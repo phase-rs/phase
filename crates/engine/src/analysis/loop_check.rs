@@ -47,6 +47,7 @@ use crate::analysis::resource::{
     loop_states_cover_modulo_growth, loop_states_equal_modulo_resources, BoardDelta, ResourceAxis,
     ResourceVector,
 };
+use crate::types::events::LossReason;
 use crate::types::game_state::GameState;
 use crate::types::player::PlayerId;
 use crate::types::zones::Zone;
@@ -96,6 +97,24 @@ pub enum WinKind {
     Advantage,
 }
 
+impl WinKind {
+    /// The win an opponent's loss for `reason` names.
+    pub(crate) fn of_loss(reason: LossReason) -> WinKind {
+        match reason {
+            // CR 704.5a / CR 704.6a: a player or team with 0 or less life loses.
+            LossReason::LifeTotal => WinKind::LethalDamage,
+            // CR 704.5c / CR 704.6b: a player with ten, or a team with fifteen, poison counters loses.
+            LossReason::Poison => WinKind::PoisonLoss,
+            // CR 704.5b: a player who drew from an empty library loses.
+            LossReason::DrewFromEmptyLibrary => WinKind::Decking,
+            LossReason::CommanderDamage
+            | LossReason::Conceded
+            | LossReason::EffectStatedLoss
+            | LossReason::OpponentWon => WinKind::ImmediateWin,
+        }
+    }
+}
+
 /// A confirmed loop cycle — its unbounded axes, win kind and breakability — as
 /// [`detect_loop`] and `game::engine`'s offer producers mint it; `WaitingFor::LoopShortcut`
 /// carries it to the players.
@@ -109,9 +128,10 @@ pub struct LoopCertificate {
     /// The subset of `unbounded` the loop drives up, from the same `ResourceVector` derivation.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub rising: Vec<ResourceAxis>,
-    /// The classified win condition, derived from `unbounded`, or for a counted offer from what
-    /// its counting replay performed; `None` when that take does not end the game with its
-    /// proposer the winner.
+    /// The classified win condition, derived from `unbounded`, or read from the reasons recorded
+    /// in the winning repetition the confirmer performed (a counted offer, or a threshold offer
+    /// whose performance wins); `None` when that take does not end the game with its proposer the
+    /// winner.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub win_kind: Option<WinKind>,
     /// CR 732.2a: the count whose take `win_kind` is the outcome of, for an outcome a smaller

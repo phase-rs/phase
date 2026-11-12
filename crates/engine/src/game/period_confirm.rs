@@ -135,9 +135,9 @@ pub(crate) struct PerformedReach {
     pub(crate) decisions: Vec<PinnedDecision>,
     /// The repetitions its proposer is still in the game after.
     pub(crate) reach: u32,
-    /// CR 104.2a: the proposer, when the performance ended the game with it winning.
+    /// CR 104.2a: the win and the proposer, when the performance ended the game with it winning.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) winner: Option<PlayerId>,
+    pub(crate) ending: Option<(WinKind, PlayerId)>,
     /// CR 800.4a: the seats that left in each repetition it performed.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(crate) departures: Vec<PredictedDeparture>,
@@ -2328,6 +2328,9 @@ struct ReplayedPeriod {
     pinned: Option<u128>,
     /// The sources the replayed cycles carried out.
     executed: ExecutedSources,
+    /// The replayed cycles' events; the second cycle's start at `second_from`.
+    events: Vec<GameEvent>,
+    second_from: usize,
     /// Every frame above is read inside the probe.
     _probe: SimulationProbeGuard,
 }
@@ -2487,6 +2490,7 @@ fn replay_period(frame: &GameState, span: NamedSpan) -> Result<ReplayedPeriod, O
     if let Some(at) = pinned {
         replay.rng.set_word_pos(at);
     }
+    let second_from = events.len();
     let second = end.repeat(
         &mut replay,
         &items,
@@ -2496,6 +2500,7 @@ fn replay_period(frame: &GameState, span: NamedSpan) -> Result<ReplayedPeriod, O
         None,
     );
     frames.push(replay.clone());
+    let executed = executed_sources(&frames, &events);
     Ok(ReplayedPeriod {
         holder,
         items,
@@ -2510,7 +2515,9 @@ fn replay_period(frame: &GameState, span: NamedSpan) -> Result<ReplayedPeriod, O
         replay,
         second,
         pinned,
-        executed: executed_sources(&frames, &events),
+        executed,
+        events,
+        second_from,
         _probe: probe,
     })
 }
@@ -2558,6 +2565,8 @@ pub(crate) fn confirm(frame: &GameState, span: NamedSpan) -> Result<Confirmation
         second,
         pinned: _,
         executed,
+        mut events,
+        second_from,
         _probe,
     } = replayed;
     // CR 104.2a + CR 732.2a: the holder won in the first repetition, so that one repetition is the
@@ -2567,7 +2576,8 @@ pub(crate) fn confirm(frame: &GameState, span: NamedSpan) -> Result<Confirmation
             .ok_or(OfferRefusal::UnanswerablePrompt)?;
         let mut count = Count::default();
         count.note(seats(&s_n), &s_n1, &second);
-        let ending = counted_ending(holder, &s_n, &s_n1, &second).map(|kind| (kind, holder));
+        let ending = counted_ending(holder, &s_n, &events[..second_from], &second)
+            .map(|kind| (kind, holder));
         let pair = Box::new([s_n, s_n1]);
         let (suggested, repetitions) = (count.survived(holder), count.repetitions);
         let parts = counted_offer(&pair[..], points, suggested, repetitions, ending);
@@ -2827,15 +2837,17 @@ pub(crate) fn confirm(frame: &GameState, span: NamedSpan) -> Result<Confirmation
             let mut count = Count::default();
             count.note(seats(&s_n), &s_n1, &CycleEnd::CameRound);
             let mut last = second;
+            let mut last_events = events.split_off(second_from);
             let mut repeats = count.note(seats(&s_n1), &replay, &last);
             while repeats && count.repetitions < COUNT_CAP {
                 let before = seats(&replay);
+                last_events.clear();
                 last = end.repeat(
                     &mut replay,
                     &items,
                     &mut Vec::new(),
                     None,
-                    &mut Vec::new(),
+                    &mut last_events,
                     None,
                 );
                 repeats = count.note(before, &replay, &last);
@@ -2845,7 +2857,7 @@ pub(crate) fn confirm(frame: &GameState, span: NamedSpan) -> Result<Confirmation
                 points,
                 count.survived(holder),
                 count.repetitions,
-                counted_ending(holder, &s_n, &replay, &last).map(|kind| (kind, holder)),
+                counted_ending(holder, &s_n, &last_events, &last).map(|kind| (kind, holder)),
             );
             return Ok(counted_confirmation(
                 items,
@@ -3574,44 +3586,39 @@ impl Count {
     }
 }
 
-/// CR 104.2a + CR 732.2a: how the counted repetitions from `start` to `end` end the game, when
-/// the last of them `ended` with `holder` the winner.
+/// CR 104.2a + CR 732.2a: how the last counted repetition, whose events are `last`, ends the game,
+/// when it `ended` with `holder` the winner.
 fn counted_ending(
     holder: PlayerId,
-    start: &GameState,
-    end: &GameState,
+    state: &GameState,
+    last: &[GameEvent],
     ended: &CycleEnd,
 ) -> Option<WinKind> {
-    matches!(ended, CycleEnd::HolderWon(_)).then(|| {
-        // CR 704.5a + CR 704.5b + CR 704.5c: the game has ended at `end`, so the thresholds the
-        // opponents seated at `start` have crossed there name the win.
-        let seated = seats(start);
-        let opponents = || {
-            end.players
-                .iter()
-                .filter(|p| p.id != holder && seated.contains(&p.id))
-        };
-        let crossed: Vec<WinKind> = [
-            (opponents().any(|p| p.life <= 0), WinKind::LethalDamage),
-            (
-                opponents().any(|p| p.drew_from_empty_library),
-                WinKind::Decking,
-            ),
-            (
-                opponents().any(|p| p.poison_counters >= 10),
-                WinKind::PoisonLoss,
-            ),
-        ]
-        .into_iter()
-        .filter_map(|(crossed, kind)| crossed.then_some(kind))
+    matches!(ended, CycleEnd::HolderWon(_)).then(|| recorded_win_kind(holder, state, last))
+}
+
+/// CR 104.2a + CR 732.2a: the win a performed repetition `holder` won names, read from the reasons
+/// its `events` record for the holder's opponents (CR 102.3): one reason names its own win, several
+/// or none name none.
+fn recorded_win_kind(holder: PlayerId, state: &GameState, events: &[GameEvent]) -> WinKind {
+    let reasons: BTreeSet<LossReason> = events
+        .iter()
+        .filter_map(|event| match event {
+            GameEvent::PlayerLost { player_id, reasons }
+                if crate::game::players::is_opponent(state, holder, *player_id) =>
+            {
+                Some(reasons)
+            }
+            _ => None,
+        })
+        .flatten()
+        .copied()
         .collect();
-        match crossed[..] {
-            [kind] => kind,
-            // CR 104.2b / CR 104.3e: with no threshold crossed an effect won it; two or more name
-            // no single axis.
-            _ => WinKind::ImmediateWin,
-        }
-    })
+    let mut reasons = reasons.into_iter();
+    match (reasons.next(), reasons.next()) {
+        (Some(reason), None) => WinKind::of_loss(reason),
+        _ => WinKind::ImmediateWin,
+    }
 }
 
 /// CR 732.2c: performs one cycle of `period` from `state`, a frame where `run`'s holder has
@@ -3659,7 +3666,8 @@ pub(crate) fn perform_declared(
     let mut replay = start.clone();
     let end = FrameEnd::of(&replay, holder, reach);
     let mut count = Count::default();
-    let mut won = false;
+    let mut ending = None;
+    let mut events = Vec::new();
     // CR 800.4a: `n` counts the period as its frame charges it; once a seat has left, the count
     // goes on while the period the remaining seats ask comes round.
     for k in 0..crate::game::engine::MAX_SHORTCUT_CYCLES {
@@ -3667,15 +3675,17 @@ pub(crate) fn perform_declared(
             break;
         }
         let before = seats(&replay);
+        events.clear();
         let ended = end.repeat(
             &mut replay,
             items,
             &mut Vec::new(),
             None,
-            &mut Vec::new(),
+            &mut events,
             declared.map(|template| (template, k)),
         );
-        won = matches!(ended, CycleEnd::HolderWon(_));
+        ending = matches!(ended, CycleEnd::HolderWon(_))
+            .then(|| (recorded_win_kind(holder, start, &events), holder));
         if !count.note(before, &replay, &ended) {
             break;
         }
@@ -3683,7 +3693,7 @@ pub(crate) fn perform_declared(
     PerformedReach {
         decisions: declared.map_or_else(Vec::new, |template| template.decisions.clone()),
         reach: count.survived(holder),
-        winner: won.then_some(holder),
+        ending,
         departures: count.departures,
     }
 }
@@ -3959,7 +3969,12 @@ fn perform_published(
             parts.schema.repetition_bound =
                 crate::analysis::decision_template::RepetitionBound::Measured;
         }
-        parts.predicted_winner = record.winner;
+        parts.predicted_winner = record.ending.map(|(_, winner)| winner);
+        // A winning performance names its win by its recorded reasons, at the count that reaches it.
+        if let Some((kind, _)) = record.ending {
+            parts.certificate.win_kind = Some(kind);
+            parts.certificate.win_kind_at = Some(record.reach);
+        }
     }
     (performed, recorded)
 }

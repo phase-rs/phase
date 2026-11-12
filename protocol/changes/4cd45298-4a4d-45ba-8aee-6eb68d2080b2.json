@@ -3,5 +3,5 @@
     "full",
     "wire"
   ],
-  "reason": "GameEvent::PlayerLost carries reasons (LossReason: LifeTotal, DrewFromEmptyLibrary, Poison, CommanderDamage, Conceded, EffectStatedLoss, OpponentWon); effect losses, concessions and shared-life teammates now emit PlayerLost"
+  "reason": "GameEvent::PlayerLost carries reasons (LossReason: LifeTotal, DrewFromEmptyLibrary, Poison, CommanderDamage, Conceded, EffectStatedLoss, OpponentWon); effect losses, concessions and shared-life teammates now emit PlayerLost; ConfirmedPeriod's performed and recorded records (PerformedReach) carry their ending (win kind and winner) in place of the winner alone"
 }

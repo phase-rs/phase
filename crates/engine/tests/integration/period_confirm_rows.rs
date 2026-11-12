@@ -7689,7 +7689,8 @@ fn a_period_spending_its_counters_or_energy_is_offered_at_its_hand_count() {
 }
 
 /// CR 704.5a + CR 732.2a: Walking Ballista's pings take P1 from 5 one life at a time; the take of
-/// the four offered ends the game in the counting loop and records P1's reason.
+/// the four offered ends the game in the counting loop, which the offer names from that last
+/// repetition, and records P1's reason.
 #[test]
 fn a_counted_take_ending_the_game_records_its_reason() {
     let mut board = in_step_hand("Walking Ballista", 30, &[], (20, 5), ping_ability)(
@@ -7701,13 +7702,21 @@ fn a_counted_take_ending_the_game_records_its_reason() {
         }
         (board.step)(&mut board.runner).expect("the board's next action");
     }
-    let (count, _, _) = offered_parts(&board.runner);
+    let (count, _, certificate) = offered_parts(&board.runner);
     assert_eq!(count, IterationCount::Fixed(4), "reach");
+    assert_eq!(
+        (certificate.win_kind, certificate.win_kind_at),
+        (Some(WinKind::LethalDamage), Some(4))
+    );
     let events = take(&mut board.runner, 4);
     assert_eq!(
         losses_in(&events),
         [(P1, BTreeSet::from([LossReason::LifeTotal]))]
     );
+    assert!(matches!(
+        board.runner.state().waiting_for,
+        WaitingFor::GameOver { winner: Some(P0) }
+    ));
 }
 
 /// CR 732.2a: a count stops at the confirmer's cap, which the replay performed, however much
@@ -8391,53 +8400,21 @@ fn a_counted_offer_states_no_outcome_its_take_does_not_produce() {
 /// CR 104.2a + CR 704.5a + CR 704.5c + CR 732.2a: Kilo, Apogee Mind ("Whenever Kilo becomes
 /// tapped, proliferate.") tapped by Relic of Legends and untapped by Freed from the Real, with
 /// Scheming Aspirant ("Whenever you proliferate, each opponent loses 2 life and you gain 2
-/// life."): the counted offer names the threshold P1 has crossed when the game ends. Offered at
-/// 2 life and 8 poison, life reaches 0 at 9 poison; offered at 3 and 8, poison reaches 10 at 1.
+/// life."): the counted offer names the reason P1 leaves for. Offered at 2 life and 8 poison, life
+/// reaches 0 at 9 poison; offered at 3 and 8, poison reaches 10 at 1; offered at 2 and 9, poison
+/// reaches 10 before the drain resolves.
 #[test]
 fn a_counted_offer_names_the_threshold_its_ending_crosses() {
-    use crate::kilo_live_offer_from_real_dump::{FREED_UNTAP, RELIC_TAP_MANA};
     let Some(db) = shared_card_db() else { return };
     for (offered_at, repetitions, expected, reason) in [
         ((2, 8), 1, WinKind::LethalDamage, LossReason::LifeTotal),
         ((3, 8), 2, WinKind::PoisonLoss, LossReason::Poison),
+        ((2, 9), 1, WinKind::PoisonLoss, LossReason::Poison),
     ] {
-        // One live cycle precedes the offer.
-        let start = (offered_at.0 + 2, offered_at.1 - 1);
-        let mut scenario = GameScenario::new();
-        scenario.at_phase(Phase::PreCombatMain);
-        scenario.with_life(P1, start.0);
-        let kilo = scenario.add_real_card(P0, "Kilo, Apogee Mind", Zone::Battlefield, db);
-        let relic = scenario.add_real_card(P0, "Relic of Legends", Zone::Battlefield, db);
-        scenario.add_real_card(P0, "Scheming Aspirant", Zone::Battlefield, db);
-        let mut runner = scenario.build();
-        runner.state_mut().loop_detection = LoopDetectionMode::Interactive;
-        runner.state_mut().players[1].poison_counters = start.1;
-        let freed = place(runner.state_mut(), P0, "Freed from the Real", db);
-        attach_to(runner.state_mut(), freed, kilo);
-        let score = |action: &GameAction| {
-            names(&[kilo])(action)
-                + chooses_color(ManaType::Blue)(action)
-                + i32::from(matches!(action, GameAction::SelectTargets { targets }
-                    if targets == &[TargetRef::Player(P1)]))
-        };
-        activate(&mut runner, relic, RELIC_TAP_MANA);
-        settle(&mut runner, &score);
-        activate(&mut runner, freed, FREED_UNTAP);
-        settle(&mut runner, &score);
-        let p1 = &runner.state().players[1];
-        assert_eq!((p1.life, p1.poison_counters), offered_at, "reach");
+        let mut runner = kilo_offer(GameScenario::new(), &[(22, 0), offered_at], &[P1], db);
         let (count, _, certificate) = offered_parts(&runner);
         assert_eq!(count, IterationCount::Fixed(repetitions), "{offered_at:?}");
-        assert!(
-            matches!(
-                runner.state().waiting_for,
-                WaitingFor::LoopShortcut {
-                    predicted_winner: Some(P0),
-                    ..
-                }
-            ),
-            "{offered_at:?}"
-        );
+        assert_eq!(predicted_winner(&runner), Some(P0), "{offered_at:?}");
         assert_eq!(certificate.win_kind, Some(expected), "{offered_at:?}");
         let events = take(&mut runner, repetitions);
         assert_eq!(
@@ -8512,8 +8489,8 @@ fn deck_to_offer(
     panic!("not offered: {:?}", latest_verdict(runner.state()));
 }
 
-/// CR 704.5b: Bumbleflower makes the victim draw from an empty library; CR 810.8a: in
-/// Two-Headed Giant the victim's teammate loses with it, carrying its reason.
+/// CR 704.5b: Bumbleflower makes the victim draw from an empty library, and the offer names that
+/// decking; CR 810.8a: in Two-Headed Giant the victim's teammate loses with it, carrying its reason.
 #[test]
 fn a_decking_take_records_its_reason_for_each_leaving_seat() {
     let Some(db) = shared_card_db() else { return };
@@ -8536,8 +8513,10 @@ fn a_decking_take_records_its_reason_for_each_leaving_seat() {
     ] {
         let (mut runner, altar, gravecrawler) = bumbleflower_board(scenario, lives, victim, db);
         deck_to_offer(&mut runner, altar, gravecrawler, victim);
-        let (count, _, _) = offered_parts(&runner);
+        let (count, _, certificate) = offered_parts(&runner);
         assert_eq!(count, IterationCount::Fixed(1), "{case}: reach");
+        assert_eq!(certificate.win_kind, Some(WinKind::Decking), "{case}");
+        assert_eq!(predicted_winner(&runner), Some(P0), "{case}");
         let events = take(&mut runner, 1);
         assert_eq!(losses_in(&events), expected, "{case}");
     }
@@ -9676,33 +9655,39 @@ fn a_repetition_eliminating_one_of_two_opponents_is_not_offered_as_won() {
 
 /// Kilo, Apogee Mind ("Whenever Kilo becomes tapped, proliferate.") tapped by Relic of Legends
 /// and untapped by Freed from the Real, with Scheming Aspirant ("Whenever you proliferate, each
-/// opponent loses 2 life and you gain 2 life."), on a Two-Headed Giant board: one live cycle,
-/// its proliferate naming `named`, leaves each seat at `offered` (life, poison) under the offer.
-fn two_headed_giant_kilo_offer(
-    offered: [(i32, u32); 4],
+/// opponent loses 2 life and you gain 2 life."), P0's, on `scenario`'s board with P0 holding the
+/// turn and priority: one live cycle, its proliferate naming `named`, leaves each seat at `offered`
+/// (life, poison) under the offer.
+fn kilo_offer(
+    mut scenario: GameScenario,
+    offered: &[(i32, u32)],
     named: &[PlayerId],
     db: &CardDatabase,
 ) -> GameRunner {
     use crate::kilo_live_offer_from_real_dump::{FREED_UNTAP, RELIC_TAP_MANA};
-    let mut scenario = GameScenario::new_with_format(FormatConfig::two_headed_giant(), 4, 42);
     scenario.at_phase(Phase::PreCombatMain);
-    // The live cycle gains P0 2 life and costs each opponent 2.
-    for (seat, (life, _)) in offered.iter().enumerate() {
-        let start = match seat {
-            0 => life - 2,
-            1 => *life,
-            _ => life + 2,
-        };
-        scenario.with_life(PlayerId(seat as u8), start);
-    }
     let kilo = scenario.add_real_card(P0, "Kilo, Apogee Mind", Zone::Battlefield, db);
     let relic = scenario.add_real_card(P0, "Relic of Legends", Zone::Battlefield, db);
     scenario.add_real_card(P0, "Scheming Aspirant", Zone::Battlefield, db);
     let mut runner = scenario.build();
-    runner.state_mut().loop_detection = LoopDetectionMode::Interactive;
-    for (seat, (_, poison)) in offered.iter().enumerate() {
-        let gained = u32::from(named.contains(&PlayerId(seat as u8)));
-        runner.state_mut().players[seat].poison_counters = poison - gained;
+    let state = runner.state_mut();
+    state.loop_detection = LoopDetectionMode::Interactive;
+    state.active_player = P0;
+    state.priority_player = P0;
+    state.waiting_for = WaitingFor::Priority { player: P0 };
+    // CR 102.3: the live cycle gains P0 2 life and costs each of its opponents 2.
+    for (seat, (life, poison)) in offered.iter().enumerate() {
+        let id = PlayerId(seat as u8);
+        let start = if id == P0 {
+            life - 2
+        } else if engine::game::players::is_opponent(state, P0, id) {
+            life + 2
+        } else {
+            *life
+        };
+        let gained = u32::from(named.contains(&id));
+        state.players[seat].life = start;
+        state.players[seat].poison_counters = poison - gained;
     }
     let freed = place(runner.state_mut(), P0, "Freed from the Real", db);
     attach_to(runner.state_mut(), freed, kilo);
@@ -9719,6 +9704,20 @@ fn two_headed_giant_kilo_offer(
     settle(&mut runner, &score);
     assert_eq!(seat_totals(runner.state()), offered, "reach");
     runner
+}
+
+/// [`kilo_offer`] on a Two-Headed Giant board.
+fn two_headed_giant_kilo_offer(
+    offered: [(i32, u32); 4],
+    named: &[PlayerId],
+    db: &CardDatabase,
+) -> GameRunner {
+    kilo_offer(
+        GameScenario::new_with_format(FormatConfig::two_headed_giant(), 4, 42),
+        &offered,
+        named,
+        db,
+    )
 }
 
 fn seat_totals(state: &GameState) -> Vec<(i32, u32)> {
@@ -9792,8 +9791,9 @@ fn a_two_headed_giant_offer_never_eliminates_the_proposers_team() {
     let Some(db) = shared_card_db() else { return };
     let offered = [(13, 0), (15, 12), (30, 4), (30, 4)];
     let mut runner = two_headed_giant_kilo_offer(offered, &[P1, PlayerId(2), PlayerId(3)], db);
-    let (count, capacity, _) = offered_parts(&runner);
+    let (count, capacity, certificate) = offered_parts(&runner);
     assert_eq!((count, capacity), (IterationCount::Fixed(2), 2));
+    assert_eq!(certificate.win_kind_at, None);
     assert_eq!(predicted_winner(&runner), None);
 
     let mut over = GameRunner::from_state(runner.state().clone());
@@ -9841,4 +9841,153 @@ fn a_two_headed_giant_offer_ends_at_the_opposing_teams_earlier_crossing() {
         WaitingFor::GameOver { winner: Some(P0) }
     ));
     assert!(!runner.state().players[1].is_eliminated);
+}
+
+/// Asserts `runner`'s offer counts `n`, names `kind` won at `n` by P0, and declares it so, then
+/// takes it: the seats leave with `losses` and P0 wins.
+fn assert_offered_win(
+    runner: &mut GameRunner,
+    n: u32,
+    kind: WinKind,
+    losses: &[(PlayerId, LossReason)],
+) {
+    let (count, capacity, certificate) = offered_parts(runner);
+    assert_eq!((count, capacity), (IterationCount::Fixed(n), n));
+    let named = (Some(kind), Some(n));
+    assert_eq!((certificate.win_kind, certificate.win_kind_at), named);
+    assert_eq!(predicted_winner(runner), Some(P0));
+    let declared = proposed(runner.state().clone(), n);
+    let WaitingFor::RespondToShortcut { proposal, .. } = &declared.waiting_for else {
+        unreachable!("proposed")
+    };
+    assert_eq!((proposal.win_kind, proposal.win_kind_at), named);
+    let events = take(runner, n);
+    let expected: Vec<_> = losses
+        .iter()
+        .map(|&(seat, reason)| (seat, BTreeSet::from([reason])))
+        .collect();
+    assert_eq!(losses_in(&events), expected);
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::GameOver { winner: Some(P0) }
+        ),
+        "{:?}",
+        runner.state().waiting_for
+    );
+}
+
+/// CR 704.6b + CR 810.8a: the opposing team's 9 + 5 shared poison reaches fifteen when the first
+/// repetition's proliferate gives P3 a sixth, removing both opponents at 30 team life; the counted
+/// win is named for poison, including when the proposer's teammate is below 0 life but the team
+/// total is not.
+#[test]
+fn a_two_headed_giant_counted_win_is_named_by_the_teams_recorded_loss() {
+    let Some(db) = shared_card_db() else { return };
+    for offered in [
+        [(13, 0), (15, 0), (15, 9), (15, 5)],
+        [(32, 0), (-3, 0), (15, 9), (15, 5)],
+    ] {
+        let mut runner = two_headed_giant_kilo_offer(offered, &[P3], db);
+        assert_offered_win(
+            &mut runner,
+            1,
+            WinKind::PoisonLoss,
+            &[(P2, LossReason::Poison), (P3, LossReason::Poison)],
+        );
+    }
+}
+
+/// CR 904.2b + CR 102.3 + CR 704.5c + CR 704.5a: facing the archenemy P1, P0's fellow hero P2
+/// leaves to its tenth poison counter from the proliferate, then Scheming Aspirant drains the
+/// archenemy, P0's one opponent, from 2 to 0; the teammate's loss names no part of the win.
+#[test]
+fn a_teammates_loss_in_the_winning_repetition_does_not_name_the_win() {
+    let Some(db) = shared_card_db() else { return };
+    let format = FormatConfig {
+        archenemy_player: Some(P1),
+        ..FormatConfig::archenemy()
+    };
+    let mut runner = kilo_offer(
+        GameScenario::new_with_format(format, 3, 42),
+        &[(20, 0), (2, 0), (20, 9)],
+        &[P2],
+        db,
+    );
+    assert_offered_win(
+        &mut runner,
+        1,
+        WinKind::LethalDamage,
+        &[(P2, LossReason::Poison), (P1, LossReason::LifeTotal)],
+    );
+}
+
+/// CR 704.6a + CR 704.6b: the opposing team's 8 shared life loses 4 a repetition and reaches 0 at
+/// the second, while the proposer's team poison, 12 plus 1 a repetition from proliferating P1, is
+/// 14; the counted win is named for life.
+#[test]
+fn a_two_headed_giant_counted_win_reads_no_poison_on_the_proposers_team() {
+    let Some(db) = shared_card_db() else { return };
+    let mut runner = two_headed_giant_kilo_offer([(13, 0), (15, 12), (4, 0), (4, 0)], &[P1], db);
+    assert_offered_win(
+        &mut runner,
+        2,
+        WinKind::LethalDamage,
+        &[(P2, LossReason::LifeTotal), (P3, LossReason::LifeTotal)],
+    );
+    assert!(!runner.state().players[1].is_eliminated);
+}
+
+/// CR 704.5c + CR 704.5a: P1 leaves to its tenth poison counter from the proliferate, then
+/// Scheming Aspirant drains P2 from 2 to 0 in the same repetition; two reasons name no single win.
+#[test]
+fn a_counted_win_with_two_reasons_is_named_immediate() {
+    let Some(db) = shared_card_db() else { return };
+    let mut runner = kilo_offer(
+        GameScenario::new_with_format(FormatConfig::free_for_all(), 3, 42),
+        &[(20, 0), (20, 9), (2, 0)],
+        &[P1],
+        db,
+    );
+    assert_offered_win(
+        &mut runner,
+        1,
+        WinKind::ImmediateWin,
+        &[(P1, LossReason::Poison), (P2, LossReason::LifeTotal)],
+    );
+}
+
+/// CR 704.6b + CR 732.2a: the opposing team's 7 shared poison plus 1 a repetition reaches fifteen
+/// at the eighth repetition's proliferate, before its drain takes the team's last 2 life; the
+/// threshold offer names the poison win its performance records, at eight.
+#[test]
+fn a_threshold_offers_performed_win_is_named_by_its_recorded_loss() {
+    let Some(db) = shared_card_db() else { return };
+    let mut runner = two_headed_giant_kilo_offer([(13, 0), (15, 0), (15, 7), (15, 0)], &[P2], db);
+    assert_offered_win(
+        &mut runner,
+        8,
+        WinKind::PoisonLoss,
+        &[(P2, LossReason::Poison), (P3, LossReason::Poison)],
+    );
+}
+
+/// CR 704.5a + CR 704.5c + CR 104.2a: P1's 6 life falls 2 a repetition and reaches 0 at the third;
+/// P2's 6 poison plus 1 a repetition reaches ten at the fourth, leaving P0 alone. The threshold
+/// offer names the win by the fourth repetition's poison, not P1's earlier departure.
+#[test]
+fn a_threshold_offers_performed_win_is_named_by_its_last_repetition() {
+    let Some(db) = shared_card_db() else { return };
+    let mut runner = kilo_offer(
+        GameScenario::new_with_format(FormatConfig::free_for_all(), 3, 42),
+        &[(20, 0), (6, 0), (20, 6)],
+        &[P2],
+        db,
+    );
+    assert_offered_win(
+        &mut runner,
+        4,
+        WinKind::PoisonLoss,
+        &[(P1, LossReason::LifeTotal), (P2, LossReason::Poison)],
+    );
 }

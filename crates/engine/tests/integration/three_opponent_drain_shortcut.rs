@@ -608,19 +608,21 @@ fn the_alternating_offer_publishes_its_observation_and_an_eliminating_suggestion
     );
     let mut fc = load_fc();
     assert_eq!(opponents_life(&fc), [13, 9, 1]);
-    // F-C stands one repetition earlier, so only its board-dependent schema, declaration and
-    // period differ from this offer.
+    // F-C stands one repetition earlier, so only its board-dependent schema, declaration, period
+    // and the count its win is named at differ from this offer.
     let (
         WaitingFor::LoopShortcut {
             schema,
             declaration,
             period,
+            certificate,
             ..
         },
         WaitingFor::LoopShortcut {
             schema: r0_schema,
             declaration: r0_declaration,
             period: r0_period,
+            certificate: r0_certificate,
             ..
         },
     ) = (&mut fc.waiting_for, &r0.waiting_for)
@@ -629,6 +631,7 @@ fn the_alternating_offer_publishes_its_observation_and_an_eliminating_suggestion
     };
     (*schema, *declaration, *period) =
         (r0_schema.clone(), r0_declaration.clone(), r0_period.clone());
+    certificate.win_kind_at = r0_certificate.win_kind_at;
     assert_eq!(
         fc.waiting_for, r0.waiting_for,
         "F-C carries the rest of this offer"
