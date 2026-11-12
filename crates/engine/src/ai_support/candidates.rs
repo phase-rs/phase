@@ -1022,8 +1022,22 @@ pub fn candidate_actions_broad_with_probe(
         } => mana_payment_actions(state, *player, *convoke_mode),
         // CR 605.3a + CR 733.1: activate a mana ability toward the pending one's
         // mana cost, or withdraw the pending activation.
-        WaitingFor::ManaAbilityManaPayment { player, .. } => {
+        WaitingFor::ManaAbilityManaPayment {
+            player,
+            pending_mana_ability,
+        } => {
             let mut actions = mana_tap_actions(state, *player);
+            // CR 601.2h via CR 602.2b: a manual payment is confirmed by passing,
+            // as `mana_payment_actions` does for a spell. Pins are never offered.
+            if crate::game::casting::payment_mode_pays_mana_manually(
+                pending_mana_ability.payment_mode,
+            ) {
+                actions.push(candidate(
+                    GameAction::PassPriority,
+                    TacticalClass::Pass,
+                    Some(*player),
+                ));
+            }
             actions.push(candidate(
                 GameAction::CancelCast,
                 TacticalClass::Pass,
