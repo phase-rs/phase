@@ -3902,6 +3902,76 @@ fn battlefield_entry_observation_indices(
     boundaries
 }
 
+/// CR 603.6a: the ledger index of each entrant's LAST battlefield entry in `events`, for the
+/// entries recorded on this turn's ledger. It identifies the instruction that put the entrant
+/// onto the battlefield ([`GameState::instruction_of_zone_change`]).
+fn battlefield_entry_ledger_indices(
+    state: &GameState,
+    events: &[GameEvent],
+) -> std::collections::HashMap<ObjectId, usize> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            GameEvent::ZoneChanged {
+                object_id,
+                to: Zone::Battlefield,
+                record,
+                ..
+            } if record.recorded_turn_number == state.turn_number => {
+                Some((*object_id, record.turn_zone_change_index))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// CR 603.6a: "each time an event puts one or more permanents onto the battlefield, all
+/// permanents on the battlefield (including the newcomers) are checked for any
+/// enters-the-battlefield triggers that match the event." Entrants of one instruction are one
+/// event, so a newcomer observes the entry of a co-entrant even when its own entry record comes
+/// later in the batch: the positional lifetime guard
+/// ([`live_battlefield_source_was_present_at_event`]) separates events that happened in order
+/// (issue #8160), not the entries of one simultaneous event.
+fn source_enters_with_event(
+    state: &GameState,
+    event: &GameEvent,
+    source_id: ObjectId,
+    entry_ledger_index: &std::collections::HashMap<ObjectId, usize>,
+) -> bool {
+    let GameEvent::ZoneChanged {
+        to: Zone::Battlefield,
+        record,
+        ..
+    } = event
+    else {
+        return false;
+    };
+    if record.recorded_turn_number != state.turn_number {
+        return false;
+    }
+    entry_ledger_index
+        .get(&source_id)
+        .is_some_and(|source_entry| {
+            state.instruction_of_zone_change(record.turn_zone_change_index)
+                == state.instruction_of_zone_change(*source_entry)
+        })
+}
+
+/// CR 113.6 + CR 603.2 + CR 603.6a: could the live battlefield source `source_id` observe
+/// `events[event_idx]`: it was on the battlefield when the event happened, or it entered in the
+/// same simultaneous entry event.
+fn battlefield_source_observes_event(
+    state: &GameState,
+    event_idx: usize,
+    events: &[GameEvent],
+    source_id: ObjectId,
+    battlefield_entry_index: &std::collections::HashMap<ObjectId, usize>,
+    entry_ledger_index: &std::collections::HashMap<ObjectId, usize>,
+) -> bool {
+    live_battlefield_source_was_present_at_event(event_idx, source_id, battlefield_entry_index)
+        || source_enters_with_event(state, &events[event_idx], source_id, entry_ledger_index)
+}
+
 fn storm_copy_count_before_cast(state: &GameState) -> i32 {
     state
         .spells_cast_this_turn_by_player
@@ -5351,6 +5421,7 @@ fn collect_pending_triggers_with_collection(
     // retroactively "sees" a sacrifice/etc. that occurred earlier in the same
     // chain, before it was there to observe it (issue #8160).
     let battlefield_entry_index = battlefield_entry_observation_indices(events);
+    let entry_ledger_index = battlefield_entry_ledger_indices(state, events);
     // CR 603.10a: built on the first co-departure group this pass sees.
     let mut co_departure_index: Option<CoDepartureObserverIndex> = None;
 
@@ -5405,10 +5476,13 @@ fn collect_pending_triggers_with_collection(
 
         // Scan candidate permanents for matching triggers
         for obj_id in candidates.iter().copied() {
-            if !live_battlefield_source_was_present_at_event(
+            if !battlefield_source_observes_event(
+                state,
                 event_idx,
+                events,
                 obj_id,
                 &battlefield_entry_index,
+                &entry_ledger_index,
             ) {
                 continue;
             }
@@ -5892,10 +5966,13 @@ fn collect_pending_triggers_with_collection(
                     .map(|(id, _)| *id)
                     .collect();
                 for obj_id in shadow_population {
-                    if !live_battlefield_source_was_present_at_event(
+                    if !battlefield_source_observes_event(
+                        state,
                         event_idx,
+                        events,
                         obj_id,
                         &battlefield_entry_index,
+                        &entry_ledger_index,
                     ) {
                         continue;
                     }
@@ -9756,7 +9833,7 @@ fn battlefield_entrant_unrecorded(state: &GameState, object_id: ObjectId) -> boo
 /// CR 608.2c + CR 603.6a: has the instruction that put this permanent onto the
 /// battlefield completed? An instruction boundary
 /// (`effects::settle_entries_before_instruction`) has passed since it was
-/// recorded (`GameState::completed_instruction_zone_changes`), or it was
+/// recorded (`GameState::instruction_boundary_marks`), or it was
 /// recorded on an earlier turn. The boundary records nothing while a
 /// co-entering step, a choice of the same instruction, or any other
 /// battlefield entry is outstanding ([`battlefield_entry_in_progress`]: a rider
@@ -9768,7 +9845,7 @@ fn battlefield_entry_instruction_completed(state: &GameState, event: &GameEvent)
         event,
         GameEvent::ZoneChanged { record, .. }
             if record.recorded_turn_number < state.turn_number
-                || record.turn_zone_change_index < state.completed_instruction_zone_changes
+                || record.turn_zone_change_index < state.completed_instruction_ledger_len()
     )
 }
 
@@ -46319,6 +46396,49 @@ pub mod tests {
         (state, events)
     }
 
+    /// CR 603.6a + CR 608.2c: entrants of one instruction are one entry event, so a
+    /// newcomer observes a co-entrant's entry even when its own entry record comes later in
+    /// the batch; the entries of separate instructions happen in order, and a newcomer does not
+    /// observe an entry that preceded it (issue #8160). Synthetic: three hand-made entries on
+    /// the ledger cut by one instruction boundary.
+    #[test]
+    fn a_newcomer_observes_only_the_entries_of_its_own_instruction() {
+        let mut state = setup();
+        let mut events = Vec::new();
+        let mut entrants = Vec::new();
+        for name in ["First", "Second", "Third"] {
+            let id = make_creature(&mut state, PlayerId(0), name, 1, 1);
+            crate::game::zones::record_and_emit_entry_from_no_zone(&mut state, id, &mut events)
+                .expect("entrant exists");
+            entrants.push(id);
+        }
+        // The boundary falls between the second and third entries: First and Second are one
+        // instruction, Third is the next.
+        state.instruction_boundary_marks = vec![2];
+        let boundaries = battlefield_entry_observation_indices(&events);
+        let ledger = battlefield_entry_ledger_indices(&state, &events);
+        let observes = |event_idx: usize, source: ObjectId| {
+            battlefield_source_observes_event(
+                &state,
+                event_idx,
+                &events,
+                source,
+                &boundaries,
+                &ledger,
+            )
+        };
+        assert!(
+            observes(0, entrants[1]),
+            "Second entered in the same instruction as First's entry"
+        );
+        assert!(observes(1, entrants[0]), "First was on the battlefield");
+        assert!(
+            !observes(0, entrants[2]) && !observes(1, entrants[2]),
+            "Third's instruction came after theirs"
+        );
+        assert!(observes(2, entrants[2]), "Third observes its own entry");
+    }
+
     /// CR 614.12a: a co-entrant whose entry is still being made, parked for its
     /// own mid-entry choice the way `capture_deferred_entry_events_if_mid_entry_choice`
     /// parks one.
@@ -46450,7 +46570,7 @@ pub mod tests {
         // whose buffer does not hold the entry: it records the completed
         // instructions' ledger rows and observes the entrants.
         state.deferred_entry_events.clear();
-        state.completed_instruction_zone_changes = state.zone_changes_this_turn.len();
+        state.instruction_boundary_marks = vec![state.zone_changes_this_turn.len()];
         crate::game::zones::settle_battlefield_entry_observations(&mut state, &[]);
         assert!(
             state.battlefield_entry_observation(&record).is_some(),

@@ -5277,7 +5277,10 @@ fn settle_entries_before_instruction(
     if !crate::game::triggers::battlefield_entry_in_progress(state)
         && state.resolving_player_scope_tail.is_none()
     {
-        state.completed_instruction_zone_changes = state.zone_changes_this_turn.len();
+        let ledger_len = state.zone_changes_this_turn.len();
+        if ledger_len > state.completed_instruction_ledger_len() {
+            state.instruction_boundary_marks.push(ledger_len);
+        }
     }
     if entry_observation_deferred(state, next, completed) {
         return;
@@ -64442,7 +64445,7 @@ mod entry_observation_settlement_tests {
         );
     }
 
-    /// CR 608.2c + CR 101.4: a boundary records the completed-instruction bound
+    /// CR 608.2c + CR 101.4: a boundary marks the instruction on the ledger
     /// even when it defers the entry observation (D3: a phase trigger stamps every
     /// node with its player), but not between the seat legs of a player-scope
     /// clause still in progress, whose seats' actions are one simultaneous event.
@@ -64450,7 +64453,7 @@ mod entry_observation_settlement_tests {
     /// seat-leg case today (Kambal, Profiteering Mayor's "for each of them" is
     /// parsed as a single `CopyTokenOf`), so the building block is pinned here.
     #[test]
-    fn boundary_records_the_completed_instruction_bound_outside_seat_legs() {
+    fn boundary_marks_the_instruction_outside_seat_legs() {
         let mut seat_scoped = node(put_counter());
         seat_scoped.scoped_player = Some(PlayerId(0));
 
@@ -64462,10 +64465,13 @@ mod entry_observation_settlement_tests {
             "reach guard: D3 defers the observation"
         );
         assert_eq!(
-            state.completed_instruction_zone_changes,
-            state.zone_changes_this_turn.len(),
-            "the completed instruction's entry is below the bound"
+            state.instruction_boundary_marks,
+            vec![state.zone_changes_this_turn.len()],
+            "the completed instruction's entry is below the mark"
         );
+        // A second boundary with no new ledger row marks nothing.
+        settle_entries_before_instruction(&mut state, &events, &seat_scoped, None);
+        assert_eq!(state.instruction_boundary_marks.len(), 1);
 
         let mut state = GameState::new_two_player(3);
         let (source, events) = entered(&mut state, 1);
@@ -64476,8 +64482,8 @@ mod entry_observation_settlement_tests {
             created_tokens: None,
         });
         settle_entries_before_instruction(&mut state, &events, &seat_scoped, None);
-        assert_eq!(
-            state.completed_instruction_zone_changes, 0,
+        assert!(
+            state.instruction_boundary_marks.is_empty(),
             "the next seat leg is part of the same clause"
         );
     }

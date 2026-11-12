@@ -2144,6 +2144,21 @@ pub(crate) fn exact_battlefield_departure_row(
 }
 
 impl GameState {
+    /// CR 608.2c + CR 603.6a: which instruction recorded the ledger row at `ledger_index`: the
+    /// number of instruction boundaries at or below it. Rows with the same value were recorded
+    /// by one instruction, so a battlefield entry among them is part of the same simultaneous
+    /// entry event as the others (every permanent, newcomers included, is checked against it).
+    pub(crate) fn instruction_of_zone_change(&self, ledger_index: usize) -> usize {
+        self.instruction_boundary_marks
+            .partition_point(|mark| *mark <= ledger_index)
+    }
+
+    /// CR 608.2c: the ledger length at the last instruction boundary; every row below it was
+    /// recorded by an instruction that has completed.
+    pub(crate) fn completed_instruction_ledger_len(&self) -> usize {
+        self.instruction_boundary_marks.last().copied().unwrap_or(0)
+    }
+
     /// CR 603.10 + CR 400.7: the settled observation of the battlefield entry `record` describes,
     /// or `None`. Exact: this turn's row at this record's ledger index, naming this record's object
     /// at its post-entry incarnation; a later entry reusing the storage id is a different object
@@ -13488,6 +13503,7 @@ pub(crate) fn reconcile_persisted_zone_change_occurrences(
     // namespace. Live deferred events keep their own recorded turn separately.
     // Retain the old positions so current-turn replay keys can follow their
     // ledger row through this compaction.
+    let original_ledger_len = ledger.len();
     let mut old_to_current_index = HashMap::new();
     let mut current_ledger = Vec::with_capacity(ledger.len());
     for (old_index, record) in std::mem::take(ledger).into_iter().enumerate() {
@@ -13534,7 +13550,7 @@ pub(crate) fn reconcile_persisted_zone_change_occurrences(
     }
 
     reindex_persisted_batched_zone_change_trigger_keys(state, turn_number, &old_to_current_index)?;
-    remap_persisted_completed_instruction_bound(state, &old_to_current_index);
+    remap_persisted_instruction_boundary_marks(state, original_ledger_len, &old_to_current_index)?;
 
     let mut seen = HashMap::<(u32, usize), OccurrenceClaim>::new();
     visit_persisted_live_zone_changed_records(state, additional_live_event_roots, &mut |record| {
@@ -13544,25 +13560,97 @@ pub(crate) fn reconcile_persisted_zone_change_occurrences(
     Ok(())
 }
 
-/// CR 608.2c + CR 603.6a: `completed_instruction_zone_changes` counts the ledger
-/// rows recorded by completed instructions. Compacting stale rows removes rows
-/// below it, so it follows the rows that survive. A value that is not an
-/// integer is left for the typed decode to reject.
-fn remap_persisted_completed_instruction_bound(
+/// CR 608.2c + CR 603.6a: `instruction_boundary_marks` are ledger lengths. They must strictly
+/// increase and lie within the ledger as it was persisted, before stale rows are pruned; a value
+/// past it would declare unfinished entries complete. Pruning stale rows removes rows below a
+/// mark, so each mark follows the rows that survive (a mark with no surviving row below it
+/// disappears).
+fn remap_persisted_instruction_boundary_marks(
     state: &mut serde_json::Map<String, serde_json::Value>,
+    original_ledger_len: usize,
     old_to_current_index: &HashMap<usize, usize>,
-) {
-    let Some(bound) = state.get_mut("completed_instruction_zone_changes") else {
-        return;
+) -> Result<(), String> {
+    let Some(marks) = state.get_mut("instruction_boundary_marks") else {
+        return Ok(());
     };
-    let Some(old_bound) = json_usize(bound) else {
-        return;
-    };
-    let kept = old_to_current_index
-        .keys()
-        .filter(|old_index| **old_index < old_bound)
-        .count();
-    *bound = serde_json::Value::from(kept);
+    let marks = marks
+        .as_array_mut()
+        .ok_or_else(|| "instruction_boundary_marks must be an array".to_string())?;
+    let mut surviving: Vec<usize> = old_to_current_index.keys().copied().collect();
+    surviving.sort_unstable();
+    let mut previous = 0;
+    let mut remapped: Vec<usize> = Vec::with_capacity(marks.len());
+    for mark in marks.iter() {
+        let mark = json_usize(mark)
+            .ok_or_else(|| "instruction_boundary_marks entries must be integers".to_string())?;
+        if mark <= previous || mark > original_ledger_len {
+            return Err(
+                "instruction_boundary_marks must strictly increase within the ledger".to_string(),
+            );
+        }
+        previous = mark;
+        let kept = surviving.partition_point(|old_index| *old_index < mark);
+        if kept > remapped.last().copied().unwrap_or(0) {
+            remapped.push(kept);
+        }
+    }
+    *marks = remapped.into_iter().map(serde_json::Value::from).collect();
+    Ok(())
+}
+
+/// CR 603.6a + CR 400.7: the restored entry hold must be coherent with the ledger it indexes.
+/// The marks strictly increase within the ledger; the held entries are battlefield entries of this
+/// turn, each naming a distinct ledger row of the same object and incarnation. A duplicate
+/// would be collected twice on release, and a stale mark would release unfinished entries.
+fn validate_restored_entry_hold(state: &GameState) -> Result<(), String> {
+    let ledger_len = state.zone_changes_this_turn.len();
+    let mut previous = 0;
+    for mark in &state.instruction_boundary_marks {
+        if *mark <= previous || *mark > ledger_len {
+            return Err(
+                "instruction_boundary_marks must strictly increase within the ledger".to_string(),
+            );
+        }
+        previous = *mark;
+    }
+    let mut seen = HashSet::new();
+    for event in &state.unsettled_entry_batch_events {
+        let GameEvent::ZoneChanged {
+            object_id,
+            to: Zone::Battlefield,
+            record,
+            ..
+        } = event
+        else {
+            return Err(
+                "unsettled_entry_batch_events may hold only battlefield-entry events".to_string(),
+            );
+        };
+        if record.recorded_turn_number != state.turn_number {
+            return Err(
+                "unsettled_entry_batch_events holds an entry from another turn".to_string(),
+            );
+        }
+        let row = state
+            .zone_changes_this_turn
+            .get(record.turn_zone_change_index)
+            .ok_or_else(|| {
+                "unsettled_entry_batch_events entry points outside the current ledger".to_string()
+            })?;
+        if row.object_id != *object_id
+            || record.object_id != *object_id
+            || row.to_zone != Zone::Battlefield
+            || row.entered_incarnation != record.entered_incarnation
+        {
+            return Err(
+                "unsettled_entry_batch_events entry disagrees with the current ledger".to_string(),
+            );
+        }
+        if !seen.insert(record.turn_zone_change_index) {
+            return Err("unsettled_entry_batch_events holds one entry twice".to_string());
+        }
+    }
+    Ok(())
 }
 
 /// CR 603.2c: the replay guard's occurrence key is a current-turn ledger
@@ -25474,18 +25562,22 @@ declare_game_state! {
     /// every viewer projection.
     #[serde(default, skip_serializing_if = "im::OrdMap::is_empty")]
     pub battlefield_entry_observations: im::OrdMap<usize, TriggerSourceContext>,
-    /// CR 608.2c + CR 603.6a: how many of `zone_changes_this_turn`'s rows were recorded by
-    /// instructions that had completed at the last instruction boundary
+    /// CR 608.2c + CR 603.6a: the length of `zone_changes_this_turn` at each instruction boundary
     /// (`effects::settle_entries_before_instruction` past its pending-choice guard, whether or
-    /// not that boundary deferred the entry observations), written only while no battlefield
-    /// entry is in progress (`triggers::battlefield_entry_in_progress`: a rider chain run inside
-    /// an entry has boundaries of its own) and no paused player-scope clause is between seat legs
-    /// resuming under its sidecar (`resolving_player_scope_tail`: CR 101.4 makes its seats'
-    /// actions one event). Every battlefield entry below it is a completed entry event, so
-    /// `triggers::settle_entry_batch_scan` never holds it. Cleared with the ledger, and zeroed
-    /// with it by the loop projection (`analysis::resource::project_out_resources`).
-    #[serde(default, skip_serializing_if = "is_zero_usize")]
-    pub completed_instruction_zone_changes: usize,
+    /// not that boundary deferred the entry observations), strictly increasing and never zero.
+    /// A mark is written only while no battlefield entry is in progress
+    /// (`triggers::battlefield_entry_in_progress`: a rider chain run inside an entry has
+    /// boundaries of its own) and no paused player-scope clause is between seat legs resuming
+    /// under its sidecar (`resolving_player_scope_tail`: CR 101.4 makes its seats' actions one
+    /// event). The marks cut the ledger into instructions: rows between two marks were recorded
+    /// by one instruction, so every battlefield entry among them is one simultaneous entry event
+    /// ([`GameState::instruction_of_zone_change`]), and every entry below the last mark is a
+    /// completed event that `triggers::settle_entry_batch_scan` never holds. Cleared with the
+    /// ledger, zeroed with it by the loop projection
+    /// (`analysis::resource::project_out_resources`), validated and remapped by the persisted
+    /// restore.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub instruction_boundary_marks: Vec<usize>,
     /// CR 603.2c: Batched zone-change triggers already collected for
     /// `(definition_ref, recorded_turn_number, turn_zone_change_index)`. Prevents a second
     /// `process_triggers` pass over the same `ZoneChanged` events from
@@ -28351,6 +28443,7 @@ impl GameStateDecode {
             .map_err(|error| error.to_string())?;
         validate_restored_attack_authority(&state, attack_map_present, &departure_targets_present)?;
         validate_restored_zone_change_replay_keys(&state)?;
+        validate_restored_entry_hold(&state)?;
         normalize_delayed_trigger_allocators(&mut state)?;
         normalize_resolution_cast_offer_allocator(&mut state)?;
         // The PERSISTED half of the projection gate; `decode` below carries the other.
@@ -34168,7 +34261,7 @@ impl GameState {
             sacrificed_permanents_this_turn: im::Vector::new(),
             zone_changes_this_turn: im::Vector::new(),
             battlefield_entry_observations: im::OrdMap::new(),
-            completed_instruction_zone_changes: 0,
+            instruction_boundary_marks: Vec::new(),
             batched_zone_change_trigger_fired: im::HashSet::new(),
             battlefield_entries_this_turn: im::Vector::new(),
             damage_dealt_this_turn: im::Vector::new(),
@@ -38132,7 +38225,7 @@ fn _gamestate_partition_is_total(s: &GameState) {
         sacrificed_permanents_this_turn: _,
         zone_changes_this_turn: _,
         battlefield_entry_observations: _,
-        completed_instruction_zone_changes: _,
+        instruction_boundary_marks: _,
         batched_zone_change_trigger_fired: _,
         battlefield_entries_this_turn: _,
         damage_dealt_this_turn: _,
@@ -38553,7 +38646,7 @@ impl PartialEq for GameState {
             && self.sacrificed_permanents_this_turn == other.sacrificed_permanents_this_turn
             && self.zone_changes_this_turn == other.zone_changes_this_turn
             && self.battlefield_entry_observations == other.battlefield_entry_observations
-            && self.completed_instruction_zone_changes == other.completed_instruction_zone_changes
+            && self.instruction_boundary_marks == other.instruction_boundary_marks
             && self.batched_zone_change_trigger_fired == other.batched_zone_change_trigger_fired
             && self.battlefield_entries_this_turn == other.battlefield_entries_this_turn
             && self.damage_dealt_this_turn == other.damage_dealt_this_turn
@@ -44544,10 +44637,41 @@ mod tests {
         )));
     }
 
-    /// CR 608.2c + CR 603.6a: the completed-instruction bound indexes the
-    /// ledger, so pruning a stale row below it moves it down with the rows.
+    fn persisted_entry_record(object_id: ObjectId, index: usize, turn: u32) -> ZoneChangeRecord {
+        ZoneChangeRecord {
+            recorded_turn_number: turn,
+            turn_zone_change_index: index,
+            ..ZoneChangeRecord::test_minimal(object_id, None, Zone::Battlefield)
+        }
+    }
+
+    /// The state at a pause between two co-entrants: two battlefield entries on
+    /// this turn's ledger, the first held, `marks` as the instruction boundaries.
+    fn persisted_entry_hold_fixture(marks: Vec<usize>) -> GameState {
+        let mut state = normal_trigger_firing_fixture();
+        state.turn_number = 19;
+        let first = persisted_entry_record(ObjectId(9_140), 0, 19);
+        let second = persisted_entry_record(ObjectId(9_141), 1, 19);
+        state.zone_changes_this_turn.push_back(first.clone());
+        state.zone_changes_this_turn.push_back(second);
+        state.unsettled_entry_batch_events = vec![persisted_zone_change_event(first)];
+        state.instruction_boundary_marks = marks;
+        state
+    }
+
+    fn restore_error(state: GameState) -> String {
+        let persisted = serde_json::to_value(PersistedGameState::Raw(Box::new(state)))
+            .expect("fixture serializes");
+        serde_json::from_value::<PersistedGameState>(persisted)
+            .expect_err("the restore must reject this state")
+            .to_string()
+    }
+
+    /// CR 608.2c + CR 603.6a: the instruction-boundary marks index the ledger, so
+    /// pruning a stale row below them moves them down with the rows, and a mark
+    /// with no surviving row below it disappears.
     #[test]
-    fn persisted_completed_instruction_bound_follows_the_pruned_ledger() {
+    fn persisted_instruction_boundary_marks_follow_the_pruned_ledger() {
         let mut state = normal_trigger_firing_fixture();
         state.turn_number = 19;
         let stale = persisted_zone_change_record(ObjectId(9_126), 18, 4);
@@ -44555,7 +44679,7 @@ mod tests {
         state.zone_changes_this_turn.push_back(stale);
         state.zone_changes_this_turn.push_back(current.clone());
         state.deferred_triggers[0].trigger_events = vec![persisted_zone_change_event(current)];
-        state.completed_instruction_zone_changes = 2;
+        state.instruction_boundary_marks = vec![1, 2];
 
         let mut persisted = serde_json::to_value(PersistedGameState::Raw(Box::new(state)))
             .expect("fixture serializes");
@@ -44567,8 +44691,75 @@ mod tests {
 
         assert_eq!(restored.zone_changes_this_turn.len(), 1);
         assert_eq!(
-            restored.completed_instruction_zone_changes, 1,
-            "the bound counts the one surviving row"
+            restored.instruction_boundary_marks,
+            vec![1],
+            "the mark after the stale row is gone, the one after the current row stays"
+        );
+    }
+
+    /// CR 608.2c: a mark past the ledger, a mark that does not increase and a zero
+    /// mark are rejected rather than clamped: each would declare unfinished
+    /// entries complete and release them before their co-entrants settle.
+    #[test]
+    fn persisted_instruction_boundary_marks_outside_the_ledger_are_rejected() {
+        for marks in [vec![1_000_000], vec![2, 1], vec![1, 1], vec![0]] {
+            let error = restore_error(persisted_entry_hold_fixture(marks.clone()));
+            assert!(
+                error.contains("instruction_boundary_marks"),
+                "{marks:?}: {error}"
+            );
+        }
+        // Positive control: marks within the ledger restore.
+        let persisted = serde_json::to_value(PersistedGameState::Raw(Box::new(
+            persisted_entry_hold_fixture(vec![1, 2]),
+        )))
+        .expect("fixture serializes");
+        let restored = serde_json::from_value::<PersistedGameState>(persisted)
+            .expect("marks within the ledger restore")
+            .into_game_state()
+            .expect("checked restore");
+        assert_eq!(restored.instruction_boundary_marks, vec![1, 2]);
+        assert_eq!(restored.unsettled_entry_batch_events.len(), 1);
+    }
+
+    /// CR 603.6a + CR 400.7: the held entries are battlefield entries naming
+    /// distinct ledger rows of this turn; a duplicate would be collected twice on
+    /// release.
+    #[test]
+    fn persisted_entry_hold_rejects_duplicate_and_foreign_entries() {
+        let mut duplicate = persisted_entry_hold_fixture(Vec::new());
+        let held = duplicate.unsettled_entry_batch_events[0].clone();
+        duplicate.unsettled_entry_batch_events.push(held);
+        assert!(restore_error(duplicate).contains("holds one entry twice"));
+
+        // A ledger-backed event that is not a battlefield entry.
+        let mut not_an_entry = persisted_entry_hold_fixture(Vec::new());
+        let leaves = persisted_zone_change_record(ObjectId(9_144), 19, 2);
+        not_an_entry
+            .zone_changes_this_turn
+            .push_back(leaves.clone());
+        not_an_entry.unsettled_entry_batch_events = vec![persisted_zone_change_event(leaves)];
+        assert!(restore_error(not_an_entry).contains("only battlefield-entry events"));
+
+        // An entry of another turn.
+        let mut earlier_turn = persisted_entry_hold_fixture(Vec::new());
+        let earlier = persisted_entry_record(ObjectId(9_145), 0, 18);
+        earlier_turn.unsettled_entry_batch_events = vec![persisted_zone_change_event(earlier)];
+        let error = restore_error(earlier_turn);
+        assert!(
+            error.contains("another turn") || error.contains("ledger occurrence"),
+            "{error}"
+        );
+
+        // An entry that names no ledger row.
+        let mut off_ledger = persisted_entry_hold_fixture(Vec::new());
+        off_ledger.unsettled_entry_batch_events = vec![persisted_zone_change_event(
+            persisted_entry_record(ObjectId(9_143), 7, 19),
+        )];
+        let error = restore_error(off_ledger);
+        assert!(
+            error.contains("outside the current ledger") || error.contains("ledger occurrence"),
+            "{error}"
         );
     }
 

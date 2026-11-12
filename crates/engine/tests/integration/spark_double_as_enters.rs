@@ -3096,6 +3096,176 @@ mod feldon_tokens {
         );
     }
 
+    fn graveyard_soul_warden(scenario: &mut GameScenario) -> ObjectId {
+        scenario
+            .add_creature_to_graveyard(P0, "Soul Warden", 1, 1)
+            .with_mana_cost(ManaCost::Cost {
+                shards: vec![ManaCostShard::White],
+                generic: 0,
+            })
+            .from_oracle_text(SOUL_WARDEN)
+            .id()
+    }
+
+    /// Soul Warden's life gain when Feldon's two Body Double tokens copy Triskelion and a
+    /// graveyard Soul Warden (no Soul Warden on the battlefield), in either order, with the
+    /// game optionally saved and restored at the pause between the two entrants.
+    fn life_with_warden_as_a_co_entrant(warden_second: bool, persist: bool) -> i32 {
+        let BodyDoubleBoard {
+            mut scenario,
+            feldon,
+            body_double,
+            scales,
+            season,
+        } = body_double_board();
+        let triskelion = graveyard_triskelion(&mut scenario);
+        let warden = graveyard_soul_warden(&mut scenario);
+        let mut runner = scenario.build();
+        let life = runner.life(P0);
+        if warden_second {
+            enter_first_copy_before_second_offer(
+                &mut runner,
+                feldon,
+                body_double,
+                triskelion,
+                scales,
+            );
+            if persist {
+                runner = restore(runner);
+            }
+            choose_copy(&mut runner, warden);
+        } else {
+            runner
+                .activate(feldon, 0)
+                .target_object(body_double)
+                .resolve();
+            choose_copy(&mut runner, warden);
+            if persist {
+                runner = restore(runner);
+            }
+            let (token, _) = choose_copy(&mut runner, triskelion);
+            choose_token_counter_order(&mut runner, token, season);
+        }
+        assert_token_entry_complete(&mut runner);
+        runner.life(P0) - life
+    }
+
+    /// CR 603.6a: each time an event puts one or more permanents onto the battlefield, all
+    /// permanents on the battlefield, including the newcomers, are checked for matching
+    /// triggers. Both tokens are one entry event, so the Soul Warden token ("Whenever another
+    /// creature enters, you gain 1 life.") triggers for the Triskelion token whichever of them
+    /// entered first, and not for itself: one life, in both orders and across a restore.
+    #[test]
+    fn a_co_entrant_observer_sees_the_entrants_of_its_own_entry_event() {
+        for persist in [false, true] {
+            assert_eq!(
+                life_with_warden_as_a_co_entrant(false, persist),
+                1,
+                "control: the Warden token enters first (restore: {persist})"
+            );
+            assert_eq!(
+                life_with_warden_as_a_co_entrant(true, persist),
+                1,
+                "the Warden token enters after the Triskelion token (restore: {persist})"
+            );
+        }
+    }
+
+    /// CR 603.6a: Cackling Counterpart under Doubling Season makes two Soul Warden tokens in
+    /// one event, with no prompt between them. Each token observes the other's entry, and the
+    /// Soul Warden that was already on the battlefield observes both: 2 + 1 + 1 life.
+    #[test]
+    fn two_observer_copies_of_one_event_see_each_other() {
+        let mut scenario = GameScenario::new_n_player(2, 42);
+        scenario.at_phase(Phase::PreCombatMain);
+        scenario.with_mana_pool(
+            P0,
+            (0..3)
+                .map(|_| ManaUnit::new(ManaType::Blue, ObjectId(0), false, vec![]))
+                .collect(),
+        );
+        let warden = scenario
+            .add_creature_from_oracle(P0, "Soul Warden", 1, 1, SOUL_WARDEN)
+            .id();
+        scenario.add_enchantment_from_oracle(P0, "Doubling Season", SEASON);
+        let counterpart = scenario
+            .add_spell_to_hand_from_oracle(P0, "Cackling Counterpart", true, CACKLING_COUNTERPART)
+            .id();
+        let mut runner = scenario.build();
+        let life = runner.life(P0);
+        runner.cast(counterpart).target_object(warden).resolve();
+        assert_token_entry_complete(&mut runner);
+        let tokens = runner
+            .state()
+            .objects
+            .values()
+            .filter(|object| {
+                object.is_token && object.zone == Zone::Battlefield && object.name == "Soul Warden"
+            })
+            .count();
+        assert_eq!(tokens, 2, "reach guard: Doubling Season makes two tokens");
+        assert_eq!(runner.life(P0) - life, 4);
+    }
+
+    /// The captured game at the pause between two co-entrants of the four-token
+    /// Body Double batch (Doubling Season, Parallel Lives), with `tamper` applied to the
+    /// state before it is persisted. Returns the restore's verdict.
+    fn restore_after_tampering_at_the_pause(
+        tamper: impl FnOnce(&mut engine::types::game_state::GameState),
+    ) -> Result<(), String> {
+        use engine::types::game_state::PersistedGameState;
+        let (mut scenario, feldon) = setup();
+        scenario.add_enchantment_from_oracle(P0, "Doubling Season", SEASON);
+        scenario.add_enchantment_from_oracle(P0, "Parallel Lives", PARALLEL_LIVES);
+        let scales = scenario
+            .add_enchantment_from_oracle(P0, "Hardened Scales", SCALES)
+            .id();
+        let body_double = scenario
+            .add_creature_to_graveyard(P0, "Body Double", 0, 0)
+            .with_subtypes(vec!["Shapeshifter"])
+            .with_mana_cost(ManaCost::Cost {
+                shards: vec![ManaCostShard::Blue],
+                generic: 4,
+            })
+            .from_oracle_text(BODY_DOUBLE)
+            .id();
+        let triskelion = graveyard_triskelion(&mut scenario);
+        let mut runner = scenario.build();
+        enter_first_copy_before_second_offer(&mut runner, feldon, body_double, triskelion, scales);
+        let mut state = runner.state().clone();
+        assert_eq!(
+            state.unsettled_entry_batch_events.len(),
+            1,
+            "reach guard: the first entrant is held at the pause"
+        );
+        tamper(&mut state);
+        let wire = serde_json::to_value(PersistedGameState::capture(state)).unwrap();
+        serde_json::from_value::<PersistedGameState>(wire)
+            .map(|_| ())
+            .map_err(|error| error.to_string())
+    }
+
+    /// CR 603.6a + CR 608.2c: a restored game cannot be handed completion metadata or a held
+    /// entry list that would release unfinished entries early or collect one twice. The
+    /// instruction-boundary marks must lie within the ledger and the held entries must be
+    /// distinct, so the restore refuses them instead of resuming the batch.
+    #[test]
+    fn a_restore_at_the_pause_refuses_forged_entry_hold_metadata() {
+        restore_after_tampering_at_the_pause(|_| {})
+            .expect("positive control: the untampered pause restores");
+        let error = restore_after_tampering_at_the_pause(|state| {
+            state.instruction_boundary_marks = vec![1_000_000];
+        })
+        .expect_err("a mark past the ledger is refused");
+        assert!(error.contains("instruction_boundary_marks"), "{error}");
+        let error = restore_after_tampering_at_the_pause(|state| {
+            let held = state.unsettled_entry_batch_events[0].clone();
+            state.unsettled_entry_batch_events.push(held);
+        })
+        .expect_err("a duplicated held entry is refused");
+        assert!(error.contains("holds one entry twice"), "{error}");
+    }
+
     #[test]
     fn t5a_decline_enters_and_dies_once_without_a_copy() {
         let (mut scenario, feldon) = setup();

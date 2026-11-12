@@ -2028,7 +2028,7 @@ pub fn start_next_turn(state: &mut GameState, events: &mut Vec<GameEvent>) {
     state.zone_changes_this_turn.clear();
     // CR 603.10: keyed by the ledger index cleared above.
     state.battlefield_entry_observations.clear();
-    state.completed_instruction_zone_changes = 0;
+    state.instruction_boundary_marks.clear();
     state.batched_zone_change_trigger_fired.clear();
     state.battlefield_entries_this_turn.clear();
     // CR 514.2 + CR 400.7: the cleanup step is where "this turn" state ends, which is the authority
