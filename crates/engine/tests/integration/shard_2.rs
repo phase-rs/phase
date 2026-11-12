@@ -59,6 +59,7 @@ mod announced_counter_recipient_set;
 mod announced_target_combat_unknown;
 mod announced_target_declared_slot_pairing;
 mod announced_target_set_placement;
+mod announced_target_stack_relationship_unknown;
 mod announced_target_token_capture;
 mod announced_x_discard_cost;
 mod announcement_trigger_collection;

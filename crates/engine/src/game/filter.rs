@@ -6239,12 +6239,15 @@ pub fn matches_target_filter_on_damage_record_source(
 /// Three-valued, because the answer belongs to the reader (the same contract as
 /// [`zone_change_filter_answer_with_epoch`]). `Some(true)` / `Some(false)` are the
 /// record's definite answers. `None` is UNRECORDED: the filter asks for an axis the
-/// announcement never captured, so the save neither proves nor contradicts it. Today
-/// that axis is combat role — an `LKISnapshot` snapshots no attacking/blocking state
-/// (CR 508.1k, CR 509.1g), and the projected record's zeroed `ZoneChangeCombatStatus`
-/// is the record type's required value rather than an observation. A reader asking
-/// "does this filter hold?" collapses `None` to no match; the restore guard
-/// (`PersistedGameState`'s announced-target check) refuses only a definite
+/// announcement never captured, so the save neither proves nor contradicts it. The
+/// unrecorded axes are combat role — an `LKISnapshot` snapshots no attacking/blocking
+/// state (CR 508.1k, CR 509.1g), and the projected record's zeroed
+/// `ZoneChangeCombatStatus` is the record type's required value rather than an
+/// observation — and the subject's TARGET RELATIONSHIPS (CR 115.9a/b/c): what the
+/// announced target itself targeted, and how many, is a fact of ITS announcement,
+/// which neither the `LKISnapshot` nor the projected `ZoneChangeRecord` carries. A
+/// reader asking "does this filter hold?" collapses `None` to no match; the restore
+/// guard (`PersistedGameState`'s announced-target check) refuses only a definite
 /// `Some(false)`, because a missing recorded fact is not a failed predicate.
 pub fn matches_target_filter_on_recorded_announcement(
     state: &GameState,
@@ -8407,7 +8410,8 @@ fn zone_change_filter_answer_with_epoch(
 /// Whether `prop` is answered by the CAPTURE rather than by the record walk —
 /// directly, or through the composites the record walk recurses into. These are
 /// the leaves whose truth belongs to what the epoch captured: the tap/token facts
-/// an `LKISnapshot` states, and combat role, which it never states at all.
+/// an `LKISnapshot` states, combat role, which it never states at all, and a stack
+/// object's target relationships, which the record never states either.
 fn epoch_answerable_property(prop: &FilterProp) -> bool {
     match prop {
         FilterProp::Token
@@ -8423,6 +8427,24 @@ fn epoch_answerable_property(prop: &FilterProp) -> bool {
         | FilterProp::BlockStatus { .. }
         | FilterProp::AttackingAlone
         | FilterProp::BlockingAlone => true,
+        // CR 115.9a + CR 115.9b + CR 115.9c: a stack object's TARGET
+        // RELATIONSHIPS are facts of that object's own announcement, and the
+        // record this door walks carries none of them: `ZoneChangeRecord` has no
+        // target list, and the `LKISnapshot` an announced target captured says
+        // what the target WAS, never what it targeted. The record walk's
+        // Group-4 arm answers these leaves with a definite `false` for a
+        // relationship it never observed, so they must reach the epoch instead —
+        // which states none — rather than be reported as contradicted.
+        //
+        // A Turn Aside ("Counter target spell that targets a permanent you
+        // control") announced at a Bolt aimed at the caster's creature is the
+        // ordinary case: the bare `StackSpell` leg is UNKNOWN on a captured
+        // stack zone (CR 405.1), and the `Targets` leg is UNKNOWN for the same
+        // reason. Only a leaf the announcement DID record (the captured zone,
+        // the snapshot's characteristics, the token bit) may contradict.
+        | FilterProp::Targets { .. }
+        | FilterProp::TargetsOnly { .. }
+        | FilterProp::HasSingleTarget => true,
         FilterProp::AnyOf { props } => props.iter().any(epoch_answerable_property),
         FilterProp::Not { prop } => epoch_answerable_property(prop),
         _ => false,
@@ -8471,6 +8493,21 @@ fn epoch_property_answer(
         | FilterProp::BlockStatus { .. }
         | FilterProp::AttackingAlone
         | FilterProp::BlockingAlone => None,
+        // CR 115.9a + CR 115.9b + CR 115.9c: target relationships of the
+        // subject. "that targets [X]" asks which targets the SUBJECT chose, and
+        // "with a single target" asks how many it chose; neither is a
+        // characteristic the subject's `LKISnapshot` captured, and the projected
+        // `ZoneChangeRecord` carries no target list. Reading the record walk's
+        // fail-closed `false` here would report a relationship the announcement
+        // never recorded as a FAILED predicate — the same defect the combat-role
+        // leaves above avoid — and the restore guard
+        // ([`matches_target_filter_on_recorded_announcement`]) would refuse an
+        // honest Turn Aside announced at a spell that does target a permanent.
+        // The epoch therefore answers UNKNOWN, and the reader decides what
+        // UNKNOWN means.
+        FilterProp::Targets { .. }
+        | FilterProp::TargetsOnly { .. }
+        | FilterProp::HasSingleTarget => None,
         // Every other leaf is a definite answer from the capture.
         _ => Some(zone_change_record_matches_property(
             prop,
@@ -12841,6 +12878,11 @@ fn zone_change_record_matches_property(
         FilterProp::IsSaddled
         | FilterProp::IsChosenColor
         | FilterProp::IsChosenCardType
+        // CR 115.9a: "with a single target" counts the subject's target list,
+        // which the record does not carry, so this two-valued walk fails closed.
+        // A three-valued reader over a CAPTURED epoch answers it UNRECORDED —
+        // see `epoch_property_answer`, which is what the restore guard's
+        // recorded-announcement check reads.
         | FilterProp::HasSingleTarget
         // ZoneChangeRecord carries no modal field — conservative gap (CR 700.2
         // evaluated on the live stack object, not the snapshot).
@@ -12878,6 +12920,11 @@ fn zone_change_record_matches_property(
         // CR 122.6: counters-put-this-turn is a live-history join keyed on the
         // object id; a zone-change snapshot does not carry it. Fail closed.
         | FilterProp::CountersPutOnThisTurn { .. }
+        // CR 115.9b + CR 115.9c: a stack object's target relationships are not
+        // on the record, so this two-valued walk fails closed. A three-valued
+        // reader over a CAPTURED epoch answers them UNRECORDED rather than false
+        // — see `epoch_property_answer`, which is what the restore guard's
+        // recorded-announcement check reads.
         | FilterProp::TargetsOnly { .. }
         | FilterProp::Targets { .. }
         // CR 107.3 + CR 202.1: X-in-cost is a spell-cast-time predicate; it has no
@@ -25199,6 +25246,93 @@ mod tests {
             ),
             None,
             "negation keeps the unknown — a missing recorded fact never becomes a match"
+        );
+    }
+
+    /// CR 115.9a + CR 115.9b + CR 115.9c: the subject's TARGET RELATIONSHIPS are
+    /// facts of its own announcement, and neither an `LKISnapshot` nor the
+    /// `ZoneChangeRecord` it projects to states them. A recorded announcement
+    /// must therefore answer each relationship leaf as UNRECORDED (`None`) —
+    /// never as a failed predicate, which would refuse an honest Turn Aside
+    /// ("Counter target spell that targets a permanent you control") announced
+    /// at a Bolt aimed at the caster's creature, and never as a match either.
+    /// Negation keeps the unknown.
+    ///
+    /// The captured zone stays definite: it is what the announcement recorded,
+    /// so a captured battlefield zone still rules a stack predicate OUT.
+    ///
+    /// Revert-probe: the pre-fix record walk answered `Targets` / `TargetsOnly`
+    /// / `HasSingleTarget` `Some(false)`, where this test requires `None` in both
+    /// directions.
+    #[test]
+    fn recorded_announcement_answers_stack_target_relationships_as_unrecorded() {
+        let mut state = setup();
+        let source = add_creature(&mut state, PlayerId(0), "Turn Aside");
+        let target = add_creature(&mut state, PlayerId(1), "Bears");
+        let ctx = FilterContext::from_source(&state, source);
+        let lki = epoch_snapshot(&[], false);
+        let announcement = |filter: &TargetFilter, zone: Zone| {
+            super::matches_target_filter_on_recorded_announcement(
+                &state,
+                target,
+                &lki,
+                filter,
+                &ctx,
+                Some(zone),
+                Some(false),
+            )
+        };
+        let permanent_you_control = || TargetFilter::Typed(TypedFilter::creature());
+        let relationship_leaves = [
+            prop_filter(FilterProp::Targets {
+                filter: Box::new(permanent_you_control()),
+            }),
+            prop_filter(FilterProp::TargetsOnly {
+                filter: Box::new(permanent_you_control()),
+            }),
+            prop_filter(FilterProp::HasSingleTarget),
+        ];
+        for leaf in &relationship_leaves {
+            assert_eq!(
+                announcement(leaf, Zone::Stack),
+                None,
+                "{leaf:?} is a target relationship the announcement never records, so it is \
+                 unrecorded on a captured stack zone — not false"
+            );
+            assert_eq!(
+                announcement(
+                    &TargetFilter::Not {
+                        filter: Box::new(leaf.clone()),
+                    },
+                    Zone::Stack,
+                ),
+                None,
+                "{leaf:?} inverted stays unrecorded — the negation of an absent fact is not a \
+                 match"
+            );
+        }
+        // The whole Turn Aside shape: the bare stack kind is UNKNOWN on a
+        // captured stack zone, and the relationship conjunct must not turn that
+        // into a definite contradiction.
+        let turn_aside_slot = TargetFilter::And {
+            filters: vec![
+                TargetFilter::StackSpell,
+                prop_filter(FilterProp::Targets {
+                    filter: Box::new(permanent_you_control()),
+                }),
+            ],
+        };
+        assert_eq!(
+            announcement(&turn_aside_slot, Zone::Stack),
+            None,
+            "the Turn Aside slot on a captured stack zone is unrecorded, not false"
+        );
+        // ... while the captured zone remains a definite answer, because the
+        // announcement itself recorded it.
+        assert_eq!(
+            announcement(&turn_aside_slot, Zone::Battlefield),
+            Some(false),
+            "a target announced on the battlefield was never a stack object"
         );
     }
 
