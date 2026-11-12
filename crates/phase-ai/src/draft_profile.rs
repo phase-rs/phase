@@ -80,6 +80,9 @@ const SIGNAL_QUALITY_THRESHOLD: f64 = 1.0;
 const PREMIUM_THREAT_THRESHOLD: f64 = 2.0;
 /// Minimum power for an evasive creature to count as a threat.
 const EVASIVE_THREAT_POWER: i32 = 3;
+/// Power at which a creature's body alone is a finisher — one of the "creatures
+/// that dominate combat" in a set's threat definition, no evasion needed.
+const DOMINANT_THREAT_POWER: i32 = 4;
 /// Highest mana value at which an evasive creature is a cheap Ninjutsu enabler.
 const NINJUTSU_ENABLER_MAX_MANA_VALUE: u32 = 3;
 /// Largest penalty (before commitment scaling) for a fully off-color card.
@@ -320,7 +323,9 @@ pub enum RoleReading {
     /// - evasion also counts menace, skulk and landwalk (CR 702.14b), CR
     ///   509.1b blocker restrictions, effects that make the source itself
     ///   evasive, and effects that make another creature evasive;
-    /// - fixing also counts a search of its controller's library for a land.
+    /// - fixing also counts a search of its controller's library for a land;
+    /// - threat status comes from the printed card's own combat capability
+    ///   (see [`DraftProfile::is_threat`]), never from its pick rating.
     Full,
 }
 
@@ -869,26 +874,38 @@ impl DraftProfile {
         need.bonus * ((target - have) / target).max(0.0)
     }
 
-    /// Premium finisher or evasive threat, not merely a creature. A creature
-    /// whose role is mana (a mana ability, multicolor mana, or a land search
-    /// such as Sakura-Tribe Elder's) is never a finisher, however highly its
-    /// pick quality is rated: the card bonus measures acceleration and fixing,
-    /// not closing a game.
+    /// Whether the card reliably closes a game, for the set's `threat_need`.
+    ///
+    /// Threat status is a card's *combat capability*, not its pick quality: the
+    /// card bonus measures the whole card (fixing, card advantage, synergy), so
+    /// it must never by itself consume a finisher slot. A high-rated 1/2 flier
+    /// or a 2/2 attrition creature is exactly the kind of card the set rates
+    /// highly without it closing a game.
+    ///
+    /// Under the full reading the predicate reads the printed card only: an
+    /// evasive body of [`EVASIVE_THREAT_POWER`] or a body that dominates combat
+    /// (see [`dominates_combat`]). Sakura-Tribe Elder is neither, so its land
+    /// search cannot make it a finisher. Under the classic reading the
+    /// Mirrodin-tuned meaning is kept exactly: a premium-rated creature counts
+    /// (except a mana creature — a 1/1 Myr is acceleration, not a finisher), or
+    /// a substantial evasive body.
     fn is_threat(&self, card: &ProfileCard<'_>) -> bool {
         let Some(face) = card.face.filter(|f| is_creature(f)) else {
             return false;
         };
         let reading = self.reading(card.set_code);
-        let classes = classify_with(face, reading);
-        if classes.contains(&CardClass::ManaCreature) || classes.contains(&CardClass::ManaFixing) {
-            return false;
-        }
         let power = match &face.power {
             Some(PtValue::Fixed(p)) => *p,
             _ => 0,
         };
-        self.bonus_for_name(card.name) >= PREMIUM_THREAT_THRESHOLD
-            || (is_evasive(face, reading) && power >= EVASIVE_THREAT_POWER)
+        let evasive = is_evasive(face, reading) && power >= EVASIVE_THREAT_POWER;
+        match reading {
+            RoleReading::Classic => {
+                !classify_with(face, reading).contains(&CardClass::ManaCreature)
+                    && (evasive || self.bonus_for_name(card.name) >= PREMIUM_THREAT_THRESHOLD)
+            }
+            RoleReading::Full => evasive || dominates_combat(face),
+        }
     }
 
     /// The role reading of `set_code`. A card from a set this profile does
@@ -950,6 +967,18 @@ fn is_creature(face: &CardFace) -> bool {
 /// Whether the face has the Equipment artifact subtype (CR 301.5).
 fn is_equipment(face: &CardFace) -> bool {
     face.card_type.subtypes.iter().any(|s| s == "Equipment")
+}
+
+/// Whether a creature's body alone dominates combat — the set threat
+/// definition's "creatures that dominate combat": fixed power at or above
+/// [`DOMINANT_THREAT_POWER`], or an open-ended power (`*`/X) that scales with
+/// the game rather than starting small (Kagemaro, First to Suffer).
+fn dominates_combat(face: &CardFace) -> bool {
+    match &face.power {
+        Some(PtValue::Fixed(power)) => *power >= DOMINANT_THREAT_POWER,
+        Some(PtValue::Variable(_) | PtValue::Quantity(_)) => true,
+        None => false,
+    }
 }
 
 /// Whether `keyword` is an evasion ability under `reading`: CR 702.9a Flying,
@@ -2598,6 +2627,158 @@ mod tests {
         assert_eq!(sated.threat_need, 0.0);
     }
 
+    /// Quality never confers a finisher slot under the full reading. Kabuto
+    /// Moth (3.5), Thief of Hope (2.25) and Ninja of the Deep Hours (3.0) are
+    /// among the profile's highest-rated cards and none of them closes a game;
+    /// real finishers keep the full bonus even in a pool full of them. The
+    /// classic reading keeps Mirrodin's tuned premium-rating clause.
+    #[test]
+    fn threat_status_reads_combat_capability_not_pick_quality() {
+        let p = DraftProfile::kamigawa_block();
+        let white = vec!["W".to_string()];
+        let black = vec!["B".to_string()];
+        let blue = vec!["U".to_string()];
+        let green = vec!["G".to_string()];
+        let red = vec!["R".to_string()];
+
+        // Kabuto Moth (CHK): {2}{W} 1/2 Spirit with flying; a support creature.
+        let moth = oracle_face(serde_json::json!({
+            "name": "Kabuto Moth",
+            "manaCost": "{2}{W}",
+            "manaValue": 3.0,
+            "colors": ["W"],
+            "type": "Creature — Spirit",
+            "types": ["Creature"],
+            "subtypes": ["Spirit"],
+            "power": "1",
+            "toughness": "2",
+            "keywords": ["Flying"],
+            "text": "Flying\n{T}: Target creature gets +1/+2 until end of turn.",
+        }));
+        // Thief of Hope (CHK): {2}{B} 2/2 Spirit, an attrition two-drop.
+        let thief = oracle_face(serde_json::json!({
+            "name": "Thief of Hope",
+            "manaCost": "{2}{B}",
+            "manaValue": 3.0,
+            "colors": ["B"],
+            "type": "Creature — Spirit",
+            "types": ["Creature"],
+            "subtypes": ["Spirit"],
+            "power": "2",
+            "toughness": "2",
+            "text": "Whenever you cast a Spirit or Arcane spell, target opponent loses 1 life and you gain 1 life.\nSoulshift 2 (When this creature dies, you may return target Spirit card with mana value 2 or less from your graveyard to your hand.)",
+        }));
+        // Ninja of the Deep Hours (BOK): {3}{U} 2/2 Ninja, card advantage.
+        let ninja = oracle_face(serde_json::json!({
+            "name": "Ninja of the Deep Hours",
+            "manaCost": "{3}{U}",
+            "manaValue": 4.0,
+            "colors": ["U"],
+            "type": "Creature — Human Ninja",
+            "types": ["Creature"],
+            "subtypes": ["Human", "Ninja"],
+            "power": "2",
+            "toughness": "2",
+            "text": "Ninjutsu {1}{U} ({1}{U}, Return an unblocked attacker you control to hand: Put this card onto the battlefield from your hand tapped and attacking.)\nWhenever this creature deals combat damage to a player, you may draw a card.",
+        }));
+        // Kokusho (CHK): a genuine premium finisher (4.0, 5/5 flying).
+        let kokusho = oracle_face(serde_json::json!({
+            "name": "Kokusho, the Evening Star",
+            "manaCost": "{4}{B}{B}",
+            "manaValue": 6.0,
+            "colors": ["B"],
+            "type": "Legendary Creature — Dragon Spirit",
+            "types": ["Creature"],
+            "subtypes": ["Dragon", "Spirit"],
+            "supertypes": ["Legendary"],
+            "power": "5",
+            "toughness": "5",
+            "keywords": ["Flying"],
+            "text": "Flying\nWhen Kokusho dies, each opponent loses 5 life. You gain life equal to the life lost this way.",
+        }));
+        // Moss Kami (CHK): 5/5 trample with only a 0.5 bonus — no rating and no
+        // evasion, but a body that dominates combat.
+        let moss = oracle_face(serde_json::json!({
+            "name": "Moss Kami",
+            "manaCost": "{5}{G}",
+            "manaValue": 6.0,
+            "colors": ["G"],
+            "type": "Creature — Spirit",
+            "types": ["Creature"],
+            "subtypes": ["Spirit"],
+            "power": "5",
+            "toughness": "5",
+            "keywords": ["Trample"],
+            "text": "Trample",
+        }));
+
+        for (name, set, colors, f, threat, bonus) in [
+            ("Kabuto Moth", "CHK", &white, &moth, false, 3.5),
+            ("Thief of Hope", "CHK", &black, &thief, false, 2.25),
+            ("Ninja of the Deep Hours", "BOK", &blue, &ninja, false, 3.0),
+            (
+                "Kokusho, the Evening Star",
+                "CHK",
+                &black,
+                &kokusho,
+                true,
+                4.0,
+            ),
+            ("Moss Kami", "CHK", &green, &moss, true, 0.5),
+        ] {
+            assert_eq!(p.bonus_for_name(name), bonus, "{name} pick rating");
+            assert_eq!(
+                p.is_threat(&card(name, set, colors, f)),
+                threat,
+                "{name} threat status"
+            );
+        }
+
+        // A pool of four high-rated non-finishers neither earns the finisher
+        // bonus nor consumes the target's four slots.
+        let pool = vec![
+            card("Kabuto Moth", "CHK", &white, &moth),
+            card("Thief of Hope", "CHK", &black, &thief),
+            card("Ninja of the Deep Hours", "BOK", &blue, &ninja),
+            card("Kabuto Moth", "CHK", &white, &moth),
+        ];
+        for weak in &pool {
+            assert!(!p.is_threat(weak), "{} is not a finisher", weak.name);
+            assert_eq!(
+                score15(p, weak, &pool, 0.0, 0.0).unwrap().threat_need,
+                0.0,
+                "{} must not earn finisher budget from its rating",
+                weak.name
+            );
+        }
+        let finisher = card("Kokusho, the Evening Star", "CHK", &black, &kokusho);
+        assert_eq!(
+            score15(p, &finisher, &pool, 0.0, 0.0).unwrap().threat_need,
+            1.25,
+            "high-rated non-finishers do not consume the threat target"
+        );
+
+        // The classic reading keeps Mirrodin's tuned meaning, so its 5DN
+        // scores do not move: Spikeshot Goblin (3.0) is a premium-rated 1/1
+        // and still counts there.
+        let mut goblin = face(vec![CoreType::Creature], &["Goblin Shaman"]);
+        goblin.power = Some(PtValue::Fixed(1));
+        goblin.toughness = Some(PtValue::Fixed(1));
+        let goblin = card("Spikeshot Goblin", "5DN", &red, &goblin);
+        let mirrodin = DraftProfile::mirrodin_block();
+        assert!(
+            mirrodin.is_threat(&goblin),
+            "classic keeps its premium-rating clause"
+        );
+        assert_eq!(
+            score15(mirrodin, &goblin, &[], 0.0, 0.0)
+                .unwrap()
+                .threat_need,
+            1.5,
+            "the Mirrodin 5DN threat need is unchanged"
+        );
+    }
+
     #[test]
     fn class_paid_theme_still_earns_its_excess_synergy() {
         let p = DraftProfile::kamigawa_block();
@@ -4044,11 +4225,11 @@ mod tests {
         // the removal class.
         let eradicate = oracle_face(serde_json::json!({
             "name": "Eradicate",
-            "manaCost": "{3}{B}",
+            "manaCost": "{2}{B}{B}",
             "manaValue": 4.0,
             "colors": ["B"],
-            "type": "Instant",
-            "types": ["Instant"],
+            "type": "Sorcery",
+            "types": ["Sorcery"],
             "text": "Exile target nonblack creature. Search its controller's graveyard, hand, and library for all cards with the same name as that creature and exile them. Then that player shuffles.",
         }));
         // Positive guard: exports at least one ChangeZone to Exile with typed target.
