@@ -276,14 +276,22 @@ pub(crate) fn chain_searches_for_land(ability: &AbilityDefinition) -> bool {
 /// search") names the controller of the parent target: when that target can be
 /// a permanent the ability's controller controls, the search can be theirs —
 /// Cleansing Wildfire targeting your own indestructible land keeps the land and
-/// adds a basic (CR 702.12b: indestructible permanents can't be destroyed). Any
-/// scope that is fixed to another player fails closed.
+/// adds a basic (CR 702.12b: indestructible permanents can't be destroyed).
+/// `Player` and `DeclaredPlayer` name a player the caster chooses (CR 601.2c),
+/// so the caster may choose themself. Any scope fixed to another player fails
+/// closed.
 fn search_can_be_controllers_library(
     target_player: &Option<TargetFilter>,
     parent_target: Option<&TargetFilter>,
 ) -> bool {
     match target_player {
-        None | Some(TargetFilter::Controller | TargetFilter::SourceController) => true,
+        None
+        | Some(
+            TargetFilter::Controller
+            | TargetFilter::SourceController
+            | TargetFilter::Player
+            | TargetFilter::DeclaredPlayer { .. },
+        ) => true,
         Some(TargetFilter::ParentTargetController | TargetFilter::ParentTargetOwner) => {
             parent_target.is_some_and(target_can_be_controllers_permanent)
         }
@@ -878,5 +886,45 @@ mod tests {
 
         let feature = detect(&[entry(face, 1)]);
         assert_eq!(feature.land_fetch_count, 0);
+    }
+
+    #[test]
+    fn player_targeted_land_search_is_fixing() {
+        // Fertilid's Favor: "Target player searches their library for a basic
+        // land card, puts it onto the battlefield tapped, then shuffles. Put
+        // two +1/+1 counters on up to one target artifact or creature."
+        // The caster can target themself (CR 601.2c), so this is fixing.
+        let face = oracle_face(
+            "Fertilid's Favor",
+            "{2}{G}",
+            "Instant",
+            "Target player searches their library for a basic land card, puts it onto the battlefield tapped, then shuffles. Put two +1/+1 counters on up to one target artifact or creature.",
+        );
+        let search = face
+            .abilities
+            .iter()
+            .flat_map(collect_chain_effects)
+            .find_map(|effect| match effect {
+                Effect::SearchLibrary {
+                    filter,
+                    target_player,
+                    ..
+                } => Some((filter, target_player)),
+                _ => None,
+            })
+            .expect("positive guard: the spell exports a library search");
+        assert!(
+            target_filter_references_land(search.0),
+            "positive guard: the search filter admits a land card"
+        );
+        assert!(
+            matches!(search.1, Some(TargetFilter::Player)),
+            "positive guard: the search names a player target"
+        );
+        assert!(face.abilities.iter().any(chain_searches_for_land));
+        assert!(is_land_fetch_spell(&face));
+
+        let feature = detect(&[entry(face, 1)]);
+        assert_eq!(feature.land_fetch_count, 1);
     }
 }
