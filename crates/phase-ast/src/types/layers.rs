@@ -280,9 +280,16 @@ pub struct ProtectionRiderGrant {
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
 pub enum ProtectionGrantOccurrence {
-    /// The source's own printed or copiable static at this index. These
-    /// precede every granted static in `static_definitions`, so grants coming
-    /// and going never move them.
+    /// The source's own printed or copiable static, by its index in the static
+    /// list a full pass gathers. That list is the object's base statics (after
+    /// the copy layer): each full pass resets `static_definitions` to
+    /// `base_static_definitions`, and layer 6 only appends granted statics
+    /// after them. So the index names the same own static however many grants
+    /// start or end, which is why it can key a snapshot. Only a change to the
+    /// base statics themselves (a copy effect starting or ending) can move it.
+    /// The engine test `own_static_index_is_a_base_prefix_index` pins that
+    /// prefix property; a change to how grants are installed must keep it or
+    /// key this occurrence by something else.
     Static { definition_index: usize },
     /// CR 613.1f: a static granted to the source by this exact layer grant
     /// occurrence (the producing `GrantStaticAbility`), whichever slot layer 6

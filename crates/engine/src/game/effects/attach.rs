@@ -5686,7 +5686,7 @@ mod tests {
     }
 
     #[test]
-    fn cr_702_16p_same_source_second_effect_does_not_inherit_first_snapshot() {
+    fn cr_702_16p_recolored_rider_does_not_keep_the_old_qualitys_attachments() {
         use crate::types::ability::ProtectionDoesNotRemove;
         use crate::types::keywords::ProtectionTarget;
         use crate::types::mana::ManaColor;
@@ -5729,7 +5729,7 @@ mod tests {
         evaluate_protection_layers(&mut state);
         assert!(
             !printed_snapshot_ids(&state, grant_source, 0, 0, host).contains(&equipment),
-            "white rider must not inherit the prior blue snapshot of the same static"
+            "the white rider takes a new snapshot under the same key: the blue Equipment from the blue snapshot is not in it"
         );
 
         state
@@ -5752,6 +5752,63 @@ mod tests {
             state.objects.get(&equipment).unwrap().attached_to,
             None,
             "Equipment that became white after the white rider started must unattach"
+        );
+    }
+
+    /// CR 702.16p: a start snapshot exempts only attachments of the quality it
+    /// was taken for. Synthetic: the refresh replaces a snapshot whose quality
+    /// no longer matches, so a mismatched entry is unreachable through a layer
+    /// pass; this sets one directly to hold the legality lookup to the quality
+    /// it was asked about (a white Equipment, a snapshot taken for blue).
+    #[test]
+    fn cr_702_16p_snapshot_of_another_quality_exempts_nothing() {
+        use crate::types::ability::ProtectionDoesNotRemove;
+        use crate::types::keywords::ProtectionTarget;
+        use crate::types::mana::ManaColor;
+
+        let mut state = setup();
+        let host = spawn_creature(&mut state, "Bear");
+        let equipment = spawn_equipment(&mut state, "Sword", 60);
+        state
+            .objects
+            .get_mut(&equipment)
+            .unwrap()
+            .color
+            .push(ManaColor::White);
+        attach_to(&mut state, equipment, host);
+
+        let grant_source = spawn_grant_source(
+            &mut state,
+            "Synthetic rider source (Benevolent Blessing analogue)",
+            61,
+        );
+        apply_protection_grant(
+            &mut state,
+            grant_source,
+            host,
+            ProtectionTarget::Color(ManaColor::White),
+            Some(ProtectionDoesNotRemove::ControlledAttachmentsAlreadyAttached),
+        );
+        evaluate_protection_layers(&mut state);
+        assert_eq!(
+            attachment_illegality(&state, equipment, host),
+            None,
+            "reach guard: the white Equipment attached at effect start is exempt"
+        );
+
+        for entry in state
+            .objects
+            .get_mut(&grant_source)
+            .unwrap()
+            .protection_start_snapshots
+            .values_mut()
+        {
+            entry.resolved_quality = ProtectionTarget::Color(ManaColor::Blue);
+        }
+        assert_eq!(
+            attachment_illegality(&state, equipment, host),
+            Some(AttachIllegality::Protection),
+            "a snapshot taken for blue does not exempt a white Equipment from protection from white"
         );
     }
 

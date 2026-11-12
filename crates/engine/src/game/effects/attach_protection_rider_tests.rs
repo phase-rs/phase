@@ -730,6 +730,72 @@ fn late_granted_rider_names_its_recipient() {
     assert_granted_rider_identity(GrantPath::Late);
 }
 
+/// CR 702.16p + CR 613.1f: `ProtectionGrantOccurrence::Static` names a source's
+/// own static by its index in the list a full pass gathers, which is safe only
+/// because that list is the base statics with granted statics appended after
+/// them. Printed Benevolent Blessing's snapshot keeps its key and value while a
+/// synthetic grantor's static (an unrelated +1/+0 grant, standing in for any
+/// lord) installs on the Blessing and then ends, and the Blessing's static list
+/// begins with exactly its base statics each time.
+#[test]
+fn own_static_index_is_a_base_prefix_index() {
+    let mut s = scenario();
+    let host = grizzly_bears(&mut s, P0);
+    let blessing = s.add_real_card(P0, "Benevolent Blessing", Zone::Hand, db());
+    let mut runner = s.build();
+    cast(&mut runner, P0, blessing, Some(host), Some("white"));
+    let state = runner.state_mut();
+    let def_index = ridered_static_index(state, blessing);
+    let base_len = state.objects[&blessing].base_static_definitions.len();
+    assert!(
+        def_index < base_len,
+        "reach guard: the ridered static is one of the base statics"
+    );
+    let snapshot = printed_snapshot_ids(state, blessing, def_index, 0, host);
+    let grantor = create_object(
+        state,
+        CardId(900),
+        P0,
+        "Synthetic static grantor".to_string(),
+        Zone::Battlefield,
+    );
+    let assert_prefix = |state: &GameState, grant_installed: bool| {
+        let object = &state.objects[&blessing];
+        let list: Vec<_> = object.static_definitions.iter_all().cloned().collect();
+        assert_eq!(
+            list.len() > base_len,
+            grant_installed,
+            "reach guard: the grant is installed exactly while its grantor's static applies"
+        );
+        assert_eq!(
+            &list[..base_len],
+            object.base_static_definitions.as_slice(),
+            "the static list begins with the base statics"
+        );
+        assert_eq!(ridered_static_index(state, blessing), def_index);
+        assert_eq!(
+            printed_snapshot_ids(state, blessing, def_index, 0, host),
+            snapshot,
+            "the snapshot keeps its key and value"
+        );
+    };
+
+    grant_static_to(
+        state,
+        grantor,
+        TargetFilter::SpecificObject { id: blessing },
+        unrelated_static(blessing),
+    );
+    evaluate_protection_layers(state);
+    assert_prefix(state, true);
+
+    let grantor_object = state.objects.get_mut(&grantor).unwrap();
+    grantor_object.static_definitions.clear();
+    grantor_object.base_static_definitions = std::sync::Arc::new(Vec::new());
+    evaluate_protection_layers(state);
+    assert_prefix(state, false);
+}
+
 /// CR 702.16n + CR 702.16p: a ridered static on the protected permanent itself
 /// keys its rider to that permanent's own definition. The static is synthetic:
 /// printed riders appear only on Auras (Flickering Ward, Spectra Ward,
