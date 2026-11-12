@@ -508,6 +508,11 @@ pub enum ProposedEvent {
         /// player who becomes the card's owner (`zone_pipeline::entry_receiver`).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         performed_by: Option<PlayerId>,
+        /// CR 614.12 + CR 611.2e: carried through the replacement pipeline and
+        /// CR 616.1 pauses so the entrant's own entry abilities stay withheld on
+        /// every pass.
+        #[serde(default, skip_serializing_if = "EntrantAbilities::is_retained")]
+        entrant_abilities: EntrantAbilities,
         #[serde(serialize_with = "crate::types::deterministic_serde::hash_set")]
         applied: HashSet<AppliedReplacementKey>,
     },
@@ -901,6 +906,36 @@ impl EntryChoices {
     }
 }
 
+/// CR 611.2e + CR 613.1f + CR 614.12: whether a battlefield entrant has its own
+/// abilities as it would exist on the battlefield. "RemovedWithEntry" when an
+/// "is/has" continuous effect of the resolution that puts it there applies
+/// simultaneously with its entry and removes all its abilities (Xu-Ifit,
+/// Osteoharmonist; Bronzehide Lion). Abilities axis only.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+pub enum EntrantAbilities {
+    /// The entrant enters with its own abilities.
+    #[default]
+    Retained,
+    /// A same-resolution effect removes all of the entrant's abilities as it
+    /// enters, so none of its own entry abilities apply.
+    RemovedWithEntry,
+}
+
+impl EntrantAbilities {
+    /// Whether the entrant's own abilities exist as it enters.
+    pub fn own_abilities_apply(self) -> bool {
+        match self {
+            EntrantAbilities::Retained => true,
+            EntrantAbilities::RemovedWithEntry => false,
+        }
+    }
+
+    /// Serde skip predicate: the default is omitted from the wire.
+    pub fn is_retained(&self) -> bool {
+        matches!(self, EntrantAbilities::Retained)
+    }
+}
+
 impl ProposedEvent {
     /// Construct a `ZoneChange` with default `enter_tapped: Unspecified` and empty `applied` set.
     pub fn zone_change(object_id: ObjectId, from: Zone, to: Zone, cause: Option<ObjectId>) -> Self {
@@ -922,6 +957,7 @@ impl ProposedEvent {
             enter_with_choices: None,
             discard_frame: None,
             performed_by: None,
+            entrant_abilities: EntrantAbilities::Retained,
             applied: HashSet::new(),
         }
     }
@@ -1004,6 +1040,17 @@ impl ProposedEvent {
             | ProposedEvent::CreateToken { enter_tapped, .. }
             | ProposedEvent::TokenEntry { enter_tapped, .. } => Some(*enter_tapped),
             _ => None,
+        }
+    }
+
+    /// CR 614.12 + CR 611.2e: the entrant-abilities carrier of a zone change
+    /// (`Retained` for every other event).
+    pub fn entrant_abilities(&self) -> EntrantAbilities {
+        match self {
+            ProposedEvent::ZoneChange {
+                entrant_abilities, ..
+            } => *entrant_abilities,
+            _ => EntrantAbilities::Retained,
         }
     }
 
@@ -1958,5 +2005,42 @@ mod tests {
         };
         assert!(applied.contains(&AppliedReplacementKey::floating(2)));
         assert!(!applied.contains(&AppliedReplacementKey::step_end_mana(2)));
+    }
+
+    /// CR 614.12 + CR 611.2e: the zone-change entrant-abilities carrier is an
+    /// optional wire field — absent decodes `Retained`, `Retained` is omitted,
+    /// and `RemovedWithEntry` round-trips.
+    #[test]
+    fn zone_change_entrant_abilities_serde() {
+        let plain = ProposedEvent::zone_change(
+            ObjectId(7),
+            Zone::Graveyard,
+            Zone::Battlefield,
+            Some(ObjectId(3)),
+        );
+        let value = serde_json::to_value(&plain).expect("serializes");
+        assert!(
+            value["ZoneChange"].get("entrant_abilities").is_none(),
+            "Retained must not be serialized: {value}"
+        );
+        let back: ProposedEvent = serde_json::from_value(value).expect("reads without the key");
+        assert_eq!(back.entrant_abilities(), EntrantAbilities::Retained);
+
+        let mut removed = plain;
+        let ProposedEvent::ZoneChange {
+            entrant_abilities, ..
+        } = &mut removed
+        else {
+            unreachable!("zone_change constructs a ZoneChange");
+        };
+        *entrant_abilities = EntrantAbilities::RemovedWithEntry;
+        let value = serde_json::to_value(&removed).expect("serializes");
+        assert!(
+            value["ZoneChange"].get("entrant_abilities").is_some(),
+            "RemovedWithEntry must be serialized: {value}"
+        );
+        let back: ProposedEvent = serde_json::from_value(value).expect("round-trips");
+        assert_eq!(back.entrant_abilities(), EntrantAbilities::RemovedWithEntry);
+        assert_eq!(back, removed);
     }
 }

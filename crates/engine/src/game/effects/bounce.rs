@@ -255,6 +255,7 @@ pub fn resolve(
                     face_down_in_exile: crate::types::ability::ExileConcealment::Public,
                     // CR 708.2a: bounce returns cards face up; no face-down entry.
                     face_down_profile: None,
+                    entrant_abilities: crate::types::proposed_event::EntrantAbilities::Retained,
                     enter_with_counters: vec![],
                     conditional_enter_with_counters: vec![],
                     count_param: 0,
@@ -352,6 +353,7 @@ pub fn resolve(
                     face_down_in_exile: crate::types::ability::ExileConcealment::Public,
                     // CR 708.2a: bounce returns cards face up; no face-down entry.
                     face_down_profile: None,
+                    entrant_abilities: crate::types::proposed_event::EntrantAbilities::Retained,
                     enter_with_counters: vec![],
                     conditional_enter_with_counters: vec![],
                     count_param: 0,
@@ -564,6 +566,7 @@ pub fn resolve_all(
                 face_down_in_exile: crate::types::ability::ExileConcealment::Public,
                 // CR 708.2a: bounce returns cards face up; no face-down entry.
                 face_down_profile: None,
+                entrant_abilities: crate::types::proposed_event::EntrantAbilities::Retained,
                 enter_with_counters: vec![],
                 conditional_enter_with_counters: vec![],
                 count_param: 0,

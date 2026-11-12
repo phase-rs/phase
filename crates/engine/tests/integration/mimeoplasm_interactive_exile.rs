@@ -483,6 +483,7 @@ fn paycost_arm_exiles_cards_via_apply_as_current() {
             track_exiled_by_source: true,
             face_down_in_exile: engine::types::ability::ExileConcealment::Public,
             face_down_profile: None,
+            entrant_abilities: engine::types::proposed_event::EntrantAbilities::Retained,
             enter_with_counters: vec![],
             conditional_enter_with_counters: vec![],
             count_param: 0,

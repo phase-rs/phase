@@ -423,6 +423,7 @@ mod x_announcement_target_constraints;
 mod x_mana_sacrifice_residual;
 mod x_prevention_amount;
 mod xantid_swarm_defending_player_cant_cast;
+mod xu_ifit_with_entry_ability_removal;
 mod yare_extra_blockers;
 mod yavimaya_enchantress_dynamic_pump;
 mod yenna_aura_token_copy;

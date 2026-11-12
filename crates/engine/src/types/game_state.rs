@@ -4911,6 +4911,18 @@ pub struct PendingChangeZoneIteration {
     /// pattern on this same struct.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub face_down_profile: Option<crate::types::ability::FaceDownProfile>,
+    /// CR 611.2e + CR 614.12: entrant-abilities carrier derived at the
+    /// ChangeZone instruction's resolver entry, carried across a
+    /// replacement-ordering / as-enters pause so a resumed entry whose own
+    /// abilities a same-resolution "has no abilities" effect removes (Xu-Ifit,
+    /// Osteoharmonist) still withholds its own entry abilities. `Retained` =
+    /// the entrant keeps its abilities. Mirrors the `face_down_profile`
+    /// carry-through above; never re-derived at the drain.
+    #[serde(
+        default,
+        skip_serializing_if = "crate::types::proposed_event::EntrantAbilities::is_retained"
+    )]
+    pub entrant_abilities: crate::types::proposed_event::EntrantAbilities,
     /// CR 401.4 + CR 701.24a: Library placement override carried across a
     /// replacement-ordering pause so Endurance-style "on the bottom of their
     /// library" still suppresses auto-shuffle on resume.
@@ -18274,6 +18286,17 @@ pub enum WaitingFor {
         /// `enter_transformed` / `enters_under_player` carry-through above.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         face_down_profile: Option<crate::types::ability::FaceDownProfile>,
+        /// CR 611.2e + CR 614.12: entrant-abilities carrier derived at the
+        /// ChangeZone instruction's resolver entry and carried across the
+        /// `EffectZoneChoice` round-trip, so the resumed move of a chosen card
+        /// whose abilities a same-resolution "has no abilities" effect removes
+        /// still withholds its own entry abilities. Never re-derived at the
+        /// resume. `Retained` at every non-ChangeZone producer.
+        #[serde(
+            default,
+            skip_serializing_if = "crate::types::proposed_event::EntrantAbilities::is_retained"
+        )]
+        entrant_abilities: crate::types::proposed_event::EntrantAbilities,
         /// CR 122.1 + CR 614.1c: Unconditional entry-time counters carried across
         /// the `EffectZoneChoice` round-trip (e.g. "enters with two +1/+1
         /// counters").
@@ -42659,6 +42682,7 @@ mod tests {
             face_down_in_exile: crate::types::ability::ExileConcealment::FaceDown,
             moved_count: None,
             face_down_profile: None,
+            entrant_abilities: crate::types::proposed_event::EntrantAbilities::Retained,
             library_placement: None,
             enter_attached_to: None,
             effect_kind: EffectKind::ChangeZone,
@@ -53639,6 +53663,7 @@ mod tests {
             track_exiled_by_source: false,
             face_down_in_exile: crate::types::ability::ExileConcealment::Public,
             face_down_profile: None,
+            entrant_abilities: crate::types::proposed_event::EntrantAbilities::Retained,
             enter_with_counters: vec![],
             conditional_enter_with_counters: vec![],
             count_param: 0,
@@ -54553,6 +54578,7 @@ mod tests {
             track_exiled_by_source: false,
             face_down_in_exile: crate::types::ability::ExileConcealment::Public,
             face_down_profile: None,
+            entrant_abilities: crate::types::proposed_event::EntrantAbilities::Retained,
             enter_with_counters: vec![],
             conditional_enter_with_counters: vec![],
             count_param: 0,
@@ -54838,6 +54864,9 @@ mod tests {
                 ward: None,
                 cause: crate::types::ability::FaceDownCause::Manifest,
             }),
+            // CR 611.2e + CR 614.12: the entrant-abilities carrier must survive
+            // the pause/resume serde round-trip (Xu-Ifit, Osteoharmonist).
+            entrant_abilities: crate::types::proposed_event::EntrantAbilities::RemovedWithEntry,
             library_placement: None,
             effect_kind: crate::types::ability::EffectKind::ChangeZone,
             enter_attached_to: None,
@@ -54869,7 +54898,32 @@ mod tests {
             parsed.face_down_profile, original.face_down_profile,
             "face_down_profile must survive the pause/resume round-trip"
         );
+        assert_eq!(
+            parsed.entrant_abilities,
+            crate::types::proposed_event::EntrantAbilities::RemovedWithEntry,
+            "entrant_abilities must survive the pause/resume round-trip"
+        );
         assert_eq!(parsed, original);
+
+        // CR 611.2e + CR 614.12: the carrier is optional on the wire — a
+        // carrier without the key decodes `Retained`, and `Retained` is omitted.
+        let mut absent = carrier.clone();
+        absent
+            .as_object_mut()
+            .expect("pending carrier serializes as an object")
+            .remove("entrant_abilities")
+            .expect("RemovedWithEntry is serialized");
+        let decoded: PendingChangeZoneIteration =
+            serde_json::from_value(absent).expect("reads without the key");
+        assert_eq!(
+            decoded.entrant_abilities,
+            crate::types::proposed_event::EntrantAbilities::Retained
+        );
+        let retained = serde_json::to_value(&decoded).expect("serialize Retained carrier");
+        assert!(
+            retained.get("entrant_abilities").is_none(),
+            "Retained must not be serialized: {retained}"
+        );
 
         let mut legacy = serde_json::to_value(&original).expect("serialize modern carrier");
         legacy
@@ -55352,6 +55406,9 @@ mod tests {
                 ward: None,
                 cause: crate::types::ability::FaceDownCause::Manifest,
             }),
+            // CR 611.2e + CR 614.12: the entrant-abilities carrier must keep its
+            // value across the `EffectZoneChoice` round-trip.
+            entrant_abilities: crate::types::proposed_event::EntrantAbilities::RemovedWithEntry,
             enter_with_counters: vec![],
             conditional_enter_with_counters: vec![],
             count_param: 0,
@@ -55369,6 +55426,31 @@ mod tests {
         );
         let parsed: WaitingFor = serde_json::from_str(&json).expect("roundtrip");
         assert_eq!(parsed, wf);
+
+        // CR 611.2e + CR 614.12: the carrier is optional on the wire — a
+        // choice without the key decodes `Retained`, and `Retained` is omitted.
+        let mut absent = serde_json::to_value(&wf).expect("serialize");
+        absent["data"]
+            .as_object_mut()
+            .expect("EffectZoneChoice payload object")
+            .remove("entrant_abilities")
+            .expect("RemovedWithEntry is serialized");
+        let decoded: WaitingFor = serde_json::from_value(absent).expect("reads without the key");
+        let WaitingFor::EffectZoneChoice {
+            entrant_abilities, ..
+        } = &decoded
+        else {
+            panic!("expected EffectZoneChoice, got {decoded:?}");
+        };
+        assert_eq!(
+            *entrant_abilities,
+            crate::types::proposed_event::EntrantAbilities::Retained
+        );
+        let retained = serde_json::to_value(&decoded).expect("serialize Retained choice");
+        assert!(
+            retained["data"].get("entrant_abilities").is_none(),
+            "Retained must not be serialized: {retained}"
+        );
     }
 
     #[test]

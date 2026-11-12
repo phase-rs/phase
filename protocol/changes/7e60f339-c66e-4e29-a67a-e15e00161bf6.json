@@ -1,0 +1,7 @@
+{
+  "surfaces": [
+    "full",
+    "wire"
+  ],
+  "reason": "PendingChangeZoneIteration (ChangeZone resolution frame), WaitingFor::EffectZoneChoice and ProposedEvent::ZoneChange gain the defaulted entrant_abilities carrier (CR 611.2e + CR 614.12); an older peer reading a paused return drops RemovedWithEntry and resumes the entry with the entrant's own entry abilities. RESOLUTION_STATE_WIRE_VERSION moves from 11 to 12."
+}
