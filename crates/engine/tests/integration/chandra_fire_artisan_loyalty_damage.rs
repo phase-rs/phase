@@ -1021,7 +1021,6 @@ fn live_chandra_loses_counters_to_aether_snap_and_triggers_once() {
 /// trigger must still fire: the departure is read from the action's raw
 /// events, not from the claimed-filtered slice. P1 takes 4 + 1.
 #[test]
-#[ignore = "blocked: Aether Snap's 'all permanents' currently parses as a single-target RemoveCounter, so a second permanent opens a target prompt"]
 fn chandra_token_trigger_survives_a_claimed_exile_record() {
     let Some((board, extras)) = snap_board(&["Nadier's Nightblade"]) else {
         return;
