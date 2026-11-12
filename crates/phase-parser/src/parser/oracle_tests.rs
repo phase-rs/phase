@@ -18637,6 +18637,46 @@ fn parse_cumulative_upkeep_say_phrase_quickly() {
     }
 }
 
+/// Un-card (no CR entry) + CR 702.24a: regression test for a named literal
+/// inside a spoken phrase. The phrase contains "named CardName" which is
+/// masked as a named literal; the unmasking order (say phrases before named
+/// literals) must restore it correctly rather than leaving the placeholder.
+#[test]
+fn parse_say_phrase_with_named_literal_inside() {
+    let r = parse(
+        "Cumulative upkeep\u{2014}Say \"for each permanent named Named Literal Test\" quickly.",
+        "Named Literal Test",
+        &[],
+        &["Artifact", "Creature"],
+        &["Ship"],
+    );
+    let cu_kw = r
+        .extracted_keywords
+        .iter()
+        .find(|k| matches!(k, Keyword::CumulativeUpkeep(_)));
+    let Some(Keyword::CumulativeUpkeep(cost)) = cu_kw else {
+        panic!(
+            "CumulativeUpkeep keyword not extracted: {:?}",
+            r.extracted_keywords
+        );
+    };
+    match cost {
+        AbilityCost::SayPhrase {
+            phrase,
+            pace,
+            repetitions,
+        } => {
+            assert_eq!(
+                phrase, "for each permanent named Named Literal Test",
+                "named literal inside speech is restored"
+            );
+            assert_eq!(*pace, PhrasePace::quickly());
+            assert_eq!(*repetitions, 1);
+        }
+        other => panic!("expected SayPhrase with restored name, got {other:?}"),
+    }
+}
+
 /// Walk an ability tree for a spoken cost of `phrase`. A tree covers the
 /// quoted speech wherever the parser attached it (activated ability head or a
 /// continuation link).
