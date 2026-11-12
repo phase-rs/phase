@@ -1,0 +1,7 @@
+{
+  "surfaces": [
+    "full",
+    "wire"
+  ],
+  "reason": "Effect::RemoveCounter gains scope (Single|All); a pre-bump peer reads a mass removal as a targeted removal"
+}
