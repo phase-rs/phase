@@ -2871,6 +2871,24 @@ mod suspect_scope_tests {
             "mass Unsuspect{{All}} (Absolving Lammasu) is a population effect, not target-filtered"
         );
     }
+
+    #[test]
+    fn extract_target_filter_only_for_single_scope_remove_counter() {
+        let remove = |scope| Effect::RemoveCounter {
+            counter_type: None,
+            count: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::Any,
+            scope,
+        };
+        assert!(
+            extract_target_filter(&remove(EffectScope::Single)).is_some(),
+            "single-scope RemoveCounter must expose a selectable target"
+        );
+        assert!(
+            extract_target_filter(&remove(EffectScope::All)).is_none(),
+            "mass RemoveCounter{{All}} (Aether Snap) is a population effect, not target-filtered"
+        );
+    }
 }
 
 #[cfg(test)]

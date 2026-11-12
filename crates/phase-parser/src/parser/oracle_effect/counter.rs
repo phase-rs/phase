@@ -1195,9 +1195,10 @@ pub(super) fn try_parse_remove_counter(lower: &str, ctx: &mut ParseContext) -> O
     // `resolve_remove_counter_from_target` cannot apply; the shared recipient
     // resolver keeps its anaphor guards and reports what it left unconsumed.
     let (target, remainder) = resolve_counter_target_with_remainder(target_text, ctx);
-    // CR 608.2k: an anaphor or self-reference ("from it", "from ~", "from that
-    // creature", "from enchanted creature") is bound by the resolver's context
-    // tiers, never a population.
+    // CR 608.2k + CR 201.5 + CR 303.4b: an anaphor ("from it", "from that
+    // creature"), a self-reference ("from ~") or the source's attachment host
+    // ("from enchanted creature") is bound by the resolver's context tiers,
+    // never a population.
     if target.is_context_ref() || target.contains_source_attachment_host() {
         return Some(Effect::RemoveCounter {
             counter_type,
@@ -1228,7 +1229,7 @@ pub(super) fn try_parse_remove_counter(lower: &str, ctx: &mut ParseContext) -> O
 /// How a remove-counter "from <recipient>" phrase names its recipient.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RemovalSource {
-    /// CR 122.1 + CR 608.2d: every object of a described population ("all
+    /// CR 122.1 + CR 115.10a: every object of a described population ("all
     /// permanents", "each creature you control", "permanents that player
     /// controls").
     Mass,
