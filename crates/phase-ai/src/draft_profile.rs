@@ -46,7 +46,7 @@ use serde::{Deserialize, Serialize};
 use engine::game::effects::effect::generic_effect_application_filter;
 use engine::types::ability::{
     AbilityCost, AbilityDefinition, AbilityKind, ContinuousModification, ControllerRef, Effect,
-    PtValue, StaticDefinition, TargetFilter, TypeFilter,
+    FilterProp, PtValue, StaticDefinition, TargetFilter, TypeFilter,
 };
 use engine::types::card::CardFace;
 use engine::types::card_type::CoreType;
@@ -1198,14 +1198,21 @@ fn reaches_opposing_creature(effect: &Effect) -> bool {
 
 /// Whether `target` is a filter that can only match battlefield permanents.
 /// Used to infer battlefield origin when `ChangeZone.origin` is `None`.
-/// Returns true for typed creature/permanent filters; false for player,
-/// zone-specific, or unbound filters.
+/// Returns true for typed creature/permanent filters with no non-battlefield
+/// zone restriction; false for player, zone-specific, or unbound filters.
 fn target_filter_implies_battlefield(filter: &TargetFilter) -> bool {
     match filter {
         TargetFilter::Typed(typed) => {
             // A typed filter with a creature/permanent type filter and no
             // zone restriction implies battlefield (CR 109.2: objects on
             // the battlefield are permanents).
+            // Exclude filters with an explicit InZone restriction to a
+            // non-battlefield zone (e.g., "from a graveyard").
+            if typed.properties.iter().any(
+                |p| matches!(p, FilterProp::InZone { zone } if !matches!(zone, Zone::Battlefield)),
+            ) {
+                return false;
+            }
             typed.type_filters.iter().any(type_admits_creature)
         }
         TargetFilter::Or { filters } => filters.iter().all(target_filter_implies_battlefield),
@@ -1351,6 +1358,9 @@ fn may_be_opposing_creature_for_sacrifice(filter: &TargetFilter) -> bool {
                     | Some(ControllerRef::EventTargetController)
                     | Some(ControllerRef::ParentTargetController)
                     | Some(ControllerRef::SourceChosenPlayer)
+                    | Some(ControllerRef::ScopedPlayer)
+                    | Some(ControllerRef::DefendingPlayer)
+                    | Some(ControllerRef::ChosenPlayer { .. })
             ) && admits_creature
                 || (typed.controller.is_none() && is_broad_permanent && admits_creature)
         }
@@ -3600,36 +3610,32 @@ mod tests {
         assert!(roles(&rend_flesh).contains(&DeckRole::Removal));
         let rf_score = first_pick(
             p,
-            &card("Rend Flesh", "CHK", &vec!["B".to_string()], &rend_flesh),
+            &card("Rend Flesh", "CHK", &["B".to_string()], &rend_flesh),
         );
         assert_eq!(rf_score.class_bonus, 0.9, "Rend Flesh is removal");
         assert_eq!(rf_score.deck_need, 2.0, "removal need is empty");
     }
 
     #[test]
-    fn horobis_whisper_opposing_sacrifice_is_removal() {
+    fn horobis_whisper_conditional_destroy_is_removal() {
         let p = DraftProfile::kamigawa_block();
         let black = vec!["B".to_string()];
-        // Horobi's Whisper (CHK): "Target player sacrifices a creature." This is
-        // an edict — it can reach an opposing creature and is removal.
+        // Horobi's Whisper (CHK): "If you control a Swamp, destroy target
+        // nonblack creature." This is conditional removal — the condition is
+        // checked at resolution (CR 608.2b). The parser emits a Destroy effect
+        // with a condition; we classify it as removal because the effect shape
+        // is removal when the condition is met.
         let whisper = oracle_face(serde_json::json!({
             "name": "Horobi's Whisper",
             "manaCost": "{2}{B}",
             "manaValue": 3.0,
             "colors": ["B"],
-            "type": "Instant",
+            "type": "Instant — Arcane",
             "types": ["Instant"],
-            "text": "Target player sacrifices a creature.",
+            "subtypes": ["Arcane"],
+            "text": "If you control a Swamp, destroy target nonblack creature.\nSplice onto Arcane—Exile four cards from your graveyard.",
         }));
-        // Positive guard: exports a Sacrifice effect with a target that can be opposing.
-        let has_sacrifice = collect_face_effects(&whisper).iter().any(
-            |e| matches!(e, Effect::Sacrifice { target, .. } if may_be_opposing_creature_for_sacrifice(target)),
-        );
-        assert!(
-            has_sacrifice,
-            "positive guard: Horobi's Whisper exports opposing sacrifice"
-        );
-        // Full reading: counts as removal because it can target an opposing creature.
+        // Full reading: counts as removal (conditional destroy).
         assert!(classify(&whisper).contains(&CardClass::Removal));
         assert!(roles(&whisper).contains(&DeckRole::Removal));
         let scored = first_pick(p, &card("Horobi's Whisper", "CHK", &black, &whisper));
@@ -3879,36 +3885,30 @@ mod tests {
     }
 
     #[test]
-    fn exile_into_darkness_upkeep_sacrifice_plus_exile_is_removal() {
+    fn exile_into_darkness_edict_is_removal() {
         let p = DraftProfile::kamigawa_block();
         let black = vec!["B".to_string()];
-        // Exile into Darkness (SOK): "At the beginning of your upkeep,
-        // sacrifice a creature. If you do, exile target creature."
-        // This is an enchantment with an upkeep trigger. The trigger has two
-        // parts: a self-sacrifice (cost-like) and an exile of a target
-        // creature. The exile effect targets an opposing creature and is
-        // removal.
+        // Exile into Darkness (SOK): "Target player sacrifices a creature of
+        // their choice with mana value 3 or less." This is an edict — a
+        // sacrifice effect targeting an opponent. The parser emits a Sacrifice
+        // effect with a target that can reach an opposing creature.
         let exile = oracle_face(serde_json::json!({
             "name": "Exile into Darkness",
             "manaCost": "{3}{B}{B}",
             "manaValue": 5.0,
             "colors": ["B"],
-            "type": "Enchantment",
-            "types": ["Enchantment"],
-            "text": "At the beginning of your upkeep, sacrifice a creature. If you do, exile target creature.",
+            "type": "Sorcery",
+            "types": ["Sorcery"],
+            "text": "Target player sacrifices a creature of their choice with mana value 3 or less.\nAt the beginning of your upkeep, if you have more cards in hand than each opponent, you may return this card from your graveyard to your hand.",
         }));
-        // Positive guard: exports a ChangeZone to Exile with typed creature target.
-        let has_exile = collect_face_effects(&exile).iter().any(|e| {
-            matches!(
-                e,
-                Effect::ChangeZone {
-                    destination: Zone::Exile,
-                    target: TargetFilter::Typed(_),
-                    ..
-                }
-            )
-        });
-        assert!(has_exile, "Exile into Darkness exports battlefield exile");
+        // Positive guard: exports a Sacrifice effect with a target that can be opposing.
+        let has_sacrifice = collect_face_effects(&exile).iter().any(
+            |e| matches!(e, Effect::Sacrifice { target, .. } if may_be_opposing_creature_for_sacrifice(target)),
+        );
+        assert!(
+            has_sacrifice,
+            "Exile into Darkness exports opposing sacrifice"
+        );
         assert!(classify(&exile).contains(&CardClass::Removal));
         assert!(roles(&exile).contains(&DeckRole::Removal));
         let scored = first_pick(p, &card("Exile into Darkness", "SOK", &black, &exile));

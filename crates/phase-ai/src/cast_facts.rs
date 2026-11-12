@@ -4,7 +4,7 @@ use engine::game::game_object::GameObject;
 use engine::types::ability::TapStateChange;
 use engine::types::ability::{
     AbilityDefinition, AbilityKind, BounceSelection, Effect, EffectScope, ReplacementDefinition,
-    TargetFilter, TriggerDefinition,
+    TargetFilter, TriggerDefinition, TypeFilter,
 };
 use engine::types::actions::GameAction;
 use engine::types::card::CardFace;
@@ -617,17 +617,72 @@ pub(crate) fn is_direct_removal(effect: &Effect) -> bool {
             | Effect::DestroyAll { .. }
             | Effect::DamageAll { .. }
             | Effect::DiscardCard { .. }
-            | Effect::ChangeZoneAll {
-                destination: Zone::Exile | Zone::Graveyard,
-                ..
-            }
     ) || matches!(
         effect,
         Effect::ChangeZone {
+            origin: Some(Zone::Battlefield) | None,
             destination: Zone::Exile | Zone::Graveyard,
+            target,
             ..
-        }
+        } if changezone_target_implies_battlefield(target)
+    ) || matches!(
+        effect,
+        Effect::ChangeZoneAll {
+            origin: Some(Zone::Battlefield) | None,
+            destination: Zone::Exile | Zone::Graveyard,
+            target,
+            ..
+        } if changezone_target_implies_battlefield(target)
     )
+}
+
+/// Whether a `ChangeZone`/`ChangeZoneAll` target filter implies the effect
+/// originates from the battlefield. Used to exclude non-battlefield moves
+/// (e.g., Leveler's "exile all cards from your library") from removal classification.
+fn changezone_target_implies_battlefield(filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::Typed(typed) => {
+            // A typed filter with a creature/permanent type filter and no
+            // zone restriction implies battlefield (CR 109.2: objects on
+            // the battlefield are permanents).
+            // Also check for InZone property that would restrict to non-battlefield.
+            if typed.properties.iter().any(|p| {
+                matches!(p, engine::types::ability::FilterProp::InZone { zone } if !matches!(zone, Zone::Battlefield))
+            }) {
+                return false;
+            }
+            typed.type_filters.iter().any(type_admits_creature)
+        }
+        TargetFilter::Or { filters } => filters.iter().all(changezone_target_implies_battlefield),
+        TargetFilter::And { filters } => filters.iter().any(changezone_target_implies_battlefield),
+        // All other filters (Player, None, ParentTarget, etc.) don't imply
+        // battlefield — they could match objects in other zones.
+        _ => false,
+    }
+}
+
+/// Whether a type-line constraint admits a creature. A constraint naming only
+/// another card type (artifact, enchantment, land, planeswalker) is aimed at
+/// that type, not at creatures, even where a permanent can carry both.
+fn type_admits_creature(filter: &TypeFilter) -> bool {
+    use engine::types::ability::TypeFilter;
+    match filter {
+        TypeFilter::Creature
+        | TypeFilter::Permanent
+        | TypeFilter::Card
+        | TypeFilter::Any
+        | TypeFilter::Subtype(_) => true,
+        TypeFilter::Non(inner) => !matches!(**inner, TypeFilter::Creature | TypeFilter::Permanent),
+        TypeFilter::AnyOf(filters) => filters.iter().any(type_admits_creature),
+        TypeFilter::Land
+        | TypeFilter::Artifact
+        | TypeFilter::Enchantment
+        | TypeFilter::Instant
+        | TypeFilter::Sorcery
+        | TypeFilter::Planeswalker
+        | TypeFilter::Battle
+        | TypeFilter::Kindred => false,
+    }
 }
 
 pub(crate) fn is_mass_damage_or_shrink(effect: &Effect) -> bool {
