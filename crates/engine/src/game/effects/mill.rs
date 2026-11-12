@@ -325,6 +325,11 @@ mod tests {
     /// redirects, the first milled card surfaces a CR 616.1 ordering prompt, so
     /// the helper must return `false`, leave `state.waiting_for` set to that
     /// prompt, and park the undelivered tail.
+    ///
+    /// Since the live staged scheduler, every milled card is consulted before
+    /// any prompt appears and each holds its own ordering decision, so the
+    /// parked prompt is first P1's CR 101.4c choice of which card's decision
+    /// to make first; answering it publishes the per-card ordering choice.
     #[test]
     fn apply_mill_after_replacement_reports_per_card_pause_to_caller() {
         let mut state = GameState::new_two_player(42);
@@ -357,6 +362,7 @@ mod tests {
             );
         }
 
+        let milled: Vec<ObjectId> = state.players[1].library.iter().take(3).copied().collect();
         let mut events = Vec::new();
         let delivered = apply_mill_after_replacement(
             &mut state,
@@ -376,11 +382,15 @@ mod tests {
             !delivered,
             "a per-card CR 616.1 pause must be reported as a non-delivery (false)"
         );
-        assert!(
-            matches!(
-                state.waiting_for,
-                crate::types::game_state::WaitingFor::ReplacementChoice { .. }
-            ),
+        // CR 101.4c + CR 616.1: the staged sweep consulted every milled card,
+        // so P1 holds one ordering decision per card and the parked prompt is
+        // P1's choice of which to make first.
+        assert_eq!(
+            state.waiting_for,
+            crate::types::game_state::WaitingFor::ReplacementDecisionOrder {
+                player: PlayerId(1),
+                objects: milled.clone(),
+            },
             "the per-card ordering prompt must be parked in waiting_for"
         );
         assert!(
@@ -394,6 +404,31 @@ mod tests {
         // instrument failing to fire.
         assert!(library_departures(&events).is_empty());
         assert!(milled_events(&events).is_empty());
+
+        // The parked prompt is answerable: making the first card's decision
+        // first publishes that card's CR 616.1 ordering choice.
+        crate::game::engine::apply_as_current(
+            &mut state,
+            crate::types::actions::GameAction::SelectCards {
+                cards: vec![milled[0]],
+            },
+        )
+        .expect("P1 makes the first milled card's decision first");
+        assert!(
+            matches!(
+                state.waiting_for,
+                crate::types::game_state::WaitingFor::ReplacementChoice { .. }
+            ),
+            "the first card's ordering choice is published, got {:?}",
+            state.waiting_for
+        );
+        assert_eq!(
+            state
+                .pending_replacement
+                .as_ref()
+                .and_then(|pending| pending.proposed.affected_object_id()),
+            Some(milled[0])
+        );
     }
 
     /// V8 — CR 701.17a: milling is a move toward the graveyard. `Effect::Mill`

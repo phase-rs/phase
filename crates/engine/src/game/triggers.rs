@@ -52780,6 +52780,23 @@ pub mod tests {
         crate::game::effects::change_zone::resolve_all(&mut state, &ability, &mut events)
             .expect("mass change-zone resolves (pausing on the first MayCost member)");
 
+        // CR 101.4c + CR 616.1: the staged sweep consulted all three members,
+        // so P0 holds both pausing members' decisions and first chooses which
+        // to make; announcement order keeps the original sequence.
+        assert_eq!(
+            state.waiting_for,
+            WaitingFor::ReplacementDecisionOrder {
+                player: PlayerId(0),
+                objects: vec![member_b, observer],
+            }
+        );
+        crate::game::engine::apply_as_current(
+            &mut state,
+            GameAction::SelectCards {
+                cards: vec![member_b],
+            },
+        )
+        .expect("P0 makes member B's decision first (announcement order)");
         // Resolve each replacement choice (accept, index 0) until the batch
         // settles. Keeping the real repeated-choice path proves the logical
         // group preserves its authority across each pause/resume boundary.
@@ -53855,6 +53872,30 @@ pub mod tests {
 
             let mut events = Vec::new();
             resolve_ltb_production_carrier(&mut state, carrier, ObjectId(91_100), &mut events);
+
+            // CR 101.4c + CR 616.1: the staged ChangeZone population's sweep
+            // consults every member before asking, so P0 holds both pausing
+            // members' decisions and first chooses which to make. That prompt
+            // also survives the save; announcement order keeps the original
+            // sequence. The BounceAll carrier still pauses member by member.
+            if matches!(carrier, LogicalZoneProductionCarrier::ChangeZone) {
+                assert_eq!(
+                    state.waiting_for,
+                    WaitingFor::ReplacementDecisionOrder {
+                        player: PlayerId(0),
+                        objects: vec![last, observer],
+                    }
+                );
+                let saved =
+                    serde_json::to_value(&state).expect("the parked decision order serializes");
+                state =
+                    serde_json::from_value(saved).expect("the parked decision order deserializes");
+                crate::game::engine::apply_as_current(
+                    &mut state,
+                    GameAction::SelectCards { cards: vec![last] },
+                )
+                .expect("P0 makes the last member's decision first (announcement order)");
+            }
 
             for pause in 1..=2 {
                 assert!(

@@ -6415,6 +6415,54 @@ mod tests {
         })
     }
 
+    /// CR 101.4c + CR 616.1: the staged population's sweep consulted every
+    /// member, and `player` holds the decisions about `objects` (announcement
+    /// order). Pin that prompt exactly, then make the decision about `first`
+    /// first, which publishes it.
+    fn answer_decision_order(
+        state: &mut GameState,
+        player: PlayerId,
+        objects: &[ObjectId],
+        first: ObjectId,
+    ) {
+        assert_eq!(
+            state.waiting_for,
+            WaitingFor::ReplacementDecisionOrder {
+                player,
+                objects: objects.to_vec(),
+            },
+            "the chooser holds one decision per listed member"
+        );
+        apply_as_current(state, GameAction::SelectCards { cards: vec![first] })
+            .expect("the chooser picks which held decision to make first");
+    }
+
+    /// CR 101.4c + CR 101.4d + CR 616.1: publish the next of `held` (the
+    /// members whose decisions `player` still holds, in announcement order),
+    /// making them in announcement order. With two or more held, `player`
+    /// first chooses which to make (the order restarts after every answer);
+    /// the last one is published without a selection. Either way the
+    /// published choice is about that member.
+    fn publish_next_held_decision(
+        state: &mut GameState,
+        player: PlayerId,
+        held: &mut Vec<ObjectId>,
+    ) {
+        let next = held[0];
+        if held.len() >= 2 {
+            answer_decision_order(state, player, held, next);
+        }
+        held.remove(0);
+        assert_eq!(
+            state
+                .pending_replacement
+                .as_ref()
+                .and_then(|pending| pending.proposed.affected_object_id()),
+            Some(next),
+            "the published choice is about the selected member"
+        );
+    }
+
     /// R4c: the staged member requests still awaiting consultation, projected
     /// into the legacy `ChangeZoneMemberEntry` shape for the readers below.
     /// Each value is the same one the legacy carrier held (the request IS the
@@ -6435,16 +6483,54 @@ mod tests {
         )
     }
 
-    /// R4c: the staged cursor member's request (the member whose delivery
-    /// authority carries the pause context).
+    /// CR 616.1 + CR 101.4: the members the staged sweep approved, each
+    /// approved event's pre-event entry projected into the legacy
+    /// `ChangeZoneMemberEntry` shape. Since the live scheduler consults every
+    /// member before any decision is asked, a member needing no choice carries
+    /// its pre-event entry on its approved event, not on an unconsulted request.
+    fn staged_approved_member_entries(state: &GameState) -> Option<Vec<ChangeZoneMemberEntry>> {
+        let staged = staged_change_zone(state)?.staged.as_ref()?;
+        Some(
+            staged
+                .members
+                .iter()
+                .filter(|member| {
+                    member.state == crate::types::game_state::StagedBatchMemberState::Approved
+                })
+                .map(|member| match &member.approved_event {
+                    Some(ProposedEvent::ZoneChange {
+                        object_id,
+                        enter_with_counters,
+                        enter_tapped,
+                        enters_attacking,
+                        ..
+                    }) => ChangeZoneMemberEntry {
+                        object_id: *object_id,
+                        enter_with_counters: enter_with_counters.clone(),
+                        enter_tapped: *enter_tapped,
+                        enters_attacking: *enters_attacking,
+                    },
+                    other => panic!("an approved member carries its zone change, got {other:?}"),
+                })
+                .collect(),
+        )
+    }
+
+    /// R4c: the asking member's request (the member whose delivery authority
+    /// carries the pause context). CR 616.1: since the live scheduler, the
+    /// member being asked is `StagedBatchDelivery::asking`, an identity; the
+    /// cursor is only the sweep position, past every member once the sweep
+    /// has consulted them all.
     fn staged_current_member_request(
         state: &GameState,
     ) -> Option<&crate::types::game_state::PendingBatchZoneMoveRequest> {
         let batch = staged_change_zone(state)?;
         let staged = batch.staged.as_ref()?;
+        let asking = staged.asking?;
         staged
             .members
-            .get(staged.cursor)
+            .iter()
+            .find(|member| member.identity == asking)
             .map(|member| &member.request)
     }
 
@@ -6818,7 +6904,11 @@ mod tests {
     /// move parks on the first member's shock replacement and resumes through
     /// `drain_pending_change_zone_iteration`, under a non-move (`Draw`) root.
     /// Row (a): two other artifacts; the parked carrier holds each remaining
-    /// member's pre-event entry (Relic none, Ornithopter the counter), and after
+    /// member's pre-event entry (Relic none, Ornithopter the counter). Since the
+    /// live scheduler (CR 616.1 + CR 101.4) consults every member before the
+    /// shock's choice is asked, those entries ride the other members' approved
+    /// events instead of unconsulted requests; the property is the same: they
+    /// were fixed before the event, not recomputed by the drain. After
     /// the decline the drain applies them: the shock artifact land, now on the
     /// battlefield, does not count toward the Relic's metalcraft. Row (b): with
     /// March on the battlefield, the remaining noncreature artifact keeps the
@@ -6896,8 +6986,16 @@ mod tests {
             } else {
                 vec![unconditional(rest[0], vec![(CounterType::Plus1Plus1, 1)])]
             };
+            // CR 616.1 + CR 101.4: the sweep consulted every member before the
+            // shock's choice was asked, so no request is left unconsulted and
+            // each remaining member's pre-event entry rides its approved event.
             assert_eq!(
                 staged_unconsulted_member_entries(state),
+                Some(Vec::new()),
+                "row_a={row_a}: the sweep leaves no member unconsulted"
+            );
+            assert_eq!(
+                staged_approved_member_entries(state),
                 Some(expected_remaining),
                 "row_a={row_a}: the parked carrier holds each member's pre-event entry"
             );
@@ -7049,7 +7147,15 @@ mod tests {
     /// R4c addendum (c): test-only conversion of one parked staged ChangeZone
     /// owner into the legacy `PendingChangeZoneIteration` carrier, so the
     /// old-save wire/migration rows keep testing the legacy shape.
+    ///
+    /// The legacy carrier paused on one member and left every LATER member
+    /// unprocessed. Since the live scheduler (CR 616.1 + CR 101.4) the staged
+    /// sweep has already consulted those later members, so a member needing no
+    /// choice is `Approved` rather than `Unconsulted`; the legacy `remaining`
+    /// is therefore every undelivered member after the asking one, whatever
+    /// its staged state, carrying its own request exactly as before.
     fn downgrade_staged_change_zone_to_legacy(state: &mut GameState) {
+        use crate::types::game_state::StagedBatchMemberState;
         let owner = state
             .resolution_stack
             .take_active_batch_delivery()
@@ -7059,11 +7165,21 @@ mod tests {
             .take_active_change_zone_frame()
             .expect("the ChangeZone marker is exposed below the batch");
         let staged = owner.staged.as_ref().expect("staged payload");
-        let remaining = staged
+        let asking = staged
+            .asking
+            .expect("the legacy pause is the asking member's");
+        let paused = staged
             .members
             .iter()
+            .position(|member| member.identity == asking)
+            .expect("the asking member is in the cohort");
+        let remaining = staged.members[paused + 1..]
+            .iter()
             .filter(|member| {
-                member.state == crate::types::game_state::StagedBatchMemberState::Unconsulted
+                matches!(
+                    member.state,
+                    StagedBatchMemberState::Unconsulted | StagedBatchMemberState::Approved
+                )
             })
             .map(|member| ChangeZoneMemberEntry {
                 object_id: member.identity.object_id,
@@ -13402,7 +13518,10 @@ mod tests {
         let mut events = Vec::new();
         resolve(&mut state, &ability, &mut events).unwrap();
 
-        // First NeedsChoice fires for shock_a; the engine must be parked.
+        // CR 101.4c: both targets were consulted and P0 holds both decisions;
+        // P0 makes shock_a's first (announcement order), so the engine is
+        // parked on shock_a's choice as before.
+        answer_decision_order(&mut state, PlayerId(0), &[shock_a, shock_b], shock_a);
         assert!(
             matches!(state.waiting_for, WaitingFor::ReplacementChoice { .. }),
             "expected first ReplacementChoice, got {:?}",
@@ -13708,6 +13827,9 @@ mod tests {
         let mut events = Vec::new();
         resolve(&mut state, &ability, &mut events).unwrap();
 
+        // CR 101.4c: the sweep consulted both targets and P0 holds both
+        // decisions; P0 makes shock_a's first (announcement order).
+        answer_decision_order(&mut state, PlayerId(0), &[shock_a, shock_b], shock_a);
         // First target pauses on its replacement choice; the stash must carry the
         // face-down profile.
         assert!(
@@ -13824,14 +13946,18 @@ mod tests {
         let mut events = Vec::new();
         resolve_all(&mut state, &ability, &mut events).unwrap();
 
+        // CR 101.4c: the sweep consulted both matches, so P0 holds both
+        // decisions and chooses the order; announcement order (shock_b is on
+        // top of the library) keeps the original sequence.
+        assert!(
+            staged_change_zone(&state).is_some(),
+            "resolve_all must stash remaining library matches on NeedsChoice"
+        );
+        answer_decision_order(&mut state, PlayerId(0), &[shock_b, shock_a], shock_b);
         assert!(
             matches!(state.waiting_for, WaitingFor::ReplacementChoice { .. }),
             "expected first ReplacementChoice, got {:?}",
             state.waiting_for
-        );
-        assert!(
-            staged_change_zone(&state).is_some(),
-            "resolve_all must stash remaining library matches on NeedsChoice"
         );
 
         let _ = apply_as_current(&mut state, GameAction::ChooseReplacement { index: 1 })
@@ -13922,6 +14048,9 @@ mod tests {
         ability.duration = Some(Duration::UntilOpponentBecomesMonarch);
         resolve_all(&mut state, &ability, &mut Vec::new()).expect("typed mass exile resolves");
         if paused {
+            // CR 101.4c: the sweep consulted both P1-owned cards, so P1 holds
+            // both decisions and makes them in announcement order.
+            answer_decision_order(&mut state, PlayerId(1), &cards, cards[0]);
             for _ in 0..2 {
                 assert!(matches!(
                     state.waiting_for,
@@ -14693,6 +14822,9 @@ mod tests {
         );
         let mut events = Vec::new();
         resolve_all(&mut state, &mass_move, &mut events).expect("first member pauses");
+        // CR 101.4c: the sweep consulted both members and P0 holds both
+        // decisions; P0 makes the first member's first (announcement order).
+        answer_decision_order(&mut state, PlayerId(0), &[first, second], first);
         assert!(matches!(
             state.waiting_for,
             WaitingFor::ReplacementChoice { .. }
@@ -15088,6 +15220,9 @@ mod tests {
         let mut events = Vec::new();
         super::super::resolve_ability_chain(&mut state, &ability, &mut events, 0)
             .expect("owner shuffle reaches its first replacement pause");
+        // CR 101.4c: the sweep consulted both permanents and P0 holds both
+        // decisions; P0 makes the first permanent's first (announcement order).
+        answer_decision_order(&mut state, PlayerId(0), &[first, second], first);
         assert!(matches!(
             state.waiting_for,
             WaitingFor::ReplacementChoice { .. }
@@ -15255,6 +15390,9 @@ mod tests {
         let mut events = Vec::new();
         resolve(&mut state, &ability, &mut events).unwrap();
 
+        // CR 101.4c: the sweep consulted both shocks and P0 holds both
+        // decisions; P0 makes shock_a's first (announcement order).
+        answer_decision_order(&mut state, PlayerId(0), &[shock_a, shock_b], shock_a);
         // First shock: pay (index 0).
         let _ = apply_as_current(&mut state, GameAction::ChooseReplacement { index: 0 })
             .expect("pay first shock");
@@ -15321,7 +15459,12 @@ mod tests {
         let mut events = Vec::new();
         resolve(&mut state, &ability, &mut events).unwrap();
 
+        // CR 101.4c + CR 101.4d: the sweep consulted all three shocks; P0 holds
+        // every decision and orders them (announcement order) before each
+        // answer while two or more remain.
+        let mut held = vec![s1, s2, s3];
         for _ in 0..3 {
+            publish_next_held_decision(&mut state, PlayerId(0), &mut held);
             assert!(
                 matches!(state.waiting_for, WaitingFor::ReplacementChoice { .. }),
                 "expected ReplacementChoice at each iteration"
@@ -15407,7 +15550,11 @@ mod tests {
 
         // Each shock pauses on its `Moved` replacement; decline (index 1) so it
         // still enters the battlefield (tapped) — i.e. it reaches the destination.
+        // CR 101.4c + CR 101.4d: the sweep consulted all three, and P0 orders
+        // its held decisions (announcement order) while two or more remain.
+        let mut held = vec![s1, s2, s3];
         for _ in 0..3 {
+            publish_next_held_decision(&mut state, PlayerId(0), &mut held);
             assert!(
                 matches!(state.waiting_for, WaitingFor::ReplacementChoice { .. }),
                 "expected a ReplacementChoice pause for each member"
@@ -15511,6 +15658,11 @@ mod tests {
         // replacement resume before its "that many" consumer can run.
         let mut events = Vec::new();
         crate::game::effects::resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+        // CR 101.4c + CR 101.4d: the sweep consulted all three returns and P0
+        // holds every decision; P0 makes them in announcement order, choosing
+        // the order while two or more remain.
+        let mut held = vec![s1, s2, s3];
+        publish_next_held_decision(&mut state, PlayerId(0), &mut held);
         assert!(
             matches!(state.waiting_for, WaitingFor::ReplacementChoice { .. }),
             "first returned card must pause on its replacement"
@@ -15568,7 +15720,11 @@ mod tests {
         );
 
         // Decline each replacement; each returned card still enters (tapped).
-        for _ in 0..3 {
+        // The first decision was published before the save.
+        for answered in 0..3 {
+            if answered > 0 {
+                publish_next_held_decision(&mut state, PlayerId(0), &mut held);
+            }
             assert!(
                 matches!(state.waiting_for, WaitingFor::ReplacementChoice { .. }),
                 "expected a ReplacementChoice pause per returned member"
@@ -15816,6 +15972,10 @@ mod tests {
                 "the moved ledger is not written from the selection"
             );
         }
+        // CR 101.4c: the sweep consulted all three chosen cards (the land's
+        // mandatory redirect needs no choice); P0 holds both shocks' decisions
+        // and makes shock_a's first (announcement order).
+        answer_decision_order(&mut state, PlayerId(0), &[shock_a, shock_b], shock_a);
         // First shock prompts; decline it (index 1 → tap).
         assert!(
             matches!(state.waiting_for, WaitingFor::ReplacementChoice { .. }),

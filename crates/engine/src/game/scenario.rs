@@ -5437,18 +5437,36 @@ mod tests {
             crate::game::effects::resolve_ability_chain(runner.state_mut(), &put, &mut events, 0)
                 .expect("start the forwarded move");
             let mut replacement_choices = 0;
+            let mut decision_orders = 0;
             for _ in 0..8 {
-                if !matches!(
-                    runner.state().waiting_for,
-                    WaitingFor::ReplacementChoice { .. }
-                ) {
-                    break;
+                match runner.state().waiting_for.clone() {
+                    // CR 101.4c + CR 616.1: the staged sweep consulted both
+                    // entrants, so with both pausing P0 holds both decisions
+                    // and makes them in announcement order.
+                    WaitingFor::ReplacementDecisionOrder { player, objects } => {
+                        assert_eq!(player, P0);
+                        assert_eq!(objects, vec![first, second]);
+                        decision_orders += 1;
+                        runner
+                            .act(GameAction::SelectCards {
+                                cards: vec![objects[0]],
+                            })
+                            .unwrap();
+                    }
+                    WaitingFor::ReplacementChoice { .. } => {
+                        replacement_choices += 1;
+                        runner
+                            .act(GameAction::ChooseReplacement { index: 0 })
+                            .unwrap();
+                    }
+                    _ => break,
                 }
-                replacement_choices += 1;
-                runner
-                    .act(GameAction::ChooseReplacement { index: 0 })
-                    .unwrap();
             }
+            assert_eq!(
+                decision_orders,
+                if only_second_pauses { 0 } else { 1 },
+                "P0 orders its decisions only when both entrants hold one ({only_second_pauses})"
+            );
             assert!(
                 replacement_choices >= if only_second_pauses { 1 } else { 2 },
                 "the move must pause for its replacement choice ({only_second_pauses})"
@@ -6076,10 +6094,16 @@ mod tests {
             })
             .expect("selected move parks for replacement ordering");
 
-        assert!(matches!(
+        // CR 101.4c + CR 616.1: the staged sweep consulted all three selected
+        // cards and P0 holds one ordering decision for each, so the move parks
+        // first on P0's choice of which to make first.
+        assert_eq!(
             runner.state().waiting_for,
-            WaitingFor::ReplacementChoice { .. }
-        ));
+            WaitingFor::ReplacementDecisionOrder {
+                player: P0,
+                objects: selected.to_vec(),
+            }
+        );
         // R4c: a three-member ChangeZone population parks the staged marker +
         // batch child; the legacy `pending` carrier is gone for this shape. The
         // typed completion is the family authority.
@@ -6101,18 +6125,36 @@ mod tests {
         )));
         assert!(!runner.state().objects[&wurm].assigns_no_combat_damage);
 
-        for _ in 0..selected.len() {
-            if !matches!(
-                runner.state().waiting_for,
-                WaitingFor::ReplacementChoice { .. }
-            ) {
-                break;
+        // Make the decisions in announcement order: P0 orders them while two or
+        // more remain, and each published choice is answered.
+        let mut answered = 0;
+        for _ in 0..2 * selected.len() {
+            match runner.state().waiting_for.clone() {
+                WaitingFor::ReplacementDecisionOrder { player, objects } => {
+                    assert_eq!(player, P0);
+                    assert_eq!(objects, selected[answered..].to_vec());
+                    assert!(!runner.state().objects[&wurm].assigns_no_combat_damage);
+                    runner
+                        .act(GameAction::SelectCards {
+                            cards: vec![objects[0]],
+                        })
+                        .expect("P0 makes the next selected card's decision first");
+                }
+                WaitingFor::ReplacementChoice { .. } => {
+                    assert!(!runner.state().objects[&wurm].assigns_no_combat_damage);
+                    runner
+                        .act(GameAction::ChooseReplacement { index: 0 })
+                        .expect("chosen redirect advances the selected move");
+                    answered += 1;
+                }
+                _ => break,
             }
-            assert!(!runner.state().objects[&wurm].assigns_no_combat_damage);
-            runner
-                .act(GameAction::ChooseReplacement { index: 0 })
-                .expect("chosen redirect advances the selected move");
         }
+        assert_eq!(
+            answered,
+            selected.len(),
+            "every selected card's choice is asked"
+        );
 
         assert_ne!(runner.state().objects[&selected[0]].zone, Zone::Exile);
         assert!(runner.state().objects[&wurm].assigns_no_combat_damage);

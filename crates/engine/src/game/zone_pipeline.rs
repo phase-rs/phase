@@ -10856,6 +10856,11 @@ mod w3_library_placement_tests {
     /// which parks again on the second card. Both the stashed tail and the second
     /// parked replacement must carry `LibraryPosition::Bottom`; otherwise the
     /// second final delivery becomes a plain Library move and auto-shuffles.
+    ///
+    /// Since the live scheduler (CR 616.1 + CR 101.4) the sweep consults both
+    /// cards before any prompt: P0 first orders the two held decisions, and the
+    /// stashed tail is the second card's held decision rather than an
+    /// unconsulted request, so the tail's placement is read from that decision.
     #[test]
     fn batch_library_placement_tail_survives_pause() {
         let (mut state, first, second, sentinels) = positioned_batch_fixture();
@@ -10871,12 +10876,33 @@ mod w3_library_placement_tests {
             move_objects_simultaneously(&mut state, reqs, &mut events),
             BatchMoveResult::NeedsChoice
         ));
+        // CR 101.4c + CR 616.1: the staged sweep consulted both cards before
+        // any prompt, so P0 holds both decisions and first chooses which to
+        // make; announcement order keeps the original sequence.
+        assert_eq!(
+            state.waiting_for,
+            WaitingFor::ReplacementDecisionOrder {
+                player: PlayerId(0),
+                objects: vec![first, second],
+            }
+        );
+        apply_as_current(&mut state, GameAction::SelectCards { cards: vec![first] })
+            .expect("P0 makes the first card's decision first");
         assert_parked_position(&state, first, Some(LibraryPosition::Bottom));
+        // The undelivered tail is the second card. It was consulted in the
+        // sweep, so it is no longer an unconsulted request: it holds its own
+        // parked decision, which must keep bottom placement.
         assert_eq!(
             state
                 .active_batch_delivery()
-                .map(|pending| pending.remaining.clone()),
-            Some(vec![second]),
+                .and_then(|pending| pending.staged.as_ref())
+                .and_then(|staged| staged
+                    .members
+                    .iter()
+                    .find(|member| member.identity.object_id == second))
+                .and_then(|member| member.held_decision.as_ref())
+                .map(|decision| event_placement(&decision.pending.proposed)),
+            Some(Some(LibraryPosition::Bottom)),
             "the first park must stash the undelivered tail"
         );
         assert_eq!(
@@ -11010,6 +11036,20 @@ mod w3_library_placement_tests {
             move_objects_simultaneously(&mut state, reqs, &mut parked_events),
             BatchMoveResult::NeedsChoice
         ));
+        // CR 101.4c + CR 616.1: the staged sweep consulted both cards, so P0
+        // first orders its two held decisions. The save is taken once the
+        // first card's decision is published, which is the pause whose three
+        // placement copies an old writer omitted. The second card's held
+        // decision is a current-format field that carries its own placement.
+        assert_eq!(
+            state.waiting_for,
+            WaitingFor::ReplacementDecisionOrder {
+                player: PlayerId(0),
+                objects: vec![first, second],
+            }
+        );
+        apply_as_current(&mut state, GameAction::SelectCards { cards: vec![first] })
+            .expect("P0 makes the first card's decision first");
         assert_parked_position(&state, first, Some(LibraryPosition::Bottom));
 
         let raw = serde_json::to_value(&state).expect("positioned batch serializes");
@@ -13341,6 +13381,17 @@ mod staged_batch_tests {
             .expect("staged owner re-parks");
     }
 
+    /// CR 616.1 + CR 101.4: put member `index` where the live scheduler leaves
+    /// the member whose decision is published. The sweep has passed it (the
+    /// cursor is the sweep position, past it), and the member being asked is
+    /// named by identity in `asking`. Before the scheduler, the same member was
+    /// the one AT the cursor; these fixtures modelled it that way.
+    fn make_asking(owner: &mut PendingBatchDeliveries, index: usize) {
+        let staged = owner.staged.as_mut().expect("staged payload");
+        staged.cursor = staged.cursor.max(index + 1);
+        staged.asking = Some(staged.members[index].identity);
+    }
+
     fn push_approved_staged(
         state: &mut GameState,
         members: Vec<StagedBatchMember>,
@@ -14650,14 +14701,19 @@ mod staged_batch_tests {
         members[0].state = StagedBatchMemberState::InnerConsulting;
         members[0].approved_event = None;
         members[0].pending_outcome = Some(StagedMemberOutcome::Prevented);
+        // CR 616.1 + CR 101.4: the member whose decision is published is the
+        // asking one, named by identity; the sweep cursor is already past it.
+        // (Before the scheduler this was "the member at cursor 0", and
+        // finalizing advanced the cursor to 1.)
+        let asking = Some(members[0].identity);
         let staged = StagedBatchDelivery {
             stage: BatchDeliveryStage::Approving,
-            cursor: 0,
+            cursor: 1,
             members,
             arrangements: Vec::new(),
             arrangement_cursor: 0,
             population_devour_snapshot: None,
-            asking: None,
+            asking,
         };
         state.push_batch_delivery(PendingBatchDeliveries {
             component_delivery_parent: None,
@@ -14694,6 +14750,10 @@ mod staged_batch_tests {
             Some(ZoneMoveCompletion::Prevented)
         );
         assert_eq!(staged.cursor, 1);
+        assert_eq!(
+            staged.asking, None,
+            "the finalized member is no longer asked"
+        );
         assert!(
             state
                 .active_batch_delivery()
@@ -14894,59 +14954,132 @@ mod staged_batch_tests {
         }
     }
 
+    /// Where member 1 sits for one transport row: AT the approval cursor (the
+    /// next member the sweep consults), or just BEHIND it, already consulted,
+    /// optionally named as the asking member.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum ApprovalPosition {
+        AtCursor,
+        BehindCursor { asking: bool },
+    }
+
+    /// Set member 1 of the Approving fixture to `current` at `position`, write
+    /// the owner into the wire, and check that both the in-memory validator and
+    /// the wire decoder accept the row exactly when `allowed` (else both refuse
+    /// it with `expected`).
+    fn assert_approval_position_row(
+        current: StagedBatchMemberState,
+        position: ApprovalPosition,
+        allowed: bool,
+        expected: &str,
+    ) {
+        let mut state = member_stage_fixture(BatchDeliveryStage::Approving);
+        let mut wire = serde_json::to_value(ResolutionStateWire::from_game_state(state.clone()))
+            .expect("valid baseline serializes");
+        let owner = state.active_batch_delivery_mut().unwrap();
+        set_fixture_member_state(&mut owner.staged.as_mut().unwrap().members[1], current);
+        if let ApprovalPosition::BehindCursor { asking } = position {
+            let staged = owner.staged.as_mut().unwrap();
+            staged.cursor = 2;
+            staged.asking = asking.then(|| staged.members[1].identity);
+        }
+        sync_staged_requests(owner);
+        let frames = wire["resolution_frames"]["frames"].as_array_mut().unwrap();
+        let batch = frames
+            .iter_mut()
+            .find(|frame| frame["type"] == "BatchDelivery")
+            .unwrap();
+        batch["data"] = serde_json::to_value(&*owner).unwrap();
+        let decoded = serde_json::from_value::<ResolutionStateWire>(wire);
+        if allowed {
+            owner
+                .validate_staged()
+                .unwrap_or_else(|error| panic!("{current:?} at {position:?}: {error}"));
+            let restored = decoded
+                .unwrap_or_else(|error| panic!("{current:?} at {position:?} decodes: {error}"))
+                .into_game_state();
+            assert_eq!(
+                restored
+                    .active_batch_delivery()
+                    .unwrap()
+                    .staged
+                    .as_ref()
+                    .unwrap()
+                    .members[1]
+                    .state,
+                current
+            );
+        } else {
+            assert_eq!(
+                owner.validate_staged().unwrap_err(),
+                expected,
+                "{current:?} at {position:?}"
+            );
+            let error = match decoded {
+                Ok(_) => panic!("{position:?} accepted {current:?}"),
+                Err(error) => error.to_string(),
+            };
+            assert!(
+                error.contains(expected),
+                "{current:?} at {position:?}: {error}"
+            );
+        }
+    }
+
+    /// CR 616.1 + CR 101.4: every member state, checked where a member is
+    /// asked. Before the live scheduler the member being asked was the one AT
+    /// the approval cursor, so an unfinished consultation was valid exactly
+    /// there. The cursor is now only the sweep position: the member at it is
+    /// the next one to sweep (unconsulted or abandoned only), and a member
+    /// whose consultation is unfinished sits behind it and must be the asking
+    /// member (or hold its decision). Both positions are checked for every
+    /// state; finished states stay refused at the cursor.
     #[test]
     fn staged_transport_checks_every_state_at_approval_cursor() {
+        let follows = "a consulted staged member follows the approval cursor";
         for (current, allowed) in [
             (StagedBatchMemberState::Unconsulted, true),
-            (StagedBatchMemberState::OuterConsulting, true),
-            (StagedBatchMemberState::InnerConsulting, true),
+            (StagedBatchMemberState::OuterConsulting, false),
+            (StagedBatchMemberState::InnerConsulting, false),
             (StagedBatchMemberState::Approved, false),
-            (StagedBatchMemberState::PreventedWithChild, true),
+            (StagedBatchMemberState::PreventedWithChild, false),
             (StagedBatchMemberState::Terminal, false),
             (StagedBatchMemberState::Abandoned, true),
         ] {
-            let mut state = member_stage_fixture(BatchDeliveryStage::Approving);
-            let mut wire =
-                serde_json::to_value(ResolutionStateWire::from_game_state(state.clone()))
-                    .expect("valid baseline serializes");
-            let owner = state.active_batch_delivery_mut().unwrap();
-            set_fixture_member_state(&mut owner.staged.as_mut().unwrap().members[1], current);
-            sync_staged_requests(owner);
-            let frames = wire["resolution_frames"]["frames"].as_array_mut().unwrap();
-            let batch = frames
-                .iter_mut()
-                .find(|frame| frame["type"] == "BatchDelivery")
-                .unwrap();
-            batch["data"] = serde_json::to_value(&*owner).unwrap();
-            let decoded = serde_json::from_value::<ResolutionStateWire>(wire);
-            if allowed {
-                owner
-                    .validate_staged()
-                    .expect("an unfinished consultation or abandonment is valid at the cursor");
-                let restored = decoded
-                    .expect("cursor consultation decodes")
-                    .into_game_state();
-                assert_eq!(
-                    restored
-                        .active_batch_delivery()
-                        .unwrap()
-                        .staged
-                        .as_ref()
-                        .unwrap()
-                        .members[1]
-                        .state,
-                    current
+            assert_approval_position_row(current, ApprovalPosition::AtCursor, allowed, follows);
+        }
+        // Behind the cursor an unfinished consultation is valid exactly for
+        // the asking member.
+        let precedes = "an unfinished staged consultation precedes the approval cursor";
+        for current in [
+            StagedBatchMemberState::OuterConsulting,
+            StagedBatchMemberState::InnerConsulting,
+            StagedBatchMemberState::PreventedWithChild,
+        ] {
+            for asking in [true, false] {
+                assert_approval_position_row(
+                    current,
+                    ApprovalPosition::BehindCursor { asking },
+                    asking,
+                    precedes,
                 );
-            } else {
-                let expected = "a consulted staged member follows the approval cursor";
-                assert_eq!(owner.validate_staged().unwrap_err(), expected);
-                let error = match decoded {
-                    Ok(_) => panic!("approval cursor accepted {current:?}"),
-                    Err(error) => error.to_string(),
-                };
-                assert!(error.contains(expected), "{current:?}: {error}");
             }
         }
+        // The sweep consulted every member behind the cursor: an unconsulted
+        // one there is refused unless it waits on a decision; abandonment can
+        // affect any slot.
+        assert_approval_position_row(
+            StagedBatchMemberState::Unconsulted,
+            ApprovalPosition::BehindCursor { asking: false },
+            false,
+            precedes,
+        );
+        assert_approval_position_row(
+            StagedBatchMemberState::Abandoned,
+            ApprovalPosition::BehindCursor { asking: false },
+            true,
+            precedes,
+        );
     }
 
     #[test]
@@ -15016,6 +15149,14 @@ mod staged_batch_tests {
                 serde_json::to_value(ResolutionStateWire::from_game_state(state.clone()))
                     .expect("valid baseline serializes");
             let owner = state.active_batch_delivery_mut().unwrap();
+            // CR 616.1 + CR 101.4: the inner-consulting member is the asking
+            // one, which the sweep cursor has passed (before the live scheduler
+            // it sat AT the cursor).
+            {
+                let staged = owner.staged.as_mut().unwrap();
+                staged.cursor = 2;
+                staged.asking = Some(staged.members[1].identity);
+            }
             let member = &mut owner.staged.as_mut().unwrap().members[1];
             set_fixture_member_state(member, StagedBatchMemberState::InnerConsulting);
             let StagedMemberOperation::Destroy(operation) = &mut member.operation else {
@@ -15925,6 +16066,15 @@ mod staged_batch_tests {
             push_approved_staged(&mut state, vec![member], BatchDeliveryStage::Approving);
         let parked = PendingZoneChangeDelivery::new(identity, changed);
         let mut owner = take_owner(&mut state, group_id);
+        // CR 616.1 + CR 101.4: the parked boundary belongs to the asking
+        // member (by identity), which is mid-consultation as a parked zone
+        // move leaves it; before the scheduler it was the member at the cursor.
+        set_fixture_member_state(
+            &mut owner.staged.as_mut().unwrap().members[0],
+            StagedBatchMemberState::InnerConsulting,
+        );
+        sync_staged_requests(&mut owner);
+        make_asking(&mut owner, 0);
         owner.paused_current = Some(parked.clone());
         put_owner(&mut state, owner);
         assert!(staged_approval_owner(&state, &parked).is_some());
@@ -16041,6 +16191,8 @@ mod staged_batch_tests {
         let group_id =
             push_approved_staged(&mut state, vec![member], BatchDeliveryStage::Approving);
         let mut owner = take_owner(&mut state, group_id);
+        // CR 616.1: the result is recorded for the asking member (by identity).
+        make_asking(&mut owner, 0);
         owner.completion = Some(BatchCompletion::RevealRestPile {
             delivery_stage: DigDeliveryStage::Rest,
             player: PlayerId(0),
@@ -16167,12 +16319,21 @@ mod staged_batch_tests {
             push_approved_staged(&mut state, vec![member], BatchDeliveryStage::Approving);
         let mut owner = take_owner(&mut state, group_id);
         let identity = owner.staged.as_ref().unwrap().members[0].identity;
+        // CR 616.1 + CR 101.4: the pause belongs to the asking member, which
+        // the sweep cursor has passed (it was the cursor member before the
+        // scheduler); both round-trip.
+        make_asking(&mut owner, 0);
         owner.paused_current = Some(PendingZoneChangeDelivery::new(identity, prepared));
         put_owner(&mut state, owner);
         state.waiting_for = WaitingFor::Priority {
             player: PlayerId(0),
         };
         let before = state.active_batch_delivery().unwrap().staged.clone();
+        assert_eq!(
+            before.as_ref().and_then(|staged| staged.asking),
+            Some(identity),
+            "premise: the paused member is the asking one"
+        );
         let wire = serde_json::to_value(&state).expect("paused staged state serializes");
         let restored: GameState =
             serde_json::from_value(wire).expect("paused staged state decodes");
@@ -16417,7 +16578,9 @@ mod staged_batch_tests {
         let group_id =
             push_approved_staged(&mut state, vec![member], BatchDeliveryStage::Approving);
         let mut owner = take_owner(&mut state, group_id);
-        owner.staged.as_mut().unwrap().cursor = 0;
+        // CR 616.1: the prevented member with the live child is the asking
+        // member (by identity); it was the cursor member before the scheduler.
+        make_asking(&mut owner, 0);
         put_owner(&mut state, owner);
         state.waiting_for = WaitingFor::DiscardChoice {
             player: PlayerId(0),
@@ -16474,7 +16637,9 @@ mod staged_batch_tests {
             push_approved_staged(&mut state, vec![member], BatchDeliveryStage::Approving);
         let parked = PendingZoneChangeDelivery::new(identity, event.clone());
         let mut owner = take_owner(&mut state, group_id);
-        owner.staged.as_mut().unwrap().cursor = 0;
+        // CR 616.1: the parked boundary belongs to the asking member (by
+        // identity); it was the cursor member before the scheduler.
+        make_asking(&mut owner, 0);
         owner.staged.as_mut().unwrap().members[0].pending_outcome =
             Some(StagedMemberOutcome::Prevented);
         owner.paused_current = Some(parked.clone());
