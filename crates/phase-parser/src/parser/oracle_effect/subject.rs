@@ -9605,12 +9605,11 @@ mod tests {
         assert!(clause.multi_target.is_none());
         assert!(clause.sub_ability.is_none());
     }
-    use crate::types::ability::AttackerBlockStatus;
-    use crate::types::ability::ThisWayCause;
     use crate::types::ability::{
         AbilityKind, BasicLandType, ChoiceType, Comparator, ContinuousModification, ControllerRef,
         Effect, PtStat, PtValueScope, QuantityRef, TypeFilter,
     };
+    use crate::types::ability::{AttackerBlockStatus, ThisWayCause};
     use crate::types::card_type::{CoreType, Supertype};
     use crate::types::identifiers::TrackedSetId;
     use crate::types::statics::BlockExceptionKind;

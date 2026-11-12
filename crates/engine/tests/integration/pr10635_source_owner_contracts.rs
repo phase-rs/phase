@@ -687,3 +687,52 @@ fn stylus_on_a_live_merged_permanent_keeps_the_base_component_delivery() {
     );
     assert!(state.stack.is_empty());
 }
+
+// Oracle text from the repo's card data export.
+const DEBT_TO_THE_KAMI: &str = "Choose one —\n• Target opponent exiles a creature they control.\n• Target opponent exiles an enchantment they control.";
+
+/// Base-behavior pin, not a rules claim. Debt to the Kami's exile is a
+/// resolution-time choice that is not a terminal shuffle, so this branch does
+/// not change its candidate population: as on `main`, the scan still offers
+/// the merged creature's absorbed component beside the permanent itself
+/// (CR 730.2 would offer only the permanent; tracked with the merged-arrival
+/// work in #10759). Only a terminal-shuffle move's scan excludes absorbed
+/// components. This test passes unchanged at the merge base.
+#[test]
+fn debt_to_the_kami_scan_of_a_merged_creature_keeps_the_base_population() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let host = scenario.add_creature(P1, "Host Creature", 2, 2).id();
+    let component = scenario.add_creature(P1, "Migratory Greathorn", 3, 4).id();
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Debt to the Kami", true, DEBT_TO_THE_KAMI)
+        .id();
+    let mut runner = scenario.build();
+    {
+        let state = runner.state_mut();
+        state.battlefield.retain(|&id| id != component);
+        let mut events = vec![];
+        merge_object_onto(state, component, host, MergeSide::Top, &mut events);
+    }
+
+    runner.cast(spell).modes(&[0]).target_player(P1).commit();
+    let mut passes = 0;
+    while matches!(runner.state().waiting_for, WaitingFor::Priority { .. }) {
+        runner
+            .act(GameAction::PassPriority)
+            .expect("priority passes until the exile choice");
+        passes += 1;
+        assert!(passes < 6, "the exile choice must surface");
+    }
+    match &runner.state().waiting_for {
+        WaitingFor::EffectZoneChoice { player, cards, .. } => {
+            assert_eq!(*player, P1, "the targeted opponent chooses");
+            let mut offered = cards.clone();
+            offered.sort_by_key(|id| id.0);
+            let mut expected = vec![host, component];
+            expected.sort_by_key(|id| id.0);
+            assert_eq!(offered, expected, "the merge-base population is offered");
+        }
+        other => panic!("expected the exile choice, got {other:?}"),
+    }
+}

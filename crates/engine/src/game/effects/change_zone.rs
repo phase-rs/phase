@@ -452,6 +452,14 @@ fn resolution_zone_candidates(
         ability,
         filter_controller,
     );
+    let terminal_shuffle_move = matches!(
+        ability.effect,
+        Effect::ChangeZone {
+            destination: Zone::Library,
+            library_shuffle: LibraryShuffleMode::TerminalShuffle,
+            ..
+        }
+    );
     state
         .objects
         .iter()
@@ -463,7 +471,10 @@ fn resolution_zone_candidates(
                 && object.is_card_population_member()
                 // CR 730.2 + CR 730.2b: a merged component is part of one
                 // permanent, not a permanent the player can choose by itself.
-                && !state.is_absorbed_merge_component(**id)
+                // Applied to the move component of a terminal shuffle, whose
+                // chosen merged permanent this branch delivers whole; every
+                // other scan keeps the merge-base population (#10759).
+                && !(terminal_shuffle_move && state.is_absorbed_merge_component(**id))
                 && crate::game::filter::matches_target_filter_for_zone(
                     state,
                     **id,

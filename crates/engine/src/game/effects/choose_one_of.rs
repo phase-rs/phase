@@ -214,7 +214,7 @@ pub(crate) fn resolve_branch(
     let mut resolved = build_resolved_from_def(branch, source_id, controller);
     resolved.context = context;
     // CR 400.7: the branch inherits the parent's OCCURRENCES, pins included.
-    // CR 608.2c: a branch that makes its own resolution-time choice ("they
+    // CR 608.2d: a branch that makes its own resolution-time choice ("they
     // shuffle another creature they own into their library") is not bound by
     // the parent's targets; the shared inheritance authority decides, as it
     // does for every other chain descent.
