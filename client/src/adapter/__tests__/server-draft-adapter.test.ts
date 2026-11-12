@@ -4287,12 +4287,14 @@ describe("ServerDraftAdapter — negotiated StateCodecV1", () => {
       const { adapter, ws, candidate, reconnecting } = await sentCandidate();
       try {
         const sentBefore = ws.send.mock.calls.length;
-        await expect(adapter.submitAction({ type: "PassPriority" } as GameAction, 0)).rejects.toMatchObject({
-          code: "ACTION_NOT_SENT", message: "A draft reattach is being confirmed; this submission was not sent.",
-        });
-        await expect(adapter.submitPick("not-yet-picked")).rejects.toMatchObject({
-          code: "ACTION_NOT_SENT", message: "A draft reattach is being confirmed; this pick was not sent.",
-        });
+        const notSent = {
+          code: "ACTION_NOT_SENT",
+          message: "The connection is being re-established; this action was not sent.",
+        };
+        await expect(adapter.submitAction({ type: "PassPriority" } as GameAction, 0)).rejects.toMatchObject(notSent);
+        await expect(adapter.submitPick("not-yet-picked")).rejects.toMatchObject(notSent);
+        await expect(adapter.submitSharedStackDecision(0, "Take")).rejects.toMatchObject(notSent);
+        await expect(adapter.submitDeck([], [])).rejects.toMatchObject(notSent);
         expect(ws.send.mock.calls.slice(sentBefore)).toEqual([]);
         // After the server answers, the adopted candidate takes requests again.
         receive(candidate, "DraftStateUpdate", { view: createMockDraftView() });
@@ -4305,7 +4307,79 @@ describe("ServerDraftAdapter — negotiated StateCodecV1", () => {
       }
     });
 
-    it("parses a large reattach bootstrap once, on adoption", async () => {
+    it("refuses unsent a deck whose preparation finishes after the ReconnectDraft was written", async () => {
+      vi.useFakeTimers();
+      const session = draftCodecSession(decodeEnvelope);
+      const { adapter, ws, provider } = await startCodecDraft(session.session);
+      const events: unknown[] = [];
+      adapter.onEvent((event) => events.push(event));
+      await enterCodecMatch(ws, events);
+      usePreferencesStore.setState({ artChain: [{ type: "newest" }], artOverrides: {} });
+      const metadata = heldArt<PrintingEntry[]>();
+      artIO.catalog.mockReturnValue(metadata.promise);
+      try {
+        // The deck is still preparing (its printings metadata is held) when
+        // the reattach writes its setup.
+        const deck = watch(adapter.submitDeck(["Plains"], []));
+        await drainArt();
+        provider.mockResolvedValueOnce(draftCodecSession(decodeEnvelope).session);
+        const reconnecting = watch(adapter.reconnectDraft());
+        await drainArt();
+        const candidate = MockWebSocket.last!;
+        candidate.dispatchSynthetic("message", CODEC_SERVER_HELLO);
+        await vi.waitFor(() => expect(candidate.send).toHaveBeenCalledWith(
+          expect.stringContaining('"type":"ReconnectDraft"'),
+        ));
+        metadata.resolve([ART_A]);
+        await drainArt();
+        await vi.waitFor(() => expect(deck.value()).toMatchObject({
+          code: "ACTION_NOT_SENT",
+          message: "The connection is being re-established; this action was not sent.",
+        }));
+        expect(ws.send.mock.calls.filter(([frame]) => String(frame).includes('"type":"DraftAction"'))).toEqual([]);
+        void reconnecting;
+      } finally {
+        usePreferencesStore.setState({ artChain: [], artOverrides: {} });
+        adapter.dispose();
+        vi.useRealTimers();
+      }
+    });
+
+    it("leaves a match transition seen on the incumbent to the candidate's own reattach", async () => {
+      vi.useFakeTimers();
+      const { adapter, ws, candidate, reconnecting } = await sentCandidate();
+      const events: unknown[] = [];
+      adapter.onEvent((event) => events.push(event));
+      const roundTwo = {
+        match_id: "r2-t0", round: 2, game_code: "GAME02", full_key: { game_code: "GAME02", generation: 1 },
+        player_token: "match-draft-token", your_player: 0, opponent_name: "Bob",
+      };
+      try {
+        const incumbentSends = ws.send.mock.calls.length;
+        const candidateSends = candidate.send.mock.calls.length;
+        // The server paired the next round before it installed the candidate:
+        // the pairing reaches the incumbent inside the interval.
+        receive(ws, "DraftMatchStart", roundTwo);
+        await vi.waitFor(() => expect(events).toContainEqual(expect.objectContaining({ type: "matchStarting", matchId: "r2-t0" })));
+        // Neither socket repeats ReconnectDraft: the incumbent's would meet the
+        // seat-authority refusal, and the candidate's is already written.
+        expect(ws.send.mock.calls.slice(incumbentSends)).toEqual([]);
+        expect(candidate.send.mock.calls.slice(candidateSends)).toEqual([]);
+        // attach_current_draft_match answers the candidate's reattach with the
+        // current match (phase-server main.rs:2795-2815).
+        receive(candidate, "DraftMatchStart", roundTwo);
+        receive(candidate, "DraftStateUpdate", { view: createMockDraftView({ status: "MatchInProgress" }) });
+        await vi.waitFor(() => expect(reconnecting.value()).toEqual({ resolvedWith: undefined }));
+        expect(adapter.currentMatchId).toBe("r2-t0");
+        expect(events).not.toContainEqual(expect.objectContaining({ type: "draftActionRejected" }));
+        expect(candidate.close).not.toHaveBeenCalled();
+      } finally {
+        adapter.dispose();
+        vi.useRealTimers();
+      }
+    });
+
+    it("parses a large reattach bootstrap once, through adoption", async () => {
       vi.useFakeTimers();
       const { adapter, candidate, reconnecting } = await sentCandidate();
       // Synthetic padding: a view larger than 8 Mi UTF-16 code units.
@@ -4319,8 +4393,8 @@ describe("ServerDraftAdapter — negotiated StateCodecV1", () => {
       try {
         candidate.dispatchSynthetic("message", bootstrap);
         await vi.waitFor(() => expect(reconnecting.value()).toEqual({ resolvedWith: undefined }));
-        // The interval reads the tag by prefix; only the adopted socket's
-        // dispatch materializes the view.
+        // The interval parses the view once to settle on it, and the adopted
+        // socket dispatches that envelope instead of parsing again.
         expect(parse.mock.calls.filter(([text]) => text === bootstrap)).toHaveLength(1);
       } finally {
         parse.mockRestore();

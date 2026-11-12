@@ -331,7 +331,8 @@
   },
   "stateCodec": {
     "actionInterrupted": "La trasmissione dello stato è stata interrotta durante l’azione",
-    "submissionNotSent": "La trasmissione dello stato è in fase di ripristino; questa azione non è stata inviata."
+    "submissionNotSent": "La trasmissione dello stato è in fase di ripristino; questa azione non è stata inviata.",
+    "reconnectSubmissionNotSent": "La connessione è in fase di ripristino; questa azione non è stata inviata."
   },
   "actionError": {
     "title": "{{action}} non riuscita",

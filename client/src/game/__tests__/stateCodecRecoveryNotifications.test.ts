@@ -170,4 +170,72 @@ describe("state codec recovery notifications", () => {
     expect(raw.close).not.toHaveBeenCalled();
     expect(isDispatchIdle()).toBe(true);
   });
+
+  it("localizes an action not sent while a reconnect is being confirmed, through real dispatch", async () => {
+    const random = vi.spyOn(Math, "random").mockReturnValue(0);
+    const decode = vi.fn(async (bytes: Uint8Array): Promise<StateCodecDecodeResult> => {
+      const envelope = JSON.parse(new TextDecoder().decode(bytes)) as { data: { state: unknown } };
+      return { kind: "decoded", json: JSON.stringify(envelope.data.state) };
+    });
+    const session: StateCodecSession = { decode, close: vi.fn() };
+    adapter = new WebSocketAdapter(
+      "wss://localhost:9374/ws", "join", { main_deck: [], sideboard: [] }, "GAME01",
+      undefined, undefined, undefined,
+      { stateCodecSessionProvider: async () => session },
+    );
+    const events: string[] = [];
+    adapter.onEvent((event) => events.push(event.type));
+    try {
+      const initialized = adapter.initialize();
+      await vi.waitFor(() => expect(RecoverySocket.last).not.toBeNull());
+      const raw = RecoverySocket.last!;
+      raw.receive(HELLO);
+      await vi.waitFor(() => expect(raw.send).toHaveBeenCalledWith(
+        expect.stringContaining('"type":"JoinGameWithPassword"'),
+      ));
+      raw.receive(CONFIRMATION);
+      const state = buildGameState({ stack: [], players: [] });
+      const started = (revision: number) => frame("Full", {
+        type: "GameStarted",
+        data: {
+          state, state_revision: revision, your_player: 0,
+          player_token: "codec-token", full_key: FULL_KEY,
+        },
+      }, revision);
+      raw.receive(started(1));
+      await initialized;
+      useGameStore.setState({
+        adapter, gameState: state, gameMode: "online", waitingFor: state.waiting_for,
+      });
+
+      // The connection drops; the adapter's own retry writes its Reconnect.
+      raw.readyState = 3;
+      raw.onclose?.();
+      raw.dispatchEvent(new Event("close"));
+      await vi.advanceTimersByTimeAsync(1000);
+      await vi.waitFor(() => expect(RecoverySocket.last).not.toBe(raw));
+      const candidate = RecoverySocket.last!;
+      candidate.receive(HELLO);
+      await vi.waitFor(() => expect(candidate.send).toHaveBeenCalledWith(
+        expect.stringContaining('"type":"Reconnect"'),
+      ));
+      candidate.receive(CONFIRMATION);
+
+      // Before the candidate's bootstrap, an action is refused unsent in the
+      // language active when it is produced.
+      usePreferencesStore.getState().setLanguage("fr");
+      const french = "La connexion est en cours de rétablissement ; cette action n’a pas été envoyée.";
+      await expect(dispatchAction({ type: "PassPriority" }, 0)).rejects.toMatchObject({
+        code: AdapterErrorCode.ACTION_NOT_SENT, recoverable: true, message: french,
+      });
+      expect(useAppNotificationStore.getState().notification).toMatchObject({ description: french });
+      expect(actionsSent(candidate)).toHaveLength(0);
+      expect(isDispatchIdle()).toBe(true);
+
+      candidate.receive(started(2));
+      await vi.waitFor(() => expect(events).toContain("reconnected"));
+    } finally {
+      random.mockRestore();
+    }
+  });
 });

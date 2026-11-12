@@ -50,6 +50,7 @@ import {
   type SetupConfirmationOutcome,
   type SetupFrameMessage,
 } from "../services/setupConfirmation";
+import i18n from "i18next";
 import { isValidWebSocketUrl, mixedContentBlockReason } from "../services/serverDetection";
 import type { FullSessionKey, WsSessionData } from "../services/multiplayerSession";
 import {
@@ -2910,13 +2911,16 @@ export class WebSocketAdapter implements EngineAdapter {
       throw new AdapterError("WS_ERROR", this.aiDriverFault.message, false);
     }
     this.stateCodec.assertNotRecovering();
-    // The reconnect interval is open: a submission on the incumbent would meet
-    // the server's seat-authority refusal once the candidate owns the seat, so
-    // it is not sent (the same typed refusal as during codec recovery).
+    // The reconnect interval is open: a game command (Action, Interaction) on
+    // the incumbent would meet the server's seat-authority refusal once the
+    // candidate owns the seat, so it is not sent: the same typed, localized
+    // refusal as during codec recovery. Other requests keep their base
+    // behaviour; with no incumbent (every product reconnect episode starts
+    // after the current socket closed) they fail locally as before.
     if (this.confirmingPreparation !== null) {
       throw new AdapterError(
         AdapterErrorCode.ACTION_NOT_SENT,
-        "A reconnect is being confirmed; this submission was not sent.",
+        i18n.t("stateCodec.reconnectSubmissionNotSent"),
         true,
       );
     }

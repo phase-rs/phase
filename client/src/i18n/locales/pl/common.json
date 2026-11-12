@@ -331,7 +331,8 @@
   },
   "stateCodec": {
     "actionInterrupted": "Przesyłanie stanu zostało przerwane podczas akcji",
-    "submissionNotSent": "Trwa przywracanie przesyłania stanu; ta akcja nie została wysłana."
+    "submissionNotSent": "Trwa przywracanie przesyłania stanu; ta akcja nie została wysłana.",
+    "reconnectSubmissionNotSent": "Trwa przywracanie połączenia; ta akcja nie została wysłana."
   },
   "actionError": {
     "title": "{{action}} nie powiodła się",

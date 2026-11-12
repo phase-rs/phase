@@ -34,6 +34,7 @@ import {
   type SetupConfirmationOutcome,
   type SetupFrameMessage,
 } from "../services/setupConfirmation";
+import i18n from "i18next";
 import { isValidWebSocketUrl } from "../services/serverDetection";
 import { captureSubmissionArtPreferences, submitDeckList } from "../services/deckSubmission";
 import type {
@@ -420,7 +421,7 @@ export class ServerDraftAdapter implements EngineAdapter {
 
   private assertNoPendingSubmission(): void {
     this.stateCodec.assertNotRecovering();
-    this.assertNoReattachInterval("this submission");
+    this.assertNoReattachInterval();
     if (this.submission.occupied) {
       throw new AdapterError(
         AdapterErrorCode.ACTION_NOT_SENT,
@@ -635,6 +636,24 @@ export class ServerDraftAdapter implements EngineAdapter {
   }
 
   /**
+   * The reattach interval is open: a seat-bound request on the incumbent would
+   * meet the server's draft-seat authority refusal once the candidate owns the
+   * seat, so it is not sent. Gated: game commands (`assertNoPendingSubmission`),
+   * picks, shared-stack decisions and deck submissions (also rechecked when deck
+   * preparation finishes). The same typed, localized refusal as during codec
+   * recovery.
+   */
+  private assertNoReattachInterval(): void {
+    if (this.confirmingAttachment !== null) {
+      throw new AdapterError(
+        AdapterErrorCode.ACTION_NOT_SENT,
+        i18n.t("stateCodec.reconnectSubmissionNotSent"),
+        true,
+      );
+    }
+  }
+
+  /**
    * Claim the single `draftResolve`/`draftReject` pair for one action.
    *
    * THE PAIR IS ONE SLOT, AND EVERY ACTION WANTED IT. `joinDraft`, `submitPick`,
@@ -655,21 +674,6 @@ export class ServerDraftAdapter implements EngineAdapter {
    * The callback pair is the pending authority; settlement clears it together
    * with its socket owner before retiring an otherwise idle attachment.
    */
-  /**
-   * The reattach interval is open: a seat-bound request on the incumbent would
-   * meet the server's draft-seat authority refusal once the candidate owns the
-   * seat, so it is not sent (the same typed refusal as during codec recovery).
-   */
-  private assertNoReattachInterval(request: string): void {
-    if (this.confirmingAttachment !== null) {
-      throw new AdapterError(
-        AdapterErrorCode.ACTION_NOT_SENT,
-        `A draft reattach is being confirmed; ${request} was not sent.`,
-        true,
-      );
-    }
-  }
-
   private claimDraftAction(
     action: string,
     resolve: (view: DraftPlayerView) => void,
@@ -719,7 +723,7 @@ export class ServerDraftAdapter implements EngineAdapter {
     if (this.seatIndex === null || this.draftCode === null) {
       throw new AdapterError("PHASE_ERROR", "Not in a draft session", false);
     }
-    this.assertNoReattachInterval("this pick");
+    this.assertNoReattachInterval();
     const view = this.draftView;
     if (view?.pool.some((card) => card.instance_id === cardInstanceId)) {
       // An already-owned instance can never be the outcome of this request,
@@ -774,7 +778,7 @@ export class ServerDraftAdapter implements EngineAdapter {
     if (this.seatIndex === null || this.draftCode === null) {
       throw new AdapterError("PHASE_ERROR", "Not in a draft session", false);
     }
-    this.assertNoReattachInterval("this decision");
+    this.assertNoReattachInterval();
     return new Promise<DraftPlayerView>((resolve, reject) => {
       if (!this.claimDraftAction("SharedStackDecision", resolve, reject)) return;
       const sent = this.send({
@@ -805,7 +809,7 @@ export class ServerDraftAdapter implements EngineAdapter {
     if (this.seatIndex === null || this.draftCode === null) {
       throw new AdapterError("PHASE_ERROR", "Not in a draft session", false);
     }
-    this.assertNoReattachInterval("this deck");
+    this.assertNoReattachInterval();
     return new Promise<DraftPlayerView>((resolve, reject) => {
       if (!this.claimDraftAction("SubmitDeck", resolve, reject, "PreparingDeck")) return;
       const ws = this.ws;
@@ -822,6 +826,8 @@ export class ServerDraftAdapter implements EngineAdapter {
             || this.draftCode !== draftCode || this.draftToken !== draftToken || this.seatIndex !== seat) {
           throw new AdapterError("WS_CLOSED", "Draft session changed during deck preparation", true);
         }
+        // A reattach written while the deck was being prepared gates it too.
+        this.assertNoReattachInterval();
         this.draftActionStage = "AwaitingReply";
         const sent = this.send({
           type: "DraftAction",
@@ -1614,7 +1620,15 @@ export class ServerDraftAdapter implements EngineAdapter {
         }
         if (!sameMatch) {
           try {
-            if (this.draftCode && this.draftToken) {
+            if (this.confirmingAttachment !== null) {
+              // A reattach interval is open, so this frame came from the
+              // incumbent (the candidate's frames are buffered). The
+              // candidate's ReconnectDraft is already written, and the server
+              // attaches the current match on it (`attach_current_draft_match`,
+              // phase-server main.rs:2795-2815); the same request on the
+              // incumbent would meet the seat-authority refusal once the
+              // candidate owns the seat (:13042-13053).
+            } else if (this.draftCode && this.draftToken) {
               this.send({
                 type: "ReconnectDraft",
                 data: {

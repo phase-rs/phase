@@ -331,7 +331,8 @@
   },
   "stateCodec": {
     "actionInterrupted": "La transmission de l’état a été interrompue pendant l’action",
-    "submissionNotSent": "La transmission de l’état est en cours de rétablissement ; cette action n’a pas été envoyée."
+    "submissionNotSent": "La transmission de l’état est en cours de rétablissement ; cette action n’a pas été envoyée.",
+    "reconnectSubmissionNotSent": "La connexion est en cours de rétablissement ; cette action n’a pas été envoyée."
   },
   "actionError": {
     "title": "Échec de {{action}}",

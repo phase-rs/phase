@@ -2342,7 +2342,7 @@ describe("WebSocketAdapter", () => {
       }
     });
 
-    it.each(["raw", "gzip"] as const)("parses a large %s reconnect bootstrap once, on adoption", async (wire) => {
+    it.each(["raw", "gzip"] as const)("parses a large %s reconnect bootstrap once, through adoption", async (wire) => {
       acceptFullReplyOwnershipSession(adapter, ws);
       vi.useFakeTimers();
       const visibility = vi.spyOn(document, "visibilityState", "get").mockReturnValue("visible");
@@ -2373,8 +2373,8 @@ describe("WebSocketAdapter", () => {
           ? (await encodeJsonEnvelope(bootstrap)).buffer as unknown as string
           : bootstrap);
         await vi.waitFor(() => expect(events).toHaveBeenCalledWith({ type: "reconnected", inGame: true }));
-        // The interval reads the tag by prefix; only the adopted socket's
-        // dispatch materializes the board.
+        // The interval parses the bootstrap once to settle on it, and the
+        // adopted socket dispatches that envelope instead of parsing again.
         expect(parse.mock.calls.filter(([text]) => text === bootstrap)).toHaveLength(1);
       } finally {
         parse.mockRestore();
@@ -6367,7 +6367,7 @@ describe("WebSocketAdapter — acquired socket ownership", () => {
       }
     });
 
-    it("parses a large codec reconnect bootstrap once, on adoption", async () => {
+    it("parses a large codec reconnect bootstrap once, through adoption", async () => {
       const { adapter, raw, candidate, events } = await sentCandidate();
       // Built before the spy: the fixture helper parses its own input.
       const frame = fullFrame(JSON.stringify(codecGameStarted(5, 5, { state: largeReconnectState(5) })));
@@ -6380,8 +6380,8 @@ describe("WebSocketAdapter — acquired socket ownership", () => {
         candidate.dispatchSynthetic("message", frame);
         await vi.waitFor(() => expect(events).toContainEqual({ type: "reconnected", inGame: true }));
         expect(raw.close).toHaveBeenCalledOnce();
-        // The decoded board reaches the interval as text; only the adopted
-        // socket's dispatch materializes it.
+        // The decoded board reaches the interval as text: parsed once there,
+        // and the adopted socket dispatches that envelope.
         const decodedBootstrapParses = parse.mock.calls
           .filter(([text]) => typeof text === "string" && text.startsWith('{"type":"GameStarted"'));
         expect(decodedBootstrapParses).toHaveLength(1);
@@ -6528,7 +6528,9 @@ describe("WebSocketAdapter — acquired socket ownership", () => {
     it.each(["none", "reconnecting", "actionPendingChanged"] as const)(
       "keeps a candidate's terminal codec failure for the successor a %s listener starts",
       async (trigger) => {
+        const random = vi.spyOn(Math, "random").mockReturnValue(0);
         const { adapter, candidate, codec, events } = await sentCandidate();
+        const timers = vi.spyOn(globalThis, "setTimeout");
         let started = false;
         adapter.onEvent((event) => {
           if (event.type !== trigger || started) return;
@@ -6542,6 +6544,13 @@ describe("WebSocketAdapter — acquired socket ownership", () => {
           // Reconnect write: a terminal bootstrapRejection before adoption.
           codec.rejectNext();
           deliverCodec(candidate, "Full", codecGameStarted(5, 5));
+          if (trigger === "none") {
+            // The adapter's own retry: confirm the pinned schedule, then
+            // advance exactly past it.
+            await vi.waitFor(() => expect(events).toContainEqual(expect.objectContaining({ type: "reconnecting" })));
+            expect(scheduledRetryDelays(timers)).toHaveLength(1);
+            await vi.advanceTimersByTimeAsync(800);
+          }
           await vi.waitFor(() => expect(MockWebSocket.last).not.toBe(candidate));
           if (trigger !== "none") expect(started).toBe(true);
           expect(events).not.toContainEqual({ type: "reconnected", inGame: true });
@@ -6555,6 +6564,8 @@ describe("WebSocketAdapter — acquired socket ownership", () => {
           ));
           expect(successor.send).not.toHaveBeenCalledWith(expect.stringContaining("state_codecs"));
         } finally {
+          timers.mockRestore();
+          random.mockRestore();
           adapter.dispose();
         }
       },
@@ -6604,12 +6615,15 @@ describe("WebSocketAdapter — acquired socket ownership", () => {
         const sentBefore = raw.send.mock.calls.length;
         // The seat may already be the candidate's: nothing new goes on the incumbent.
         await expect(adapter.submitAction({ type: "PassPriority" } as GameAction, 0)).rejects.toMatchObject({
-          code: "ACTION_NOT_SENT", message: "A reconnect is being confirmed; this submission was not sent.",
+          code: "ACTION_NOT_SENT",
+          message: "The connection is being re-established; this action was not sent.",
         });
         expect(raw.send.mock.calls.slice(sentBefore)
           .filter(([frame]) => String(frame).includes('"type":"Action"'))).toEqual([]);
-        // The server's seat-authority refusal of an earlier incumbent request
-        // (phase-server main.rs:10083-10090) answers that request only.
+        // Synthetic: the server's seat-authority refusal answers an earlier
+        // incumbent request (phase-server main.rs:10083-10090) with `Error` for
+        // a request that has no `*Failed` channel, such as Emote or
+        // RequestTakeback; it answers that request only.
         raw.dispatchSynthetic("message", JSON.stringify({
           type: "Error", data: { message: "This socket's game session identity is no longer current" },
         }));

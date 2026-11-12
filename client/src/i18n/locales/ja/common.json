@@ -331,7 +331,8 @@
   },
   "stateCodec": {
     "actionInterrupted": "操作中に状態の配信が中断されました",
-    "submissionNotSent": "状態の配信を復旧中です。この操作は送信されませんでした。"
+    "submissionNotSent": "状態の配信を復旧中です。この操作は送信されませんでした。",
+    "reconnectSubmissionNotSent": "接続を再確立しています。この操作は送信されませんでした。"
   },
   "actionError": {
     "title": "{{action}}に失敗しました",

@@ -331,7 +331,8 @@
   },
   "stateCodec": {
     "actionInterrupted": "A transmissão do estado foi interrompida durante a ação",
-    "submissionNotSent": "A transmissão do estado está sendo restabelecida; esta ação não foi enviada."
+    "submissionNotSent": "A transmissão do estado está sendo restabelecida; esta ação não foi enviada.",
+    "reconnectSubmissionNotSent": "A conexão está sendo restabelecida; esta ação não foi enviada."
   },
   "actionError": {
     "title": "{{action}} falhou",
