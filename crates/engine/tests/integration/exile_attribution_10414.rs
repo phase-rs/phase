@@ -1,8 +1,10 @@
 //! Issue #10414 — the exiling player is the instruction's acting player.
 //!
 //! A zone move's `performed_by` feeds `GameObject::exiled_by` (CR 406.6 +
-//! CR 607.2a/b, the per-card record the exile-cast permissions read) and entry
-//! ownership under `EntryOwnership::ActorOwns`. When the printed instruction
+//! CR 607.2a/b, the per-card record the exile-cast permissions read). Entry
+//! ownership under `EntryOwnership::ActorOwns` (Dandân) reads a separate input
+//! that this change leaves on the resolving controller, or the zone prompt's
+//! chooser on the interactive route. When the printed instruction
 //! names another player as its subject ("that player exiles a card from their
 //! hand", "target opponent exiles a creature they control", "each opponent
 //! exiles a card from their hand"), that subject performs the move — the
@@ -46,12 +48,19 @@
 //!     The printed optional land tail is explicitly declined.
 //!   * Reference kinds: one printed card per player reference the parser
 //!     stamps — Fiend of the Shadows (`TriggeringPlayer`), Bane of Bala Ged
-//!     (`DefendingPlayer`), Arcane Artisan (`DeclaredPlayer`), Elkin Lair
+//!     (`DefendingPlayer`), Arcane Artisan (`DeclaredPlayer`), Azula, Cunning
+//!     Usurper (`DeclaredPlayer` reached by the chain's anaphor rewrite), Elkin Lair
 //!     (`ScopedPlayer`), Wildfire Devils (`Typed { ChosenPlayer }`). Where the
 //!     move can prompt, the single-candidate shortcut and the interactive
 //!     selection must credit the same player. (`ParentTargetOwner` is a
 //!     resolver unit row in `change_zone.rs`: no printed card stamped with it
 //!     exiles.)
+//!   * Dandân — Skullwinder: an opponent-performed return keeps the receiving
+//!     hand and owner the entry-ownership input decides (the controller on the
+//!     shortcut, the prompt's chooser on the selection route), not the
+//!     performer. These rows pin that outcome unchanged; whether the printed
+//!     "their hand" should send the card to the performer's hand under Dandân
+//!     is a separate entry-ownership question this change does not decide.
 //!
 //! R8 and R9 share the `ParentTargetController` scope; only the sentence
 //! differs. Declaration in Stone's sweep is imperative, so its actor stays
@@ -77,6 +86,7 @@ use engine::types::ability::{
     TargetFilter,
 };
 use engine::types::actions::GameAction;
+use engine::types::format::FormatConfig;
 use engine::types::game_state::{
     PersistedGameState, PersistedRestoreFinalization, ReplacementChoiceKind, WaitingFor,
 };
@@ -162,6 +172,10 @@ const BANE_OF_BALA_GED: &str =
 
 /// Wildfire Devils `{3}{R}` Creature — Devil 4/2 — verbatim Oracle text.
 const WILDFIRE_DEVILS: &str = "When this creature enters and at the beginning of your upkeep, choose a player at random. That player exiles an instant or sorcery card from their graveyard. Copy that card. You may cast the copy without paying its mana cost.";
+
+const AZULA_CUNNING_USURPER: &str = "Firebending 2 (Whenever this creature attacks, add {R}{R}. This mana lasts until end of combat.)\nWhen Azula enters, target opponent exiles a nontoken creature they control, then they exile a nonland card from their graveyard.\nDuring your turn, you may cast cards exiled with Azula and you may cast them as though they had flash. Mana of any type can be spent to cast those spells.";
+
+const SKULLWINDER: &str = "Deathtouch\nWhen this creature enters, return target card from your graveyard to your hand, then choose an opponent. That player returns a card from their graveyard to their hand.";
 
 const AJANIS_PRIDEMATE: &str = "Whenever you gain life, put a +1/+1 counter on this creature.";
 
@@ -1669,7 +1683,7 @@ fn assert_routes_credit(
                 "{label}: the selection prompt carries the same performer"
             );
         }
-        // Recorded for the CR 608.2d chooser follow-up (#10691); not asserted here.
+        // Recorded for the separate CR 608.2d chooser question; not asserted here.
         println!("{label}: (chooser, performer) per prompt: {prompts:?}");
         prompted |= !prompts.is_empty();
     }
@@ -1778,6 +1792,53 @@ fn declared_player_subject_credits_the_target_on_both_routes() {
     assert_routes_credit("Arcane Artisan", vec![route(0), route(1)], P1);
 }
 
+/// `DeclaredPlayer` reached through the chain's anaphor rewrite: "target
+/// opponent exiles a nontoken creature they control, then they exile a nonland
+/// card from their graveyard." The second exile's "they" is the announced
+/// opponent. One graveyard card takes the shortcut; two reach the selection.
+/// Positive witness: the prior `ParentTargetController` actor also resolves to
+/// the opponent here; the revert-sensitive control is the parser row
+/// `pronoun_subject_binds_its_continuation`.
+#[test]
+fn declared_player_continuation_credits_the_target_on_both_routes() {
+    assert_parses_clean(
+        "Azula, Cunning Usurper",
+        &["Firebending"],
+        &["Creature"],
+        AZULA_CUNNING_USURPER,
+    );
+    let route = |grave: usize| {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let creature = scenario.add_creature(P1, "P1 Bear", 2, 2).id();
+        let cards: Vec<ObjectId> = (0..grave)
+            .map(|i| {
+                scenario
+                    .add_spell_to_graveyard(P1, &format!("P1 Grave Spell {i}"), false)
+                    .id()
+            })
+            .collect();
+        let azula = scenario
+            .add_creature_to_hand_from_oracle(
+                P0,
+                "Azula, Cunning Usurper",
+                4,
+                4,
+                AZULA_CUNNING_USURPER,
+            )
+            .with_mana_cost(ManaCost::zero())
+            .id();
+        let mut runner = scenario.build();
+        runner.cast(azula).resolve();
+        let prompts = drive_answering_zone_choices(&mut runner);
+        // Reach-guard: the first exile ran and credits the opponent too.
+        assert_eq!(zone(&runner, creature), Zone::Exile);
+        assert_eq!(exiled_by(&runner, creature), Some(P1));
+        (runner, cards, prompts)
+    };
+    assert_routes_credit("Azula, Cunning Usurper", vec![route(1), route(2)], P1);
+}
+
 /// `ScopedPlayer`: "At the beginning of each player's upkeep, that player exiles
 /// a card at random from their hand." A random pick has no selection prompt.
 #[test]
@@ -1860,4 +1921,211 @@ fn chosen_player_subject_credits_the_chosen_player_on_both_routes() {
         (runner, cards, prompts)
     };
     assert_routes_credit("Wildfire Devils", vec![route(1), route(2)], P1);
+}
+
+// ---------------------------------------------------------------------------
+// Dandân — the performer does not decide the receiving hand or the owner.
+// ---------------------------------------------------------------------------
+
+/// Run Skullwinder for P0 under Dandân, whose graveyard is one pile both seats
+/// read. The enters trigger targets `pile[first]`; the chosen opponent, P1, then
+/// returns one of the cards left in the pile. Returns the staged pile and the
+/// zone-choice prompts answered as `(chooser, performer)`; a prompt is answered
+/// with `pile[pick]`.
+fn skullwinder_dandan_run(
+    pile: &[(PlayerId, &str)],
+    first: usize,
+    pick: usize,
+) -> (GameRunner, Vec<ObjectId>, ZoneChoicePrompts) {
+    assert_parses_clean("Skullwinder", &["Deathtouch"], &["Creature"], SKULLWINDER);
+    let mut scenario = GameScenario::new_with_format(FormatConfig::dandan(), 2, 11);
+    scenario.at_phase(Phase::PreCombatMain);
+    let skullwinder = scenario
+        .add_creature_to_hand_from_oracle(P0, "Skullwinder", 1, 3, SKULLWINDER)
+        .with_mana_cost(ManaCost::zero())
+        .id();
+    let cards: Vec<ObjectId> = pile
+        .iter()
+        .map(|&(owner, name)| scenario.add_spell_to_graveyard(owner, name, true).id())
+        .collect();
+    let mut runner = scenario.build();
+    runner
+        .cast(skullwinder)
+        .target_objects(&[cards[first]])
+        .resolve();
+    let mut prompts = Vec::new();
+    for _ in 0..60 {
+        match runner.state().waiting_for.clone() {
+            WaitingFor::NamedChoice { options, .. } => {
+                assert_eq!(options, vec![P1.0.to_string()], "P1 is the only opponent");
+                runner
+                    .act(GameAction::ChooseOption {
+                        choice: options[0].clone(),
+                    })
+                    .expect("P1 is chosen");
+            }
+            WaitingFor::EffectZoneChoice {
+                player,
+                performed_by,
+                cards: offered,
+                ..
+            } => {
+                prompts.push((player, performed_by));
+                assert!(offered.contains(&cards[pick]), "the pick is offered");
+                runner
+                    .act(GameAction::SelectCards {
+                        cards: vec![cards[pick]],
+                    })
+                    .expect("the zone choice accepts the pick");
+            }
+            _ => {
+                if drive_step(&mut runner) {
+                    return (runner, cards, prompts);
+                }
+            }
+        }
+    }
+    panic!(
+        "the Skullwinder run did not settle: {:?}",
+        runner.state().waiting_for
+    );
+}
+
+fn hand_holder(runner: &GameRunner, id: ObjectId) -> Option<PlayerId> {
+    runner
+        .state()
+        .players
+        .iter()
+        .find(|player| player.hand.contains(&id))
+        .map(|player| player.id)
+}
+
+/// One card is left for the opponent's return, so it takes the
+/// single-candidate shortcut. P1 performs the move (CR 608.2c), but the
+/// Dandân receiving hand and owner are read from the entry-ownership input,
+/// which stays the resolving controller, as before this change: the P0-owned
+/// card goes to P0's hand and stays P0's. Feeding the performer to that input
+/// instead sends it to P1's hand, owned by P1.
+#[test]
+fn skullwinder_dandan_single_candidate_ownership_ignores_the_performer() {
+    let (runner, cards, prompts) =
+        skullwinder_dandan_run(&[(P1, "P1 Grave Spell"), (P0, "P0 Grave Spell")], 0, 1);
+    assert!(prompts.is_empty(), "one candidate takes the shortcut");
+    // Reach-guard: the enters trigger's own return resolved.
+    assert_eq!(zone(&runner, cards[0]), Zone::Hand);
+    assert_eq!(zone(&runner, cards[1]), Zone::Hand, "the opponent's return");
+    assert_eq!(hand_holder(&runner, cards[1]), Some(P0));
+    assert_eq!(runner.state().objects[&cards[1]].owner, P0);
+}
+
+/// Two cards are left, so the return reaches the zone prompt. Its chooser is
+/// still the prompt's existing chooser, P0 (who should choose under CR 608.2d
+/// is a separate question this change does not decide), while P1 performs the
+/// move (CR 608.2c). The interactive
+/// resume keeps reading the chooser for Dandân ownership, as before this
+/// change, so the P0-owned pick goes to P0's hand and stays P0's. Feeding the
+/// performer to that input instead sends it to P1's hand, owned by P1.
+#[test]
+fn skullwinder_dandan_selected_candidate_ownership_ignores_the_performer() {
+    let (runner, cards, prompts) = skullwinder_dandan_run(
+        &[
+            (P1, "P1 Grave Spell"),
+            (P0, "P0 Grave Spell A"),
+            (P0, "P0 Grave Spell B"),
+        ],
+        0,
+        1,
+    );
+    assert_eq!(prompts, vec![(P0, Some(P1))], "P0 chooses, P1 performs");
+    assert_eq!(zone(&runner, cards[0]), Zone::Hand);
+    assert_eq!(zone(&runner, cards[1]), Zone::Hand, "the opponent's pick");
+    assert_eq!(zone(&runner, cards[2]), Zone::Graveyard);
+    assert_eq!(hand_holder(&runner, cards[1]), Some(P0));
+    assert_eq!(runner.state().objects[&cards[1]].owner, P0);
+}
+
+// ---------------------------------------------------------------------------
+// The player an earlier clause announced stays the subject across the
+// controller's own intervening choice.
+// ---------------------------------------------------------------------------
+
+/// Juggernaut Peddler `{W}{B}` Creature — Human Artificer 3/2 — verbatim Oracle
+/// text.
+const JUGGERNAUT_PEDDLER: &str = "Vigilance\nWhen Juggernaut Peddler enters, target player reveals all nonland cards in their hand. You may choose one of those cards. If you do, that player exiles it and conjures a card named Juggernaut into their hand.";
+
+/// CR 608.2c: "target player reveals … You may choose one of those cards. If
+/// you do, that player exiles it": P0 makes the choice, but the exile is the
+/// revealing player's (here P1), as for Taster of Wares
+/// (`count_slot_fail_closed_runtime`). Revert sensitivity: without the
+/// antecedent walk reading past the controller's choice the stamp is absent
+/// and P0 is recorded.
+#[test]
+fn juggernaut_peddler_exile_is_the_revealing_players() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let peddler = scenario
+        .add_creature_to_hand_from_oracle(P0, "Juggernaut Peddler", 3, 2, JUGGERNAUT_PEDDLER)
+        .with_mana_cost(ManaCost::zero())
+        .id();
+    let revealed: Vec<ObjectId> = (0..2)
+        .map(|i| {
+            scenario
+                .add_spell_to_hand(P1, &format!("P1 Hand Spell {i}"), false)
+                .id()
+        })
+        .collect();
+    let mut runner = scenario.build();
+    runner.cast(peddler).target_player(P1).resolve();
+
+    let mut chosen = None;
+    for _ in 0..60 {
+        match runner.state().waiting_for.clone() {
+            WaitingFor::TriggerTargetSelection { .. } | WaitingFor::TargetSelection { .. } => {
+                runner
+                    .act(GameAction::SelectTargets {
+                        targets: vec![engine::types::ability::TargetRef::Player(P1)],
+                    })
+                    .expect("P1 is a legal target player");
+            }
+            WaitingFor::RevealChoice { player, cards, .. } => {
+                assert_eq!(
+                    player, P0,
+                    "the controller chooses among the revealed cards"
+                );
+                assert!(cards.iter().all(|card| revealed.contains(card)));
+                chosen = Some(cards[0]);
+                runner
+                    .act(GameAction::SelectCards {
+                        cards: vec![cards[0]],
+                    })
+                    .expect("the choice is accepted");
+            }
+            WaitingFor::OptionalEffectChoice { .. } => {
+                runner
+                    .act(GameAction::DecideOptionalEffect { accept: true })
+                    .expect("the controller accepts the optional choice");
+            }
+            WaitingFor::ChooseFromZoneChoice { cards, .. } => {
+                chosen = Some(cards[0]);
+                runner
+                    .act(GameAction::SelectCards {
+                        cards: vec![cards[0]],
+                    })
+                    .expect("the choice is accepted");
+            }
+            _ => {
+                if drive_step(&mut runner) {
+                    break;
+                }
+            }
+        }
+    }
+    let chosen = chosen.expect("the controller chose a revealed card");
+    // Reach-guard: the exile ran on the card the controller chose.
+    assert_eq!(zone(&runner, chosen), Zone::Exile);
+    assert_eq!(
+        exiled_by(&runner, chosen),
+        Some(P1),
+        "the revealing player exiles the chosen card, not Juggernaut Peddler's controller"
+    );
 }
