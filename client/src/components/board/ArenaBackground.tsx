@@ -24,9 +24,18 @@ export function ArenaBackground({ color = "Blue", animated = true, quality = "fu
     if (!canvas || !animated || reducedMotion || quality === "minimal") return;
     let cancelled = false;
     let dispose: (() => void) | undefined;
-    void import("./arenaBackgroundScene.ts").then(({ createArenaBackgroundScene }) => {
-      if (!cancelled) dispose = createArenaBackgroundScene(canvas, color, quality, intensity, ambiance);
-    });
+    // `cancelled` guards the callback but cannot cancel an `import()` already in
+    // flight, so a load that settles after teardown needs a rejection handler or
+    // it becomes an unhandled rejection — fatal to the process even though the
+    // painting below is still on screen. The scene is decorative, so swallowing
+    // is the right answer for both real cases: a chunk fetch failing mid-deploy,
+    // and a module graph resolving against an environment that is already gone.
+    // Same shape as `BuildBadge.tsx`'s lazy Tauri import.
+    void import("./arenaBackgroundScene.ts")
+      .then(({ createArenaBackgroundScene }) => {
+        if (!cancelled) dispose = createArenaBackgroundScene(canvas, color, quality, intensity, ambiance);
+      })
+      .catch(() => {});
     return () => {
       cancelled = true;
       dispose?.();

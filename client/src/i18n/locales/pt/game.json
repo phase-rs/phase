@@ -204,6 +204,14 @@
         "label": "Rótulo",
         "fallback": "Escolha"
       }
+    },
+    "attacking": {
+      "you": "Atacando você",
+      "player": "Atacando {{player}}",
+      "yourPlaneswalker": "Atacando seu planeswalker {{name}}",
+      "planeswalker": "Atacando o planeswalker {{name}} de {{player}}",
+      "battle": "Atacando a batalha {{name}}",
+      "nothing": "Atacando, mas nenhum jogador, planeswalker ou batalha"
     }
   },
   "actionButton": {
@@ -436,7 +444,12 @@
     "assignRemaining_other": "Atribuir mais {{count}}",
     "confirmDistribute_one": "Declarar {{count}} Atacante",
     "confirmDistribute_other": "Declarar {{count}} Atacantes",
-    "noCommonTarget": "No shared target — switch to Distribute to aim each attacker."
+    "noCommonTarget": "No shared target — switch to Distribute to aim each attacker.",
+    "totalsHeading": "Totais de ataque",
+    "targetTotal_few": "{{count}} atacantes · {{damage}} de dano",
+    "targetTotal_many": "{{count}} atacantes · {{damage}} de dano",
+    "targetTotal_one": "{{count}} atacante · {{damage}} de dano",
+    "targetTotal_other": "{{count}} atacantes · {{damage}} de dano"
   },
   "fullControl": {
     "label": "Controle",
@@ -822,7 +835,12 @@
     "lethalBadge": "Letal",
     "planeswalkerLoyalty": "Planeswalker (lealdade: {{loyalty}})",
     "defendingPlayerTrample": "Jogador Defensor (Atropelar)",
-    "pwControllerTrample": "Controlador do PW (Atropelar Sobre PW)"
+    "pwControllerTrample": "Controlador do PW (Atropelar Sobre PW)",
+    "assignRemainingButton": "+{{amount}}",
+    "assignRemainingTo_few": "Atribuir os {{count}} de dano restantes a {{target}}",
+    "assignRemainingTo_many": "Atribuir os {{count}} de dano restantes a {{target}}",
+    "assignRemainingTo_one": "Atribuir o {{count}} de dano restante a {{target}}",
+    "assignRemainingTo_other": "Atribuir os {{count}} de dano restantes a {{target}}"
   },
   "cardTextReference": {
     "title": "Printed card text (reference)",
@@ -1404,6 +1422,7 @@
     },
     "config": {
       "startingLife": "Vida Inicial",
+      "commanderDamage": "Dano de Comandante",
       "players": "Jogadores",
       "whoGoesFirst": "Quem Começa",
       "firstPlayer": {

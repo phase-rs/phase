@@ -4738,6 +4738,27 @@ export interface DerivedViews {
    * it through `lifeReadout`. Mirrors `engine::game::derived_views::DerivedViews::life_magnitude`.
    */
   life_magnitude?: Record<string, DisplayMagnitude>;
+  /**
+   * CR 508.1a + CR 510.1a + CR 120.3a/b: per-candidate-attacker projection of unblocked damage,
+   * published only while the attack declaration prompt is open; keyed by attacker id. Display-only;
+   * before replacement and prevention effects. Mirrors
+   * `engine::game::derived_views::DerivedViews::unblocked_attack_previews`.
+   */
+  unblocked_attack_previews?: Record<string, UnblockedAttackPreview>;
+  /**
+   * CR 506.4c: each attacking creature's current attack target, keyed by attacker id. An attacker
+   * whose relation has ended is absent: it is still attacking, but not any player, planeswalker,
+   * or battle. Mirrors `engine::game::derived_views::DerivedViews::attack_targets`.
+   */
+  attack_targets?: Record<string, AttackTarget>;
+}
+
+/** Mirrors `engine::game::derived_views::UnblockedAttackPreview`. */
+export interface UnblockedAttackPreview {
+  /** CR 510.1a + CR 702.4b: combat damage across every damage step it would assign in. */
+  damage: number;
+  /** CR 120.3a / CR 120.3b: life loss that damage causes a player (0 for infect). */
+  life_loss: number;
 }
 
 /** Mirrors `engine::types::game_state::NextSpellModifier` (serde tag="type"). */

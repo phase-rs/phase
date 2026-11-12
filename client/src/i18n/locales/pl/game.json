@@ -204,6 +204,14 @@
         "label": "Etykieta",
         "fallback": "Wybór"
       }
+    },
+    "attacking": {
+      "you": "Atakuje ciebie",
+      "player": "Atakuje: {{player}}",
+      "yourPlaneswalker": "Atakuje twojego planeswalkera {{name}}",
+      "planeswalker": "Atakuje planeswalkera {{name}} gracza {{player}}",
+      "battle": "Atakuje bitwę {{name}}",
+      "nothing": "Atakuje, ale żadnego gracza, planeswalkera ani bitwy"
     }
   },
   "actionButton": {
@@ -436,7 +444,12 @@
     "assignRemaining_other": "Przydziel jeszcze {{count}}",
     "confirmDistribute_one": "Zadeklaruj {{count}} atakującego",
     "confirmDistribute_other": "Zadeklaruj {{count}} atakujących",
-    "noCommonTarget": "No shared target — switch to Distribute to aim each attacker."
+    "noCommonTarget": "No shared target — switch to Distribute to aim each attacker.",
+    "totalsHeading": "Sumy ataku",
+    "targetTotal_few": "{{count}} atakujących · obrażenia: {{damage}}",
+    "targetTotal_many": "{{count}} atakujących · obrażenia: {{damage}}",
+    "targetTotal_one": "{{count}} atakujący · obrażenia: {{damage}}",
+    "targetTotal_other": "{{count}} atakujących · obrażenia: {{damage}}"
   },
   "fullControl": {
     "label": "Kontrola",
@@ -822,7 +835,12 @@
     "lethalBadge": "Śmiertelne",
     "planeswalkerLoyalty": "Wędrowiec (lojalność: {{loyalty}})",
     "defendingPlayerTrample": "Broniący gracz (Tratowanie)",
-    "pwControllerTrample": "Kontroler wędrowca (Tratowanie przez wędrowca)"
+    "pwControllerTrample": "Kontroler wędrowca (Tratowanie przez wędrowca)",
+    "assignRemainingButton": "+{{amount}}",
+    "assignRemainingTo_few": "Przydziel pozostałe {{count}} obrażenia do: {{target}}",
+    "assignRemainingTo_many": "Przydziel pozostałych {{count}} obrażeń do: {{target}}",
+    "assignRemainingTo_one": "Przydziel pozostałe {{count}} obrażenie do: {{target}}",
+    "assignRemainingTo_other": "Przydziel pozostałe {{count}} obrażenia do: {{target}}"
   },
   "cardTextReference": {
     "title": "Printed card text (reference)",
@@ -1404,6 +1422,7 @@
     },
     "config": {
       "startingLife": "Życie początkowe",
+      "commanderDamage": "Obrażenia od dowódcy",
       "players": "Gracze",
       "whoGoesFirst": "Kto zaczyna",
       "firstPlayer": {

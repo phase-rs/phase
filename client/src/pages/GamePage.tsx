@@ -1096,6 +1096,8 @@ function GamePageContent({
   );
   const debugPanelOpen = useUiStore((s) => s.debugPanelOpen);
   const debugClickModeButtonVisible = useUiStore((s) => s.debugClickModeButtonVisible);
+  const debugInteractionMode = useUiStore((s) => s.debugInteractionMode);
+  const toggleDebugInteractionMode = useUiStore((s) => s.toggleDebugInteractionMode);
   const logPanelOpen = useUiStore((s) => s.logPanelOpen);
   const toggleDebugClickModeButtonVisible = useUiStore(
     (s) => s.toggleDebugClickModeButtonVisible,
@@ -1276,7 +1278,8 @@ function GamePageContent({
     navigate("/");
   }, [isOnlineMode, gameId, handleConcede, navigate]);
 
-  useKeyboardShortcuts();
+  const sandboxToolsAvailable = mode === "ai" || mode === "local" || isSandboxGame;
+  useKeyboardShortcuts({ sandboxToolsAvailable });
 
   // Priority-attention cues: one controller writes the store; each cue reads it.
   usePriorityAttentionController();
@@ -1860,8 +1863,10 @@ function GamePageContent({
             : undefined
         }
         takebackAudience={hasRemoteHumans(storeGameMode) ? "table" : "solo"}
-        showSandboxTools={mode === "ai" || mode === "local" || isSandboxGame}
+        showSandboxTools={sandboxToolsAvailable}
         onSandboxToolsClick={() => useUiStore.getState().openSandboxTools()}
+        debugInteractionMode={debugInteractionMode}
+        onToggleDebugInteractionMode={sandboxToolsAvailable ? toggleDebugInteractionMode : undefined}
         debugClickModeButtonVisible={debugClickModeButtonVisible}
         onToggleDebugClickModeButtonVisible={toggleDebugClickModeButtonVisible}
         showReportCard={canReportCard}

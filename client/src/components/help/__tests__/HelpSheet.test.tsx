@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import i18n from "i18next";
 
 import { AdapterError, type EngineAdapter, type GameState } from "../../../adapter/types";
@@ -133,5 +133,25 @@ describe("HelpSheet replay export status", () => {
 
     expect(downloadCurrentReplay).toHaveBeenCalledOnce();
     expect(document.querySelector("p.text-emerald-300")).toBeNull();
+  });
+});
+
+describe("HelpSheet shortcut entries", () => {
+  beforeEach(() => {
+    useUiStore.setState({ helpSheetOpen: true });
+    useGameStore.setState({ gameState: { turn_number: 1 } as GameState });
+  });
+
+  afterEach(() => {
+    cleanup();
+    useUiStore.setState({ helpSheetOpen: false });
+    useGameStore.setState({ gameState: null });
+  });
+
+  it("lists the Click Mode shortcut", () => {
+    render(<HelpSheet />);
+
+    const title = screen.getByText("Toggle Click Mode");
+    expect(within(title.closest("article")!).getByText("K")).toBeInTheDocument();
   });
 });
