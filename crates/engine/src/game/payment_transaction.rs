@@ -195,8 +195,10 @@ fn recorded_failure(shadow: &GameState) -> Option<PlayerId> {
 /// rejects it (a concession instead retires the payment). Every outcome of a
 /// payment shadow carries what it recorded: completed, paused or failed, the
 /// shadow's own state is discarded or replaces the live one, and a failure
-/// recorded in it must not be discarded with it. Outside an action boundary
-/// there is no window and the change keeps its compatibility skip.
+/// recorded in it must not be discarded with it. A shadow records a failure
+/// only inside an action's window (outside one there is no window and the
+/// change keeps its compatibility skip); `replay` reopens the shadow's window
+/// after the transcript answers only to hold such a failure.
 fn record_failure(state: &mut GameState, failure: Option<PlayerId>) {
     let (Some(player), Some(window)) = (failure, state.ingress_life_window.as_mut()) else {
         return;
@@ -557,6 +559,16 @@ pub(crate) fn settle_after_outside_action(
         // failed recovery; the caller's failed-recovery boundary retires the
         // checkpoint instead of keeping one from before the departure.
         resettle_parked_replacement_after_departure(&mut shadow, &mut events, &mut log_entries)?;
+        if !rebuild_parked_object_prompt_after_departure(&mut shadow) {
+            return settle_replay_outcome(
+                state,
+                transaction,
+                ReplayOutcome::Failed {
+                    recorded_failure: recorded_failure(&shadow),
+                },
+            )
+            .map(Some);
+        }
         shadow.payment_transaction_replay = false;
         return settle_recovered_outcome(state, transaction, shadow, events, log_entries).map(Some);
     }
@@ -626,6 +638,16 @@ fn settle_accepted_prefix_after_departure(
     // recovery, as on the checkpoint branch: the caller's failed-recovery
     // boundary retires the payment instead of replaying on the changed base.
     resettle_parked_replacement_after_departure(&mut shadow, &mut events, &mut log_entries)?;
+    if !rebuild_parked_object_prompt_after_departure(&mut shadow) {
+        return settle_replay_outcome(
+            state,
+            transaction.clone(),
+            ReplayOutcome::Failed {
+                recorded_failure: recorded_failure(&shadow),
+            },
+        )
+        .map(Some);
+    }
     shadow.payment_transaction_replay = false;
     settle_recovered_outcome(state, transaction.clone(), shadow, events, log_entries).map(Some)
 }
@@ -924,6 +946,19 @@ fn resettle_parked_replacement_after_departure(
     events.extend(result.events);
     log_entries.extend(result.log_entries);
     Ok(())
+}
+
+/// CR 400.7 + CR 800.4a + CR 614.17a: a departure removes the departed
+/// player's objects, not the payment. A parked object-naming prompt (a discard,
+/// a `PayCost` selection, an effect-cost zone choice) is rebuilt on the
+/// departed board without the objects that left, and the accepted prefix is
+/// kept. Returns false when the rest can no longer meet the prompt's count: the
+/// cost can no longer be paid, and the caller settles it as the failed payment
+/// a replay on the departed base reaches (the printed continuation for an
+/// unpaid cost runs).
+fn rebuild_parked_object_prompt_after_departure(shadow: &mut GameState) -> bool {
+    crate::types::game_state::drop_prompt_choices_that_left(shadow);
+    crate::types::game_state::recovered_prompt_names_live_objects(shadow)
 }
 
 /// CR 104.3a: a concession must stand even when the staged payment's recovery or

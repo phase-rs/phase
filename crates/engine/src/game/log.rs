@@ -1901,7 +1901,9 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
         // CR 732.2: engine-authored game-flow message — raw text, not t()-wrapped
         // (the i18n boundary keeps engine/log pass-through strings raw).
         GameEvent::ResolutionHalted { .. } => {
-            vec![text("Resolution halted — possible mandatory loop")]
+            vec![text(
+                "Resolution halted at the engine's work limit; passing continues it",
+            )]
         }
 
         // CR 732.2a: engine-authored raw text, like `ResolutionHalted` above.

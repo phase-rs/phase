@@ -96,6 +96,26 @@ pub(crate) fn handle_priority_pass_with_limit(
         clear_priority_passes(state);
 
         if state.stack.is_empty() {
+            // CR 732.2 + CR 702.24a: a repeated draw payment halted at the
+            // runaway ceiling keeps its owed instructions; when every player
+            // passes in succession it resumes, before the step can end.
+            if super::engine_payment_choices::draw_payment_is_halted(state) {
+                let waiting_for = match super::engine_payment_choices::resume_halted_draw_payment(
+                    state, events,
+                ) {
+                    Ok(waiting_for) => waiting_for,
+                    Err(error) => {
+                        debug_assert!(false, "a halted draw payment failed to resume: {error:?}");
+                        tracing::warn!(?error, "a halted draw payment failed to resume");
+                        state.waiting_for.clone()
+                    }
+                };
+                return PriorityPassOutcome {
+                    waiting_for,
+                    consumed_stack_entries: 0,
+                    transition_deferred: false,
+                };
+            }
             // Cleanup -> Untap is owned by the phase interpreter, but only
             // after the resolution pipeline has retired every popped carrier
             // and typed continuation.  Returning the current Priority window

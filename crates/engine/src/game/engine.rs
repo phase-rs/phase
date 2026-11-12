@@ -11886,14 +11886,27 @@ fn emit_resolution_halt(state: &mut GameState, result: &mut ActionResult) {
     let mut involved: Vec<ObjectId> = state.stack.iter().map(|e| e.source_id).collect();
     involved.sort_unstable_by_key(|id| id.0);
     involved.dedup();
-    result.events.push(GameEvent::ResolutionHalted { involved });
+    result.waiting_for = halt_resolution(state, &mut result.events, involved);
+}
 
+/// CR 732.2: the one halt contract for work past the runaway ceiling
+/// ([`runaway_growth_exceeded`]): resolution is paused, `ResolutionHalted`
+/// names the sources involved, and priority returns to the active player. The
+/// work left stays where it is — a cascade's entries on the stack, a repeated
+/// payment's owed instructions under its owner — and continues when every
+/// player passes in succession.
+pub(crate) fn halt_resolution(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+    involved: Vec<ObjectId>,
+) -> WaitingFor {
+    events.push(GameEvent::ResolutionHalted { involved });
     priority::reset_priority(state);
-    let wf = WaitingFor::Priority {
+    let waiting_for = WaitingFor::Priority {
         player: state.active_player,
     };
-    state.waiting_for = wf.clone();
-    result.waiting_for = wf;
+    state.waiting_for = waiting_for.clone();
+    waiting_for
 }
 
 /// CR 707.10c / CR 601.2c: advance the copy target walk after a pick — the

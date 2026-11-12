@@ -1134,6 +1134,15 @@ pub(crate) fn pending_replacement_option_count(
     }
 }
 
+/// Whether the parked replacement prompt belongs to a payment that keeps it
+/// across outside actions: a draw unless-payment parked between instructions,
+/// or a staged resolution payment (its live descriptor or its replay shadow).
+fn prompt_belongs_to_a_payment(state: &GameState) -> bool {
+    super::engine_payment_choices::draw_payment_is_parked(state)
+        || state.payment_transaction.is_some()
+        || state.payment_transaction_replay
+}
+
 /// CR 616.1: whether a parked prompt still offers only replacements that
 /// apply. When a stored candidate no longer would ([`stored_candidate_applies`]:
 /// its source left the battlefield or the game, its grant ended), the answer
@@ -5038,20 +5047,10 @@ fn remove_counter_matcher(event: &ProposedEvent, _source: ObjectId, _state: &Gam
 
 fn remove_counter_applier(
     event: ProposedEvent,
-    rid: ReplacementId,
-    state: &mut GameState,
+    _rid: ReplacementId,
+    _state: &mut GameState,
     _events: &mut Vec<GameEvent>,
 ) -> ApplyResult {
-    use crate::types::ability::QuantityModification;
-    // CR 614.6: a `Prevent` modification replaces the counter removal with
-    // nothing, as `add_counter_applier` does for a placement; the definition is
-    // read through the shared lookup, so a floating effect prevents as an
-    // object's does.
-    let prevents = stored_replacement_definition(state, rid)
-        .is_some_and(|def| def.quantity_modification == Some(QuantityModification::Prevent));
-    if prevents {
-        return ApplyResult::Prevented;
-    }
     ApplyResult::Modified(event)
 }
 
@@ -13684,8 +13683,11 @@ fn continue_replacement_impl(
 
     // CR 616.1: a stored candidate that no longer applies is not among the
     // effects its chooser chooses from. Re-propose the event so the prompt, if any
-    // remains, offers only the replacements that still apply.
-    if !pending_candidates_are_current(state, &pending) {
+    // remains, offers only the replacements that still apply. Scoped to the
+    // owners whose prompt a departure can outlive while it stays parked: a draw
+    // payment's prompt and a staged payment's prompt (live or replayed); every
+    // other prompt keeps its answer as before.
+    if prompt_belongs_to_a_payment(state) && !pending_candidates_are_current(state, &pending) {
         return pipeline_loop(state, pending.proposed, pending.depth + 1, registry, events);
     }
 

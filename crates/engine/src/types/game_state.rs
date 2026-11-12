@@ -16980,6 +16980,54 @@ pub(crate) fn recovered_prompt_names_live_objects(probe: &GameState) -> bool {
     }
 }
 
+/// CR 400.7 + CR 800.4a: rebuild a parked object-naming prompt on the board a
+/// departure left: every named object that left the zone its prompt draws from
+/// (a departing owner's objects leave the game) is dropped, so the prompt offers
+/// only what the board still holds. Whether the rest can still meet the
+/// prompt's count is [`recovered_prompt_names_live_objects`].
+pub(crate) fn drop_prompt_choices_that_left(state: &mut GameState) {
+    let retained: Option<Vec<ObjectId>> = match &state.waiting_for {
+        WaitingFor::DiscardChoice { player, cards, .. } => {
+            let hand = state.players.iter().find(|seat| seat.id == *player);
+            Some(
+                cards
+                    .iter()
+                    .copied()
+                    .filter(|card| hand.is_some_and(|seat| seat.hand.contains(card)))
+                    .collect(),
+            )
+        }
+        WaitingFor::PayCost { kind, choices, .. } => {
+            let zones = pay_cost_choice_zones(kind);
+            Some(
+                choices
+                    .iter()
+                    .copied()
+                    .filter(|id| object_is_in_zones(state, *id, zones))
+                    .collect(),
+            )
+        }
+        WaitingFor::EffectZoneChoice { cards, zone, .. } => Some(
+            cards
+                .iter()
+                .copied()
+                .filter(|id| object_is_in_zones(state, *id, std::slice::from_ref(zone)))
+                .collect(),
+        ),
+        _ => None,
+    };
+    let Some(retained) = retained else {
+        return;
+    };
+    match &mut state.waiting_for {
+        WaitingFor::PayCost { choices, .. } => *choices = retained,
+        WaitingFor::DiscardChoice { cards, .. } | WaitingFor::EffectZoneChoice { cards, .. } => {
+            *cards = retained
+        }
+        _ => {}
+    }
+}
+
 /// CR 400.7: whether `id` is still an object in one of `zones`.
 fn object_is_in_zones(probe: &GameState, id: ObjectId, zones: &[Zone]) -> bool {
     probe
@@ -16993,9 +17041,11 @@ fn pay_cost_choice_zones(kind: &PayCostKind) -> &[Zone] {
     match kind {
         // CR 701.9a + CR 701.20a: discarded and revealed cards are in hand.
         PayCostKind::Discard | PayCostKind::Reveal { .. } => &[Zone::Hand],
-        // CR 601.2h: sacrificed, returned, exiled, unattached and tapped
-        // permanents, and permanents counters are removed from, are on the
-        // battlefield.
+        // CR 701.21a + CR 701.26a: sacrificed and tapped permanents (and the
+        // returned, exiled and unattached ones, and those counters are removed
+        // from) are on the battlefield. Whether each is still eligible (an
+        // untapped creature, a matching filter) is the answer handler's check,
+        // which the admission probe runs.
         PayCostKind::Sacrifice
         | PayCostKind::ReturnToHand
         | PayCostKind::ExilePermanent { .. }
@@ -37927,9 +37977,16 @@ const LOOP_DETECT_RING_CAP: usize = 16;
 /// (CR 104.4b + CR 615.3: a state is not the same loop point when its LIVE floating shields
 /// differ; a spent shield is not part of the position).
 pub(crate) fn loop_states_equal(a: &GameState, b: &GameState) -> bool {
-    a.is_loop_comparable()
-        && b.is_loop_comparable()
-        && a == b
+    a.is_loop_comparable() && b.is_loop_comparable() && same_position(a, b)
+}
+
+/// CR 104.4b: whether two `normalize_for_loop`d states hold the same game
+/// position — the comparison [`loop_states_equal`] confirms a loop with, without
+/// its priority-beat comparability gate. `PartialEq` compares only
+/// `objects.len()` and omits the floating shields, so object content and the
+/// live shields are compared here.
+pub(crate) fn same_position(a: &GameState, b: &GameState) -> bool {
+    a == b
         && a.stack_trigger_firings == b.stack_trigger_firings
         && objects_content_eq(&a.objects, &b.objects)
         && pending_shields_loop_eq(a, b)

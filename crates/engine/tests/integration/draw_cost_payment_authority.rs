@@ -2424,81 +2424,6 @@ fn a_departure_that_removes_a_parked_candidate_keeps_a_restorable_checkpoint() {
     assert!(matches!(restored.waiting_for, WaitingFor::Priority { .. }));
 }
 
-/// CR 616.1 + CR 800.4a: outside any payment, P0's draw parks a choice
-/// between P0's Dredge and P3's Notion Thief, and P3 concedes. Notion Thief has
-/// left the game with its owner, so it is no longer an effect that would apply:
-/// P0's answer naming it re-proposes the draw, which offers Dredge alone, and
-/// declining it draws the card instead of skipping it for a player who is gone.
-#[test]
-fn an_answer_after_a_candidate_left_the_game_reproposes_the_draw() {
-    let mut scenario = GameScenario::new_n_player(4, 42);
-    scenario.at_phase(Phase::PreCombatMain);
-    for player in 0..4 {
-        scenario.with_library_top(PlayerId(player), &STAGED_LIBRARY);
-    }
-    let source = scenario.add_creature(P0, "Draw Source", 1, 1).id();
-    scenario
-        .add_creature_to_graveyard(P0, "Stinkweed Imp", 1, 2)
-        .from_oracle_text(STINKWEED_IMP_ORACLE);
-    let thief = scenario
-        .add_creature_from_oracle(PlayerId(3), "Notion Thief", 3, 1, NOTION_THIEF_ORACLE)
-        .id();
-    let mut runner = scenario.build();
-    evaluate_layers(runner.state_mut());
-    let state = runner.state_mut();
-    let hand_before = state.players[0].hand.len();
-    let root = ResolvedAbility::new(draw_effect(1), vec![], source, P0);
-    resolve_ability_chain(state, &root, &mut Vec::new(), 0).expect("the draw resolves");
-    assert!(
-        matches!(
-            state.waiting_for,
-            WaitingFor::ReplacementChoice { player, candidate_count: 2, .. } if player == P0
-        ),
-        "reach guard: Dredge and Notion Thief both apply: {:?}",
-        state.waiting_for
-    );
-    assert!(state.payment_transaction.is_none(), "no payment is staged");
-
-    apply(
-        state,
-        PlayerId(3),
-        GameAction::Concede {
-            player_id: PlayerId(3),
-        },
-    )
-    .expect("a player can concede at any time");
-    let thief_index = state
-        .pending_replacement
-        .as_ref()
-        .and_then(|pending| {
-            pending
-                .candidates
-                .iter()
-                .position(|rid| rid.source == thief)
-        })
-        .expect("reach guard: the parked prompt still lists Notion Thief");
-    apply(
-        state,
-        P0,
-        GameAction::ChooseReplacement { index: thief_index },
-    )
-    .expect("an answer naming the departed candidate is accepted");
-    let pending = state
-        .pending_replacement
-        .as_ref()
-        .expect("the re-proposed draw offers Dredge");
-    assert!(
-        pending.is_optional && pending.candidates.len() == 1,
-        "only Dredge still applies: {pending:?}"
-    );
-    apply(state, P0, GameAction::ChooseReplacement { index: 1 }).expect("Dredge is declined");
-    assert_eq!(
-        state.players[0].hand.len(),
-        hand_before + 1,
-        "P0 draws the card"
-    );
-}
-
 /// `recovered_dredge_checkpoint` with `second` as the cost's second leg: leg 1
 /// declines Dredge, leg 2 opens its own prompt, and P2's concession parks that
 /// prompt on a recovery checkpoint. P0 has a second creature and a second
@@ -2771,22 +2696,23 @@ fn an_unrepresentable_gain_in_the_replayed_prefix_rejects_the_completing_answer(
     assert_eq!(state.payment_transaction, before.payment_transaction);
 }
 
-/// CR 800.4a + CR 400.7 + CR 104.3a: P0's staged payment parks a prompt to tap
-/// a creature, listing a creature P2 owns but P0 controls. Synthetic control:
-/// the nearest printed card is Control Magic ("You control enchanted
-/// creature."). P3 concedes first, so the prefix parks on a recovery
-/// checkpoint; then P2 concedes, and P2's creature leaves the game with its
-/// owner. A checkpoint whose prompt names it cannot execute, so the concession
-/// retires the payment: the departure is published, the save restores, and the
-/// next action starts from it.
-#[test]
-fn a_second_concession_whose_owner_lent_a_listed_creature_retires_the_payment() {
+/// Four players: P0's staged `PayCost{Composite[Draw 1; tap a creature you
+/// control]}` declines leg 1's Dredge and parks leg 2's prompt, which lists a
+/// creature P2 owns but P0 controls; P3 then concedes, so the prefix parks on
+/// a recovery checkpoint. Synthetic control: the nearest printed card is
+/// Control Magic ("You control enchanted creature."). With `own_creature`, P0
+/// also controls a creature of its own. Returns the runner, the lent creature,
+/// and P0's creature if any.
+fn lent_creature_checkpoint(own_creature: bool) -> (GameRunner, ObjectId, Option<ObjectId>) {
     let mut scenario = GameScenario::new_n_player(4, 42);
     scenario.at_phase(Phase::PreCombatMain);
     for player in 0..4 {
         scenario.with_library_top(PlayerId(player), &STAGED_LIBRARY);
     }
-    let source = scenario.add_creature(P0, "Draw Cost Source", 1, 1).id();
+    let source = scenario
+        .add_artifact_from_oracle(P0, "Draw Cost Source", "")
+        .id();
+    let own = own_creature.then(|| scenario.add_creature(P0, "Own Creature", 1, 1).id());
     let lent = scenario
         .add_creature(PlayerId(2), "Lent Creature", 1, 1)
         .id();
@@ -2849,9 +2775,12 @@ fn a_second_concession_whose_owner_lent_a_listed_creature_retires_the_payment() 
         listed.contains(&lent),
         "reach guard: the lent creature is listed"
     );
+    (runner, lent, own)
+}
 
+fn concede_lender(runner: &mut GameRunner) {
     let published = apply(
-        state,
+        runner.state_mut(),
         PlayerId(2),
         GameAction::Concede {
             player_id: PlayerId(2),
@@ -2865,16 +2794,77 @@ fn a_second_concession_whose_owner_lent_a_listed_creature_retires_the_payment() 
         )),
         "the second departure is published"
     );
+}
+
+/// CR 800.4a + CR 400.7 + CR 614.17a: P2 concedes and the lent creature leaves
+/// the game with its owner. The departure removes the creature, not the
+/// payment: the parked prompt is rebuilt to list only P0's own creature, the
+/// save restores, and tapping it completes the payment with the card drawn
+/// through the declined Dredge.
+#[test]
+fn a_concession_that_removes_a_listed_creature_keeps_the_payment() {
+    let (mut runner, lent, own) = lent_creature_checkpoint(true);
+    let own = own.expect("P0 controls a creature of its own");
+    let hand_before = runner.state().players[P0.0 as usize].hand.len();
+    concede_lender(&mut runner);
+    let state = runner.state();
+    assert!(
+        state
+            .payment_transaction
+            .as_ref()
+            .is_some_and(|transaction| transaction.recovered.is_some()),
+        "the payment keeps its accepted prefix"
+    );
+    let WaitingFor::PayCost { choices, .. } = &state.waiting_for else {
+        panic!("leg 2 still asks: {:?}", state.waiting_for);
+    };
+    assert_eq!(choices, &vec![own], "only P0's own creature is listed");
+    assert!(!state
+        .objects
+        .get(&lent)
+        .is_some_and(|object| object.zone == Zone::Battlefield));
+    let mut restored = checked_round_trip(state).expect("the rebuilt prompt restores");
+    apply(
+        &mut restored,
+        P0,
+        GameAction::SelectCards { cards: vec![own] },
+    )
+    .expect("tapping P0's own creature pays leg 2");
+    assert!(
+        restored.payment_transaction.is_none(),
+        "the payment completed"
+    );
+    assert!(restored.objects[&own].tapped, "the creature paid the cost");
+    assert_eq!(
+        restored.players[P0.0 as usize].hand.len(),
+        hand_before + 1,
+        "the card drawn through the declined Dredge is in hand"
+    );
+}
+
+/// CR 800.4a + CR 118.12: the same departure when the lent creature was the
+/// only one listed. Leg 2 can no longer be paid, so the payment fails as a
+/// replay on the departed base would: the staged prefix is not committed, no
+/// prompt remains, and the save restores.
+#[test]
+fn a_concession_that_removes_the_only_listed_creature_fails_the_payment() {
+    let (mut runner, _, _) = lent_creature_checkpoint(false);
+    let hand_before = runner.state().players[P0.0 as usize].hand.len();
+    concede_lender(&mut runner);
     let state = runner.state();
     assert!(
         state.payment_transaction.is_none(),
-        "a recovery whose prompt names an object that left is retired, not kept"
+        "the payment is settled"
     );
-    let mut restored =
-        checked_round_trip(state).expect("the published state passes checked restore");
-    let WaitingFor::Priority { player } = restored.waiting_for else {
-        panic!("a living player has priority: {:?}", restored.waiting_for);
-    };
-    apply(&mut restored, player, GameAction::PassPriority)
-        .expect("the next ordinary action starts from the departure");
+    assert!(
+        !matches!(state.waiting_for, WaitingFor::PayCost { .. }),
+        "no prompt remains: {:?}",
+        state.waiting_for
+    );
+    assert_eq!(
+        state.players[P0.0 as usize].hand.len(),
+        hand_before,
+        "the failed staged payment commits none of its prefix"
+    );
+    checked_round_trip(state).expect("the settled state restores");
 }

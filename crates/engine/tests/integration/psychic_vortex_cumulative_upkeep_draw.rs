@@ -2286,13 +2286,24 @@ fn install_every_draw_gains_life(runner: &mut GameRunner, holder: ObjectId) {
     object.replacement_definitions.push(replacement);
 }
 
-/// CR 118.12 + CR 702.24a: a count no single dispatch can perform is halted by
-/// the engine's runaway authority, never refused: the instructions performed
-/// stand, the rest are not performed, the payment settles as paid, and
-/// `ResolutionHalted` names Psychic Vortex.
+fn halts(events: &[GameEvent], vortex: ObjectId) -> usize {
+    events
+        .iter()
+        .filter(|event| {
+            matches!(event, GameEvent::ResolutionHalted { involved } if involved.contains(&vortex))
+        })
+        .count()
+}
+
+/// CR 732.2 + CR 702.24a: a count no single dispatch can perform is halted by
+/// the engine's runaway ceiling, never refused and never settled as paid:
+/// the instructions still owed stay parked, `ResolutionHalted` names Psychic
+/// Vortex, and priority returns to the active player. When both players pass,
+/// the payment resumes, and every age counter is paid before the upkeep
+/// resolves.
 #[test]
-fn an_enormous_payment_that_changes_the_game_on_every_draw_is_halted_not_refused() {
-    const AGE: u32 = 1 << 20;
+fn a_payment_past_the_runaway_ceiling_halts_and_resumes_until_paid() {
+    const AGE: u32 = 16_668;
     let (mut runner, vortex, holder) = vortex_board(AGE - 1, &STAGED_LIBRARY, |scenario| {
         scenario
             .add_creature(P0, "Synthetic Life Source", 1, 1)
@@ -2303,20 +2314,46 @@ fn an_enormous_payment_that_changes_the_game_on_every_draw_is_halted_not_refused
     assert_draw_cost_prompt(&runner, AGE as usize, 1);
     let life_before = runner.life(P0);
     let before = ZoneSizes::of(&runner, P0);
-    let result = runner
+    let paid = runner
         .act(GameAction::PayUnlessCost { pay: true })
         .expect("paying is never refused");
+    assert_eq!(halts(&paid.events, vortex), 1, "the payment halts once");
     assert!(
-        result.events.iter().any(|event| matches!(
-            event,
-            GameEvent::ResolutionHalted { involved } if involved.contains(&vortex)
-        )),
-        "the runaway is halted and names its source"
+        !upkeep_ability_resolved(&paid.events, vortex),
+        "the upkeep is not paid yet"
     );
-    let gained = runner.life(P0) - life_before;
     assert!(
-        gained > 1_000 && (gained as u32) < AGE,
-        "the payment ran until the runaway ceiling, then stopped: {gained}"
+        matches!(runner.state().waiting_for, WaitingFor::Priority { player } if player == P0),
+        "priority returns to the active player: {:?}",
+        runner.state().waiting_for
+    );
+    let performed = (runner.life(P0) - life_before) as u32;
+    assert_eq!(performed, 16_667, "the ceiling stops the first dispatch");
+    assert_eq!(
+        parked_unpaid_suffix(&runner),
+        owed_instructions(AGE - performed),
+        "every instruction not performed is still owed"
+    );
+    let mut events = Vec::new();
+    let mut passes = 0;
+    while runner.state().pending_cost_move_resume.is_some() {
+        events.extend(
+            runner
+                .act(GameAction::PassPriority)
+                .expect("passing priority resumes the payment")
+                .events,
+        );
+        passes += 1;
+        assert!(
+            passes <= 2,
+            "the payment resumes once every player has passed"
+        );
+    }
+    assert_eq!(halts(&events, vortex), 0, "the rest fits in one dispatch");
+    assert_eq!(
+        (runner.life(P0) - life_before) as u32,
+        AGE,
+        "every age counter is paid"
     );
     assert_eq!(
         ZoneSizes::of(&runner, P0),
@@ -2324,13 +2361,83 @@ fn an_enormous_payment_that_changes_the_game_on_every_draw_is_halted_not_refused
         "every draw was replaced"
     );
     assert!(
-        upkeep_ability_resolved(&result.events, vortex),
+        upkeep_ability_resolved(&events, vortex),
         "the upkeep is paid"
     );
     assert_eq!(zone_of(&runner, vortex), Zone::Battlefield);
     assert!(
         runner.state().pending_cost_move_resume.is_none(),
         "nothing is owed"
+    );
+}
+
+/// Words of Worship and Platinum Emperion, verbatim Oracle text.
+const WORDS_OF_WORSHIP_ORACLE: &str =
+    "{1}: The next time you would draw a card this turn, you gain 5 life instead.";
+const PLATINUM_EMPERION_ORACLE: &str = "Your life total can't change. (You can't gain or lose \
+life. You can't pay any amount of life except 0.)";
+
+/// CR 118.11 + CR 614.6: in response to Psychic Vortex's upkeep trigger, P0
+/// activates Words of Worship. The first draw instruction is replaced by a gain
+/// that Platinum Emperion makes impossible: it emits nothing a trigger keys on,
+/// yet it uses up the shield, so the game changed and it is not a fixed point.
+/// The two later instructions are real draws.
+#[test]
+fn a_quiet_instruction_that_uses_up_a_shield_is_not_a_fixed_point() {
+    const AGE: u32 = 3;
+    let (mut runner, vortex, words) = vortex_board(AGE - 1, &STAGED_LIBRARY, |scenario| {
+        scenario.add_creature_from_oracle(P0, "Platinum Emperion", 8, 8, PLATINUM_EMPERION_ORACLE);
+        scenario
+            .add_enchantment_from_oracle(P0, "Words of Worship", WORDS_OF_WORSHIP_ORACLE)
+            .id()
+    });
+    runner.advance_to_upkeep();
+    assert_eq!(
+        runner.state().stack.len(),
+        1,
+        "reach guard: the upkeep trigger waits"
+    );
+    runner.state_mut().players[P0.0 as usize]
+        .mana_pool
+        .add(ManaUnit::new(
+            ManaType::Colorless,
+            ObjectId(0),
+            false,
+            vec![],
+        ));
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: words,
+            ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("Words of Worship is activated in response");
+    runner.resolve_top();
+    assert_eq!(
+        runner.state().stack.len(),
+        1,
+        "reach guard: the shield is made"
+    );
+    runner.resolve_top();
+    assert_draw_cost_prompt(&runner, AGE as usize, 1);
+    let before = ZoneSizes::of(&runner, P0);
+    let life_before = runner.life(P0);
+    let result = runner
+        .act(GameAction::PayUnlessCost { pay: true })
+        .expect("paying is admitted");
+    assert_eq!(
+        ZoneSizes::of(&runner, P0).hand,
+        before.hand + 2,
+        "the instructions after the shield are real draws"
+    );
+    assert_eq!(
+        runner.life(P0),
+        life_before,
+        "Platinum Emperion keeps the life total"
+    );
+    assert!(
+        upkeep_ability_resolved(&result.events, vortex),
+        "the upkeep is paid"
     );
 }
 
