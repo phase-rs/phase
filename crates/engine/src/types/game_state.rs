@@ -35846,7 +35846,10 @@ impl GameState {
     /// incarnation's last-known copiable values and its departure snapshot
     /// (`token_copy::CopySource::last_known` takes the token image from
     /// `lki_by_incarnation`), so both tables keep exactly the incarnations in
-    /// `sources` and drop the rest as history.
+    /// `sources` and drop the rest as history. This symmetry holds for the
+    /// step clear only: the loop-normalisation clone prunes `lki_by_incarnation`
+    /// by `retain_carrier_referenced_lki` instead (comparison only, so the
+    /// dropped display data has no behavioural effect).
     pub(crate) fn retain_own_copy_source_lki(&mut self, sources: &HashSet<ObjectIncarnationRef>) {
         self.retain_own_copy_source_values(sources);
         self.lki_by_incarnation =
