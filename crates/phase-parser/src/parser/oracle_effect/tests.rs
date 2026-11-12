@@ -98445,14 +98445,11 @@ fn source_qualified_cant_be_targeted_effect_fails_closed() {
 /// Vastwood, Veilstone Amulet) still lowers to `CantBeTargeted { Opponents }`.
 #[test]
 fn unqualified_opponents_cant_be_targeted_effect_is_supported() {
-    for text in [
-        "Target creature can't be the target of spells or abilities your opponents control this turn.",
-    ] {
-        let def = parse_effect_chain(text, AbilityKind::Spell);
-        assert!(!ability_chain_has_unimplemented(&def), "{text}: {def:?}");
-        assert!(
-            format!("{def:?}").contains("CantBeTargeted"),
-            "{text}: expected CantBeTargeted, got {def:?}"
-        );
-    }
+    let text = "Target creature can't be the target of spells or abilities your opponents control this turn.";
+    let def = parse_effect_chain(text, AbilityKind::Spell);
+    assert!(!ability_chain_has_unimplemented(&def), "{text}: {def:?}");
+    assert!(
+        format!("{def:?}").contains("CantBeTargeted"),
+        "{text}: expected CantBeTargeted, got {def:?}"
+    );
 }

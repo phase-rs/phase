@@ -320,11 +320,14 @@ fn install_transient(
     // the recipient as it was when the effect resolved; a blinked or otherwise
     // re-created object is a new object it no longer reaches.
     let affected_recipient = match &affected {
-        TargetFilter::SpecificObject { id } if modifications.iter().any(is_cant_be_targeted_rule_effect) => {
+        TargetFilter::SpecificObject { id }
+            if modifications.iter().any(is_cant_be_targeted_rule_effect) =>
+        {
+            use crate::game::game_object::ObjectIncarnationRefExt;
             state
                 .objects
                 .get(id)
-                .map(|obj| <crate::types::identifiers::ObjectIncarnationRef as crate::game::game_object::ObjectIncarnationRefExt>::from_object(obj))
+                .map(crate::types::identifiers::ObjectIncarnationRef::from_object)
         }
         _ => None,
     };
