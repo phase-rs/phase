@@ -23249,7 +23249,7 @@ fn try_split_targeted_compound(text: &str, ctx: &mut ParseContext) -> Option<Par
     // The non-anaphoric arm already inherits all three through the cloned
     // context; this keeps the anaphoric arm's blank context from dropping them
     // ("... and choose a creature you control other than it").
-    continuation_ctx.clause_subject_chooser = ctx.clause_subject_chooser.clone();
+    continuation_ctx.clause_subject_chooser = ctx.clause_subject_chooser;
     continuation_ctx.clause_player_scope = ctx.clause_player_scope.clone();
     continuation_ctx.clause_opponent_may_scope = ctx.clause_opponent_may_scope;
     // CR 608.2c + CR 608.2k: a bare object pronoun in an anaphoric continuation
@@ -29572,6 +29572,7 @@ fn cast_time_bare_choice(effect: &Effect, timing: TargetChoiceTiming) -> bool {
 ///   own). The payload is still the clause's own effect here, carrying the delay;
 ///   a delayed trigger another producer already wrapped reads context references,
 ///   not a preceding choice, and is not claimed.
+///
 /// Every earlier bare choice is withheld, not only the nearest antecedent, since
 /// such a reader may read several of them ("Those creatures fight each other").
 /// Reading the chosen object through any other slot is not claimed; over-withholding
