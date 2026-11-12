@@ -481,6 +481,7 @@ fn rebuking_ceremony_concession_during_the_prompt_places_the_surviving_artifact_
         cast_until_resolved_or_asked(&mut runner, ceremony, &[surviving, pile.survivor]);
         assert_commander_prompt(runner.state(), P1, pile.brokkos);
         assert_eq!(runner.state().objects[&surviving].zone, Zone::Battlefield);
+        save_and_restore(&mut runner);
 
         let conceded = engine::game::engine::apply(
             runner.state_mut(),
@@ -490,7 +491,7 @@ fn rebuking_ceremony_concession_during_the_prompt_places_the_surviving_artifact_
         .expect("a player may concede at any time");
 
         assert!(
-            matches!(conceded.waiting_for, WaitingFor::Priority { .. }),
+            matches!(conceded.waiting_for, WaitingFor::Priority { player: P0 }),
             "{label}: {:?}",
             conceded.waiting_for
         );
@@ -537,7 +538,9 @@ fn concede(runner: &mut GameRunner, player: PlayerId) -> ActionResult {
 /// owner's command-zone choice parks the batch. P1 concedes: Karn leaves the
 /// game, and the resumed batch reaches Traxos, whose owner's choice parks it
 /// again — the concession hands that prompt to P2 and keeps its own departure
-/// events. Answering it finishes the ceremony.
+/// events, and P0's Super Shredder trigger from Karn's departure waits for the
+/// resolution. Answering it finishes the ceremony and puts each leave trigger on
+/// the stack once.
 #[test]
 fn concession_resume_that_parks_again_opens_the_next_commander_prompt() {
     let db = shared_card_db().expect("integration card fixture must load");
@@ -545,6 +548,7 @@ fn concession_resume_that_parks_again_opens_the_next_commander_prompt() {
     scenario.at_phase(Phase::PreCombatMain);
     let karn = scenario.add_real_card(P1, "Karn, Silver Golem", Zone::Battlefield, db);
     let traxos = scenario.add_real_card(P2, "Traxos, Scourge of Kroog", Zone::Battlefield, db);
+    let shredder = scenario.add_real_card(P0, "Super Shredder", Zone::Battlefield, db);
     let ceremony = scenario.add_real_card(P0, "Rebuking Ceremony", Zone::Hand, db);
     scenario.with_library_top(P2, &["Library Card A"]);
     scenario.with_mana_pool(P0, mana(ManaType::Green, 5));
@@ -580,8 +584,22 @@ fn concession_resume_that_parks_again_opens_the_next_commander_prompt() {
         "the concession keeps its own departure events"
     );
 
+    assert!(
+        runner.state().stack.is_empty(),
+        "the departure's trigger waits until the resolution finishes"
+    );
+
     answer(&mut runner, 1);
     resolution_finished(runner.state());
+    let shredder_triggers = waiting_triggers(runner.state())
+        .into_iter()
+        .filter(|(_, text)| text.contains("another permanent leaves"))
+        .count();
+    assert_eq!(
+        shredder_triggers, 2,
+        "Super Shredder saw Karn leave the game and Traxos go to its library, once each"
+    );
+    assert_eq!(runner.state().objects[&shredder].zone, Zone::Battlefield);
     assert_eq!(runner.state().players[2].library.front(), Some(&traxos));
     assert_eq!(runner.state().objects[&ceremony].zone, Zone::Graveyard);
 }
@@ -638,7 +656,7 @@ fn concession_resume_of_a_triggered_ability_performs_state_based_actions() {
 
     let conceded = concede(&mut runner, P1);
     assert!(
-        matches!(conceded.waiting_for, WaitingFor::Priority { .. }),
+        matches!(conceded.waiting_for, WaitingFor::Priority { player: P0 }),
         "{:?}",
         conceded.waiting_for
     );
@@ -683,7 +701,7 @@ fn concession_resume_puts_the_spell_into_the_graveyard_before_state_based_action
 
     let conceded = concede(&mut runner, P1);
     assert!(
-        matches!(conceded.waiting_for, WaitingFor::Priority { .. }),
+        matches!(conceded.waiting_for, WaitingFor::Priority { player: P0 }),
         "{:?}",
         conceded.waiting_for
     );
@@ -837,7 +855,7 @@ fn chaos_warp_owner_concession_during_the_prompt_finishes_before_priority() {
         let conceded = concede(&mut runner, P1);
 
         assert!(
-            matches!(conceded.waiting_for, WaitingFor::Priority { .. }),
+            matches!(conceded.waiting_for, WaitingFor::Priority { player: P0 }),
             "{label}: {:?}",
             conceded.waiting_for
         );
