@@ -147,17 +147,31 @@ pub(crate) fn capture_own_history(clause: &mut ParsedEffectClause, text: &str, c
 /// tree search can substitute a different instruction for a missing producer.
 #[derive(Default)]
 pub(crate) struct HistoryTransport {
-    records: Vec<(HistoryProvenance, Option<usize>)>,
+    records: Vec<(HistoryProvenance, Option<Handle>)>,
 }
 
-fn address(def: &AbilityDefinition) -> usize {
-    std::ptr::from_ref(def.effect.as_ref()) as usize
+/// A producer's transport handle: its effect allocation, and that effect's variant.
+/// The address follows the node through moves and wrapping. It can only be reused
+/// after the producer's effect was dropped, and a reused allocation is accepted only
+/// if it holds the same kind of instruction, so an unrelated node that took the
+/// address is a dangling producer, which the audit reports.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct Handle {
+    address: usize,
+    kind: std::mem::Discriminant<Effect>,
+}
+
+fn address(def: &AbilityDefinition) -> Handle {
+    Handle {
+        address: std::ptr::from_ref(def.effect.as_ref()) as usize,
+        kind: std::mem::discriminant(def.effect.as_ref()),
+    }
 }
 
 fn walk(
     def: &AbilityDefinition,
     path: &mut InstructionPath,
-    out: &mut Vec<(usize, InstructionPath)>,
+    out: &mut Vec<(Handle, InstructionPath)>,
 ) {
     out.push((address(def), path.clone()));
     let mut child = |step, def: &AbilityDefinition| {
