@@ -1763,12 +1763,21 @@ impl ClauseDraft<'_> {
             .builder
             .slot
             .allocator()
-            .allocate_with_span(span, Some(&self.source_text))
+            .allocate_with_span(span.clone(), Some(&self.source_text))
             .expect("chain-relative clause span is contained by its chain item");
         // Seal the history occurrence's clause envelope with the same source unit
         // that owns its parsed instruction. Reminting an absorbed clause transports
         // this envelope too; nested logical lineage remains on the pending record.
         for record in &mut self.parsed.history {
+            // Rebase once per enclosing clause, preserving the same printed
+            // offsets for all fan-out copies while distinguishing later clauses.
+            if span.end_byte > span.start_byte {
+                record.occurrence.printed.enclose(
+                    &self.source_text.to_ascii_lowercase(),
+                    &self.builder.chain_text.to_ascii_lowercase(),
+                    span.start_byte,
+                );
+            }
             record.occurrence.source = Some(source.clone());
         }
         self.builder.next_clause_id += 1;

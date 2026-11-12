@@ -6463,18 +6463,18 @@ pub(crate) fn detect_combat_history_relation(
     provenance: &[super::oracle_ir::history_provenance::HistoryAudit<'_>],
     diagnostics: &mut Vec<OracleDiagnostic>,
 ) {
-    let mut available = provenance.iter().collect::<Vec<_>>();
     let mut swallowed = false;
     let mut remaining = cleaned;
-    while let Some((_, clause, rest)) = scan_preceded(remaining, parse_block_history_clause) {
-        match available
-            .iter()
-            .position(|record| record.record.occurrence.clause == clause)
-        {
-            Some(index) => {
-                available.remove(index);
-            }
-            None => swallowed = true,
+    while let Some((before, clause, rest)) = scan_preceded(remaining, parse_block_history_clause) {
+        let start = cleaned.len() - remaining.len() + before.len();
+        let end = cleaned.len() - rest.len();
+        // Fan-out may produce many instructions for one printed occurrence.
+        // Every one is checked below; none can stand in for a later occurrence.
+        if !provenance.iter().any(|evidence| {
+            evidence.record.occurrence.clause == clause
+                && evidence.record.occurrence.printed.offsets_in(cleaned) == Some((start, end))
+        }) {
+            swallowed = true;
         }
         remaining = rest;
     }

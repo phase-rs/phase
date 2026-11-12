@@ -97,11 +97,40 @@ impl InstructionPath {
 pub(crate) struct HistoryOccurrence {
     pub(crate) clause: BlockHistoryClause,
     pub(crate) fragment: String,
-    /// Exact owner-local offsets; the envelope below names its committed clause.
-    pub(crate) owner_text: String,
+    /// Logical printed identity, shared by every instruction produced by fan-out.
+    pub(crate) printed: PrintedHistoryIdentity,
     pub(crate) source: Option<super::doc::OracleUnitSource>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PrintedHistoryIdentity {
+    pub(crate) owner_text: String,
     pub(crate) start: usize,
     pub(crate) end: usize,
+}
+
+impl PrintedHistoryIdentity {
+    /// Locate an owner without guessing between repeated identical fragments.
+    pub(crate) fn offsets_in(&self, text: &str) -> Option<(usize, usize)> {
+        // allow-noncombinator: source identity bookkeeping, not parsing dispatch
+        let mut owners = text.match_indices(&self.owner_text);
+        let (offset, _) = owners.next()?;
+        if owners.next().is_some() {
+            return None;
+        }
+        Some((offset + self.start, offset + self.end))
+    }
+
+    pub(crate) fn enclose(&mut self, fragment: &str, owner: &str, offset: usize) {
+        if self.owner_text == owner {
+            return;
+        }
+        if let Some((start, end)) = self.offsets_in(fragment) {
+            self.start = offset + start;
+            self.end = offset + end;
+            self.owner_text = owner.to_string();
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -164,10 +193,12 @@ pub(crate) fn capture_own_history(clause: &mut ParsedEffectClause, text: &str, c
             occurrence: HistoryOccurrence {
                 clause: parsed,
                 fragment: lower[start..end].to_string(),
-                owner_text: lower.clone(),
+                printed: PrintedHistoryIdentity {
+                    owner_text: lower.clone(),
+                    start,
+                    end,
+                },
                 source: None,
-                start,
-                end,
             },
             expected,
             instruction: InstructionPath::default(),
@@ -1414,6 +1445,50 @@ mod tests {
             target: population(CombatRelationSubject::Source),
         };
         assert!(flagged(text, &lowered));
+    }
+
+    #[test]
+    fn distributed_history_cannot_pay_for_a_later_printed_occurrence() {
+        // Synthetic grammar discriminator: an earlier announced player makes
+        // the coordinated-set channel decline, while the chosen-player binding
+        // is supported by the legacy two-halves distributor.
+        let text = "Target player draws a card. You and that player each sacrifice a creature ~ blocked this turn. Tap all creatures ~ blocked this turn.";
+        let ctx = ParseContext {
+            relative_player_scope: Some(crate::types::ability::ControllerRef::ChosenPlayer {
+                index: 0,
+            }),
+            ..source_context()
+        };
+        let lowered = lower(text, ctx);
+        assert_eq!(lowered.history.len(), 3, "{lowered:?}");
+        assert!(!flagged(text, &lowered), "{lowered:?}");
+        let first = &lowered.history[0].occurrence.printed;
+        let copies: Vec<_> = lowered
+            .history
+            .iter()
+            .filter(|record| record.occurrence.printed == *first)
+            .collect();
+        assert_eq!(copies.len(), 2, "the first printed clause fans out");
+        assert_ne!(copies[0].producer, copies[1].producer);
+        assert_ne!(copies[0].locator, copies[1].locator);
+        assert_eq!(first.owner_text, text.to_ascii_lowercase());
+
+        // Only remove provenance: both first-occurrence instructions and the
+        // correctly parsed later instruction remain in the production tree.
+        let mut missing = lowered.clone();
+        missing
+            .history
+            .retain(|record| record.occurrence.printed == *first);
+        assert!(flagged(text, &missing));
+
+        // Each instruction produced by the same printed clause must preserve
+        // the restriction; the other half cannot vouch for a widened operand.
+        for copy in copies {
+            let mut widened = lowered.clone();
+            let path = copy.locator.as_ref().expect("distributed instruction");
+            replace_population(resolve_mut(path, &mut widened.value), bare());
+            assert!(flagged(text, &widened), "missing relation at {path:?}");
+        }
     }
 
     #[test]
