@@ -1102,6 +1102,38 @@ pub fn filter_pool_listing(listing_json: &str, filter_json: &str) -> Result<JsVa
     )))
 }
 
+/// CR 702.139a + CR 100.4b: whether `companion` is backed by a drafted pool
+/// copy the main deck does not use. Both card lists are JSON arrays of card
+/// names (the pool's instance names and the main deck's names). Stateless —
+/// usable by P2P guests, and the one rule `validate_limited_deck` enforces at
+/// submission, so the deck builder never re-counts copies itself.
+#[wasm_bindgen]
+pub fn companion_has_drafted_copy_outside_deck(
+    pool_names_json: &str,
+    main_deck_json: &str,
+    companion: &str,
+) -> Result<bool, JsValue> {
+    companion_backed_inner(pool_names_json, main_deck_json, companion)
+        .map_err(|error| JsValue::from_str(&error))
+}
+
+/// Native-testable core for `companion_has_drafted_copy_outside_deck`.
+fn companion_backed_inner(
+    pool_names_json: &str,
+    main_deck_json: &str,
+    companion: &str,
+) -> Result<bool, String> {
+    let pool: Vec<String> = serde_json::from_str(pool_names_json)
+        .map_err(|error| format!("Failed to parse pool names: {error}"))?;
+    let main_deck: Vec<String> = serde_json::from_str(main_deck_json)
+        .map_err(|error| format!("Failed to parse main deck: {error}"))?;
+    Ok(
+        draft_core::validation::companion_has_drafted_copy_outside_deck(
+            &pool, &main_deck, companion,
+        ),
+    )
+}
+
 /// The complete engine-owned filter option lists for a pool, computed from
 /// the instances alone (review round 5): the stateless path a display uses
 /// when its delivered view predates the option fields, so legacy controls
@@ -5897,6 +5929,26 @@ mod create_multiplayer_draft_tests {
         });
 
         clear_state();
+    }
+
+    #[test]
+    fn companion_backing_is_the_pool_count_beyond_the_decks_use() {
+        let names = |cards: &[&str]| serde_json::to_string(cards).unwrap();
+        let backed = |pool: &[&str], deck: &[&str]| {
+            companion_backed_inner(&names(pool), &names(deck), "Gyruda, Doom of Depths").unwrap()
+        };
+        // Moving the only drafted copy into the deck leaves nothing outside it.
+        assert!(!backed(
+            &["Gyruda, Doom of Depths"],
+            &["Gyruda, Doom of Depths"]
+        ));
+        assert!(backed(&["Gyruda, Doom of Depths"], &["Island"]));
+        assert!(backed(
+            &["Gyruda, Doom of Depths", "Gyruda, Doom of Depths"],
+            &["Gyruda, Doom of Depths"]
+        ));
+        assert!(!backed(&["Island"], &["Island"]));
+        assert!(companion_backed_inner("not json", "[]", "Gyruda, Doom of Depths").is_err());
     }
 
     #[test]

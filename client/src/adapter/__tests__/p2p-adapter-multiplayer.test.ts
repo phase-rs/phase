@@ -3802,6 +3802,7 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
       commander: [],
       companion: [],
       signature_spell: [],
+      min_deck_size: 60,
       selected_format: "Custom:0",
     });
     expect(mockCheckDeckCompatibility).not.toHaveBeenCalled();
@@ -3824,6 +3825,34 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
       "WaitingHuman",
     ]);
     expect(mockInitializeHostGame).not.toHaveBeenCalled();
+  });
+
+  // CR 100.2b + CR 702.139b: a draft match is hosted under its Cube's own
+  // minimum deck size, and the guest's companion is judged against that.
+  it("gates a guest deck against the room's own minimum deck size", async () => {
+    mockEvaluateDeckFormatGate.mockResolvedValueOnce({ compatible: true, reasons: [] });
+    const { adapter, emitConnection } = makeHost(2, 5_000, {
+      ...customFormatConfig(),
+      format: "Limited",
+      deck_size: { type: "Minimum", data: 50 },
+    });
+    await adapter.initialize();
+
+    await joinGuest(emitConnection, {
+      type: "guest_deck",
+      deckData: {
+        player: { main_deck: ["Plains"], sideboard: [], companion: ["Yorion, Sky Nomad"] },
+      },
+    });
+    await flushPromises(20);
+
+    expect(mockEvaluateDeckFormatGate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        companion: ["Yorion, Sky Nomad"],
+        min_deck_size: 50,
+        selected_format: "Limited",
+      }),
+    );
   });
 
   it("projects team metadata from wire SeatView into player slots", () => {

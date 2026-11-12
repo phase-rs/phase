@@ -66,6 +66,7 @@ import {
   loadGameStrict,
 } from "../services/gamePersistence";
 import type { DraftRunState } from "../services/quickDraftPersistence";
+import { limitedFormatConfigForSession } from "../services/draftFormatConfig";
 import { SPECTATOR_PLAYER_ID } from "../constants/game";
 import { clearWsSession, loadWsSession, saveWsSession } from "../services/multiplayerSession";
 import {
@@ -1777,11 +1778,18 @@ export function GameProvider({
         }
         return run;
       };
+      // CR 100.2b + CR 702.139b: the draft match runs under the session's own
+      // minimum deck size, recorded on the run at launch.
+      const draftMatchFormatConfig = (run: DraftRunState | null) =>
+        formatConfig && run
+          ? limitedFormatConfigForSession(formatConfig, run.min_deck_size)
+          : formatConfig;
       const startDraftDeck = async (raw: string) => {
         try {
           const deckList = JSON.parse(raw) as DeckListPayload;
+          let run: DraftRunState | null = null;
           if (soloDraft) {
-            const run = await loadExactDraftRun();
+            run = await loadExactDraftRun();
             if (cancelled) return;
             if (!matchesPublishedDraftPayload(deckList, run)) throw unavailableDraftStage();
           }
@@ -1791,7 +1799,7 @@ export function GameProvider({
             gameId,
             adapter,
             submission,
-            formatConfig,
+            draftMatchFormatConfig(run),
             playerCount,
             matchConfig,
             firstPlayer,
@@ -1830,7 +1838,9 @@ export function GameProvider({
           };
           const submission = await submitLocalHandoff(deckList);
           if (cancelled) return;
-          await initGame(gameId, adapter, submission, formatConfig, playerCount, matchConfig, firstPlayer, "strict");
+          await initGame(
+            gameId, adapter, submission, draftMatchFormatConfig(run), playerCount, matchConfig, firstPlayer, "strict",
+          );
           if (cancelled) return;
           controller = createGameLoopController({
             mode: mode === "local" ? "local" : "ai", difficulty,

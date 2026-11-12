@@ -1412,6 +1412,9 @@ function PodDeckBuilder({
   const workspace = useMultiplayerDraftStore((s) => s.workspaceState);
   const interactionLocked = useMultiplayerDraftStore((s) => s.pickInteractionLocked);
   const submitDeck = useMultiplayerDraftStore((s) => s.submitDeck);
+  // CR 702.139a: reopening a submitted deck starts from its designation, so a
+  // resubmission keeps an unchanged companion rather than silently clearing it.
+  const submittedCompanion = useMultiplayerDraftStore((s) => s.submittedCompanion);
   const autoSuggestLands = useMultiplayerDraftStore((s) => s.autoSuggestLands);
   const submissionError = useMultiplayerDraftStore((s) => s.error);
   const [preferences, setPreferences] = useState<DraftWorkspacePreferences>(loadDraftWorkspacePreferences);
@@ -1480,6 +1483,7 @@ function PodDeckBuilder({
           onRemoveBasicLand: (name) => useMultiplayerDraftStore.getState().removeBasicLand(name),
           onAutoSuggestLands: autoSuggestLands,
           onSubmitDeck: confirmSubmitDeck,
+          initialCompanion: submittedCompanion,
         }}
         submissionError={submissionError}
         showSuggestions

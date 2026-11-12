@@ -110,6 +110,7 @@ import type {
 } from "./draftStore";
 import { DRAFT_DECK_SESSION_KEY } from "./draftStore";
 import { FORMAT_DEFAULTS } from "./multiplayerStore";
+import { limitedFormatConfigForSession } from "../services/draftFormatConfig";
 
 // ── Types ──────────────────────────────────────────────────────────────
 
@@ -334,6 +335,12 @@ interface MultiplayerDraftState {
   /** Full deck submitted during deckbuilding (mainDeck + lands). */
   submittedDeck: string[];
   submittedWorkspaceState: DraftWorkspaceState | null;
+  /**
+   * CR 702.139a: the companion the player's last accepted submission
+   * designated, or null. A later resubmission (between rounds) starts from it,
+   * so only an explicit removal in the builder clears the designation.
+   */
+  submittedCompanion: string | null;
   submittedPartition: DraftWorkspacePartition | null;
   intergameWorkspaceState: DraftWorkspaceState | null;
   matchPairing: DraftMatchLaunch | null;
@@ -1676,6 +1683,7 @@ const initialState: MultiplayerDraftState = {
   pairings: [],
   submittedDeck: [],
   submittedWorkspaceState: null,
+  submittedCompanion: null,
   submittedPartition: null,
   intergameWorkspaceState: null,
   matchPairing: null,
@@ -2421,6 +2429,7 @@ export const useMultiplayerDraftStore = create<
           submittedDeck: partition.mainDeck,
           submittedWorkspaceState: cloneWorkspace(workspace),
           submittedPartition: partition,
+          submittedCompanion: companion,
         },
       });
       void autosaveDraftDeck({ view, setCode: null, partition, commanders, companion });
@@ -2434,6 +2443,7 @@ export const useMultiplayerDraftStore = create<
         submittedDeck: partition.mainDeck,
         submittedWorkspaceState: cloneWorkspace(workspace),
         submittedPartition: partition,
+        submittedCompanion: companion,
       });
       void autosaveDraftDeck({ view, setCode: null, partition, commanders, companion });
     }
@@ -3034,6 +3044,13 @@ export const useMultiplayerDraftStore = create<
     if (!matchPairing) return null;
     const gameId = `draft-match-${matchPairing.matchId}`;
     if (matchAdapter) return gameId;
+    // CR 100.2b + CR 702.139b: the match runs under the pod's own resolved
+    // minimum deck size (a Cube may configure other than 40), which the
+    // engine's "minimum deck size" companion condition reads.
+    const matchFormatConfig = limitedFormatConfigForSession(
+      DRAFT_MATCH_FORMAT_CONFIG,
+      get().view?.min_deck_size,
+    );
     // A pod session already detached has no pod left to host or report this match.
     if (!activeWorkspaceAdapter()) return null;
     if (matchStartInFlight?.matchId === matchPairing.matchId && !matchStartInFlight.abort.signal.aborted) return null;
@@ -3070,7 +3087,7 @@ export const useMultiplayerDraftStore = create<
           host.peer,
           host.onGuestConnected,
           2, // 1v1 match
-          DRAFT_MATCH_FORMAT_CONFIG,
+          matchFormatConfig,
           matchPairing.matchConfig,
           undefined,
           undefined,
@@ -3256,7 +3273,7 @@ export const useMultiplayerDraftStore = create<
         abort.signal.throwIfAborted();
         const initResult = await matchAdapter.initializeGame(
           { ...matchPairing.deckPayload, player, opponent, ai_decks: aiDecks },
-          DRAFT_MATCH_FORMAT_CONFIG,
+          matchFormatConfig,
           2,
           matchPairing.matchConfig,
         );

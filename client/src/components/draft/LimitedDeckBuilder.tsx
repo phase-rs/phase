@@ -28,6 +28,7 @@ import {
 } from "../../services/deckCompatibility";
 import { draftSubmissionToParsedDeck } from "../../services/draftDeckAutosave";
 import { netCompanionFromPoolSideboard } from "../../services/savedDeckProjection";
+import { companionHasDraftedCopyOutsideDeck } from "../../viewmodel/limitedCompanion";
 import type {
   DraftCardInstance,
   DraftPlayerView,
@@ -416,12 +417,22 @@ function useCommanderDesignation({
 
 function useLimitedCompanion({
   pool,
+  mainDeckNames,
+  initialCompanion = null,
   onCompanionSelect,
 }: {
   pool: DraftCardInstance[];
+  /** The main deck's card names, one entry per copy. */
+  mainDeckNames: readonly string[];
+  /**
+   * The companion the player's last accepted submission designated. The
+   * builder starts from it, so reopening a submitted deck keeps an unchanged
+   * designation and only an explicit removal clears it.
+   */
+  initialCompanion?: string | null;
   onCompanionSelect?: (cardName: string) => void;
 }) {
-  const [companion, setCompanion] = useState<string | null>(null);
+  const [selectedCompanion, setCompanion] = useState<string | null>(initialCompanion);
   const [companionCandidates, setCompanionCandidates] = useState<string[] | null>(null);
   const [eligibilityFailed, setEligibilityFailed] = useState(false);
 
@@ -451,10 +462,48 @@ function useLimitedCompanion({
   }, [poolCardNames]);
 
   useEffect(() => {
-    if (companion && companionCandidates !== null && !companionCandidates.includes(companion)) {
+    if (
+      selectedCompanion
+      && companionCandidates !== null
+      && !companionCandidates.includes(selectedCompanion)
+    ) {
       setCompanion(null);
     }
-  }, [companion, companionCandidates]);
+  }, [selectedCompanion, companionCandidates]);
+
+  // CR 702.139a + CR 100.4b: the designation is a card the player owns outside
+  // the game, i.e. a drafted copy the main deck does not use. The ENGINE decides
+  // that (the rule submission enforces); the selection stays, but only a backed
+  // one is designated, so moving the last copy into the deck never exports or
+  // submits a second card.
+  const poolNames = useMemo(() => pool.map((card) => card.name), [pool]);
+  const backingKey = useMemo(
+    () => JSON.stringify([selectedCompanion, poolNames, mainDeckNames]),
+    [selectedCompanion, poolNames, mainDeckNames],
+  );
+  const [backing, setBacking] = useState<{ key: string; backed: boolean } | null>(null);
+  useEffect(() => {
+    // The key carries every input by value, so a re-render handing this hook
+    // equal-content arrays does not re-ask the engine.
+    const [designated, pooled, deck] = JSON.parse(backingKey) as [string | null, string[], string[]];
+    if (!designated) return;
+    let cancelled = false;
+    companionHasDraftedCopyOutsideDeck(pooled, deck, designated)
+      .then((backed) => {
+        if (!cancelled) setBacking({ key: backingKey, backed });
+      })
+      .catch(() => {
+        // Unanswerable: stay unresolved. Submission is still gated by the engine.
+        if (!cancelled) setBacking(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [backingKey]);
+  const companionBacked: boolean | null = selectedCompanion && backing?.key === backingKey
+    ? backing.backed
+    : null;
+  const companion = companionBacked === false ? null : selectedCompanion;
 
   const handleSetCompanion = useCallback((cardName: string) => {
     setCompanion(cardName);
@@ -467,6 +516,7 @@ function useLimitedCompanion({
 
   return {
     companion,
+    companionBacked,
     companionCandidates,
     eligibilityFailed,
     handleSetCompanion,
@@ -591,6 +641,7 @@ function useCommanderDraftCompatibility({
   main,
   commanders,
   companion = null,
+  minDeckSize,
 }: {
   enforceCompatibility: boolean;
   selectedFormat: GameFormat | null;
@@ -598,6 +649,8 @@ function useCommanderDraftCompatibility({
   main: DeckEntry[];
   commanders: string[];
   companion?: string | null;
+  /** The draft session's resolved minimum deck size (CR 100.2b + CR 702.139b). */
+  minDeckSize?: number | null;
 }) {
   const request = useMemo<ParsedDeck>(() => ({
     main,
@@ -616,7 +669,8 @@ function useCommanderDraftCompatibility({
     schemeDeck: [],
     signatureSpell: [],
     companion: companion ? [companion] : [],
-  }), [enforceCompatibility, selectedFormat, draftSetCodes, main, commanders, companion]);
+    minDeckSize: minDeckSize ?? null,
+  }), [enforceCompatibility, selectedFormat, draftSetCodes, main, commanders, companion, minDeckSize]);
   const [state, setState] = useState<DraftDeckCompatibilityState | null>(null);
   const generationRef = useRef(0);
 
@@ -626,6 +680,7 @@ function useCommanderDraftCompatibility({
     evaluateDeckCompatibility(request, {
       selectedFormat,
       draftSetCodes,
+      minDeckSize,
     })
       .then((result) => {
         if (generation === generationRef.current) {
@@ -635,13 +690,13 @@ function useCommanderDraftCompatibility({
       .catch(() => {
         if (generation === generationRef.current) setState({ key, status: "error" });
       });
-    // `enforceCompatibility`, `draftSetCodes`, and `selectedFormat` are deliberately absent from this
-    // dependency array: both ride in the `key` memo above, whose value is a
+    // `enforceCompatibility`, `draftSetCodes`, `selectedFormat`, and `minDeckSize` are deliberately absent from this
+    // dependency array: all of them ride in the `key` memo above, whose value is a
     // JSON.stringify string, and React compares dependencies with Object.is,
     // which is by value for strings — so a re-render handing this hook a
     // different array of equal content does not re-fire the evaluator while
-    // one of different content does. The exhaustive-deps warning naming those
-    // two is expected; do NOT silence it by adding them. `cd client && npx
+    // one of different content does. The exhaustive-deps warning naming them
+    // is expected; do NOT silence it by adding them. `cd client && npx
     // eslint src/components/draft/LimitedDeckBuilder.tsx` prints that warning,
     // and `cd client && npx vitest run --coverage.enabled=false
     // src/components/draft/__tests__/LimitedDeckBuilder.test.tsx` covers both
@@ -694,6 +749,12 @@ interface WorkspaceDeckBuilderControllerBase {
   onWorkspaceChange: (next: DraftWorkspaceState) => void;
   onPreferencesChange: (next: DraftWorkspacePreferences) => void;
   onSubmitDeck: (commanders?: string[], companion?: string | null) => void | Promise<void>;
+  /**
+   * CR 702.139a: the companion this player's last accepted submission
+   * designated, when the builder reopens a submitted deck (between rounds).
+   * The builder starts from it; only its remove control submits no companion.
+   */
+  initialCompanion?: string | null;
   onCardHover?: (info: CardHoverInfo | null) => void;
 }
 
@@ -920,6 +981,7 @@ function ControlledDeckBuilder({
     handleRemoveCompanion,
   } = useLimitedCompanion({
     pool,
+    mainDeckNames: mainDeck,
     // CR 100.4b: the designation is a pool card outside the main deck. Take a
     // main-deck copy only when no copy is already outside it.
     onCompanionSelect: (cardName) => {
@@ -942,6 +1004,8 @@ function ControlledDeckBuilder({
     main: commanderDeckEntries,
     commanders,
     companion,
+    // CR 100.2b + CR 702.139b: only a companion's condition reads the minimum.
+    minDeckSize: companion ? view?.min_deck_size : undefined,
   });
   const { cardDataCache } = useDeckCardData(
     commanderDeckEntries.map((entry) => entry.name),
@@ -1379,11 +1443,14 @@ function WorkspaceDeckBuilder({
 
   const {
     companion,
+    companionBacked,
     companionCandidates,
     handleSetCompanion,
     handleRemoveCompanion,
   } = useLimitedCompanion({
     pool,
+    mainDeckNames: deckNames,
+    initialCompanion: controller.initialCompanion,
     onCompanionSelect: handleCompanionSelectInWorkspace,
   });
   const effectiveFormat: GameFormat | null = commandersRequired > 0
@@ -1397,11 +1464,13 @@ function WorkspaceDeckBuilder({
       draftSubmissionToParsedDeck(
         projectWorkspacePartition(workspace, pool),
         commandersRequired > 0 ? commanders : [],
-        companion,
+        // CR 100.4b: exported only while an actual outside-the-deck copy backs
+        // it, so one drafted card never exports as two.
+        companionBacked === true ? companion : null,
       ),
       effectiveFormat ?? "Limited",
     ),
-    [workspace, pool, commandersRequired, commanders, companion, effectiveFormat],
+    [workspace, pool, commandersRequired, commanders, companion, companionBacked, effectiveFormat],
   );
   const compatibility = useCommanderDraftCompatibility({
     enforceCompatibility,
@@ -1410,6 +1479,8 @@ function WorkspaceDeckBuilder({
     main: commanderDeckEntries,
     commanders,
     companion,
+    // CR 100.2b + CR 702.139b: only a companion's condition reads the minimum.
+    minDeckSize: companion ? view.min_deck_size : undefined,
   });
   const { cardDataCache } = useDeckCardData(
     commanderDeckEntries.map((entry) => entry.name),

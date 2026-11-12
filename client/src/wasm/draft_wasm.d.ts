@@ -119,6 +119,15 @@ export function draft_procedure(kind: number, tournament_format: string): any;
 export function export_draft_session(): string;
 
 /**
+ * CR 702.139a + CR 100.4b: whether `companion` is backed by a drafted pool
+ * copy the main deck does not use. Both card lists are JSON arrays of card
+ * names (the pool's instance names and the main deck's names). Stateless —
+ * usable by P2P guests, and the one rule `validate_limited_deck` enforces at
+ * submission, so the deck builder never re-counts copies itself.
+ */
+export function companion_has_drafted_copy_outside_deck(pool_names_json: string, main_deck_json: string, companion: string): boolean;
+
+/**
  * Narrow a limited-pool listing through the ENGINE's filtering authority
  * (#7546 review): the display sends the listing and a typed `PoolFilter`;
  * it renders exactly the returned instance ids. Each instance is classified
@@ -382,6 +391,7 @@ export interface InitOutput {
     readonly create_multiplayer_draft: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number, m: number) => [number, number, number];
     readonly draft_procedure: (a: number, b: number, c: number) => [number, number, number];
     readonly export_draft_session: () => [number, number, number, number];
+    readonly companion_has_drafted_copy_outside_deck: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number];
     readonly filter_pool_listing: (a: number, b: number, c: number, d: number) => [number, number, number];
     readonly get_bot_deck: (a: number) => [number, number, number];
     readonly get_draft_status: () => [number, number, number];

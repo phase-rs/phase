@@ -183,6 +183,19 @@ vi.mock("../../../services/engineRuntime", async (importOriginal) => {
   };
 });
 
+// CR 702.139a + CR 100.4b: the ENGINE decides whether a designated companion is
+// backed by a drafted pool copy the main deck does not use. Contract-faithful
+// fake of draft-core's `companion_has_drafted_copy_outside_deck` (one entry per
+// copy; backed iff the pool holds more copies than the deck uses).
+vi.mock("../../../viewmodel/limitedCompanion", () => ({
+  companionHasDraftedCopyOutsideDeck: async (
+    poolNames: readonly string[],
+    mainDeckNames: readonly string[],
+    companion: string,
+  ) => poolNames.filter((n) => n === companion).length
+    > mainDeckNames.filter((n) => n === companion).length,
+}));
+
 vi.mock("../../../hooks/useDeckCardData", () => ({
   useDeckCardData: () => ({
     cardDataCache: compatibilityHarness.cardDataCache,
@@ -3997,5 +4010,146 @@ describe("Limited companion support", () => {
     const text = within(dialog).getByRole<HTMLTextAreaElement>("textbox").value;
     expect(text).toContain("[Companion]\n1 Lurrus of the Dream-Den\n");
     expect(text).toContain("[Sideboard]\n1 Lurrus of the Dream-Den\n");
+  });
+
+  describe("workspace mode: designation backing, Cube minimum and resubmission", () => {
+    function lurrusWorkspace(lurrusZone: "deck" | "sideboard"): DraftWorkspaceState {
+      const deckBasics = lurrusZone === "deck" ? 39 : 40;
+      const workspace: DraftWorkspaceState = {
+        schemaVersion: 1,
+        placements: { "lurrus-1": { zone: lurrusZone, row: 0, column: 0, order: 0 } },
+        virtualBasics: Array.from({ length: deckBasics }, (_, i) => ({
+          instanceId: `plains-virtual-${i}`,
+          name: "Plains",
+        })),
+      };
+      for (let i = 0; i < deckBasics; i++) {
+        workspace.placements[`plains-virtual-${i}`] = { zone: "deck", row: 0, column: 0, order: i + 1 };
+      }
+      return workspace;
+    }
+
+    function workspaceBuilder(
+      workspace: DraftWorkspaceState,
+      overrides: {
+        onSubmitDeck?: (commanders?: string[], companion?: string | null) => void;
+        initialCompanion?: string | null;
+        minDeckSize?: number;
+      } = {},
+    ) {
+      return (
+        <LimitedDeckBuilder
+          local={{
+            view: { ...TEST_VIEW, pool: poolWithLurrus, min_deck_size: overrides.minDeckSize ?? 40 },
+            workspace,
+            preferences: createDefaultDraftWorkspacePreferences(),
+            interactionLocked: false,
+            capabilities: { kind: "editable-pool", suggestions: false },
+            onWorkspaceChange: () => {},
+            onPreferencesChange: () => {},
+            onSubmitDeck: overrides.onSubmitDeck ?? (() => {}),
+            initialCompanion: overrides.initialCompanion,
+            onAddBasicLand: () => {},
+            onRemoveBasicLand: () => {},
+          }}
+          responsiveLayout="desktop"
+          showSuggestions={false}
+        />
+      );
+    }
+
+    async function exportedText(): Promise<string> {
+      fireEvent.click(screen.getByRole("button", { name: "Export deck" }));
+      const dialog = await screen.findByRole("dialog", { name: "Export Deck" });
+      return within(dialog).getByRole<HTMLTextAreaElement>("textbox").value;
+    }
+
+    it("hands the session's minimum deck size to the engine's compatibility check", async () => {
+      engineIsCardCompanion.mockImplementation(async (name) => name === "Lurrus of the Dream-Den");
+      compatibilityHarness.evaluate.mockClear();
+      compatibilityHarness.evaluate.mockResolvedValue(compatibleResult());
+
+      render(workspaceBuilder(lurrusWorkspace("sideboard"), { minDeckSize: 50 }));
+      await waitFor(() => expect(screen.getByText("Companion")).toBeInTheDocument());
+      fireEvent.click(
+        within(screen.getByText("Companion").closest("section")!)
+          .getByRole("button", { name: "Lurrus of the Dream-Den" }),
+      );
+
+      await waitFor(() => {
+        expect(compatibilityHarness.evaluate).toHaveBeenCalledWith(
+          expect.objectContaining({ companion: "Lurrus of the Dream-Den" }),
+          expect.objectContaining({ selectedFormat: "Limited", minDeckSize: 50 }),
+        );
+      });
+    });
+
+    it("exports the companion while a drafted copy sits outside the deck", async () => {
+      engineIsCardCompanion.mockImplementation(async (name) => name === "Lurrus of the Dream-Den");
+      compatibilityHarness.evaluate.mockResolvedValue(compatibleResult());
+
+      render(workspaceBuilder(lurrusWorkspace("sideboard"), {
+        initialCompanion: "Lurrus of the Dream-Den",
+      }));
+      await waitFor(() => expect(screen.getByText("Companion requirement met")).toBeInTheDocument());
+
+      const text = await exportedText();
+      expect(text).toContain("[Companion]\n1 Lurrus of the Dream-Den\n");
+      expect(text).toContain("[Sideboard]\n1 Lurrus of the Dream-Den\n");
+    });
+
+    it("never exports or submits a companion once its only copy is moved back into the deck", async () => {
+      engineIsCardCompanion.mockImplementation(async (name) => name === "Lurrus of the Dream-Den");
+      compatibilityHarness.evaluate.mockResolvedValue(compatibleResult());
+      const onSubmitDeck = vi.fn();
+
+      const { rerender } = render(workspaceBuilder(lurrusWorkspace("sideboard"), { onSubmitDeck }));
+      await waitFor(() => expect(screen.getByText("Companion")).toBeInTheDocument());
+      fireEvent.click(
+        within(screen.getByText("Companion").closest("section")!)
+          .getByRole("button", { name: "Lurrus of the Dream-Den" }),
+      );
+      await waitFor(() => expect(screen.getByText("Companion requirement met")).toBeInTheDocument());
+
+      // The player drags the only drafted copy back into the main deck.
+      rerender(workspaceBuilder(lurrusWorkspace("deck"), { onSubmitDeck }));
+      await waitFor(() => {
+        expect(screen.queryByText("Companion requirement met")).not.toBeInTheDocument();
+      });
+
+      const text = await exportedText();
+      expect(text).not.toContain("[Companion]");
+      expect(text.match(/Lurrus of the Dream-Den/g)).toHaveLength(1);
+
+      fireEvent.keyDown(document.body, { key: "Escape" });
+      fireEvent.click(screen.getByRole("button", { name: /submit deck/i }));
+      await waitFor(() => expect(onSubmitDeck).toHaveBeenCalledWith([]));
+    });
+
+    it("resubmits an unchanged companion, and only the remove control clears it", async () => {
+      engineIsCardCompanion.mockImplementation(async (name) => name === "Lurrus of the Dream-Den");
+      compatibilityHarness.evaluate.mockResolvedValue(compatibleResult());
+      const onSubmitDeck = vi.fn();
+
+      render(workspaceBuilder(lurrusWorkspace("sideboard"), {
+        onSubmitDeck,
+        initialCompanion: "Lurrus of the Dream-Den",
+      }));
+      await waitFor(() => expect(screen.getByText("Companion requirement met")).toBeInTheDocument());
+
+      // Reopened from the submitted deck: submitting again keeps the designation.
+      fireEvent.click(screen.getByRole("button", { name: /submit deck/i }));
+      await waitFor(() => {
+        expect(onSubmitDeck).toHaveBeenLastCalledWith([], "Lurrus of the Dream-Den");
+      });
+
+      const section = screen.getByText("Companion").closest("section")!;
+      fireEvent.click(within(section).getByRole("button", { name: "Remove companion" }));
+      await waitFor(() => {
+        expect(screen.queryByText("Companion requirement met")).not.toBeInTheDocument();
+      });
+      fireEvent.click(screen.getByRole("button", { name: /submit deck/i }));
+      await waitFor(() => expect(onSubmitDeck).toHaveBeenLastCalledWith([]));
+    });
   });
 });

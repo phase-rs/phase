@@ -2037,6 +2037,50 @@ describe("multiplayerDraftStore", () => {
       });
     });
 
+    // CR 702.139a: the between-rounds editor starts from the designation the
+    // last accepted submission carried, so an unchanged resubmission keeps it
+    // and only an explicit removal (a submission without one) clears it.
+    it.each(["host", "guest"] as const)(
+      "records the %s's accepted companion designation and clears it only on a submission without one",
+      async (role) => {
+        const deckbuildingView = { ...mockView("Deckbuilding"), pool: [card("spell", "Spell")] };
+        if (role === "host") {
+          await useMultiplayerDraftStore.getState().hostDraft({
+            poolInput: { type: "Set", data: { set_pool_json: "{}" } },
+            kind: "Premier",
+            podSize: 8,
+            hostDisplayName: "Host",
+            tournamentFormat: "Swiss",
+            podPolicy: "Casual",
+          });
+          capturedHostEventHandler!({ type: "viewUpdated", view: deckbuildingView });
+          mockHostAdapter.submitDeck.mockResolvedValue(deckbuildingView);
+        } else {
+          await useMultiplayerDraftStore.getState().joinDraft({
+            kind: "new",
+            roomCode: "ABCDE",
+            displayName: "Alice",
+          });
+          capturedGuestEventHandler!({ type: "viewUpdated", view: deckbuildingView });
+        }
+        expect(useMultiplayerDraftStore.getState().submittedCompanion).toBeNull();
+
+        await useMultiplayerDraftStore.getState().submitDeck([], "Lurrus of the Dream-Den");
+        expect(useMultiplayerDraftStore.getState().submittedCompanion).toBe("Lurrus of the Dream-Den");
+
+        // The builder reopened from that designation resubmits it unchanged.
+        await useMultiplayerDraftStore.getState().submitDeck(
+          [],
+          useMultiplayerDraftStore.getState().submittedCompanion,
+        );
+        expect(useMultiplayerDraftStore.getState().submittedCompanion).toBe("Lurrus of the Dream-Den");
+
+        // The explicit remove control submits no companion.
+        await useMultiplayerDraftStore.getState().submitDeck([]);
+        expect(useMultiplayerDraftStore.getState().submittedCompanion).toBeNull();
+      },
+    );
+
     describe("draft deck autosave", () => {
       beforeEach(async () => {
         installFifoWebLocks();

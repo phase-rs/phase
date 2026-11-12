@@ -109,6 +109,7 @@ const store = vi.hoisted(() => {
     playDrawPrompt: null,
     sideboardSubmitted: false,
     intergameWorkspaceState: null,
+    submittedCompanion: null as string | null,
     standings: [],
     pairings: [],
     error: null,
@@ -286,6 +287,7 @@ vi.mock("../../components/draft/LimitedDeckBuilder", async (importOriginal) => {
 describe("DraftPodPage workspace", () => {
   beforeEach(() => {
     captured.pack = null;
+    store.state.submittedCompanion = null;
     captured.workspace = null;
     captured.deckbuilder = null;
     captured.builderLayout = null;
@@ -408,6 +410,17 @@ describe("DraftPodPage workspace", () => {
     expect(store.state.submitDeck).toHaveBeenCalledOnce();
     expect(store.state.submitDeck).toHaveBeenCalledWith(["Commander A"]);
     await vi.waitFor(() => expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument());
+  });
+
+  it("starts the reopened builder from the submitted companion", async () => {
+    store.state.phase = "deckbuilding";
+    store.state.submittedCompanion = "Lurrus of the Dream-Den";
+    render(<MemoryRouter><DraftPodPage /></MemoryRouter>);
+    const deckbuilder = captured.deckbuilder;
+    if (!isEditableDeckBuilderController(deckbuilder)) {
+      throw new Error("editable deck builder controller not installed");
+    }
+    expect(deckbuilder.initialCompanion).toBe("Lurrus of the Dream-Den");
   });
 
   it("submits the selected companion after confirmation", async () => {

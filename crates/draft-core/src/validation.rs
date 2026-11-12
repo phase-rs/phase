@@ -91,6 +91,24 @@ pub enum LimitedDeckError {
     TooFewCommanders { designated: usize, minimum: usize },
 }
 
+/// CR 702.139a + CR 100.4b: whether `companion` names a card the player owns
+/// outside the game. In individual Limited the cards outside the game are the
+/// drafted pool cards the main deck does not use (the sideboard), so the
+/// designation needs at least one DRAFTED copy beyond those in `main_deck`.
+///
+/// The single authority for that rule: `validate_limited_deck` enforces it at
+/// submission and draft-wasm publishes it so the deck builder never re-counts
+/// copies itself. It reads the pool alone -- never `addable_cards`, which
+/// exempts the main deck from pool accounting but supplies no owned card.
+pub fn companion_has_drafted_copy_outside_deck(
+    pool: &[String],
+    main_deck: &[String],
+    companion: &str,
+) -> bool {
+    let count = |cards: &[String]| cards.iter().filter(|card| *card == companion).count();
+    count(pool) > count(main_deck)
+}
+
 /// Validate a Limited deck against the drafted pool.
 ///
 /// Rules (per MTG Limited):
@@ -153,18 +171,15 @@ pub fn validate_limited_deck(
         *pool_counts.entry(card.as_str()).or_insert(0) += 1;
     }
 
-    // 3. Build main deck multiset and total requested multiset (main deck + companion)
+    // 3. Build the main deck multiset.
     let mut main_deck_counts: HashMap<&str, u32> = HashMap::new();
     for card in main_deck {
         *main_deck_counts.entry(card.as_str()).or_insert(0) += 1;
     }
-    let mut requested_counts = main_deck_counts.clone();
-    if let Some(comp) = companion {
-        *requested_counts.entry(comp).or_insert(0) += 1;
-    }
+    let requested_counts = &main_deck_counts;
 
     // 4. Validate each non-basic card against pool
-    for (card_name, requested) in &requested_counts {
+    for (card_name, requested) in requested_counts {
         // CR 903.13e: the granted filler is checked BEFORE the `is_addable`
         // exemption, never through it. `is_addable` names are pool-EXEMPT, i.e.
         // unlimited -- correct for basic lands and exactly wrong for a filler,
@@ -231,6 +246,33 @@ pub fn validate_limited_deck(
         }
     }
 
+    // CR 702.139a + CR 100.4b: "reveal one card you own from outside the game".
+    // In individual Limited the cards outside the game are the pool cards not in
+    // the deck (the sideboard), so the designation needs one DRAFTED copy beyond
+    // those the main deck uses. This is checked against the pool alone, never
+    // through `addable_cards`: a basic land or a Cube-configured addable name is
+    // unlimited for the main deck, but an addable copy is not a card the player
+    // owns outside the game, and it is never a sideboard card. A filler's
+    // drafted copies count the same way; its added (commander) copies live in the
+    // main deck.
+    if let Some(comp) = companion {
+        if !companion_has_drafted_copy_outside_deck(pool, main_deck, comp) {
+            let drafted = pool_counts.get(comp).copied().unwrap_or(0);
+            let in_deck = main_deck_counts.get(comp).copied().unwrap_or(0);
+            errors.push(if drafted == 0 {
+                LimitedDeckError::NotInPool {
+                    name: comp.to_string(),
+                }
+            } else {
+                LimitedDeckError::ExceedsPoolCount {
+                    name: comp.to_string(),
+                    requested: in_deck + 1,
+                    available: drafted,
+                }
+            });
+        }
+    }
+
     // 5. CR 702.124h: "You may designate two legendary CARDS as your commander
     // rather than one if each of them has partner." Two commanders are two
     // CARDS, and CR 903.3 says the same for the one-commander case ("Each deck
@@ -285,6 +327,7 @@ pub fn validate_limited_deck(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::DeckAddableCardPolicy;
 
     fn addable() -> DeckAddableCards {
         DeckAddableCards::standard_basics()
@@ -938,5 +981,102 @@ mod tests {
             LimitedDeckError::ExceedsPoolCount { name, requested: 2, available: 1 }
             if name == "Yorion, Sky Nomad"
         )));
+    }
+
+    /// A Cube may configure its own addable names (here Gyruda). Addability
+    /// exempts the MAIN DECK from pool accounting; it must not make a card the
+    /// player never drafted a legal companion (CR 702.139a + CR 100.4b).
+    fn cube_addable_gyruda() -> DeckAddableCards {
+        DeckAddableCards {
+            policy: DeckAddableCardPolicy::StandardBasicsPlusCustom,
+            custom: vec![s("Gyruda, Doom of Depths")],
+        }
+    }
+
+    fn forty_card_pool_and_deck() -> (Vec<String>, Vec<String>) {
+        let pool: Vec<String> = (0..40).map(|i| format!("Card {i}")).collect();
+        let deck = pool.clone();
+        (pool, deck)
+    }
+
+    #[test]
+    fn addable_companion_with_zero_drafted_copies_is_rejected() {
+        let (pool, deck) = forty_card_pool_and_deck();
+        let errors = validate_limited_deck(
+            &deck,
+            &pool,
+            &cube_addable_gyruda(),
+            40,
+            &[],
+            &[],
+            0,
+            Some("Gyruda, Doom of Depths"),
+        )
+        .unwrap_err();
+        assert!(errors.iter().any(|e| matches!(
+            e,
+            LimitedDeckError::NotInPool { name } if name == "Gyruda, Doom of Depths"
+        )));
+    }
+
+    #[test]
+    fn addable_companion_with_a_drafted_copy_outside_the_deck_is_accepted() {
+        let (mut pool, deck) = forty_card_pool_and_deck();
+        pool.push(s("Gyruda, Doom of Depths"));
+        assert!(validate_limited_deck(
+            &deck,
+            &pool,
+            &cube_addable_gyruda(),
+            40,
+            &[],
+            &[],
+            0,
+            Some("Gyruda, Doom of Depths")
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn addable_companion_whose_only_drafted_copy_is_in_the_deck_is_rejected() {
+        let (mut pool, mut deck) = forty_card_pool_and_deck();
+        pool.push(s("Gyruda, Doom of Depths"));
+        deck.push(s("Gyruda, Doom of Depths"));
+        let errors = validate_limited_deck(
+            &deck,
+            &pool,
+            &cube_addable_gyruda(),
+            40,
+            &[],
+            &[],
+            0,
+            Some("Gyruda, Doom of Depths"),
+        )
+        .unwrap_err();
+        assert!(errors.iter().any(|e| matches!(
+            e,
+            LimitedDeckError::ExceedsPoolCount { name, requested: 2, available: 1 }
+            if name == "Gyruda, Doom of Depths"
+        )));
+    }
+
+    #[test]
+    fn addable_companion_needs_a_drafted_copy_beyond_the_decks_use() {
+        // Two drafted copies: one is in the main deck, one is outside it, so the
+        // companion is backed by a drafted copy beyond the deck's use.
+        let (mut pool, mut deck) = forty_card_pool_and_deck();
+        pool.push(s("Gyruda, Doom of Depths"));
+        pool.push(s("Gyruda, Doom of Depths"));
+        deck.push(s("Gyruda, Doom of Depths"));
+        assert!(validate_limited_deck(
+            &deck,
+            &pool,
+            &cube_addable_gyruda(),
+            40,
+            &[],
+            &[],
+            0,
+            Some("Gyruda, Doom of Depths")
+        )
+        .is_ok());
     }
 }

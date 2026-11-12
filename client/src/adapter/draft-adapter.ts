@@ -1132,6 +1132,18 @@ export class DraftEngineOperationLease {
     return this.wasm.pool_filter_options(JSON.stringify(pool)) as PoolFilterOptions;
   }
 
+  companionHasDraftedCopyOutsideDeck(
+    poolNames: readonly string[],
+    mainDeck: readonly string[],
+    companion: string,
+  ): boolean {
+    return this.wasm.companion_has_drafted_copy_outside_deck(
+      JSON.stringify(poolNames),
+      JSON.stringify(mainDeck),
+      companion,
+    );
+  }
+
   checkRestorableSession(json: string): RestorableDraftSessionVerdict {
     return this.wasm.check_restorable_draft_session(json) as RestorableDraftSessionVerdict;
   }
@@ -1486,6 +1498,20 @@ export class DraftAdapter {
    */
   async poolFilterOptions(pool: DraftCardInstance[]): Promise<PoolFilterOptions> {
     return withDraftEngineOperation((lease) => lease.poolFilterOptions(pool));
+  }
+
+  /**
+   * CR 702.139a + CR 100.4b: whether a companion designation is backed by a
+   * drafted pool copy outside the main deck. The engine's one rule (the same
+   * one submission enforces); stateless, so P2P guests can ask it too.
+   */
+  async companionHasDraftedCopyOutsideDeck(
+    poolNames: readonly string[],
+    mainDeck: readonly string[],
+    companion: string,
+  ): Promise<boolean> {
+    return withDraftEngineOperation((lease) =>
+      lease.companionHasDraftedCopyOutsideDeck(poolNames, mainDeck, companion));
   }
 
   /**
