@@ -16,16 +16,19 @@
 //! R9), including a `ChangeZone` resumed after a CR 616.1 replacement-ordering pause that
 //! precedes the entry (R4p); a pause after an entry has been delivered keeps the entry with its
 //! owner, and a rider that pauses before it applies (a ReturnAsAura host choice among two or
-//! more candidates) lets the post-action collector check the entry first (known gaps). The
-//! hand-off is made only when no later instruction that starts after the entry acts on a moved
-//! object (CR 608.2c): Call a Surprise Witness's "Put a flying counter on it." comes after the
+//! more candidates) lets the post-action collector check the entry first (known gaps). A
+//! `ChangeZone` completed from an `EffectZoneChoice` resume (Ashiok, Nightmare Weaver's -X) still
+//! checks its entries at the owner, before the "is/has" effect exists (known gap; R19 covers only
+//! the carrier). The hand-off is made only when no later instruction that starts after the
+//! entry acts on a moved object (CR 608.2c): Call a Surprise Witness's "Put a flying counter on it." comes after the
 //! entry, so the owner checks the entry before it and Watcher of the Spheres does not trigger
 //! (R8c). Such an entry is then also checked before the "is/has" effect exists (known gap). R8c
 //! keeps Soul Warden on the board: when no observer matches at the owner's check, the owner
 //! queues no collection witness and the post-action collector checks the entry again after the
 //! counter (an older gap, outside this hand-off). The hand-off covers a whole logical group or
 //! none of it (CR 603.2c): when a member ends outside the battlefield, the owner keeps every
-//! occurrence, so a batched observer triggers once for the event (R8m, R9m).
+//! occurrence, so a batched observer triggers once for the event (R8m, R9m). A handed-off entry
+//! from a graveyard keeps its CR 603.10a leaves-the-graveyard half (R4t, R9t).
 //!
 //! Consequence (b) — CR 113.6h + CR 614.12 + CR 611.2e: an ability of the entrant that modifies
 //! how it enters functions as it enters, checked as the permanent would exist on the battlefield,
@@ -1111,6 +1114,82 @@ fn ever_after_mixed_destination_return_triggers_a_batched_observer_once() {
     runner.advance_until_stack_empty();
 
     assert_one_batched_trigger(&runner, giant, bears, "Zombie");
+}
+
+fn zombie_tokens(runner: &GameRunner) -> usize {
+    runner
+        .state()
+        .objects
+        .values()
+        .filter(|object| {
+            object.is_token
+                && object.zone == Zone::Battlefield
+                && object.card_types.subtypes.iter().any(|s| s == "Zombie")
+        })
+        .count()
+}
+
+fn add_tormod(scenario: &mut GameScenario) {
+    scenario
+        .add_creature_from_oracle(P0, "Tormod, the Desecrator", 2, 2, TORMOD_THE_DESECRATOR)
+        .with_subtypes(vec!["Zombie", "Wizard"])
+        .as_legendary();
+}
+
+/// R4t — CR 603.10a + CR 611.2e: Xu-Ifit's single entry is handed off to the post-action
+/// collector whole, so its leaves-the-graveyard half still triggers Tormod ("Whenever one or more
+/// cards leave your graveyard") exactly once, and the Dreadnought's own ETB does not trigger.
+#[test]
+fn xu_ifit_handed_off_entry_triggers_a_leaves_graveyard_observer_once() {
+    let mut scenario = main_phase();
+    let xu = scenario
+        .add_creature_from_oracle(P0, "Xu-Ifit, Osteoharmonist", 2, 3, XU_IFIT)
+        .id();
+    add_tormod(&mut scenario);
+    let dreadnought = add_dreadnought(&mut scenario);
+    let mut runner = scenario.build();
+
+    let _ = runner.activate(xu, 0).target_object(dreadnought).resolve();
+    runner.advance_until_stack_empty();
+
+    // Reach: the entry happened with the rider applied.
+    assert_eq!(runner.state().objects[&dreadnought].zone, Zone::Battlefield);
+    assert!(subtypes(&runner, dreadnought)
+        .iter()
+        .any(|t| t == "Skeleton"));
+    assert_eq!(zombie_tokens(&runner), 1, "Tormod triggers once");
+    assert_priority_with_empty_stack(&runner);
+}
+
+/// R9t — CR 603.2c + CR 603.10a + CR 611.2e: Storm of Souls hands its single-destination group off
+/// whole, so both cards leaving the graveyard in one event trigger Tormod exactly once.
+#[test]
+fn storm_of_souls_handed_off_group_triggers_a_leaves_graveyard_observer_once() {
+    let mut scenario = main_phase();
+    add_tormod(&mut scenario);
+    let giant = scenario
+        .add_creature_to_graveyard(P0, "Hill Giant", 3, 3)
+        .with_subtypes(vec!["Giant"])
+        .id();
+    let bears = scenario
+        .add_creature_to_graveyard(P0, "Grizzly Bears", 2, 2)
+        .with_subtypes(vec!["Bear"])
+        .id();
+    let storm = scenario
+        .add_spell_to_hand_from_oracle(P0, "Storm of Souls", false, STORM_OF_SOULS)
+        .id();
+    let mut runner = scenario.build();
+
+    let _ = runner.cast(storm).resolve();
+    runner.advance_until_stack_empty();
+
+    // Reach: both members entered with the rider applied.
+    for id in [giant, bears] {
+        assert_eq!(runner.state().objects[&id].zone, Zone::Battlefield);
+        assert!(subtypes(&runner, id).iter().any(|t| t == "Spirit"));
+    }
+    assert_eq!(zombie_tokens(&runner), 1, "Tormod triggers once");
+    assert_priority_with_empty_stack(&runner);
 }
 
 fn add_boot_nipper(scenario: &mut GameScenario) -> ObjectId {

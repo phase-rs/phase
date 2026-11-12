@@ -4322,10 +4322,10 @@ pub(crate) fn deliver_replaced_zone_change(
         // `pending_etb_counters` are not consumed.
         if entered_battlefield {
             // CR 306.5c + CR 310.4c + CR 704.5i: the entrant's intrinsic loyalty/defense
-            // ability was removed with its entry (seed gate above), so it enters with no
-            // such counters and its loyalty/defense is 0; a present zero entry is the
-            // counter-tracked 0 the CR 613.1 re-derive reads (Xu-Ifit returning Grist, the
-            // Hunger Tide).
+            // ability was removed with its entry (the gate in
+            // `seed_intrinsic_entry_counters`), so it enters with no such counters and its
+            // loyalty/defense is 0; a present zero entry is the counter-tracked 0 the CR 613.1
+            // re-derive reads (Xu-Ifit returning Grist, the Hunger Tide).
             if !entrant_abilities.own_abilities_apply() {
                 if let Some(obj) = state.objects.get_mut(&object_id) {
                     let withheld = crate::game::printed_cards::intrinsic_face_entry_counters(

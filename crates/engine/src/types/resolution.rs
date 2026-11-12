@@ -4303,8 +4303,9 @@ impl ResolutionStack {
 /// and parked frames, and preserves unavailable announced bindings through coin
 /// outcomes and detached continuations (CR 601.2c + CR 608.2b); coin frames and
 /// unresolved coin abilities from earlier versions are refused.
-/// Version 12 carries the CR 611.2e entrant-abilities profile on a parked
-/// ChangeZone (`PendingChangeZoneIteration.entrant_abilities`), omitted when
+/// Version 12 carries the CR 611.2e entrant-abilities carrier on a parked
+/// ChangeZone (`PendingChangeZoneIteration.entrant_abilities`), a paused
+/// `ProposedEvent::ZoneChange` and `WaitingFor::EffectZoneChoice`, omitted when
 /// `Retained`; earlier versions decode it as `Retained`, which is what they meant.
 pub const RESOLUTION_STATE_WIRE_VERSION: u64 = 12;
 
