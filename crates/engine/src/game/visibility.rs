@@ -3389,6 +3389,35 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
     redact_waiting_for_payment(&mut filtered.waiting_for, &hidden_zone_change_ids);
     redact_paused_ability_payment(&mut filtered, &hidden_zone_change_ids);
 
+    // CR 401.2 + CR 401.4: a hidden ordered zone publishes no position. Masking
+    // a hidden card's printed identity is not enough by itself: viewers keep
+    // learning object identities while the card is revealed, and the ordered
+    // `Player::library` still pairs each of those stable ids with a slot, so a
+    // settled order could be recovered by joining earlier knowledge to the
+    // projected order. Every zone member this audience may not identify is
+    // therefore placed in a canonical (id-ascending) slot among the hidden
+    // slots; a member shown at its real position (a revealed card, a look
+    // permission, a reveal that is still necessary) keeps that position, so
+    // the projection still tells the truth about everything it discloses.
+    let hidden_ordered_ids: HashSet<ObjectId> = filtered
+        .objects
+        .iter()
+        .filter(|(_, object)| object.name == HIDDEN_CARD_NAME)
+        .map(|(object_id, _)| *object_id)
+        .collect();
+    let is_hidden_ordered = |object_id: ObjectId| hidden_ordered_ids.contains(&object_id);
+    for player in filtered.players.iter_mut() {
+        canonicalize_hidden_ordered_zone(&mut player.library, is_hidden_ordered);
+        // CR 717.2 + CR 901.15 + CR 904.4: the supplementary decks are
+        // hidden-order zones too, so the same identity-to-position boundary
+        // applies to their unrevealed members.
+        canonicalize_hidden_ordered_zone(&mut player.attraction_deck, is_hidden_ordered);
+        canonicalize_hidden_ordered_zone(&mut player.contraption_deck, is_hidden_ordered);
+    }
+    canonicalize_hidden_ordered_zone(&mut filtered.planar_deck, is_hidden_ordered);
+    canonicalize_hidden_ordered_zone(&mut filtered.scheme_deck, is_hidden_ordered);
+    canonicalize_hidden_ordered_zone(&mut filtered.boss_deck, is_hidden_ordered);
+
     // This is the single display-identity authority sent to every client. The
     // preceding projection/redaction passes decide whether an object's identity
     // remains available; UI code consumes this result rather than recreating
@@ -3398,6 +3427,42 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
     }
 
     filtered
+}
+
+/// CR 401.2 + CR 401.4: Break the identity-to-position link in a hidden ordered
+/// zone. Members the audience cannot identify are redistributed across the
+/// hidden slots in a canonical id order, so no object identity keeps the slot
+/// it actually occupies; members the audience may see stay in their true slots,
+/// because a revealed card is legitimately shown at its position (CR 701.20a).
+///
+/// The canonical order is a deterministic function of the hidden id set, so the
+/// projection stays stable across equal states and across viewers; what it can
+/// never express is which hidden card sits at which library position.
+fn canonicalize_hidden_ordered_zone(
+    zone: &mut im::Vector<ObjectId>,
+    is_hidden: impl Fn(ObjectId) -> bool,
+) {
+    let mut hidden: Vec<ObjectId> = zone.iter().copied().filter(|id| is_hidden(*id)).collect();
+    if hidden.len() < 2 {
+        // A lone hidden member has exactly one possible slot, so there is no
+        // link left to break.
+        return;
+    }
+    hidden.sort_unstable();
+    let mut next_hidden = hidden.into_iter();
+    *zone = zone
+        .iter()
+        .copied()
+        .map(|object_id| {
+            if is_hidden(object_id) {
+                next_hidden
+                    .next()
+                    .expect("the hidden slot count equals the hidden member count")
+            } else {
+                object_id
+            }
+        })
+        .collect();
 }
 
 /// CR 723.4 + CR 805.8: a player controlling another player sees the
@@ -15105,6 +15170,68 @@ mod tests {
         // never firing anywhere.
         let wire = filter_state_for_viewer(&state, PlayerId(0));
         assert_eq!(wire.objects[&fd].name, "Grizzly Bears");
+    }
+
+    /// CR 401.2 + CR 401.4: the shared viewer projection breaks the
+    /// identity-to-position link in a hidden ordered zone. A card a viewer
+    /// learned while it was revealed keeps its stable object id, so the
+    /// projected library must not place that id at the position it truly
+    /// occupies; a card still legitimately shown keeps its true slot.
+    #[test]
+    fn hidden_library_order_breaks_the_identity_to_position_link() {
+        let mut state = GameState::new_two_player(7);
+        let revealed_top = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Revealed Top".into(),
+            Zone::Library,
+        );
+        // Created before `hidden_higher_id`, so its object id is lower while it
+        // truly sits BELOW that card: the canonical id order cannot coincide
+        // with this library's real order.
+        let hidden_lower_id = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Hidden Lower Id".into(),
+            Zone::Library,
+        );
+        let hidden_higher_id = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Hidden Higher Id".into(),
+            Zone::Library,
+        );
+        assert!(hidden_lower_id < hidden_higher_id);
+        state.players[0].library.clear();
+        state.players[0].library.push_back(revealed_top);
+        state.players[0].library.push_back(hidden_higher_id);
+        state.players[0].library.push_back(hidden_lower_id);
+        state.revealed_cards.insert(revealed_top);
+
+        for (label, projected) in [
+            ("P0", filter_state_for_viewer(&state, PlayerId(0))),
+            ("P1", filter_state_for_viewer(&state, PlayerId(1))),
+            ("unseated", filter_state_for_unseated_viewer(&state)),
+        ] {
+            let order: Vec<ObjectId> = projected.players[0].library.iter().copied().collect();
+            assert_eq!(order.len(), 3, "{label}: the zone keeps every member");
+            assert_eq!(
+                order[0], revealed_top,
+                "{label}: CR 701.20a — a card still revealed keeps its true slot"
+            );
+            assert_eq!(
+                &order[1..],
+                &[hidden_lower_id, hidden_higher_id],
+                "{label}: hidden members take canonical id-order slots"
+            );
+            assert_eq!(
+                projected.objects[&hidden_higher_id].name, HIDDEN_CARD_NAME,
+                "{label}: and carry no printed identity"
+            );
+        }
     }
 
     /// CR 401.2: a revealed card that now sits in a library at a hidden

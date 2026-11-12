@@ -951,3 +951,130 @@ fn goblin_machinist_activation_pump_and_owner_arranged_bottom() {
     assert_eq!(machinist_obj.power, Some(3));
     assert_eq!(machinist_obj.toughness, Some(5));
 }
+
+/// CR 401.2 + CR 401.4 + CR 701.20d: after the owner arranges the revealed
+/// pile, the settled order is authoritative state only. The authorized owner
+/// receives the arrangement prompt; every viewer's projection — the owner's
+/// included, because CR 401.2 keeps even the owner from reading library order —
+/// hides the revealed cards and cannot join their previously public identities
+/// to the slots the arrangement gave them.
+#[test]
+fn settled_owner_order_is_not_identifiable_from_any_projection() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    let victim = scenario.add_creature(P1, "Victim", 2, 5).id();
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Erratic Mutation", true, ERRATIC_MUTATION_ORACLE)
+        .id();
+    scenario.with_mana_pool(
+        P0,
+        vec![
+            ManaUnit::new(ManaType::Blue, ObjectId(0), false, vec![]),
+            ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]),
+            ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]),
+        ],
+    );
+
+    let other = scenario.add_card_to_library_top(P0, "Deep Card");
+    let nonland = scenario
+        .add_spell_to_library_top(P0, "Divination", false)
+        .with_mana_cost(ManaCost::generic(3))
+        .id();
+    let land2 = scenario
+        .add_spell_to_library_top(P0, "Island", false)
+        .as_land()
+        .id();
+    let land1 = scenario
+        .add_spell_to_library_top(P0, "Forest", false)
+        .as_land()
+        .id();
+
+    let mut runner = scenario.build();
+    let mut committed = runner.cast(spell).target_object(victim).commit();
+    committed.act(GameAction::PassPriority).unwrap();
+    committed.act(GameAction::PassPriority).unwrap();
+
+    // Reach guard: the authorized owner receives the ordering prompt over the
+    // whole revealed pile.
+    match &committed.state().waiting_for {
+        WaitingFor::EffectZoneChoice { player, cards, .. } => {
+            assert_eq!(*player, P0, "the library owner arranges its own pile");
+            assert_eq!(
+                cards
+                    .iter()
+                    .copied()
+                    .collect::<std::collections::BTreeSet<_>>(),
+                [land1, land2, nonland].into_iter().collect(),
+            );
+        }
+        other_prompt => panic!("expected EffectZoneChoice, got {other_prompt:?}"),
+    }
+
+    // CR 701.20a: the pile is public while the instruction still needs it.
+    let revealed_to_opponent =
+        engine::game::visibility::filter_state_for_viewer(committed.state(), P1);
+    assert_ne!(
+        revealed_to_opponent.objects[&land1].name,
+        engine::game::visibility::HIDDEN_CARD_NAME,
+        "CR 701.20a: the revealed pile is public while the owner arranges it"
+    );
+
+    // A permutation that is NOT the canonical id order, so the projection's
+    // canonical hidden slots cannot coincide with the truth by construction.
+    let submitted = vec![nonland, land1, land2];
+    committed
+        .act(GameAction::SelectCards {
+            cards: submitted.clone(),
+        })
+        .unwrap();
+
+    let true_order: Vec<ObjectId> = committed.state().players[P0.0 as usize]
+        .library
+        .iter()
+        .copied()
+        .collect();
+    assert_eq!(
+        true_order,
+        vec![other, nonland, land1, land2],
+        "the submitted arrangement is the authoritative settled order"
+    );
+
+    for (label, projected) in [
+        (
+            "P0",
+            engine::game::visibility::filter_state_for_viewer(committed.state(), P0),
+        ),
+        (
+            "P1",
+            engine::game::visibility::filter_state_for_viewer(committed.state(), P1),
+        ),
+        (
+            "unseated",
+            engine::game::visibility::filter_state_for_unseated_viewer(committed.state()),
+        ),
+    ] {
+        for id in [land1, land2, nonland] {
+            assert_eq!(
+                projected.objects[&id].name,
+                engine::game::visibility::HIDDEN_CARD_NAME,
+                "{label}: CR 401.2 — a settled library card carries no identity"
+            );
+        }
+        let projected_order: Vec<ObjectId> = projected.players[P0.0 as usize]
+            .library
+            .iter()
+            .copied()
+            .collect();
+        assert_eq!(
+            projected_order.len(),
+            true_order.len(),
+            "{label}: reach guard — every settled member is still in the zone"
+        );
+        assert_eq!(
+            projected_order,
+            vec![other, nonland, land2, land1],
+            "{label}: hidden members occupy canonical slots, not their settled positions"
+        );
+    }
+}
