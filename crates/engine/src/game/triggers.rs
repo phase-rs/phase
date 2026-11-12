@@ -9721,7 +9721,8 @@ fn battlefield_entrant_unrecorded(state: &GameState, object_id: ObjectId) -> boo
 /// co-entering step, a choice of the same instruction, or any other
 /// battlefield entry is outstanding ([`battlefield_entry_in_progress`]: a rider
 /// chain run inside an entry passes boundaries of its own), nor between the
-/// seat legs of a player-scope clause (CR 101.4: one simultaneous event).
+/// seat legs of a paused player-scope clause resuming under its scope sidecar
+/// (CR 101.4: one simultaneous event).
 fn battlefield_entry_instruction_completed(state: &GameState, event: &GameEvent) -> bool {
     matches!(
         event,

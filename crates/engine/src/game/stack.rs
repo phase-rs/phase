@@ -191,6 +191,10 @@ pub(super) fn abandon_active_resolution_carrier(
         state.resolving_stack_object = object;
     }
     state.resolution_source_relatch = None;
+    // CR 614.12a: these entries had not happened yet; abandoning the family
+    // abandons them. Entries held in `unsettled_entry_batch_events` did happen
+    // (CR 603.2), so they stay and are checked at the next collector; CR 800.4a
+    // removes the departed player's own abilities there.
     state.deferred_entry_events.clear();
     state.pending_token_battlefield_entry = None;
 }

@@ -5270,8 +5270,10 @@ fn settle_entries_before_instruction(
     // Not while a battlefield entry is still being made: a chain run inside that entry (a copy
     // or post-replacement rider) has boundaries of its own, and the instruction that put its
     // earlier co-entrants onto the battlefield has not completed. Nor between the seat legs of
-    // a player-scope clause still in progress (`resolving_player_scope_tail`): its seats'
-    // actions are one simultaneous event (CR 101.4), completed at its `after_scope` boundary.
+    // a paused player-scope clause resuming under its scope sidecar
+    // (`resolving_player_scope_tail`): its seats' actions are one simultaneous event
+    // (CR 101.4), completed at its `after_scope` boundary. Seat legs resumed without a sidecar
+    // (a clause with no following clause that reads its result) are not distinguished here.
     if !crate::game::triggers::battlefield_entry_in_progress(state)
         && state.resolving_player_scope_tail.is_none()
     {
