@@ -1749,3 +1749,55 @@ fn vines_survives_ability_removal_ends_on_blink_and_expires() {
         }
     }
 }
+
+/// Tomik, Distinguished Advokist's targeting clause protects lands (CR 109.2a),
+/// not Tomik itself: an opponent can legally target Tomik with removal.
+/// Oracle text confirmed against the card database.
+const TOMIK: &str = "Flying
+Lands on the battlefield and land cards in graveyards can't be the targets of spells or abilities your opponents control.
+Your opponents can't play land cards from graveyards.";
+
+#[test]
+fn opponent_can_target_tomik_with_removal() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    let tomik = scenario
+        .add_creature_from_oracle(P0, "Tomik, Distinguished Advokist", 3, 3, TOMIK)
+        .id();
+
+    let shock = scenario
+        .add_spell_to_hand(P1, "Shock", false)
+        .with_mana_cost(ManaCost::generic(0))
+        .from_oracle_text("Shock deals 2 damage to any target.")
+        .id();
+
+    let mut runner = scenario.build();
+    runner.state_mut().active_player = P1;
+    runner.state_mut().waiting_for = WaitingFor::Priority { player: P1 };
+    runner.state_mut().priority_player = P1;
+
+    runner
+        .act(GameAction::CastSpell {
+            object_id: shock,
+            card_id: runner.state().objects[&shock].card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("casting must reach target selection");
+
+    let WaitingFor::TargetSelection { target_slots, .. } = runner.state().waiting_for.clone()
+    else {
+        panic!(
+            "expected target selection, got {:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert!(
+        target_slots[0]
+            .legal_targets
+            .contains(&TargetRef::Object(tomik)),
+        "Tomik itself is targetable by an opponent: {:?}",
+        target_slots[0].legal_targets
+    );
+}

@@ -9772,10 +9772,9 @@ fn static_cant_be_the_target() {
     // CR 702.11b / CR 109.5: "can't be the target of spells or abilities your opponents
     // control" (Sphinx of the Final Word) is modeled as the CantBeTargeted { who: Opponents } static
     // and enforced in `targeting.rs::can_target`.
-    let def = parse_static_line(
-        "Sphinx of the Final Word can't be the target of spells or abilities your opponents control.",
-    )
-    .unwrap();
+    let def =
+        parse_static_line("~ can't be the target of spells or abilities your opponents control.")
+            .unwrap();
     assert_eq!(
         def.mode,
         StaticMode::CantBeTargeted {
@@ -9837,8 +9836,7 @@ fn static_cant_be_targeted_blanket_is_shroud_static() {
     // (no controller qualifier) is blanket Shroud — untargetable by any player,
     // including the controller — modeled as the CantBeTargeted { who: AllPlayers } static and enforced
     // in `targeting.rs::can_target`.
-    let def =
-        parse_static_line("Guardian Idol can't be the target of spells or abilities.").unwrap();
+    let def = parse_static_line("~ can't be the target of spells or abilities.").unwrap();
     assert_eq!(
         def.mode,
         StaticMode::CantBeTargeted {
@@ -42769,5 +42767,62 @@ fn repaired_grammar_neighbours_parse_to_their_meaning_or_an_explicit_gap() {
             json.contains("Unknown") || json.contains("Unimplemented"),
             "{name} must stay an explicit gap: {json}"
         );
+    }
+}
+
+/// CR 109.2a + CR 115.1: a targeting prohibition binds the subject it names,
+/// never the source. Tomik's conjoined two-zone subject is not typed by any
+/// building block, so the line is an explicit inert gap with no `SelfRef`.
+#[test]
+fn cant_be_targeted_unparsed_subject_is_inert_gap_not_self_ref() {
+    let def = parse_static_line(
+        "Lands on the battlefield and land cards in graveyards can't be the targets of spells or abilities your opponents control.",
+    )
+    .unwrap();
+    assert!(
+        matches!(def.mode, StaticMode::Other(_)),
+        "Tomik's subject must stay an unsupported gap, got {:?}",
+        def.mode
+    );
+    assert_ne!(def.affected, Some(TargetFilter::SelfRef));
+}
+
+/// CR 109.2a + CR 115.1: a non-self subject is scoped to its parsed filter.
+#[test]
+fn cant_be_targeted_non_self_subject_uses_parsed_filter() {
+    let def = parse_static_line(
+        "Creatures you control can't be the targets of spells or abilities your opponents control.",
+    )
+    .unwrap();
+    assert_eq!(
+        def.mode,
+        StaticMode::CantBeTargeted {
+            who: ProhibitionScope::Opponents
+        }
+    );
+    assert_eq!(
+        def.affected,
+        Some(TargetFilter::Typed(
+            TypedFilter::creature().controller(ControllerRef::You)
+        ))
+    );
+}
+
+/// CR 115.1 + CR 702.11b: a true self-subject still binds the source.
+#[test]
+fn cant_be_targeted_self_subject_stays_self_ref() {
+    for line in [
+        "~ can't be the target of spells or abilities your opponents control.",
+        "This creature can't be the target of spells or abilities your opponents control.",
+    ] {
+        let def = parse_static_line(line).unwrap();
+        assert_eq!(
+            def.mode,
+            StaticMode::CantBeTargeted {
+                who: ProhibitionScope::Opponents
+            },
+            "{line}"
+        );
+        assert_eq!(def.affected, Some(TargetFilter::SelfRef), "{line}");
     }
 }
