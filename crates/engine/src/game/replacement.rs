@@ -1143,10 +1143,13 @@ fn prompt_belongs_to_a_payment(state: &GameState) -> bool {
         || state.payment_transaction_replay
 }
 
-/// CR 616.1: whether a parked prompt still offers only replacements that
-/// apply. When a stored candidate no longer would ([`stored_candidate_applies`]:
-/// its source left the battlefield or the game, its grant ended), the answer
-/// re-proposes the event, so only the effects that would now be applicable are
+/// CR 616.1: whether a parked prompt still offers the replacements its chooser
+/// chooses among: every stored candidate still applies
+/// ([`stored_candidate_applies`]: its source has not left the battlefield or
+/// the game, its grant has not ended), and no effect that began to apply while
+/// the prompt was parked is left out
+/// ([`leaves_out_an_applicable_replacement`]). Otherwise the answer re-proposes
+/// the event, so exactly the effects that would now be applicable are
 /// considered. A found-card or step-end prompt carries its own candidate
 /// binding.
 pub(crate) fn pending_candidates_are_current(
@@ -1156,10 +1159,59 @@ pub(crate) fn pending_candidates_are_current(
     matches!(
         pending.proposed,
         ProposedEvent::SearchFound { .. } | ProposedEvent::EmptyManaPool { .. }
-    ) || pending
+    ) || (pending
         .candidates
         .iter()
         .all(|rid| stored_candidate_applies(state, &pending.proposed, *rid))
+        && !leaves_out_an_applicable_replacement(state, pending))
+}
+
+/// CR 616.1 + CR 800.4a: whether the discovery that built the parked prompt
+/// would now offer a replacement the prompt does not know: an effect that did
+/// not apply when the event was parked and applies now (Hullbreacher once the
+/// Humility that muted it left the game with its controller). The affected
+/// player chooses among all the effects that apply, so a prompt missing one is
+/// not the choice the rules give them.
+///
+/// The prompt knows its stored candidates and, when it asks about the one
+/// optional candidate its chooser picked from an ordering, the candidates
+/// passed over (`PendingReplacement::ordering_peers`), which are offered again
+/// after that candidate's own choice.
+///
+/// Read only for a prompt parked at the choice itself, where the stored
+/// candidates are what [`pipeline_loop`] discovered for the stored event. A
+/// prompt re-parked inside one candidate's application (an accepted MayCost,
+/// an entry-controller or as-enters answer, which mark their candidate applied
+/// first) is past that choice.
+fn leaves_out_an_applicable_replacement(state: &GameState, pending: &PendingReplacement) -> bool {
+    if pending.may_cost_paid
+        || pending.may_cost_remaining.is_some()
+        || pending
+            .candidates
+            .iter()
+            .any(|rid| pending.proposed.already_applied(rid))
+    {
+        return false;
+    }
+    let applicable = find_applicable_replacements(state, &pending.proposed, replacement_registry());
+    choosable_replacement_candidates(state, &pending.proposed, applicable)
+        .iter()
+        .any(|rid| !pending.candidates.contains(rid) && !pending.ordering_peers.contains(rid))
+}
+
+/// CR 616.1 + CR 614.17c + CR 800.4a: whether a parked replacement prompt no
+/// longer describes its event: the draw can no longer happen, or the
+/// replacements that apply to it changed
+/// ([`pending_candidates_are_current`]). A departure re-settles such a prompt
+/// of a payment at once, through the replacement authority, so the chooser is
+/// never shown a choice the game would not offer: a staged payment's in
+/// `payment_transaction::resettle_parked_replacement_after_departure`, a
+/// parked unless payment's at the concession's action boundary. An answer to
+/// one that was not re-settled (a sandbox action or a restored save changed
+/// it) re-proposes it in any case, so no stored index is applied to it.
+pub(crate) fn parked_prompt_is_stale(state: &GameState, pending: &PendingReplacement) -> bool {
+    proposed_draw_cannot_happen(state, &pending.proposed)
+        || !pending_candidates_are_current(state, pending)
 }
 
 /// Build a `WaitingFor::ReplacementChoice` from the current `pending_replacement` state.
@@ -12200,6 +12252,7 @@ fn park_entry_controller_choice(
         sacrifice_provenance: None,
         candidates: vec![rid],
         search_found_candidates: Vec::new(),
+        ordering_peers: Vec::new(),
         depth,
         is_optional: false,
         choice_player: None,
@@ -12375,6 +12428,7 @@ fn park_as_enters_named_choice(
         sacrifice_provenance: None,
         candidates: vec![rid],
         search_found_candidates: Vec::new(),
+        ordering_peers: Vec::new(),
         depth,
         is_optional: false,
         choice_player: None,
@@ -12585,6 +12639,7 @@ fn park_as_enters_pay_choice(
         sacrifice_provenance: None,
         candidates: vec![rid],
         search_found_candidates: Vec::new(),
+        ordering_peers: Vec::new(),
         depth,
         is_optional: false,
         choice_player: None,
@@ -13347,6 +13402,7 @@ fn pipeline_loop(
                     sacrifice_provenance: None,
                     candidates,
                     search_found_candidates,
+                    ordering_peers: Vec::new(),
                     depth,
                     is_optional: true,
                     choice_player: Some(affected),
@@ -13420,6 +13476,7 @@ fn pipeline_loop(
                 sacrifice_provenance: None,
                 candidates,
                 search_found_candidates,
+                ordering_peers: Vec::new(),
                 depth,
                 is_optional: false,
                 choice_player: None,
@@ -13681,9 +13738,10 @@ fn continue_replacement_impl(
     let registry = replacement_registry();
     prepare_replacement_index_for_pipeline(state);
 
-    // CR 616.1: a stored candidate that no longer applies is not among the
-    // effects its chooser chooses from. Re-propose the event so the prompt, if any
-    // remains, offers only the replacements that still apply. Scoped to the
+    // CR 616.1: the chooser chooses among the effects that apply now: a stored
+    // candidate that no longer applies is not one of them, and an effect that
+    // began to apply while the prompt was parked is. Re-propose the event so the
+    // prompt, if any remains, offers exactly those. Scoped to the
     // owners whose prompt a departure can outlive while it stays parked: a draw
     // payment's prompt and a staged payment's prompt (live or replayed); every
     // other prompt keeps its answer as before.
@@ -13875,6 +13933,7 @@ fn continue_replacement_impl(
                     sacrifice_provenance: reparked_sacrifice_provenance,
                     candidates: reparked_candidates,
                     search_found_candidates: Vec::new(),
+                    ordering_peers: Vec::new(),
                     depth: reparked_depth,
                     is_optional: true,
                     choice_player: reparked_choice_player,
@@ -14178,6 +14237,14 @@ fn continue_replacement_impl(
             proposed.mark_applied(rid);
             return pipeline_loop(state, proposed, pending.depth + 1, registry, events);
         };
+        // The candidates passed over still apply; the optional prompt keeps
+        // them so it is not mistaken for one that leaves an effect out.
+        pending.ordering_peers = pending
+            .candidates
+            .iter()
+            .copied()
+            .filter(|candidate| *candidate != rid)
+            .collect();
         pending.candidates = vec![rid];
         pending.is_optional = true;
         pending.choice_player = Some(affected);
@@ -14315,6 +14382,7 @@ mod tests {
             sacrifice_provenance: None,
             candidates: vec![finality_counter_replacement_id(ObjectId(1))],
             search_found_candidates: Vec::new(),
+            ordering_peers: Vec::new(),
             depth: 0,
             is_optional: true,
             choice_player: None,
@@ -17337,6 +17405,7 @@ mod tests {
                 index: 0,
             }],
             search_found_candidates: Vec::new(),
+            ordering_peers: Vec::new(),
             depth: 0,
             is_optional: true,
             choice_player: Some(PlayerId(0)),
@@ -17402,6 +17471,7 @@ mod tests {
                 sacrifice_provenance: None,
                 candidates: vec![commander_hand_or_library_return_replacement_id(commander)],
                 search_found_candidates: Vec::new(),
+                ordering_peers: Vec::new(),
                 depth: 0,
                 is_optional: true,
                 choice_player: Some(PlayerId(0)),
@@ -17488,6 +17558,7 @@ mod tests {
                 index: 0,
             }],
             search_found_candidates: Vec::new(),
+            ordering_peers: Vec::new(),
             depth: 0,
             is_optional: false,
             choice_player: None,
@@ -22981,6 +23052,7 @@ mod tests {
             sacrifice_provenance: None,
             candidates: vec![],
             search_found_candidates: Vec::new(),
+            ordering_peers: Vec::new(),
             depth: 0,
             is_optional: false,
             choice_player: None,

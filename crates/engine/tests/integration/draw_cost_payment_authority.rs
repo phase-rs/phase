@@ -23,8 +23,9 @@ use engine::types::ability::{
 use engine::types::actions::{DebugAction, GameAction};
 use engine::types::events::GameEvent;
 use engine::types::game_state::{
-    AutoPassMode, CastPaymentMode, GameState, PayCostKind, PersistedGameState,
-    PersistedRestoreError, StackEntry, StackEntryKind, WaitingFor,
+    AutoPassMode, CastPaymentMode, GameState, PayCostKind, PendingCostMoveResume,
+    PersistedGameState, PersistedRestoreError, StackEntry, StackEntryKind, UnpaidCostRemainder,
+    UnpaidCostSuffix, WaitingFor,
 };
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaType, ManaUnit};
@@ -2339,9 +2340,166 @@ fn checked_restore_refuses_a_stale_replacement_candidate() {
     );
 }
 
+/// CR 702.24a + CR 118.12: a recovery checkpoint is a second executable state,
+/// so a parked unless payment inside it is held to the outer state's rule. NOT
+/// a state the game produces: a staged payment's checkpoint never parks an
+/// unless payment, so one is forged into the valid Dredge checkpoint, owing a
+/// repeated draw to a payer who is not a seat. The save is refused.
+#[test]
+fn checked_restore_refuses_a_checkpoint_whose_parked_payment_names_no_seat() {
+    let runner = recovered_dredge_checkpoint();
+    checked_round_trip(runner.state()).expect("reach guard: the checkpoint restores");
+    let mut state = runner.state().clone();
+    let source = state
+        .payment_transaction
+        .as_ref()
+        .expect("reach guard: the payment is staged")
+        .root
+        .source_id;
+    let checkpoint = state
+        .payment_transaction
+        .as_mut()
+        .and_then(|transaction| transaction.recovered.as_mut())
+        .expect("the departure parked a recovery checkpoint");
+    checkpoint.state.pending_cost_move_resume =
+        Some(PendingCostMoveResume::CounterAdditionUnlessPayment {
+            cost: draw_cost(1),
+            pending_effect: Box::new(ResolvedAbility::new(
+                Effect::GainLife {
+                    amount: QuantityExpr::Fixed { value: 1 },
+                    player: TargetFilter::Controller,
+                },
+                vec![],
+                source,
+                P0,
+            )),
+            trigger_event: None,
+            effect_description: None,
+            remaining: Vec::new(),
+            unpaid_suffix: Some(Box::new(UnpaidCostSuffix {
+                payer: PlayerId(99),
+                remainder: UnpaidCostRemainder::Repeated(
+                    std::num::NonZeroU32::new(2).expect("two is not zero"),
+                ),
+            })),
+        });
+    let refusal = checked_round_trip(&state);
+    assert!(
+        matches!(
+            &refusal,
+            Err(PersistedRestoreError::InvalidPaymentTransaction(reason))
+                if reason.contains("recovery checkpoint: parked unless payment")
+        ),
+        "a checkpoint owing a remainder to no seat is not admitted: {refusal:?}"
+    );
+}
+
 /// Notion Thief, verbatim Oracle text.
 const NOTION_THIEF_ORACLE: &str = "Flash\nIf an opponent would draw a card except the first one \
 they draw in each of their draw steps, instead that player skips that draw and you draw a card.";
+
+/// Hullbreacher, verbatim Oracle text.
+const HULLBREACHER_ORACLE: &str = "Flash\nIf an opponent would draw a card except the first one \
+they draw in each of their draw steps, instead you create a Treasure token. (It's an artifact \
+with \"{T}, Sacrifice this token: Add one mana of any color.\")";
+
+/// CR 616.1 + CR 800.4a + CR 104.3a: the staged form of a departure that makes
+/// a replacement applicable. P0's draw leg parks on Dredge alone while P3's
+/// Humility mutes P1's Hullbreacher. P3 concedes, so Hullbreacher applies
+/// again. The departure re-settles the parked prompt on the checkpoint, which
+/// stores the order among both effects; the save passes checked restore, and
+/// choosing Hullbreacher for each leg pays the cost with two Treasures and no
+/// card drawn. NOT a printed cost: `PayCost{Composite[Draw 1; Draw 1]}` is the
+/// staged shape nearest the five printed `[Mana, PayLife]` composites.
+#[test]
+fn a_departure_that_adds_a_parked_candidate_keeps_a_restorable_checkpoint() {
+    let mut scenario = GameScenario::new_n_player(4, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    for player in 0..4 {
+        scenario.with_library_top(PlayerId(player), &STAGED_LIBRARY);
+    }
+    let source = scenario.add_creature(P0, "Draw Cost Source", 1, 1).id();
+    scenario
+        .add_creature_to_graveyard(P0, "Stinkweed Imp", 1, 2)
+        .from_oracle_text(STINKWEED_IMP_ORACLE);
+    let hullbreacher = scenario
+        .add_creature_from_oracle(P1, "Hullbreacher", 3, 2, HULLBREACHER_ORACLE)
+        .id();
+    scenario.add_enchantment_from_oracle(PlayerId(3), "Humility", HUMILITY_ORACLE);
+    let mut runner = scenario.build();
+    evaluate_layers(runner.state_mut());
+    let root = ResolvedAbility::new(pay_cost(draw_legs(2)), vec![], source, P0);
+    let state = runner.state_mut();
+    let hand_before = state.players[P0.0 as usize].hand.len();
+    resolve_ability_chain(state, &root, &mut Vec::new(), 0).expect("the staged payment resolves");
+    assert!(
+        is_dredge_prompt_for_p0(state)
+            && matches!(
+                &state.waiting_for,
+                WaitingFor::ReplacementChoice {
+                    kind: engine::types::game_state::ReplacementChoiceKind::OptionalBranch,
+                    ..
+                }
+            ),
+        "reach guard: only Dredge applies while Humility mutes Hullbreacher: {:?}",
+        state.waiting_for
+    );
+
+    apply(
+        state,
+        PlayerId(3),
+        GameAction::Concede {
+            player_id: PlayerId(3),
+        },
+    )
+    .expect("a player can concede at any time");
+    let pending = state
+        .payment_transaction
+        .as_ref()
+        .and_then(|transaction| transaction.recovered.as_ref())
+        .expect("the departure keeps the accepted prefix on a checkpoint")
+        .state
+        .pending_replacement
+        .as_ref()
+        .expect("the checkpoint parks a replacement choice");
+    assert!(
+        !pending.is_optional && pending.candidates.len() == 2,
+        "the checkpoint stores the order among Dredge and Hullbreacher: {:?}",
+        pending.candidates
+    );
+
+    let mut restored =
+        checked_round_trip(runner.state()).expect("the checkpoint passes checked restore");
+    for leg in 1..=2 {
+        let WaitingFor::ReplacementChoice { candidates, .. } = &restored.waiting_for else {
+            panic!(
+                "leg {leg} asks for a replacement choice: {:?}",
+                restored.waiting_for
+            );
+        };
+        let index = candidates
+            .iter()
+            .position(|candidate| candidate.source_id == hullbreacher)
+            .unwrap_or_else(|| panic!("leg {leg} offers Hullbreacher: {candidates:?}"));
+        apply(&mut restored, P0, GameAction::ChooseReplacement { index })
+            .unwrap_or_else(|error| panic!("choosing Hullbreacher on leg {leg}: {error:?}"));
+    }
+    assert!(
+        restored.payment_transaction.is_none(),
+        "the payment settled"
+    );
+    let treasures = restored
+        .battlefield
+        .iter()
+        .filter(|id| restored.objects[*id].name == "Treasure")
+        .count();
+    assert_eq!(treasures, 2, "each leg became a Treasure");
+    assert_eq!(
+        restored.players[P0.0 as usize].hand.len(),
+        hand_before,
+        "no card is drawn"
+    );
+}
 
 /// CR 616.1 + CR 800.4a + CR 104.3a: P0's draw leg parks a choice between
 /// P0's Dredge and P3's Notion Thief. P3 concedes, so Notion Thief leaves the

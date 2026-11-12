@@ -2258,6 +2258,56 @@ fn park_owed_instructions(
     });
 }
 
+/// CR 800.4a: retire a parked unless payment
+/// ([`PendingCostMoveResume::CounterAdditionUnlessPayment`]) that leaves with
+/// the players leaving the game, before the departure sweeps run.
+///
+/// - The payment settles the resolution of the ability it guards. When that
+///   ability's controller leaves, the ability ceases to exist with everything
+///   still to be done for it, and the payment is retired whether or not
+///   anything is still owed: a pause on the last instruction parks no
+///   remainder, and its owner must not outlive the resolution it belongs to.
+/// - When the payer of legs or instructions still owed leaves, they leave
+///   with that player: nothing more is performed for a player who is no
+///   longer in the game. (Psychic Vortex's upkeep is paid by the ability's
+///   controller, so both conditions name the same player there.)
+///
+/// A payment that stays (its controller and its payer are still in the game)
+/// keeps its prompt when the chooser is still there, and otherwise resumes at
+/// the concession's action boundary
+/// (`engine::reconcile_parked_unless_payment_after_departure`), before any
+/// player receives priority (CR 117.2e).
+pub(crate) fn retire_parked_unless_payment_of_departing_players(
+    state: &mut GameState,
+    leaving: &std::collections::HashSet<PlayerId>,
+) {
+    if matches!(
+        &state.pending_cost_move_resume,
+        Some(PendingCostMoveResume::CounterAdditionUnlessPayment {
+            pending_effect,
+            unpaid_suffix,
+            ..
+        }) if leaving.contains(&pending_effect.controller)
+            || unpaid_suffix
+                .as_ref()
+                .is_some_and(|suffix| leaving.contains(&suffix.payer))
+    ) {
+        state.pending_cost_move_resume = None;
+    }
+}
+
+/// CR 117.2e + CR 800.4a: whether a parked unless payment has lost the prompt
+/// it waited on: no replacement choice is parked for it. Under a Priority
+/// result that is a payment a departure interrupted (the choice left with its
+/// chooser), still owed its resume before any player may act.
+pub(crate) fn parked_unless_payment_lost_its_prompt(state: &GameState) -> bool {
+    state.pending_replacement.is_none()
+        && matches!(
+            state.pending_cost_move_resume,
+            Some(PendingCostMoveResume::CounterAdditionUnlessPayment { .. })
+        )
+}
+
 /// The most game-changing instructions one dispatch of a repeated draw payment
 /// performs: one work slice. An engine work limit, not a rule: it sits far
 /// above a library's cards (the payments a game produces end inside one
@@ -2307,18 +2357,32 @@ pub(crate) fn awaits_payment_continuation(state: &GameState) -> bool {
     payment_continuation_prompt(state).is_some_and(|prompt| prompt == state.waiting_for)
 }
 
-/// CR 702.24a: the continuation of a repeated draw payment has one answer, to
-/// continue. The mana actions an unless-payment prompt otherwise admits are
-/// refused there, at the tap preflight and in each handler, and the
-/// legal-action lists offer none (`ai_support::mana_action_player`): a mana
-/// ability that paused on a replacement choice would take the slot the owed
-/// cursor is parked in (`GameState::pending_cost_move_resume`), after which
-/// the prompt would read as a fresh choice. No mana is needed there (CR
-/// 605.3a: mana abilities serve a mana payment; the draw cost asks for none).
-pub(crate) fn refuse_mana_at_payment_continuation(state: &GameState) -> Result<(), EngineError> {
-    if awaits_payment_continuation(state) {
+/// CR 605.3a: whether the open unless-payment prompt asks for no mana: its
+/// cost is draws only (Psychic Vortex's upkeep, Decoy Gambit's "has you draw a
+/// card"), at the offer and at the continuation of a repeated payment alike.
+/// A mana ability is activated with priority or when a rule or effect asks for
+/// a mana payment; the payer of a draw cost has neither while the ability
+/// resolves (CR 117.1d). The one mana-window authority of an unless payment:
+/// the tap preflight, each mana handler and the legal-action lists
+/// (`ai_support::mana_action_player`) read it. Every other unless cost keeps
+/// the window it had.
+pub(crate) fn unless_prompt_asks_for_no_mana(state: &GameState) -> bool {
+    matches!(
+        &state.waiting_for,
+        WaitingFor::UnlessPayment { cost, .. } if costs::cost_is_only_draws(cost)
+    )
+}
+
+/// CR 605.3a: refuse a mana action at an unless payment of draws
+/// ([`unless_prompt_asks_for_no_mana`]). At the continuation of a repeated
+/// payment the refusal also protects the owed cursor: a mana ability that
+/// paused on a replacement choice would take the slot the cursor is parked in
+/// (`GameState::pending_cost_move_resume`), after which the prompt would read
+/// as a fresh choice.
+pub(crate) fn refuse_mana_at_draw_only_payment(state: &GameState) -> Result<(), EngineError> {
+    if unless_prompt_asks_for_no_mana(state) {
         return Err(EngineError::InvalidAction(
-            "CR 702.24a: a repeated payment already begun only continues".to_string(),
+            "CR 605.3a: a payment of draws asks for no mana".to_string(),
         ));
     }
     Ok(())
@@ -2694,7 +2758,7 @@ pub(super) fn handle_unless_payment_tap_land_for_mana(
     selection: &ManaSourceSelection,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
-    refuse_mana_at_payment_continuation(state)?;
+    refuse_mana_at_draw_only_payment(state)?;
     let WaitingFor::UnlessPayment {
         player,
         cost,
@@ -2738,7 +2802,7 @@ pub(super) fn handle_unless_payment_untap_land_for_mana(
     object_id: ObjectId,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
-    refuse_mana_at_payment_continuation(state)?;
+    refuse_mana_at_draw_only_payment(state)?;
     let WaitingFor::UnlessPayment {
         player,
         cost,
@@ -2773,7 +2837,7 @@ pub(super) fn handle_unless_payment_activate_ability(
     ability_index: usize,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
-    refuse_mana_at_payment_continuation(state)?;
+    refuse_mana_at_draw_only_payment(state)?;
     let WaitingFor::UnlessPayment {
         player,
         cost,
@@ -3555,7 +3619,7 @@ pub(super) fn resume_unless_bounce_cost_move(
 /// active player's priority. Once the active player has
 /// left the game, the next player in turn order still in the game receives it
 /// instead, and `priority_player` names the same seat.
-fn set_active_priority(state: &mut GameState) {
+pub(super) fn set_active_priority(state: &mut GameState) {
     let player = living_priority_seat(state);
     state.waiting_for = WaitingFor::Priority { player };
     state.priority_player = player;

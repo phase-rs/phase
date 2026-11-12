@@ -2383,9 +2383,9 @@ fn a_payment_past_a_work_slice_continues_at_a_boundary_without_priority() {
 const SOL_RING_ORACLE: &str = "{T}: Add {C}{C}.";
 
 /// CR 605.3a + CR 702.24a: the continuation asks for no mana payment, so the
-/// payer's mana abilities, which an unless-payment prompt otherwise admits,
-/// are refused at a work-slice boundary: P0 can neither tap a land nor
-/// activate Sol Ring there, and the prompt and its owed cursor are unchanged.
+/// payer's mana abilities are refused at a work-slice boundary as they are at
+/// the offer: P0 can neither tap a land nor activate Sol Ring there, and the
+/// prompt and its owed cursor are unchanged.
 #[test]
 fn the_payer_cannot_activate_mana_abilities_at_a_work_slice_boundary() {
     const AGE: u32 = WORK_SLICE + 2;
@@ -2421,7 +2421,7 @@ fn the_payer_cannot_activate_mana_abilities_at_a_work_slice_boundary() {
             matches!(
                 &refused,
                 Err(engine::game::engine::EngineError::InvalidAction(reason))
-                    if reason.contains("only continues")
+                    if reason.contains("asks for no mana")
             ),
             "{action:?} is refused at the boundary: {refused:?}"
         );
@@ -2745,7 +2745,8 @@ const HUMILITY_ORACLE: &str =
 /// Humility. P0 pays, and
 /// the first draw parks on Dredge (the only replacement that applies). P2
 /// concedes, so Humility leaves the game (CR 800.4a) and Hullbreacher applies
-/// again while the payment is parked.
+/// again while the payment is parked: the parked choice is rebuilt, and P0 is
+/// asked which of Dredge and Hullbreacher applies first (CR 616.1).
 fn hullbreacher_unmuted_mid_payment() -> (GameRunner, ObjectId, ObjectId) {
     const AGE: u32 = WORK_SLICE + 2;
     let mut scenario = GameScenario::new_n_player(3, 42);
@@ -2792,19 +2793,59 @@ fn hullbreacher_unmuted_mid_payment() -> (GameRunner, ObjectId, ObjectId) {
         },
     )
     .expect("a player can concede at any time");
+    assert_replacement_choice(&runner, "the rebuilt choice is still P0's");
+    let pending = runner
+        .state()
+        .pending_replacement
+        .as_ref()
+        .expect("the first draw is still parked");
+    assert_eq!(
+        pending.candidates.len(),
+        2,
+        "CR 616.1: Dredge and Hullbreacher both apply once Humility is gone"
+    );
     (runner, vortex, hullbreacher)
 }
 
-/// CR 702.24a + CR 117.2e + CR 800.4a: after the departure, accepting Dredge
+/// The position of Hullbreacher (`chosen`) or of the other candidate, Dredge,
+/// in the parked replacement choice.
+fn candidate_position(runner: &GameRunner, hullbreacher: ObjectId, chosen: bool) -> usize {
+    runner
+        .state()
+        .pending_replacement
+        .as_ref()
+        .expect("a replacement choice is parked")
+        .candidates
+        .iter()
+        .position(|rid| (rid.source == hullbreacher) == chosen)
+        .expect("the candidate is offered")
+}
+
+/// CR 702.24a + CR 117.2e + CR 800.4a: after the departure, choosing Dredge
 /// replaces the parked draw, and every later instruction is replaced by
 /// Hullbreacher. The resumed suffix is one work slice and one more instruction:
 /// it runs to the slice boundary, where the payer continues, and the payment
 /// is performed in full.
 #[test]
 fn accepting_dredge_after_a_departure_unmutes_hullbreacher_completes_the_payment() {
-    let (mut runner, vortex, _) = hullbreacher_unmuted_mid_payment();
+    let (mut runner, vortex, hullbreacher) = hullbreacher_unmuted_mid_payment();
+    // CR 616.1: choosing Dredge's turn asks its own "may"; accepting it mills.
+    let index = candidate_position(&runner, hullbreacher, false);
+    runner
+        .act(GameAction::ChooseReplacement { index })
+        .expect("choosing Dredge's turn is never refused");
+    assert!(
+        runner
+            .state()
+            .pending_replacement
+            .as_ref()
+            .is_some_and(|pending| pending.is_optional && pending.candidates.len() == 1),
+        "Dredge's own choice is asked while Hullbreacher still applies"
+    );
     let resumed = runner
-        .act(GameAction::ChooseReplacement { index: 0 })
+        .act(GameAction::ChooseReplacement {
+            index: APPLY_REPLACEMENT,
+        })
         .expect("accepting Dredge is never refused");
     assert_eq!(
         treasures_of(&runner, P1),
@@ -2829,31 +2870,24 @@ fn accepting_dredge_after_a_departure_unmutes_hullbreacher_completes_the_payment
     );
 }
 
-/// CR 616.1 + CR 702.24a + CR 800.4a: after the same departure, declining
-/// Dredge lets Hullbreacher replace the draw; every later draw again offers
+/// CR 616.1 + CR 702.24a + CR 800.4a: after the same departure, choosing
+/// Hullbreacher replaces the parked draw; every later draw again offers
 /// Dredge and Hullbreacher, and choosing Hullbreacher each time pays every
 /// instruction with no answer refused.
 #[test]
-fn declining_dredge_after_a_departure_unmutes_hullbreacher_completes_the_payment() {
+fn choosing_hullbreacher_after_a_departure_unmutes_it_completes_the_payment() {
     let (mut runner, vortex, hullbreacher) = hullbreacher_unmuted_mid_payment();
-    let mut events = runner
-        .act(GameAction::ChooseReplacement { index: 1 })
-        .expect("declining Dredge is never refused")
-        .events;
+    let mut events = Vec::new();
     let mut orders = 0;
-    while let Some(pending) = runner.state().pending_replacement.as_ref() {
-        let index = pending
-            .candidates
-            .iter()
-            .position(|rid| rid.source == hullbreacher)
-            .expect("each later draw offers Hullbreacher");
+    while runner.state().pending_replacement.is_some() {
+        let index = candidate_position(&runner, hullbreacher, true);
         events = runner
             .act(GameAction::ChooseReplacement { index })
             .expect("choosing Hullbreacher is never refused")
             .events;
         orders += 1;
     }
-    assert_eq!(orders, WORK_SLICE + 1, "each later draw asks for an order");
+    assert_eq!(orders, WORK_SLICE + 2, "each draw asks for an order");
     assert_eq!(
         treasures_of(&runner, P1),
         (WORK_SLICE + 2) as usize,
@@ -2911,5 +2945,605 @@ fn a_skip_prompt_whose_source_left_reproposes_the_draw() {
         before.hand + 2,
         "both draws happen once the skip no longer applies"
     );
+    assert!(upkeep_ability_resolved(&result.events, vortex));
+}
+
+/// Thought Reflection, verbatim Oracle text.
+const THOUGHT_REFLECTION_ORACLE: &str = "If you would draw a card, draw two cards instead.";
+
+/// `player` concedes; returns the events of the concession.
+fn concede_with_events(runner: &mut GameRunner, player: PlayerId) -> Vec<GameEvent> {
+    engine::game::engine::apply(
+        runner.state_mut(),
+        player,
+        GameAction::Concede { player_id: player },
+    )
+    .expect("a player can concede at any time")
+    .events
+}
+
+/// Three players at P0's untap step with Psychic Vortex carrying
+/// `age_counters_before` age counters, plus whatever `setup` adds.
+fn three_player_vortex_board<Fixture>(
+    age_counters_before: u32,
+    setup: impl FnOnce(&mut GameScenario) -> Fixture,
+) -> (GameRunner, ObjectId, Fixture) {
+    let mut scenario = GameScenario::new_n_player(3, 42);
+    scenario.at_phase(Phase::Untap);
+    scenario.with_library_top(P0, &STAGED_LIBRARY);
+    let vortex = scenario
+        .add_enchantment_from_oracle(P0, "Psychic Vortex", PSYCHIC_VORTEX_ORACLE)
+        .id();
+    let fixture = setup(&mut scenario);
+    let mut runner = scenario.build();
+    if age_counters_before > 0 {
+        runner
+            .state_mut()
+            .objects
+            .get_mut(&vortex)
+            .expect("Psychic Vortex exists")
+            .counters
+            .insert(CounterType::Age, age_counters_before);
+    }
+    (runner, vortex, fixture)
+}
+
+/// CR 800.4a: the payer of a draw payment who leaves at the replacement prompt
+/// of the last instruction takes the payment with them. Nothing is owed after
+/// that instruction, and the parked payment is still retired: no owner is left
+/// behind for a later replacement answer to settle, and the living players go
+/// on.
+#[test]
+fn a_payer_departing_at_the_last_instructions_prompt_retires_the_payment() {
+    let (mut runner, vortex, ()) = three_player_vortex_board(0, |scenario| {
+        scenario.add_creature_from_oracle(
+            P0,
+            "Obstinate Familiar",
+            1,
+            1,
+            OBSTINATE_FAMILIAR_ORACLE,
+        );
+    });
+    advance_through_upkeep(&mut runner);
+    assert_draw_cost_prompt(&runner, 1, 1);
+    runner
+        .act(GameAction::PayUnlessCost { pay: true })
+        .expect("choosing the draw cost is legal");
+    assert_replacement_choice(&runner, "the only draw offers the skip");
+    assert_eq!(
+        parked_unpaid_suffix(&runner),
+        None,
+        "reach guard: the pause came on the last instruction"
+    );
+
+    let departure = concede_with_events(&mut runner, P0);
+    assert!(
+        !departure
+            .iter()
+            .any(|event| matches!(event, GameEvent::CardDrawn { .. })),
+        "nothing is drawn for the departed player"
+    );
+    assert_eq!(upkeep_resolutions(&departure, vortex), 0);
+    let state = runner.state();
+    assert!(state.players[P0.0 as usize].is_eliminated);
+    assert!(
+        state.pending_cost_move_resume.is_none(),
+        "the departed payer's payment is retired: {:?}",
+        state.pending_cost_move_resume
+    );
+    assert!(state.pending_replacement.is_none());
+    let WaitingFor::Priority { player } = state.waiting_for else {
+        panic!("a living player receives priority: {:?}", state.waiting_for);
+    };
+    assert_ne!(player, P0);
+    let next = engine::game::engine::apply(runner.state_mut(), player, GameAction::PassPriority)
+        .expect("the game goes on for the living players");
+    assert_eq!(upkeep_resolutions(&next.events, vortex), 0);
+}
+
+/// CR 800.4a + CR 702.24a + CR 117.2e: P1's Notion Thief turns the first of
+/// P0's two upkeep draws into a draw by P1, which parks on P1's own Obstinate
+/// Familiar. P1 concedes: the interrupted substitute leaves with P1, and P0,
+/// who chose to pay and is still in the game, performs the instruction still
+/// owed before any player receives priority.
+#[test]
+fn a_departing_substitute_chooser_leaves_the_surviving_payer_to_finish_the_payment() {
+    let (mut runner, vortex, ()) = three_player_vortex_board(1, |scenario| {
+        scenario.with_library_top(P1, &STAGED_LIBRARY[..6]);
+        scenario.add_creature_from_oracle(P1, "Notion Thief", 3, 1, NOTION_THIEF_ORACLE);
+        scenario.add_creature_from_oracle(
+            P1,
+            "Obstinate Familiar",
+            1,
+            1,
+            OBSTINATE_FAMILIAR_ORACLE,
+        );
+    });
+    advance_through_upkeep(&mut runner);
+    assert_draw_cost_prompt(&runner, 2, 1);
+    let before = ZoneSizes::of(&runner, P0);
+    runner
+        .act(GameAction::PayUnlessCost { pay: true })
+        .expect("choosing the draw cost is legal");
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::ReplacementChoice { player: P1, .. }
+        ),
+        "reach guard: Notion Thief's draw offers P1 the skip: {:?}",
+        runner.state().waiting_for
+    );
+    assert_eq!(
+        parked_unpaid_suffix(&runner),
+        owed_instructions(1),
+        "reach guard: P0 still owes the second instruction"
+    );
+
+    let departure = concede_with_events(&mut runner, P1);
+    let drawn_by = |player: PlayerId| {
+        departure
+            .iter()
+            .filter(|event| matches!(event, GameEvent::CardDrawn { player_id, .. } if *player_id == player))
+            .count()
+    };
+    assert_eq!(
+        drawn_by(P1),
+        0,
+        "the departed player's draw does not happen"
+    );
+    assert_eq!(
+        drawn_by(P0),
+        1,
+        "the instruction still owed is performed, with Notion Thief gone"
+    );
+    assert_eq!(ZoneSizes::of(&runner, P0).hand, before.hand + 1);
+    assert_eq!(
+        upkeep_resolutions(&departure, vortex),
+        1,
+        "the upkeep is paid inside the same resolution"
+    );
+    let state = runner.state();
+    assert!(
+        state.pending_cost_move_resume.is_none(),
+        "nothing is owed: {:?}",
+        state.pending_cost_move_resume
+    );
+    assert_eq!(zone_of(&runner, vortex), Zone::Battlefield);
+    assert!(
+        matches!(state.waiting_for, WaitingFor::Priority { player: P0 }),
+        "priority only once the payment is over: {:?}",
+        state.waiting_for
+    );
+}
+
+/// CR 616.1 + CR 800.4a: a parked ordering choice is rebuilt when a departure
+/// makes another replacement applicable. P0's only upkeep draw parks on the
+/// order of two Thought Reflections while P2's Humility mutes P1's
+/// Hullbreacher. P2 concedes, Hullbreacher applies again, and P0 may choose it
+/// first: one Treasure, no draw, and the payment is complete.
+#[test]
+fn a_departure_that_makes_a_replacement_applicable_rebuilds_the_parked_choice() {
+    let (mut runner, vortex, hullbreacher) = three_player_vortex_board(0, |scenario| {
+        for _ in 0..2 {
+            scenario.add_enchantment_from_oracle(
+                P0,
+                "Thought Reflection",
+                THOUGHT_REFLECTION_ORACLE,
+            );
+        }
+        let hullbreacher = scenario
+            .add_creature_from_oracle(P1, "Hullbreacher", 3, 2, HULLBREACHER_ORACLE)
+            .id();
+        scenario.add_enchantment_from_oracle(PlayerId(2), "Humility", HUMILITY_ORACLE);
+        hullbreacher
+    });
+    advance_through_upkeep(&mut runner);
+    assert_draw_cost_prompt(&runner, 1, 1);
+    let before = ZoneSizes::of(&runner, P0);
+    runner
+        .act(GameAction::PayUnlessCost { pay: true })
+        .expect("choosing the draw cost is legal");
+    let offered = |runner: &GameRunner| {
+        runner
+            .state()
+            .pending_replacement
+            .as_ref()
+            .expect("a replacement choice is parked")
+            .candidates
+            .clone()
+    };
+    assert_replacement_choice(&runner, "the draw asks for the Reflections' order");
+    assert_eq!(offered(&runner).len(), 2, "reach guard: two Reflections");
+    assert!(
+        offered(&runner)
+            .iter()
+            .all(|rid| rid.source != hullbreacher),
+        "reach guard: Humility mutes Hullbreacher"
+    );
+
+    concede_with_events(&mut runner, PlayerId(2));
+    assert_replacement_choice(&runner, "the choice is still P0's");
+    let candidates = offered(&runner);
+    assert_eq!(
+        candidates.len(),
+        3,
+        "CR 616.1: every replacement that now applies is offered"
+    );
+    let index = candidates
+        .iter()
+        .position(|rid| rid.source == hullbreacher)
+        .expect("Hullbreacher is offered");
+    let result = runner
+        .act(GameAction::ChooseReplacement { index })
+        .expect("choosing Hullbreacher first is legal");
+    assert_eq!(treasures_of(&runner, P1), 1, "exactly one Treasure");
+    assert_eq!(ZoneSizes::of(&runner, P0), before, "no card is drawn");
+    assert!(
+        upkeep_ability_resolved(&result.events, vortex),
+        "the upkeep is paid"
+    );
+    assert!(runner.state().pending_cost_move_resume.is_none());
+    assert_eq!(zone_of(&runner, vortex), Zone::Battlefield);
+}
+
+/// CR 702.24a: checked restore validates a parked draw payment's owner where
+/// no continuation prompt is open. A save of a payment parked on a Dredge
+/// choice whose only change is a payer who is not a seat in the game is
+/// refused, and so is one that polls a player who is not a seat, or that
+/// repeats a cost which is not a draw instruction; the untouched save
+/// restores and the payment completes.
+#[test]
+fn checked_restore_refuses_a_parked_payment_whose_payer_is_not_in_the_game() {
+    const AGE: u32 = 3;
+    let (mut runner, vortex, ()) = vortex_board(AGE - 1, &STAGED_LIBRARY, |scenario| {
+        scenario
+            .add_creature_to_graveyard(P0, "Stinkweed Imp", 1, 2)
+            .from_oracle_text(STINKWEED_IMP_ORACLE);
+    });
+    advance_through_upkeep(&mut runner);
+    runner
+        .act(GameAction::PayUnlessCost { pay: true })
+        .expect("choosing the draw cost is legal");
+    assert_parked_with_owed(&runner, AGE - 1, "the first draw offers Dredge");
+
+    let restore = |saved: &serde_json::Value| {
+        serde_json::from_value::<PersistedGameState>(saved.clone())
+            .expect("the save decodes")
+            .into_game_state()
+    };
+    let saved = serde_json::to_value(PersistedGameState::Raw(Box::new(runner.state().clone())))
+        .expect("the parked payment serializes");
+    let mut forged = saved.clone();
+    let mut replaced = 0;
+    replace_parked_payer(&mut forged, 99, &mut replaced);
+    assert_eq!(replaced, 1, "reach guard: exactly the parked payer changed");
+    let refused = restore(&forged);
+    assert!(
+        refused
+            .as_ref()
+            .is_err_and(|error| error.to_string().contains("parked unless payment")),
+        "a payer who is not a seat is refused: {:?}",
+        refused.as_ref().err()
+    );
+
+    let refused_with = |forge: &dyn Fn(&mut PendingCostMoveResume), reason: &str| {
+        let mut forged = runner.state().clone();
+        forge(
+            forged
+                .pending_cost_move_resume
+                .as_mut()
+                .expect("reach guard: the payment is parked"),
+        );
+        let saved = serde_json::to_value(PersistedGameState::Raw(Box::new(forged)))
+            .expect("the forged state serializes");
+        let refused = restore(&saved);
+        assert!(
+            refused
+                .as_ref()
+                .is_err_and(|error| error.to_string().contains(reason)),
+            "expected a refusal naming {reason:?}: {:?}",
+            refused.as_ref().err()
+        );
+    };
+    refused_with(
+        &|owner| {
+            let PendingCostMoveResume::CounterAdditionUnlessPayment { remaining, .. } = owner
+            else {
+                panic!("reach guard: an unless payment is parked");
+            };
+            remaining.push(PlayerId(99));
+        },
+        "who is not a seat",
+    );
+    refused_with(
+        &|owner| {
+            let PendingCostMoveResume::CounterAdditionUnlessPayment { cost, .. } = owner else {
+                panic!("reach guard: an unless payment is parked");
+            };
+            *cost = draw_counter_mana_cost();
+        },
+        "not a draw instruction",
+    );
+
+    *runner.state_mut() = restore(&saved).expect("the untouched save restores");
+    assert_parked_with_owed(&runner, AGE - 1, "after the restore");
+    let mut events = Vec::new();
+    while matches!(
+        runner.state().waiting_for,
+        WaitingFor::ReplacementChoice { .. }
+    ) {
+        events = runner
+            .act(GameAction::ChooseReplacement {
+                index: DECLINE_REPLACEMENT,
+            })
+            .expect("declining Dredge is legal")
+            .events;
+    }
+    assert!(
+        upkeep_ability_resolved(&events, vortex),
+        "the restored payment completes"
+    );
+    assert!(runner.state().pending_cost_move_resume.is_none());
+}
+
+/// Sets the payer of the parked unless payment's remainder in a serialized
+/// game to seat `payer`, counting the records changed.
+fn replace_parked_payer(value: &mut serde_json::Value, payer: u64, replaced: &mut usize) {
+    match value {
+        serde_json::Value::Object(fields) => {
+            if let Some(suffix) = fields
+                .get_mut("CounterAdditionUnlessPayment")
+                .and_then(|owner| owner.get_mut("unpaid_suffix"))
+            {
+                assert!(suffix["payer"].is_u64(), "reach guard: the payer is a seat");
+                suffix["payer"] = serde_json::json!(payer);
+                *replaced += 1;
+            }
+            for field in fields.values_mut() {
+                replace_parked_payer(field, payer, replaced);
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                replace_parked_payer(item, payer, replaced);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// CR 605.3a + CR 702.24a: Psychic Vortex's upkeep asks for draws, not mana,
+/// so the payer's mana abilities are not admitted at its initial offer either:
+/// tapping an Island and activating Sol Ring are refused and offered by no
+/// legal-action list, the sources and the pool are unchanged, and the payment
+/// is then paid in full.
+#[test]
+fn the_payer_cannot_activate_mana_abilities_at_a_draw_only_offer() {
+    const AGE: u32 = 2;
+    let (mut runner, vortex, (ring, island)) = vortex_board(AGE - 1, &STAGED_LIBRARY, |scenario| {
+        let ring = scenario
+            .add_artifact_from_oracle(P0, "Sol Ring", SOL_RING_ORACLE)
+            .id();
+        (ring, scenario.add_basic_land(P0, ManaColor::Blue))
+    });
+    advance_through_upkeep(&mut runner);
+    assert_draw_cost_prompt(&runner, AGE as usize, 1);
+    let before = ZoneSizes::of(&runner, P0);
+    let (flat, _, by_object) = engine::ai_support::legal_actions_full(runner.state());
+    let offered: Vec<&GameAction> = flat
+        .iter()
+        .chain(by_object.values().flatten())
+        .filter(|action| {
+            matches!(
+                action,
+                GameAction::TapLandForMana { .. }
+                    | GameAction::UntapLandForMana { .. }
+                    | GameAction::ActivateAbility { .. }
+            )
+        })
+        .collect();
+    assert!(
+        offered.is_empty(),
+        "no mana action is offered at a draw-only offer: {offered:?}"
+    );
+    let selection =
+        engine::game::mana_sources::activatable_mana_source_selections(runner.state(), P0)
+            .into_iter()
+            .find(|selection| selection.source.object_id == island)
+            .expect("reach guard: the Island's mana ability is activatable");
+    let pool_before = runner.state().players[P0.0 as usize].mana_pool.clone();
+    for action in [
+        GameAction::ActivateAbility {
+            source_id: ring,
+            ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
+        },
+        GameAction::TapLandForMana { selection },
+    ] {
+        let refused = runner.act(action.clone());
+        assert!(
+            matches!(
+                &refused,
+                Err(engine::game::engine::EngineError::InvalidAction(reason))
+                    if reason.contains("asks for no mana")
+            ),
+            "{action:?} is refused at the offer: {refused:?}"
+        );
+    }
+    assert_eq!(
+        runner.state().players[P0.0 as usize].mana_pool,
+        pool_before,
+        "no mana was produced"
+    );
+    assert!(!runner.state().objects[&ring].tapped);
+    assert!(!runner.state().objects[&island].tapped);
+    assert_draw_cost_prompt(&runner, AGE as usize, 1);
+    let result = runner
+        .act(GameAction::PayUnlessCost { pay: true })
+        .expect("the draw payment is still open");
+    assert_eq!(ZoneSizes::of(&runner, P0).hand, before.hand + AGE as usize);
+    assert!(upkeep_ability_resolved(&result.events, vortex));
+}
+
+/// CR 800.4a: the same board as
+/// `a_departing_substitute_chooser_leaves_the_surviving_payer_to_finish_the_payment`,
+/// with the payer leaving instead. Psychic Vortex's upkeep ability ceases to
+/// exist with its controller, so the payment is retired whole and nothing more
+/// is drawn for P0. P1's own draw, which Notion Thief gave them, is still
+/// theirs to take or skip, and the game goes on.
+#[test]
+fn a_departing_payer_leaves_another_players_substitute_draw_to_its_chooser() {
+    let (mut runner, vortex, ()) = three_player_vortex_board(1, |scenario| {
+        scenario.with_library_top(P1, &STAGED_LIBRARY[..6]);
+        scenario.add_creature_from_oracle(P1, "Notion Thief", 3, 1, NOTION_THIEF_ORACLE);
+        scenario.add_creature_from_oracle(
+            P1,
+            "Obstinate Familiar",
+            1,
+            1,
+            OBSTINATE_FAMILIAR_ORACLE,
+        );
+    });
+    advance_through_upkeep(&mut runner);
+    runner
+        .act(GameAction::PayUnlessCost { pay: true })
+        .expect("choosing the draw cost is legal");
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::ReplacementChoice { player: P1, .. }
+        ),
+        "reach guard: Notion Thief's draw offers P1 the skip"
+    );
+    assert_eq!(parked_unpaid_suffix(&runner), owed_instructions(1));
+
+    let departure = concede_with_events(&mut runner, P0);
+    assert!(
+        !departure
+            .iter()
+            .any(|event| matches!(event, GameEvent::CardDrawn { .. })),
+        "the departure draws nothing"
+    );
+    assert!(
+        runner.state().pending_cost_move_resume.is_none(),
+        "the departed controller's payment is retired"
+    );
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::ReplacementChoice { player: P1, .. }
+        ),
+        "P1's own draw is still P1's to answer: {:?}",
+        runner.state().waiting_for
+    );
+    let p1_hand = ZoneSizes::of(&runner, P1).hand;
+    let answered = engine::game::engine::apply(
+        runner.state_mut(),
+        P1,
+        GameAction::ChooseReplacement {
+            index: DECLINE_REPLACEMENT,
+        },
+    )
+    .expect("P1 declines the skip");
+    assert_eq!(ZoneSizes::of(&runner, P1).hand, p1_hand + 1, "P1 draws");
+    assert!(
+        !answered.events.iter().any(
+            |event| matches!(event, GameEvent::CardDrawn { player_id, .. } if *player_id == P0)
+        ),
+        "nothing is drawn for the departed player"
+    );
+    assert_eq!(upkeep_resolutions(&answered.events, vortex), 0);
+    let WaitingFor::Priority { player } = runner.state().waiting_for else {
+        panic!(
+            "a living player has priority: {:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert_ne!(player, P0);
+    engine::game::engine::apply(runner.state_mut(), player, GameAction::PassPriority)
+        .expect("the game goes on");
+}
+
+/// CR 616.1: an answer to an ordering prompt that leaves out an effect which
+/// now applies is not applied; the event is re-proposed first, also after a
+/// checked save and restore. Humility is removed by a sandbox action, which
+/// re-settles nothing (the public-action form is the concession above), so the
+/// two-Reflection prompt is still parked when P0 answers it: the answer
+/// re-proposes the draw, all three effects are offered, and Hullbreacher can
+/// be chosen first.
+#[test]
+fn an_answer_to_an_ordering_prompt_missing_an_applicable_replacement_reproposes_it() {
+    let (mut runner, vortex, (hullbreacher, humility)) = three_player_vortex_board(0, |scenario| {
+        for _ in 0..2 {
+            scenario.add_enchantment_from_oracle(
+                P0,
+                "Thought Reflection",
+                THOUGHT_REFLECTION_ORACLE,
+            );
+        }
+        let hullbreacher = scenario
+            .add_creature_from_oracle(P1, "Hullbreacher", 3, 2, HULLBREACHER_ORACLE)
+            .id();
+        let humility = scenario
+            .add_enchantment_from_oracle(PlayerId(2), "Humility", HUMILITY_ORACLE)
+            .id();
+        (hullbreacher, humility)
+    });
+    advance_through_upkeep(&mut runner);
+    let before = ZoneSizes::of(&runner, P0);
+    runner
+        .act(GameAction::PayUnlessCost { pay: true })
+        .expect("choosing the draw cost is legal");
+    let state = runner.state_mut();
+    state.debug_mode = true;
+    state.format_config.allow_debug_actions = true;
+    runner
+        .act(GameAction::Debug(DebugAction::RemoveObject {
+            object_id: humility,
+        }))
+        .expect("the sandbox removes Humility");
+    let offered = |runner: &GameRunner| {
+        runner
+            .state()
+            .pending_replacement
+            .as_ref()
+            .expect("a replacement choice is parked")
+            .candidates
+            .clone()
+    };
+    assert_eq!(
+        offered(&runner).len(),
+        2,
+        "reach guard: the sandbox action leaves the two-Reflection prompt parked"
+    );
+
+    let saved = serde_json::to_string(&PersistedGameState::Raw(Box::new(runner.state().clone())))
+        .expect("the parked payment serializes");
+    *runner.state_mut() = serde_json::from_str::<PersistedGameState>(&saved)
+        .expect("the save decodes")
+        .into_game_state()
+        .expect("the save restores");
+    assert_eq!(
+        offered(&runner).len(),
+        2,
+        "the restored prompt is the saved one"
+    );
+
+    runner
+        .act(GameAction::ChooseReplacement { index: 0 })
+        .expect("an answer to a prompt that changed is not refused");
+    assert_replacement_choice(&runner, "the draw is re-proposed, not replaced");
+    assert_eq!(ZoneSizes::of(&runner, P0), before, "no Reflection applied");
+    let candidates = offered(&runner);
+    assert_eq!(candidates.len(), 3, "every effect that applies is offered");
+    let index = candidates
+        .iter()
+        .position(|rid| rid.source == hullbreacher)
+        .expect("Hullbreacher is offered");
+    let result = runner
+        .act(GameAction::ChooseReplacement { index })
+        .expect("choosing Hullbreacher first is legal");
+    assert_eq!(treasures_of(&runner, P1), 1, "exactly one Treasure");
+    assert_eq!(ZoneSizes::of(&runner, P0), before, "no card is drawn");
     assert!(upkeep_ability_resolved(&result.events, vortex));
 }

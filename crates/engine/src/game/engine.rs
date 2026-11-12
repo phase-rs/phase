@@ -1784,6 +1784,19 @@ fn apply_action_boundary_core(
                     }));
                 }
             };
+            // CR 800.4a + CR 616.1 + CR 117.2e: a concession that left a parked unless
+            // payment without its prompt, or with a prompt that no longer describes its
+            // event, is reconciled before the action returns. A payment that ended joins
+            // the convergence pass below.
+            let reconciled_unless_payment = match reconcile_parked_unless_payment_after_departure(
+                state,
+                committed_departure.as_ref(),
+                &mut result,
+                scan_from,
+            ) {
+                Ok(moved) => moved,
+                Err(err) => break 'follow_up Some(err),
+            };
             let realized_token_entry =
                 effects::token::realize_settled_token_battlefield_entry(state, &mut result.events);
             // CR 608.2c + CR 608.2n: the same convergence for a resolution this action
@@ -1794,7 +1807,8 @@ fn apply_action_boundary_core(
             // triggers. A token realization and an owed final part on the same action
             // share one pass.
             let owed_spell_final_part_is_due = owed_spell_final_part_is_due(state, &result);
-            if (resumed_parked_root && matches!(result.waiting_for, WaitingFor::Priority { .. }))
+            if ((resumed_parked_root || reconciled_unless_payment)
+                && matches!(result.waiting_for, WaitingFor::Priority { .. }))
                 || realized_token_entry
                 || owed_spell_final_part_is_due
             {
@@ -1907,6 +1921,81 @@ fn resume_parked_counter_cost_root_at_action_boundary(
         );
     }
     Ok(progressed.then(|| state.waiting_for.clone()))
+}
+
+/// CR 800.4a + CR 616.1 + CR 117.2e: the concession-boundary reconciliation of
+/// a parked unless payment
+/// ([`PendingCostMoveResume::CounterAdditionUnlessPayment`]) the departure did
+/// not retire
+/// (`engine_payment_choices::retire_parked_unless_payment_of_departing_players`).
+///
+/// - Its replacement choice is still open for a surviving chooser, and the
+///   departure changed the replacements that apply to the parked draw (a
+///   candidate's source left, or an effect the departed player's permanent
+///   suppressed applies again): the event is re-proposed through the
+///   replacement authority, so the chooser is offered exactly the effects that
+///   apply now (CR 616.1). The same authority re-proposes on an answer; here it
+///   runs before the chooser is asked.
+/// - Its replacement choice left with a departed chooser (a substitute draw by
+///   another player, interrupted on that player's own choice): the choice and
+///   the substitute are gone (CR 800.4a), and the payer, who chose to pay and
+///   is still in the game, performs what is still owed. No player receives
+///   priority before the payment ends (CR 117.2e); when the resolution it
+///   belongs to ends, the active player does (CR 117.3b).
+///
+/// A payment that parks again has its events collected as any pause inside a
+/// payment of draws does (CR 603.2c); one that ended is left to the caller's
+/// convergence pass. A staged resolution payment is settled by its own
+/// authority in the concession arm
+/// (`payment_transaction::settle_after_outside_action`). Inert for an action
+/// that committed no departure; `true` when the payment moved.
+fn reconcile_parked_unless_payment_after_departure(
+    state: &mut GameState,
+    departure: Option<&CommittedDeparture>,
+    result: &mut ActionResult,
+    scan_from: usize,
+) -> Result<bool, EngineError> {
+    if departure.is_none()
+        || state.payment_transaction.is_some()
+        || !matches!(
+            state.pending_cost_move_resume,
+            Some(PendingCostMoveResume::CounterAdditionUnlessPayment { .. })
+        )
+    {
+        return Ok(false);
+    }
+    match &result.waiting_for {
+        WaitingFor::ReplacementChoice { .. }
+            if engine_payment_choices::draw_payment_is_parked(state)
+                && state
+                    .pending_replacement
+                    .as_ref()
+                    .is_some_and(|pending| replacement::parked_prompt_is_stale(state, pending)) =>
+        {
+            sync_waiting_for(state, &result.waiting_for);
+            // No answer is read: the replacement authority re-proposes a stale
+            // prompt before it applies any index (`continue_replacement`).
+            result.waiting_for =
+                engine_replacement::handle_replacement_choice(state, 0, &mut result.events)?;
+            state.waiting_for = result.waiting_for.clone();
+        }
+        WaitingFor::Priority { .. }
+            if engine_payment_choices::parked_unless_payment_lost_its_prompt(state) =>
+        {
+            sync_waiting_for(state, &result.waiting_for);
+            engine_payment_choices::set_active_priority(state);
+            resume_pending_continuation_if_priority(state, &mut result.events)?;
+            result.waiting_for = state.waiting_for.clone();
+        }
+        _ => return Ok(false),
+    }
+    if !matches!(result.waiting_for, WaitingFor::Priority { .. })
+        && engine_payment_choices::paused_in_draw_payment(state)
+        && state.game_end.is_none()
+    {
+        triggers::collect_paused_exit_triggers(state, &result.events, scan_from);
+    }
+    Ok(true)
 }
 
 /// The action boundary's convergence pass: the ordinary post-action pipeline,

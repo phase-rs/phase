@@ -16576,19 +16576,7 @@ impl GameState {
     /// smuggle an out-of-range actor/owner through serde and into the ordinary
     /// action boundary.
     fn validate_payment_transaction(&self) -> Result<(), String> {
-        // CR 702.24a: an unless-payment prompt saved over a parked repeated
-        // draw payment is that payment's continuation, derived from its owner
-        // and its exact owed cursor; any other prompt there would be answered
-        // as a fresh choice over a payment already begun.
-        if matches!(self.waiting_for, WaitingFor::UnlessPayment { .. })
-            && crate::game::engine_payment_choices::payment_continuation_prompt(self)
-                .is_some_and(|prompt| prompt != self.waiting_for)
-        {
-            return Err(
-                "unless-payment prompt does not match the repeated payment parked under it"
-                    .to_string(),
-            );
-        }
+        self.validate_parked_unless_payment()?;
         let Some(transaction) = self.payment_transaction.as_deref() else {
             return Ok(());
         };
@@ -16666,6 +16654,76 @@ impl GameState {
         Ok(())
     }
 
+    /// CR 118.12 + CR 702.24a + CR 800.4a: a parked unless payment
+    /// ([`PendingCostMoveResume::CounterAdditionUnlessPayment`]) is an
+    /// execution owner: its resume performs the unpaid remainder for the payer
+    /// the remainder names, and settles the ability it guards. It is checked
+    /// whatever prompt is open and whether or not a staged transaction exists:
+    /// - a remainder's payer is still in the game (a departure retires the
+    ///   payment of a departed payer,
+    ///   `engine_payment_choices::retire_parked_unless_payment_of_departing_players`),
+    ///   so no instruction is performed for, and no continuation addressed to,
+    ///   a seat that cannot answer;
+    /// - a repeated remainder counts copies of a draw instruction, the only
+    ///   cost paid that way (CR 702.24a);
+    /// - the players still to be polled are seats;
+    /// - an unless-payment prompt saved over a repeated remainder is that
+    ///   payment's continuation, derived from the owner and its exact owed
+    ///   cursor; any other prompt there would be answered as a fresh choice
+    ///   over a payment already begun.
+    fn validate_parked_unless_payment(&self) -> Result<(), String> {
+        let Some(PendingCostMoveResume::CounterAdditionUnlessPayment {
+            cost,
+            remaining,
+            unpaid_suffix,
+            ..
+        }) = &self.pending_cost_move_resume
+        else {
+            return Ok(());
+        };
+        let seated = |player: PlayerId| self.players.iter().any(|seat| seat.id == player);
+        let in_game = |player: PlayerId| {
+            self.players
+                .iter()
+                .any(|seat| seat.id == player && !seat.is_eliminated)
+        };
+        if let Some(player) = remaining.iter().find(|player| !seated(**player)) {
+            return Err(format!(
+                "parked unless payment polls {player:?}, who is not a seat"
+            ));
+        }
+        if let Some(suffix) = unpaid_suffix.as_deref() {
+            if !in_game(suffix.payer) {
+                return Err(format!(
+                    "parked unless payment owes a remainder for {:?}, who is not in the game",
+                    suffix.payer
+                ));
+            }
+            if matches!(suffix.remainder, UnpaidCostRemainder::Repeated(_))
+                && !matches!(
+                    cost,
+                    AbilityCost::EffectCost { effect }
+                        if matches!(effect.as_ref(), super::ability::Effect::Draw { .. })
+                )
+            {
+                return Err(
+                    "parked unless payment repeats a cost that is not a draw instruction"
+                        .to_string(),
+                );
+            }
+        }
+        if matches!(self.waiting_for, WaitingFor::UnlessPayment { .. })
+            && crate::game::engine_payment_choices::payment_continuation_prompt(self)
+                .is_some_and(|prompt| prompt != self.waiting_for)
+        {
+            return Err(
+                "unless-payment prompt does not match the repeated payment parked under it"
+                    .to_string(),
+            );
+        }
+        Ok(())
+    }
+
     /// CR 614.17a + CR 118.12: a recovery checkpoint is a second persisted
     /// executable state. It describes this game at this transcript cursor (the
     /// same seats, departures and prompt, and no descriptor of its own) and
@@ -16702,6 +16760,9 @@ impl GameState {
             );
         }
         nested
+            .validate_parked_unless_payment()
+            .map_err(|error| format!("recovery checkpoint: {error}"))?;
+        nested
             .refuse_unresolvable_persisted_stack()
             .and_then(|()| nested.refuse_ownerless_post_replacement_dispatch())
             .map_err(|error| format!("recovery checkpoint: {error}"))
@@ -16723,8 +16784,9 @@ impl GameState {
         let probe = crate::game::payment_transaction::hydrated_checkpoint(self, checkpoint);
         // CR 616.1: a saved replacement prompt is the one the
         // replacement authority builds from its stored candidates, each of
-        // which must still apply; a stale candidate, a forged count or a
-        // missing owner changes that prompt.
+        // which must still apply, with no effect that now applies left out; a
+        // stale candidate, a forged count or a missing owner changes that
+        // prompt.
         if matches!(probe.waiting_for, WaitingFor::ReplacementChoice { .. }) {
             let Some(pending) = probe.pending_replacement.as_ref() else {
                 return Err("recovery checkpoint prompt lacks its replacement owner".to_string());
@@ -29958,6 +30020,15 @@ pub struct PendingReplacement {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sacrifice_provenance: Option<PendingSacrificeProvenance>,
     pub candidates: Vec<ReplacementId>,
+    /// CR 616.1: the other candidates of the ordering prompt from which this
+    /// optional candidate's turn to apply was selected. They still apply to
+    /// the event and are offered again once this candidate's own choice is
+    /// made, so they are part of the choice this prompt belongs to: the prompt
+    /// is stale only when an effect outside `candidates` and these applies
+    /// (`replacement::pending_candidates_are_current`). Empty for every prompt
+    /// parked at the choice among candidates itself.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ordering_peers: Vec<ReplacementId>,
     /// CR 616.1: SearchFound choices snapshot the selected source
     /// incarnation, controller/grantee, modifier, and display data at offer
     /// time. Empty for every other replacement event.
@@ -58173,6 +58244,7 @@ mod tests {
             sacrifice_provenance: None,
             candidates: Vec::new(),
             search_found_candidates: Vec::new(),
+            ordering_peers: Vec::new(),
             depth: 0,
             is_optional: false,
             choice_player: None,

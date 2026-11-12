@@ -3762,6 +3762,18 @@ pub(crate) fn cost_includes_draw(cost: &AbilityCost) -> bool {
     }
 }
 
+/// CR 121.1 + CR 605.3a: whether `cost` asks for draws and nothing else (nested
+/// `Composite`s flattened): a payment that asks for no mana.
+pub(crate) fn cost_is_only_draws(cost: &AbilityCost) -> bool {
+    match cost {
+        AbilityCost::Composite { costs } => {
+            !costs.is_empty() && costs.iter().all(cost_is_only_draws)
+        }
+        AbilityCost::EffectCost { effect } => matches!(effect.as_ref(), Effect::Draw { .. }),
+        _ => false,
+    }
+}
+
 /// Adds each context-ref draw leaf under `cost` (nested `Composite`s
 /// flattened) to its drawer's running total.
 fn accumulate_draw_leg_totals(

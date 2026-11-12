@@ -249,18 +249,13 @@ pub(crate) fn eliminate_players(
         None
     };
 
-    // CR 800.4a: a parked unless payment is owed by its payer; when that player
-    // leaves, the legs or instructions still owed leave with them instead of
-    // resuming for a player who is no longer in the game.
-    if matches!(
-        &state.pending_cost_move_resume,
-        Some(PendingCostMoveResume::CounterAdditionUnlessPayment {
-            unpaid_suffix: Some(suffix),
-            ..
-        }) if leaving_set.contains(&suffix.payer)
-    ) {
-        state.pending_cost_move_resume = None;
-    }
+    // CR 800.4a: a parked unless payment leaves with the players leaving: with
+    // the controller of the ability it settles, or with the payer of the legs
+    // or instructions still owed.
+    super::engine_payment_choices::retire_parked_unless_payment_of_departing_players(
+        state,
+        &leaving_set,
+    );
 
     // CR 800.4a: elimination can remove frozen stack entries and a session's
     // canonical representative. Restore the pre-overlay preferences before
@@ -2522,6 +2517,7 @@ mod tests {
             sacrifice_provenance: None,
             candidates: Vec::new(),
             search_found_candidates: Vec::new(),
+            ordering_peers: Vec::new(),
             depth: 0,
             is_optional: false,
             choice_player: None,
@@ -4044,6 +4040,7 @@ mod tests {
             sacrifice_provenance: None,
             candidates: Vec::new(),
             search_found_candidates: Vec::new(),
+            ordering_peers: Vec::new(),
             depth: 0,
             is_optional: false,
             choice_player: None,
@@ -4189,6 +4186,7 @@ mod tests {
             sacrifice_provenance: None,
             candidates: Vec::new(),
             search_found_candidates: Vec::new(),
+            ordering_peers: Vec::new(),
             depth: 0,
             is_optional: false,
             choice_player: None,
@@ -4246,6 +4244,7 @@ mod tests {
             sacrifice_provenance: None,
             candidates: Vec::new(),
             search_found_candidates: Vec::new(),
+            ordering_peers: Vec::new(),
             depth: 0,
             is_optional: false,
             choice_player: None,
@@ -4295,6 +4294,7 @@ mod tests {
             sacrifice_provenance: None,
             candidates: Vec::new(),
             search_found_candidates: Vec::new(),
+            ordering_peers: Vec::new(),
             depth: 0,
             is_optional: false,
             choice_player: None,
@@ -4374,6 +4374,7 @@ mod tests {
             sacrifice_provenance: None,
             candidates: Vec::new(),
             search_found_candidates: Vec::new(),
+            ordering_peers: Vec::new(),
             depth: 0,
             is_optional: false,
             choice_player: None,

@@ -258,9 +258,20 @@ pub(super) fn handle_replacement_choice(
     // CR 616.1f: a second ordering choice, or any nested prompt, leaves the record
     // parked for the next answer; only a settled round trip may close the batch.
     // Nothing is left behind on this path — the anchor is a local that dies here.
-    if !matches!(waiting_for, WaitingFor::Priority { .. }) {
+    let WaitingFor::Priority { player } = waiting_for else {
         return Ok(waiting_for);
-    }
+    };
+    // CR 800.4j: the handler hands a settled choice back to the active player's
+    // priority. A choice answered after that player left the game (another
+    // player's draw, parked on their own choice while the active player
+    // conceded) hands it to the next player in turn order still in the game.
+    let waiting_for = WaitingFor::Priority {
+        player: if super::players::is_alive(state, player) {
+            player
+        } else {
+            super::engine::living_priority_seat(state)
+        },
+    };
     state.waiting_for = waiting_for.clone();
     Ok(
         super::combat_damage::resume_pending_combat_lifelink(state, action_event_start, events)
@@ -5018,6 +5029,7 @@ mod tests {
                 index: 0,
             }],
             search_found_candidates: Vec::new(),
+            ordering_peers: Vec::new(),
             depth: 0,
             is_optional: true,
             choice_player: Some(PlayerId(0)),
@@ -5697,6 +5709,7 @@ mod tests {
                 index: 0,
             }],
             search_found_candidates: Vec::new(),
+            ordering_peers: Vec::new(),
             depth: 0,
             is_optional: false,
             choice_player: None,
