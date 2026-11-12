@@ -5582,7 +5582,8 @@ enum LaterInstructionQuery {
     /// `WithEntry`) and may act on an object the completing instruction moved? Read without the
     /// completing instruction in hand, so every referent `moved_objects_referent` classifies
     /// counts, a self-reference and a trigger's triggering-object referent included (the
-    /// conservative answer).
+    /// conservative answer). A later population that may include a moved object counts too
+    /// (C2, CR 608.2c).
     MayActOnEntrantAfterEntry,
 }
 
@@ -5891,9 +5892,10 @@ fn held_later_instruction_matches(state: &GameState, query: LaterInstructionQuer
 /// `instruction`'s own continuation is read through its moved-object referents
 /// ([`continuation_acts_on_moved_objects_after_entry`]). A frame-held later instruction cannot
 /// be tied to the moved objects without the instruction, so it is read conservatively
-/// ([`LaterInstructionQuery::MayActOnEntrantAfterEntry`]). Each completion site then narrows the
-/// result to the logical group it completes (`EntryOccurrenceCollector::for_group` /
-/// `within_action`, CR 603.2c).
+/// ([`LaterInstructionQuery::MayActOnEntrantAfterEntry`]). A later population that may include a
+/// moved object ("Creatures you control get +1/+1") keeps the owner too (C2, CR 608.2c). Each
+/// completion site then narrows the result to the logical group it completes
+/// (`EntryOccurrenceCollector::for_group` / `within_action`, CR 603.2c).
 pub(crate) fn entry_occurrence_collector(
     state: &GameState,
     instruction: Option<&ResolvedAbility>,
@@ -5919,8 +5921,8 @@ enum MovedObjectsReferent {
     /// Every moved object: an "it"/"them" anaphor (`ParentTarget`), the chain sentinel, or a
     /// context referent naming the moved object.
     All,
-    /// May name only some of the moved objects: one of the instruction's target slots
-    /// (`ParentTargetSlot`).
+    /// May name only some of the moved objects: one of the instruction's target slots, or any
+    /// object referent or population not provably excluded (C2).
     Part,
     /// Something other than the moved objects.
     Other,
@@ -5976,6 +5978,16 @@ impl MovedObjectsSource {
             Self::OtherObjects => false,
         }
     }
+
+    /// CR 608.2c: may the resolving source be among the moved objects? Only an instruction known
+    /// to move other objects excludes it (Storm of Souls' "Exile Storm of Souls."); a
+    /// triggering-object return may move the trigger's own source.
+    fn may_move_resolving_source(self) -> bool {
+        match self {
+            Self::ContextReferent(_) | Self::UnknownInstruction => true,
+            Self::OtherObjects => false,
+        }
+    }
 }
 
 /// CR 608.2c + CR 603.2: does this ChangeZone instruction move exactly its trigger's triggering
@@ -6008,6 +6020,11 @@ fn moves_exactly_the_triggering_object(
 /// CR 608.2c: classify `filter` against the objects the instruction moves. A context referent
 /// names a moved object only as `source` reads it ([`MovedObjectsSource`]).
 ///
+/// A filter is `Other` only when it provably cannot name a moved permanent: a player or stack
+/// referent, a population restricted to zones other than the battlefield (CR 109.2), the
+/// resolving source when the instruction moves other objects, or a conjunction with such a
+/// filter. Every other object referent may name some of them (`Part`), conservatively (C2).
+///
 /// Exhaustive over `TargetFilter`, so a new variant must be classified here.
 fn moved_objects_referent(
     filter: &TargetFilter,
@@ -6029,6 +6046,95 @@ fn moved_objects_referent(
             id: TrackedSetId(0),
         } => MovedObjectsReferent::All,
         TargetFilter::ParentTargetSlot { .. } => MovedObjectsReferent::Part,
+        // CR 608.2c: the resolving source may be among the moved objects unless the instruction
+        // is known to move other objects.
+        TargetFilter::SelfRef => {
+            if source.may_move_resolving_source() {
+                MovedObjectsReferent::Part
+            } else {
+                MovedObjectsReferent::Other
+            }
+        }
+        // `None` may name a moved object: a mass resolver reads it as a permissive population
+        // (`change_zone::resolve_all`, `destroy`, `bounce`), and a single-object resolver reads
+        // the chain-propagated targets first (`counters`, CR 608.2c), so it is never `Other`;
+        // `animate_names_moved_objects` keeps its own `None` reading for the derivation.
+        TargetFilter::None => MovedObjectsReferent::Part,
+        // CR 608.2c: under a mass or targeted move the triggering object may be among the moved
+        // objects; under a self-return it may be the source itself.
+        TargetFilter::TriggeringSource => MovedObjectsReferent::Part,
+        // CR 109.2 + CR 400.1: a description that refers to another zone names objects there,
+        // and every moved object is on the battlefield (Relive the Past's "from your
+        // graveyard").
+        TargetFilter::Typed(_) => {
+            if restricted_off_battlefield(filter) {
+                MovedObjectsReferent::Other
+            } else {
+                MovedObjectsReferent::Part
+            }
+        }
+        // A union names every moved object when one member does, and may name some when one
+        // member may.
+        TargetFilter::Or { filters } => {
+            let children: Vec<_> = filters
+                .iter()
+                .map(|child| moved_objects_referent(child, source))
+                .collect();
+            if children.contains(&MovedObjectsReferent::All) {
+                MovedObjectsReferent::All
+            } else if children.contains(&MovedObjectsReferent::Part) {
+                MovedObjectsReferent::Part
+            } else {
+                MovedObjectsReferent::Other
+            }
+        }
+        // An intersection with a provably excluded filter is excluded; `Other` is only ever
+        // assigned on proof, so this is sound under every source.
+        TargetFilter::And { filters } => {
+            let children: Vec<_> = filters
+                .iter()
+                .map(|child| moved_objects_referent(child, source))
+                .collect();
+            if children.contains(&MovedObjectsReferent::Other) {
+                MovedObjectsReferent::Other
+            } else if !children.is_empty()
+                && children
+                    .iter()
+                    .all(|child| *child == MovedObjectsReferent::All)
+            {
+                MovedObjectsReferent::All
+            } else {
+                MovedObjectsReferent::Part
+            }
+        }
+        // Object referents and populations not provably excluded: they may name some of the
+        // moved objects. `Not` is never read as `Other`, because an `All` child may itself be a
+        // conservative reading (`SelfRef` under `UnknownInstruction`).
+        TargetFilter::Any
+        | TargetFilter::Not { .. }
+        | TargetFilter::ControllerAndControlledPermanents { .. }
+        | TargetFilter::GrantingObject { .. }
+        | TargetFilter::SourceOrPaired
+        | TargetFilter::SpecificObject { .. }
+        | TargetFilter::AttachedTo
+        | TargetFilter::LastCreated
+        | TargetFilter::LastRevealed
+        | TargetFilter::LastZoneChanged
+        | TargetFilter::CostPaidObject
+        | TargetFilter::AmassedArmy
+        | TargetFilter::ChosenCard
+        | TargetFilter::TrackedSet { .. }
+        | TargetFilter::TrackedSetFiltered { .. }
+        | TargetFilter::ExiledBySource
+        | TargetFilter::ExiledCardByIndex { .. }
+        | TargetFilter::AttackedPlayerOrPlaneswalker
+        | TargetFilter::EventTarget
+        | TargetFilter::OriginalSource
+        | TargetFilter::PostReplacementDamageSource
+        | TargetFilter::PostReplacementDamageTarget
+        | TargetFilter::HasChosenName
+        | TargetFilter::ChosenDamageSource { .. }
+        | TargetFilter::Named { .. } => MovedObjectsReferent::Part,
         // Players and stack objects: never a moved permanent.
         TargetFilter::Player
         | TargetFilter::Controller
@@ -6058,40 +6164,14 @@ fn moved_objects_referent(
         | TargetFilter::StackAbility { .. }
         | TargetFilter::StackSpell
         | TargetFilter::CastingSpell => MovedObjectsReferent::Other,
-        // Object referents and populations this classification does not tie to the moved
-        // objects.
-        TargetFilter::None
-        | TargetFilter::Any
-        | TargetFilter::ControllerAndControlledPermanents { .. }
-        | TargetFilter::SelfRef
-        | TargetFilter::GrantingObject { .. }
-        | TargetFilter::SourceOrPaired
-        | TargetFilter::Typed(_)
-        | TargetFilter::Not { .. }
-        | TargetFilter::Or { .. }
-        | TargetFilter::And { .. }
-        | TargetFilter::SpecificObject { .. }
-        | TargetFilter::AttachedTo
-        | TargetFilter::LastCreated
-        | TargetFilter::LastRevealed
-        | TargetFilter::LastZoneChanged
-        | TargetFilter::CostPaidObject
-        | TargetFilter::AmassedArmy
-        | TargetFilter::ChosenCard
-        | TargetFilter::TrackedSet { .. }
-        | TargetFilter::TrackedSetFiltered { .. }
-        | TargetFilter::ExiledBySource
-        | TargetFilter::ExiledCardByIndex { .. }
-        | TargetFilter::TriggeringSource
-        | TargetFilter::AttackedPlayerOrPlaneswalker
-        | TargetFilter::EventTarget
-        | TargetFilter::OriginalSource
-        | TargetFilter::PostReplacementDamageSource
-        | TargetFilter::PostReplacementDamageTarget
-        | TargetFilter::HasChosenName
-        | TargetFilter::ChosenDamageSource { .. }
-        | TargetFilter::Named { .. } => MovedObjectsReferent::Other,
     }
+}
+
+/// CR 109.2 + CR 400.1: is this population restricted to zones other than the battlefield (a
+/// zone constraint that does not include it)?
+fn restricted_off_battlefield(filter: &TargetFilter) -> bool {
+    let zones = filter.extract_zones();
+    !zones.is_empty() && !zones.contains(&Zone::Battlefield)
 }
 
 /// CR 608.2c: the nodes of `instruction`'s own `sub_ability` chain (its continuation; an
@@ -6111,7 +6191,12 @@ fn moved_objects_continuation(
 /// CR 608.2c: may a referent slot of `effect` name an object the instruction moves? A
 /// `GenericEffect` is read per static through its application filter
 /// (`generic_effect_application_filter`); every other effect through its parent-referent slots
-/// (`effect_parent_ref_slots`, which include `target_filter()`).
+/// (`effect_parent_ref_slots`, which include `target_filter()`) and its mass population
+/// (`mass_population_target`).
+///
+/// Known gap: a scope-`All` effect outside `mass_population_target` (`SetTapState`,
+/// `Transform`, `PreventDamage`, `ForceAttack` with `EffectScope::All`, `GoadAll`) hides its
+/// population from both authorities. No printed return chain with a rider has such a later node.
 fn effect_may_name_moved_objects(effect: &Effect, source: MovedObjectsSource) -> bool {
     let names = |filter: &TargetFilter| {
         moved_objects_referent(filter, source) != MovedObjectsReferent::Other
@@ -6125,7 +6210,12 @@ fn effect_may_name_moved_objects(effect: &Effect, source: MovedObjectsSource) ->
             effect::generic_effect_application_filter(target.as_ref(), static_def.affected.as_ref())
                 .is_some_and(names)
         }),
-        _ => effect_parent_ref_slots(effect).into_iter().any(names),
+        // CR 608.2c + CR 109.2: a mass effect's population is hidden from `target_filter()`; read
+        // it through its single authority so "creatures you control get +1/+1" counts (C2).
+        _ => effect_parent_ref_slots(effect)
+            .into_iter()
+            .chain(mass_population_target(effect))
+            .any(names),
     }
 }
 
@@ -6164,10 +6254,18 @@ fn continuation_acts_on_moved_objects_after_entry(
 /// `WithEntry` node, whose execution is not guaranteed when the instruction resolves. A
 /// `WhenFollowed` node ("becomes", "gains", "loses") starts after the entry and is skipped
 /// (CR 611.2e).
+///
+/// `None` for an instruction whose declared destination is not the battlefield (CR 611.2e).
 pub(crate) fn with_entry_effect(
     state: &GameState,
     instruction: &ResolvedAbility,
 ) -> Option<Box<crate::types::proposed_event::WithEntryEffect>> {
+    // CR 611.2e: the effect applies simultaneously with an entry only when the resolution puts
+    // the permanent onto the battlefield (Durnan of the Yawning Portal's "That spell has
+    // undaunted." follows an exile instruction, so nothing is carried).
+    if declared_this_way_destination(&instruction.effect) != Some(Zone::Battlefield) {
+        return None;
+    }
     let source = MovedObjectsSource::of(state, instruction);
     let mut modifications = Vec::new();
     for node in moved_objects_continuation(instruction) {
@@ -67847,10 +67945,16 @@ mod with_entry_effect_tests {
     }
 
     fn return_to_battlefield(target: TargetFilter) -> Effect {
+        return_to(Zone::Battlefield, target)
+    }
+
+    /// A `ChangeZone` from a graveyard to `destination` (the origin does not enter the
+    /// derivation).
+    fn return_to(destination: Zone, target: TargetFilter) -> Effect {
         Effect::ChangeZone {
             library_shuffle: Default::default(),
             origin: Some(Zone::Graveyard),
-            destination: Zone::Battlefield,
+            destination,
             target,
             owner_library: false,
             enter_transformed: false,
@@ -67941,9 +68045,13 @@ mod with_entry_effect_tests {
     }
 
     fn change_zone_all_to_battlefield() -> Effect {
+        change_zone_all_to(Zone::Battlefield)
+    }
+
+    fn change_zone_all_to(destination: Zone) -> Effect {
         Effect::ChangeZoneAll {
             origin: Some(Zone::Graveyard),
-            destination: Zone::Battlefield,
+            destination,
             target: TargetFilter::Typed(TypedFilter::creature()),
             enters_under: None,
             enter_tapped: EtbTapState::Unspecified,
@@ -68388,21 +68496,24 @@ mod with_entry_effect_tests {
     /// A resume (`instruction: None`) reads a parked continuation conservatively: a parked
     /// `WhenFollowed` node that may name a moved object keeps the owner, while a parked rider
     /// alone hands off (the R4p route). A resolver site reads the same parked frames.
+    /// A state whose resolution stack holds `chain` as a parked continuation (a frame-held
+    /// later instruction).
+    fn parked(chain: ResolvedAbility) -> GameState {
+        let mut state = GameState::new_two_player(20);
+        let pending = PendingContinuation::new(Box::new(chain), &state);
+        state
+            .resolution_stack
+            .push_inner(ResolutionFrame::AbilityContinuation(
+                AbilityContinuationFrame {
+                    pending,
+                    choose_zone_trigger_context: None,
+                },
+            ));
+        state
+    }
+
     #[test]
     fn parked_instructions_are_read_conservatively() {
-        let parked = |chain: ResolvedAbility| {
-            let mut state = GameState::new_two_player(20);
-            let pending = PendingContinuation::new(Box::new(chain), &state);
-            state
-                .resolution_stack
-                .push_inner(ResolutionFrame::AbilityContinuation(
-                    AbilityContinuationFrame {
-                        pending,
-                        choose_zone_trigger_context: None,
-                    },
-                ));
-            state
-        };
         let rider = || with_entry(spirit(TargetFilter::ParentTarget));
         assert_eq!(
             entry_occurrence_collector(&parked(rider()), None),
@@ -68424,6 +68535,115 @@ mod with_entry_effect_tests {
             ),
             EntryOccurrenceCollector::Owner
         );
+    }
+
+    // R-U1c: C2 at the collector — a later population that may include a moved object keeps the
+    // owner (CR 608.2c), and one restricted to another zone does not (CR 109.2 + CR 400.1).
+
+    fn creatures_you_control() -> TargetFilter {
+        TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You))
+    }
+
+    /// "Creatures you control get +1/+1 until end of turn." — a mass population hidden from
+    /// `Effect::target_filter()`.
+    fn pump_all(affected: TargetFilter) -> Effect {
+        Effect::PumpAll {
+            power: PtValue::Fixed(1),
+            toughness: PtValue::Fixed(1),
+            target: affected,
+        }
+    }
+
+    /// An untargeted later `ChangeZone` whose population is "creature card", restricted to the
+    /// graveyard when `in_graveyard`.
+    fn later_population_return(in_graveyard: bool) -> ResolvedAbility {
+        let mut creature = TypedFilter::creature();
+        if in_graveyard {
+            creature = creature.properties(vec![FilterProp::InZone {
+                zone: Zone::Graveyard,
+            }]);
+        }
+        node(return_to_battlefield(TargetFilter::Typed(creature)))
+    }
+
+    /// c1, c2 and c4(c1): "Creatures you control gain haste until end of turn." (an untargeted
+    /// `GenericEffect` population) and "Creatures you control get +1/+1" (a `PumpAll`, whose
+    /// population only `mass_population_target` surfaces) may include the moved object, so the
+    /// owner checks the entry, in the instruction's own continuation and parked alike. Synthetic:
+    /// no printed return chain has a later population (M2); nearest printed card Relive the Past
+    /// ("… from your graveyard to the battlefield. They are 5/5 Elemental creatures in addition
+    /// to their other types.").
+    #[test]
+    fn later_population_that_may_include_a_moved_object_keeps_the_owner() {
+        let rider = || with_entry(spirit(TargetFilter::ParentTarget));
+        let haste_to_creatures_you_control = || {
+            node(untargeted_generic(
+                creatures_you_control(),
+                vec![ContinuousModification::AddKeyword {
+                    keyword: Keyword::Haste,
+                }],
+            ))
+        };
+        // c1
+        assert_eq!(
+            collector(&sequence(vec![
+                targeted_return(),
+                rider(),
+                haste_to_creatures_you_control(),
+            ])),
+            EntryOccurrenceCollector::Owner
+        );
+        // c2
+        assert_eq!(
+            collector(&sequence(vec![
+                targeted_return(),
+                rider(),
+                node(pump_all(creatures_you_control())),
+            ])),
+            EntryOccurrenceCollector::Owner
+        );
+        // c4(c1)
+        assert_eq!(
+            entry_occurrence_collector(
+                &parked(chained(rider(), haste_to_creatures_you_control())),
+                None
+            ),
+            EntryOccurrenceCollector::Owner
+        );
+    }
+
+    /// c3 and c4(c3): a later population restricted to the graveyard ("creature card … from your
+    /// graveyard") cannot name an object on the battlefield, so the entry is still handed off.
+    /// Reach guard c3+: the same node without its graveyard restriction keeps the owner, so the
+    /// node is read. Synthetic; nearest printed card Relive the Past.
+    #[test]
+    fn later_population_in_another_zone_hands_off() {
+        let rider = || with_entry(spirit(TargetFilter::ParentTarget));
+        for (in_graveyard, expected) in [
+            (
+                true,
+                EntryOccurrenceCollector::AfterSimultaneousEntryEffects,
+            ),
+            (false, EntryOccurrenceCollector::Owner),
+        ] {
+            assert_eq!(
+                collector(&sequence(vec![
+                    targeted_return(),
+                    rider(),
+                    later_population_return(in_graveyard),
+                ])),
+                expected,
+                "c3 (in_graveyard: {in_graveyard})"
+            );
+            assert_eq!(
+                entry_occurrence_collector(
+                    &parked(chained(rider(), later_population_return(in_graveyard))),
+                    None
+                ),
+                expected,
+                "c4(c3) (in_graveyard: {in_graveyard})"
+            );
+        }
     }
 
     // R-U1a: the derivation for every producer shape (CR 611.2e + CR 613.1), the walk's skip and
@@ -68684,6 +68904,49 @@ mod with_entry_effect_tests {
         );
     }
 
+    /// R-U1a-d — CR 611.2e: an effect applies simultaneously with an entry only when the
+    /// resolution puts the permanent onto the battlefield. Durnan of the Yawning Portal: "You may
+    /// exile a creature card from among them. … That spell has undaunted." parses an exile
+    /// `ChangeZone` followed by a `WithEntry` rider on `ParentTarget`, so nothing is carried. The
+    /// `ChangeZoneAll` form is synthetic (no printed `ChangeZoneAll` to a zone other than the
+    /// battlefield carries a `WithEntry` node; nearest printed card Durnan of the Yawning Portal),
+    /// kept because `with_entry_effect` also serves `change_zone::resolve_all`. Paired positive:
+    /// the identical chains to the battlefield carry the rider.
+    #[test]
+    fn rider_after_a_move_off_the_battlefield_is_not_carried() {
+        let undaunted = || {
+            vec![ContinuousModification::AddKeyword {
+                keyword: Keyword::Undaunted,
+            }]
+        };
+        let durnan_exile = |destination| {
+            node(return_to(
+                destination,
+                TargetFilter::TrackedSetFiltered {
+                    id: TrackedSetId(0),
+                    filter: Box::new(TargetFilter::Typed(TypedFilter::creature())),
+                    caused_by: None,
+                },
+            ))
+        };
+        let rider = || with_entry(generic(TargetFilter::ParentTarget, undaunted()));
+        for (destination, expected) in [
+            (Zone::Exile, None),
+            (Zone::Battlefield, carried(undaunted())),
+        ] {
+            assert_eq!(
+                derive(&chained(durnan_exile(destination), rider())),
+                expected,
+                "ChangeZone to {destination:?}"
+            );
+            assert_eq!(
+                derive(&chained(node(change_zone_all_to(destination)), rider())),
+                expected,
+                "ChangeZoneAll to {destination:?}"
+            );
+        }
+    }
+
     // R-U1b: the exhaustive referent match's `All` arms and its phase-stable rows.
 
     const EVERY_SOURCE: [MovedObjectsSource; 4] = [
@@ -68727,61 +68990,137 @@ mod with_entry_effect_tests {
         let triggering = MovedObjectsSource::ContextReferent(ContextObjectRef::TriggeringObject);
         let unknown = MovedObjectsSource::UnknownInstruction;
         let other_objects = MovedObjectsSource::OtherObjects;
-        for (filter, all_under, other_under) in [
+        // CR 608.2c (C2): a self-reference under a triggering-object return may name the trigger's
+        // own source among the moved objects; only an instruction known to move other objects
+        // excludes the resolving source. The triggering object may be among the moved objects
+        // under a mass or targeted move, or be the source itself under a self-return.
+        for (filter, all_under, part_under, other_under) in [
             (
                 TargetFilter::SelfRef,
-                [own_source, unknown],
-                [other_objects, triggering],
+                vec![own_source, unknown],
+                vec![triggering],
+                vec![other_objects],
             ),
             (
                 TargetFilter::TriggeringSource,
-                [triggering, unknown],
-                [other_objects, own_source],
+                vec![triggering, unknown],
+                vec![other_objects, own_source],
+                vec![],
             ),
+            (TargetFilter::None, vec![], EVERY_SOURCE.to_vec(), vec![]),
         ] {
-            for source in all_under {
-                assert_eq!(
-                    moved_objects_referent(&filter, source),
-                    MovedObjectsReferent::All,
-                    "{filter:?} under {source:?}"
-                );
-            }
-            for source in other_under {
-                assert_eq!(
-                    moved_objects_referent(&filter, source),
-                    MovedObjectsReferent::Other,
-                    "{filter:?} under {source:?}"
-                );
+            for (expected, sources) in [
+                (MovedObjectsReferent::All, all_under),
+                (MovedObjectsReferent::Part, part_under),
+                (MovedObjectsReferent::Other, other_under),
+            ] {
+                for source in sources {
+                    assert_eq!(
+                        moved_objects_referent(&filter, source),
+                        expected,
+                        "{filter:?} under {source:?}"
+                    );
+                }
             }
         }
     }
 
-    /// Phase-1 base readings, pinned `Other`: another tracked set, a population ("creatures you
-    /// control", the Storm of Souls population shape) and the composites.
+    /// C2 — CR 608.2c + CR 109.2: a filter is `Other` only when it provably cannot name a moved
+    /// permanent (a player or stack referent, a population restricted to zones other than the
+    /// battlefield, or a conjunction with such a filter); every other object referent or
+    /// population may name some of the moved objects (`Part`). A disjunction with an `All` child
+    /// and a conjunction of `All` children name every moved object.
     #[test]
-    fn referent_classification_base_other_rows() {
+    fn referent_classification_conservative_rows() {
         let creatures_you_control =
             TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You));
-        for filter in [
+        let creature_card_in = |zones: Vec<Zone>| {
+            TargetFilter::Typed(
+                TypedFilter::creature().properties(vec![FilterProp::InAnyZone { zones }]),
+            )
+        };
+        let creature_card_in_graveyard =
+            TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::InZone {
+                zone: Zone::Graveyard,
+            }]));
+        let sentinel = TargetFilter::TrackedSet {
+            id: TrackedSetId(0),
+        };
+        let part = [
             TargetFilter::TrackedSet {
                 id: TrackedSetId(5),
             },
             creatures_you_control.clone(),
+            creature_card_in(vec![Zone::Graveyard, Zone::Battlefield]),
+            TargetFilter::Not {
+                filter: Box::new(TargetFilter::ParentTarget),
+            },
+            TargetFilter::Any,
+            TargetFilter::ExiledBySource,
+            TargetFilter::Or {
+                filters: vec![
+                    TargetFilter::ParentTargetSlot { index: 0 },
+                    TargetFilter::Controller,
+                ],
+            },
             TargetFilter::And {
                 filters: vec![TargetFilter::ParentTarget, creatures_you_control.clone()],
             },
+            TargetFilter::And { filters: vec![] },
+        ];
+        let all = [
             TargetFilter::Or {
                 filters: vec![TargetFilter::ParentTarget, creatures_you_control],
             },
+            TargetFilter::And {
+                filters: vec![TargetFilter::ParentTarget, sentinel],
+            },
+        ];
+        let other = [
+            creature_card_in_graveyard.clone(),
+            TargetFilter::And {
+                filters: vec![TargetFilter::ParentTarget, creature_card_in_graveyard],
+            },
+            TargetFilter::And {
+                filters: vec![TargetFilter::ParentTarget, TargetFilter::Controller],
+            },
+            TargetFilter::Or {
+                filters: vec![TargetFilter::Controller, TargetFilter::Player],
+            },
+            TargetFilter::Or { filters: vec![] },
+        ];
+        for (expected, filters) in [
+            (MovedObjectsReferent::Part, part.as_slice()),
+            (MovedObjectsReferent::All, all.as_slice()),
+            (MovedObjectsReferent::Other, other.as_slice()),
         ] {
-            for source in EVERY_SOURCE {
-                assert_eq!(
-                    moved_objects_referent(&filter, source),
-                    MovedObjectsReferent::Other,
-                    "{filter:?} under {source:?}"
-                );
+            for filter in filters {
+                for source in EVERY_SOURCE {
+                    assert_eq!(
+                        moved_objects_referent(filter, source),
+                        expected,
+                        "{filter:?} under {source:?}"
+                    );
+                }
             }
         }
+
+        // Source-dependent: the resolving source is excluded only under an instruction that moves
+        // other objects, which excludes the conjunction; under a self-return it names every one.
+        let self_and_parent = TargetFilter::And {
+            filters: vec![TargetFilter::SelfRef, TargetFilter::ParentTarget],
+        };
+        assert_eq!(
+            moved_objects_referent(&self_and_parent, MovedObjectsSource::OtherObjects),
+            MovedObjectsReferent::Other
+        );
+        assert_eq!(
+            moved_objects_referent(
+                &self_and_parent,
+                MovedObjectsSource::ContextReferent(ContextObjectRef::Source)
+            ),
+            MovedObjectsReferent::All
+        );
     }
 
     // R-U1e: `MovedObjectsSource::of`, the context read of what the instruction moves.

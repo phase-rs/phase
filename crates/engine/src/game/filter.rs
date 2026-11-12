@@ -5551,12 +5551,27 @@ impl EntryProjection {
 /// or granted by a `GrantStaticAbility`, per recipient) and of every transient
 /// are evaluated against the pre-entry state
 /// (`layers::pin_entry_population_conditions`); the live game, triggers and
-/// entry observations keep the realized battlefield. `state` must be the board
-/// before the entry event's first member moved (CR 603.6a); multi-object callers
-/// resolve every member first (`change_zone::resolve_change_zone_member_entries`).
+/// entry observations keep the realized battlefield. For [`Self::new`], `state`
+/// must be the board before the entry event's first member moved (CR 603.6a);
+/// multi-object callers resolve every member first
+/// (`change_zone::resolve_change_zone_member_entries`). [`Self::for_proposed_entry`]
+/// reads the board at the replacement check, where a `ChangeZoneAll`'s earlier
+/// members are already delivered (they move one by one), as the live read it
+/// replaces did (known gap).
 pub(crate) struct BattlefieldEntrantProjection {
     scratch: GameState,
     entrant: ObjectId,
+}
+
+/// What an entry event already gives its entrant as it is placed on the scratch
+/// battlefield: the event's own fields, borrowed.
+struct EntrantStaging<'a> {
+    controller_override: Option<PlayerId>,
+    enter_transformed: bool,
+    face_down_profile: Option<&'a crate::types::ability::FaceDownProfile>,
+    chain_referent: crate::types::zones::ChainReferentIntent,
+    enter_with_choices: Option<&'a crate::types::proposed_event::EntryChoices>,
+    enter_as_copy: Option<&'a crate::types::proposed_event::CopyTokenSpec>,
 }
 
 impl BattlefieldEntrantProjection {
@@ -5567,12 +5582,106 @@ impl BattlefieldEntrantProjection {
     /// keeps today's pre-move read. With `enter_transformed`, the scratch entrant
     /// is turned to its back face after placement (CR 712.14a), as the real
     /// delivery does.
+    ///
+    /// Known gaps: an effect-carried entry gate does not install a with-entry
+    /// effect (no printed return carries both a gate and a `WithEntry` rider); a
+    /// liminal (transformed or melded) entrant with a rider keeps its liminal read
+    /// (none printed); and earlier members of a mass move are already on the
+    /// scratch board.
     pub(crate) fn new(
         state: &GameState,
         entrant: ObjectId,
         controller_override: Option<PlayerId>,
         enter_transformed: bool,
     ) -> Option<Self> {
+        let (scratch, origin) = Self::place(
+            state,
+            entrant,
+            &EntrantStaging {
+                controller_override,
+                enter_transformed,
+                face_down_profile: None,
+                chain_referent: crate::types::zones::ChainReferentIntent::Silent,
+                enter_with_choices: None,
+                enter_as_copy: None,
+            },
+        )?;
+        Some(Self::finish(
+            scratch,
+            Some((state, Some(origin))),
+            entrant,
+            None,
+        ))
+    }
+
+    /// CR 614.12 + CR 611.2e: the entrant of a proposed battlefield entry whose resolution carries a
+    /// simultaneous "is/has" effect, as it would exist on the battlefield. It is placed on a scratch
+    /// battlefield as the new object (CR 400.7) under the controller it enters under (CR 110.2a), with
+    /// the characteristics the event already gives it installed by delivery's own authority (face
+    /// down, as-enters choices, enter as a copy; replacements already applied, CR 616.1), turned back
+    /// face up when it enters transformed (CR 712.14a), the carried effect installed on it, and the
+    /// full layer pass run (CR 613.1, 613.3, 613.6, 613.7), which a detached applier cannot reproduce.
+    /// `None` when the event carries no such effect, is not a battlefield entry, or its entrant can't
+    /// be placed (a liminal entrant keeps its liminal read; a refused placement keeps today's read).
+    pub(crate) fn for_proposed_entry(state: &GameState, event: &ProposedEvent) -> Option<Self> {
+        let ProposedEvent::ZoneChange {
+            object_id,
+            to: Zone::Battlefield,
+            controller_override,
+            enter_transformed,
+            face_down_profile,
+            chain_referent,
+            enter_as_copy,
+            enter_with_choices,
+            with_entry_effect: Some(effect),
+            ..
+        } = event
+        else {
+            return None;
+        };
+        let (scratch, origin) = Self::place(
+            state,
+            *object_id,
+            &EntrantStaging {
+                controller_override: *controller_override,
+                enter_transformed: *enter_transformed,
+                face_down_profile: face_down_profile.as_deref(),
+                chain_referent: *chain_referent,
+                enter_with_choices: enter_with_choices.as_deref(),
+                enter_as_copy: enter_as_copy.as_deref(),
+            },
+        )?;
+        Some(Self::finish(
+            scratch,
+            Some((state, Some(origin))),
+            *object_id,
+            Some(effect),
+        ))
+    }
+
+    /// CR 614.12 + CR 611.2e + CR 614.1c: a just-delivered entrant (already placed, its entry
+    /// characteristics installed) with the carried effect installed and the layer pass run, for the
+    /// delivered `EntersWithAdditionalCounters` read.
+    pub(crate) fn entered(
+        state: &GameState,
+        entrant: ObjectId,
+        effect: &crate::types::proposed_event::WithEntryEffect,
+    ) -> Option<Self> {
+        if state.objects.get(&entrant)?.zone != Zone::Battlefield {
+            return None;
+        }
+        // The entrant is already on the live battlefield, so there is no population to pin.
+        Some(Self::finish(state.clone(), None, entrant, Some(effect)))
+    }
+
+    /// Place the entrant onto a scratch copy of `state` the way delivery does: the move, the
+    /// characteristics its event installs, the back face, then the controller. Returns the
+    /// scratch and the entrant's origin zone, or `None` when it can't be placed.
+    fn place(
+        state: &GameState,
+        entrant: ObjectId,
+        staging: &EntrantStaging<'_>,
+    ) -> Option<(GameState, Zone)> {
         let origin = state.entering_or_live_object(entrant)?.zone;
         if state.liminal_entries.contains_key(&entrant) {
             return None;
@@ -5585,19 +5694,32 @@ impl BattlefieldEntrantProjection {
             entrant,
             Zone::Battlefield,
             &mut events,
-            enter_transformed,
+            staging.enter_transformed,
             None,
         );
-        let placed = scratch.objects.get(&entrant)?;
-        if placed.zone != Zone::Battlefield {
+        if scratch.objects.get(&entrant)?.zone != Zone::Battlefield {
             return None;
         }
+        // CR 708.3 + CR 608.2c + CR 614.12a + CR 707.2: what the entry event installs, by
+        // delivery's own authority and in its order.
+        crate::game::zone_pipeline::install_battlefield_entry_characteristics(
+            &mut scratch,
+            entrant,
+            staging.face_down_profile,
+            staging.chain_referent,
+            staging.enter_with_choices,
+            staging.enter_as_copy,
+            &mut events,
+        );
         // CR 712.14a: a transformed entry is turned back face up after placement, as delivery does.
-        if enter_transformed && placed.back_face.is_some() && !placed.transformed {
-            let _ = crate::game::transform::enter_back_face_up(&mut scratch, entrant);
+        if staging.enter_transformed {
+            let placed = scratch.objects.get(&entrant)?;
+            if placed.back_face.is_some() && !placed.transformed {
+                let _ = crate::game::transform::enter_back_face_up(&mut scratch, entrant);
+            }
         }
         // CR 110.2a: the controller the real move installs.
-        if let Some(controller) = controller_override {
+        if let Some(controller) = staging.controller_override {
             crate::game::zones::apply_battlefield_entry_controller_override(
                 &mut scratch,
                 &mut events,
@@ -5605,12 +5727,39 @@ impl BattlefieldEntrantProjection {
                 controller,
             );
         }
+        Some((scratch, origin))
+    }
+
+    /// Install the carried effect (if any) on the scratch entrant, pin the pre-entry
+    /// population conditions (if the entrant was placed from `pre_entry`), and run the layer
+    /// pass.
+    fn finish(
+        mut scratch: GameState,
+        pre_entry: Option<(&GameState, Option<Zone>)>,
+        entrant: ObjectId,
+        effect: Option<&crate::types::proposed_event::WithEntryEffect>,
+    ) -> Self {
+        // CR 611.2e + CR 613.7: the carried effect applies to the entrant as it exists on the
+        // battlefield, installed after placement (a later timestamp than the entrant). It is a
+        // description: nothing reaches the live game.
+        if let Some(effect) = effect {
+            scratch.add_transient_continuous_effect(
+                effect.source_id,
+                effect.controller,
+                crate::types::ability::Duration::Permanent,
+                TargetFilter::SpecificObject { id: entrant },
+                effect.modifications.clone(),
+                None,
+            );
+        }
         // CR 614.12 + CR 700.5: conditions count the pre-entry population (Heliod ruling 2020-01-24); the entrant's own statics still apply.
-        crate::game::layers::pin_entry_population_conditions(&mut scratch, state, Some(origin));
+        if let Some((pre, origin)) = pre_entry {
+            crate::game::layers::pin_entry_population_conditions(&mut scratch, pre, origin);
+        }
         // CR 613.1: the full layer pass, so CR 614.12's own statics and existing effects both apply.
         crate::game::layers::mark_layers_full(&mut scratch);
         crate::game::layers::flush_layers(&mut scratch);
-        Some(Self { scratch, entrant })
+        Self { scratch, entrant }
     }
 
     /// CR 614.12: whether the projected entrant matches `filter` under `ctx`.
@@ -5878,6 +6027,12 @@ pub fn matches_target_filter_on_battlefield_entry(
             controller_override,
             ..
         } if *to == Zone::Battlefield => {
+            // CR 614.12 + CR 611.2e: an entry whose resolution applies a simultaneous "is/has"
+            // effect is checked with that effect applied; every other entry keeps the reads below.
+            if let Some(projection) = BattlefieldEntrantProjection::for_proposed_entry(state, event)
+            {
+                return projection.matches(filter, ctx);
+            }
             if let Some(profile) = face_down_profile {
                 // CR 708.2a + CR 708.3 + CR 708.10 + CR 614.12: an object
                 // entering face down IS the profile's body (a colorless 2/2
@@ -14013,6 +14168,476 @@ mod tests {
             rng_draw
         );
         assert_eq!(state.objects[&artifact].zone, Zone::Graveyard);
+    }
+
+    // R-U2: the CR 614.12 projection of an entrant whose resolution carries a simultaneous
+    // "is/has" effect (CR 611.2e), as a building block.
+
+    /// Barkhide Troll — verbatim Oracle text.
+    const BARKHIDE_TROLL: &str = "This creature enters with a +1/+1 counter on it.\n{1}, Remove a +1/+1 counter from this creature: This creature gains hexproof until end of turn. (It can't be the target of spells or abilities your opponents control.)";
+    /// Metallic Mimic — verbatim Oracle text.
+    const METALLIC_MIMIC: &str = "As this creature enters, choose a creature type.\nThis creature is the chosen type in addition to its other types.\nEach other creature you control of the chosen type enters with an additional +1/+1 counter on it.";
+
+    /// Which printed graveyard card a projection row places.
+    #[derive(Clone, Copy)]
+    enum Entrant {
+        /// Grizzly Bears {1}{G} Creature — Bear 2/2.
+        GrizzlyBears,
+        /// Hill Giant {3}{R} Creature — Giant 3/3.
+        HillGiant,
+        /// Barkhide Troll {G}{G} Creature — Troll 2/2.
+        BarkhideTroll,
+        /// Metallic Mimic {2} Artifact Creature — Shapeshifter 2/1.
+        MetallicMimic,
+    }
+
+    /// A board with a "Rider Source" creature on P0's battlefield (the carried effect's
+    /// source) and `entrant` in P0's graveyard with its printed characteristics.
+    fn rider_board(entrant: Entrant) -> (GameState, ObjectId, ObjectId) {
+        let mut scenario = crate::game::scenario::GameScenario::new();
+        let source = scenario
+            .add_creature(PlayerId(0), "Rider Source", 1, 1)
+            .id();
+        let cost = |generic: u32, shards: Vec<ManaCostShard>| ManaCost::Cost { generic, shards };
+        let id = match entrant {
+            Entrant::GrizzlyBears => scenario
+                .add_creature_to_graveyard(PlayerId(0), "Grizzly Bears", 2, 2)
+                .with_mana_cost(cost(1, vec![ManaCostShard::Green]))
+                .with_subtypes(vec!["Bear"])
+                .id(),
+            Entrant::HillGiant => scenario
+                .add_creature_to_graveyard(PlayerId(0), "Hill Giant", 3, 3)
+                .with_mana_cost(cost(3, vec![ManaCostShard::Red]))
+                .with_subtypes(vec!["Giant"])
+                .id(),
+            Entrant::BarkhideTroll => scenario
+                .add_creature_to_graveyard(PlayerId(0), "Barkhide Troll", 2, 2)
+                .with_mana_cost(cost(0, vec![ManaCostShard::Green, ManaCostShard::Green]))
+                .with_subtypes(vec!["Troll"])
+                .from_oracle_text(BARKHIDE_TROLL)
+                .id(),
+            Entrant::MetallicMimic => scenario
+                .add_creature_to_graveyard(PlayerId(0), "Metallic Mimic", 2, 1)
+                .as_artifact_creature()
+                .with_mana_cost(cost(2, vec![]))
+                .with_subtypes(vec!["Shapeshifter"])
+                .from_oracle_text(METALLIC_MIMIC)
+                .id(),
+        };
+        let mut runner = scenario.build();
+        (runner.state_mut().clone(), source, id)
+    }
+
+    fn carried_effect(
+        source: ObjectId,
+        modifications: Vec<ContinuousModification>,
+    ) -> crate::types::proposed_event::WithEntryEffect {
+        crate::types::proposed_event::WithEntryEffect {
+            source_id: source,
+            controller: PlayerId(0),
+            modifications,
+        }
+    }
+
+    /// A proposed entry of `entrant` from P0's graveyard to `to`, carrying `effect`.
+    fn carried_entry(
+        entrant: ObjectId,
+        to: Zone,
+        effect: Option<crate::types::proposed_event::WithEntryEffect>,
+    ) -> ProposedEvent {
+        let mut event = ProposedEvent::zone_change(entrant, Zone::Graveyard, to, None);
+        let ProposedEvent::ZoneChange {
+            with_entry_effect, ..
+        } = &mut event
+        else {
+            unreachable!("zone_change builds a ZoneChange");
+        };
+        *with_entry_effect = effect.map(Box::new);
+        event
+    }
+
+    fn subtype_filter(subtype: &str) -> TargetFilter {
+        TargetFilter::Typed(TypedFilter::creature().subtype(subtype.to_string()))
+    }
+
+    fn creature_with(prop: FilterProp) -> TargetFilter {
+        TargetFilter::Typed(TypedFilter::creature().properties(vec![prop]))
+    }
+
+    fn power_is(value: i32) -> TargetFilter {
+        creature_with(FilterProp::PtComparison {
+            stat: crate::types::ability::PtStat::Power,
+            scope: Default::default(),
+            comparator: Comparator::EQ,
+            value: QuantityExpr::Fixed { value },
+        })
+    }
+
+    fn color_is(color: ManaColor) -> TargetFilter {
+        creature_with(FilterProp::HasColor { color })
+    }
+
+    /// Storm of Souls: "Each of them is a 1/1 Spirit with flying in addition to its other
+    /// types."
+    fn storm_of_souls_rider() -> Vec<ContinuousModification> {
+        vec![
+            ContinuousModification::AddSubtype {
+                subtype: "Spirit".to_string(),
+            },
+            ContinuousModification::SetPower { value: 1 },
+            ContinuousModification::SetToughness { value: 1 },
+            ContinuousModification::AddKeyword {
+                keyword: Keyword::Flying,
+            },
+        ]
+    }
+
+    fn zombie_rider() -> Vec<ContinuousModification> {
+        vec![ContinuousModification::AddSubtype {
+            subtype: "Zombie".to_string(),
+        }]
+    }
+
+    /// The proposed projection of `event` must match every `matching` filter and no
+    /// `non_matching` one.
+    fn assert_projection_reads(
+        state: &GameState,
+        source: ObjectId,
+        event: &ProposedEvent,
+        matching: &[TargetFilter],
+        non_matching: &[TargetFilter],
+    ) {
+        let ctx = FilterContext::from_source(state, source);
+        let projection = BattlefieldEntrantProjection::for_proposed_entry(state, event)
+            .expect("a carrier-bearing battlefield entry is projected");
+        for filter in matching {
+            assert!(projection.matches(filter, &ctx), "matches {filter:?}");
+        }
+        for filter in non_matching {
+            assert!(
+                !projection.matches(filter, &ctx),
+                "does not match {filter:?}"
+            );
+        }
+    }
+
+    /// R-U2 a — CR 614.12 + CR 611.2e: three printed riders' carried lists, applied in their
+    /// layers by the real layer pass. (a1) Storm of Souls on Grizzly Bears: a 1/1 Spirit with
+    /// flying (CR 613.1d, CR 613.4b, CR 613.1f). (a2) Rise from the Grave, "That creature is a
+    /// black Zombie in addition to its other colors and types.", on Grizzly Bears (CR 613.1e,
+    /// CR 613.1d). (a3) Xu-Ifit, Osteoharmonist, "It's a Skeleton in addition to its other types
+    /// and has no abilities.", on Barkhide Troll: matches "creature with no abilities"
+    /// (Muraganda Petroglyphs' "Creatures with no abilities get +2/+2."; CR 613.1f), which the
+    /// live graveyard Troll does not.
+    #[test]
+    fn battlefield_entrant_projection_applies_each_carried_rider_in_its_layer() {
+        // (a1)
+        let (state, source, bears) = rider_board(Entrant::GrizzlyBears);
+        let event = carried_entry(
+            bears,
+            Zone::Battlefield,
+            Some(carried_effect(source, storm_of_souls_rider())),
+        );
+        assert_projection_reads(
+            &state,
+            source,
+            &event,
+            &[
+                subtype_filter("Spirit"),
+                power_is(1),
+                creature_with(FilterProp::WithKeyword {
+                    value: Keyword::Flying,
+                }),
+            ],
+            &[power_is(2)],
+        );
+
+        // (a2)
+        let black_zombie = vec![
+            ContinuousModification::AddColor {
+                color: ManaColor::Black,
+            },
+            ContinuousModification::AddSubtype {
+                subtype: "Zombie".to_string(),
+            },
+        ];
+        let event = carried_entry(
+            bears,
+            Zone::Battlefield,
+            Some(carried_effect(source, black_zombie)),
+        );
+        assert_projection_reads(
+            &state,
+            source,
+            &event,
+            &[
+                color_is(ManaColor::Black),
+                color_is(ManaColor::Green),
+                subtype_filter("Zombie"),
+            ],
+            &[],
+        );
+
+        // (a3)
+        let (state, source, troll) = rider_board(Entrant::BarkhideTroll);
+        let no_abilities = creature_with(FilterProp::HasNoAbilities);
+        let skeleton_with_no_abilities = vec![
+            ContinuousModification::AddSubtype {
+                subtype: "Skeleton".to_string(),
+            },
+            ContinuousModification::RemoveAllAbilities,
+        ];
+        let event = carried_entry(
+            troll,
+            Zone::Battlefield,
+            Some(carried_effect(source, skeleton_with_no_abilities)),
+        );
+        assert_projection_reads(
+            &state,
+            source,
+            &event,
+            &[subtype_filter("Skeleton"), no_abilities.clone()],
+            &[],
+        );
+        let ctx = FilterContext::from_source(&state, source);
+        assert!(
+            !super::matches_target_filter(&state, troll, &no_abilities, &ctx),
+            "negative: the live Troll has its abilities"
+        );
+    }
+
+    /// R-U2 b, c — no projection without a carried effect, or for an entry to another zone.
+    #[test]
+    fn battlefield_entrant_projection_of_a_proposal_needs_a_carrier_and_a_battlefield_entry() {
+        let (state, source, bears) = rider_board(Entrant::GrizzlyBears);
+        // Reach guard: the same entrant with a carrier to the battlefield is projected.
+        assert!(BattlefieldEntrantProjection::for_proposed_entry(
+            &state,
+            &carried_entry(
+                bears,
+                Zone::Battlefield,
+                Some(carried_effect(source, zombie_rider()))
+            ),
+        )
+        .is_some());
+        // (b)
+        assert!(BattlefieldEntrantProjection::for_proposed_entry(
+            &state,
+            &carried_entry(bears, Zone::Battlefield, None),
+        )
+        .is_none());
+        // (c)
+        assert!(BattlefieldEntrantProjection::for_proposed_entry(
+            &state,
+            &carried_entry(
+                bears,
+                Zone::Exile,
+                Some(carried_effect(source, zombie_rider()))
+            ),
+        )
+        .is_none());
+    }
+
+    /// R-U2 d — CR 614.12: both carried-effect constructors are reads; the live state is
+    /// unchanged. Positive control: each projection sees the carried subtype.
+    #[test]
+    fn battlefield_entrant_projection_with_a_carried_effect_leaves_live_state_untouched() {
+        use rand::Rng as _;
+        let (state, source, bears) = rider_board(Entrant::GrizzlyBears);
+        let mut entered_state = state.clone();
+        crate::game::zones::move_to_zone(
+            &mut entered_state,
+            bears,
+            Zone::Battlefield,
+            &mut Vec::new(),
+        );
+        let effect = carried_effect(source, zombie_rider());
+        let event = carried_entry(bears, Zone::Battlefield, Some(effect.clone()));
+        let check_untouched =
+            |live: &GameState,
+             project: &dyn Fn(&GameState) -> Option<BattlefieldEntrantProjection>| {
+                let before = serde_json::to_value(live).expect("GameState serializes");
+                let next_timestamp = live.next_timestamp;
+                let zone_changes = live.zone_changes_this_turn.len();
+                let rng_draw = live
+                    .rng
+                    .clone()
+                    .draw(crate::types::game_state::RandomDraw::Outcome)
+                    .random::<u64>();
+
+                let projection = project(live).expect("projectable");
+                assert!(projection.matches(
+                    &subtype_filter("Zombie"),
+                    &FilterContext::from_source(live, source)
+                ));
+                drop(projection);
+
+                assert_eq!(
+                    serde_json::to_value(live).expect("GameState serializes"),
+                    before,
+                    "the projection must not mutate the live state"
+                );
+                assert_eq!(live.next_timestamp, next_timestamp);
+                assert_eq!(live.zone_changes_this_turn.len(), zone_changes);
+                assert_eq!(
+                    live.rng
+                        .clone()
+                        .draw(crate::types::game_state::RandomDraw::Outcome)
+                        .random::<u64>(),
+                    rng_draw
+                );
+                assert!(!live.transient_continuous_effects.iter().any(|effect| {
+                    effect.affected == TargetFilter::SpecificObject { id: bears }
+                }));
+            };
+        check_untouched(&state, &|live| {
+            BattlefieldEntrantProjection::for_proposed_entry(live, &event)
+        });
+        check_untouched(&entered_state, &|live| {
+            BattlefieldEntrantProjection::entered(live, bears, &effect)
+        });
+    }
+
+    /// R-U2 e, f, g — the carried effect applies on top of what the event already gives the
+    /// entrant, installed by delivery's own authority: (e) Hill Giant entering as a copy of
+    /// Grizzly Bears (CR 707.2) is a Bear Zombie, not a Giant; (f) a Metallic Mimic card whose
+    /// as-enters choice named Elf (CR 614.12a) is an Elf by its own static, and black; (g) Hill
+    /// Giant entering face down (CR 708.3) is a colorless Zombie creature, not a Giant.
+    #[test]
+    fn battlefield_entrant_projection_stacks_the_carried_effect_on_the_event_staging() {
+        // (e)
+        let (mut state, source, giant) = rider_board(Entrant::HillGiant);
+        let copied = create_object(
+            &mut state,
+            CardId(902),
+            PlayerId(0),
+            "Grizzly Bears".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&copied).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.card_types.subtypes.push("Bear".to_string());
+            obj.base_card_types = obj.card_types.clone();
+            obj.base_power = Some(2);
+            obj.base_toughness = Some(2);
+        }
+        let values = crate::game::printed_cards::intrinsic_copiable_values(&state.objects[&copied]);
+        let mut event = carried_entry(
+            giant,
+            Zone::Battlefield,
+            Some(carried_effect(source, zombie_rider())),
+        );
+        if let ProposedEvent::ZoneChange { enter_as_copy, .. } = &mut event {
+            *enter_as_copy = Some(Box::new(crate::types::proposed_event::CopyTokenSpec {
+                values: Box::new(values),
+                display: Default::default(),
+                extra_keywords: vec![],
+                additional_modifications: vec![],
+                tapped: false,
+                enters_attacking: false,
+                attack_request: crate::types::proposed_event::TokenAttackRequest::Unspecified,
+                sacrifice_at: None,
+                source_id: copied,
+                controller: PlayerId(0),
+                // Test-only enter-as-copy fixture stages no donor.
+                donor: None,
+            }));
+        }
+        assert_projection_reads(
+            &state,
+            source,
+            &event,
+            &[subtype_filter("Bear"), subtype_filter("Zombie")],
+            &[subtype_filter("Giant")],
+        );
+
+        // (f)
+        let (state, source, mimic) = rider_board(Entrant::MetallicMimic);
+        let mut event = carried_entry(
+            mimic,
+            Zone::Battlefield,
+            Some(carried_effect(
+                source,
+                vec![ContinuousModification::AddColor {
+                    color: ManaColor::Black,
+                }],
+            )),
+        );
+        if let ProposedEvent::ZoneChange {
+            enter_with_choices, ..
+        } = &mut event
+        {
+            *enter_with_choices = Some(Box::new(crate::types::proposed_event::EntryChoices(vec![
+                ChosenAttribute::CreatureType("Elf".to_string()),
+            ])));
+        }
+        assert_projection_reads(
+            &state,
+            source,
+            &event,
+            &[subtype_filter("Elf"), color_is(ManaColor::Black)],
+            &[],
+        );
+
+        // (g)
+        let (state, source, giant) = rider_board(Entrant::HillGiant);
+        let mut event = carried_entry(
+            giant,
+            Zone::Battlefield,
+            Some(carried_effect(source, zombie_rider())),
+        );
+        if let ProposedEvent::ZoneChange {
+            face_down_profile, ..
+        } = &mut event
+        {
+            *face_down_profile = Some(Box::new(FaceDownProfile::vanilla_2_2()));
+        }
+        assert_projection_reads(
+            &state,
+            source,
+            &event,
+            &[
+                creature_with(FilterProp::ColorCount {
+                    comparator: Comparator::EQ,
+                    count: 0,
+                }),
+                subtype_filter("Zombie"),
+            ],
+            &[subtype_filter("Giant")],
+        );
+    }
+
+    /// R-U2 h — the delivered and proposed constructors read the same characteristics for the
+    /// same entry: after a real move of the Bears on a clone, `entered` and the proposal's
+    /// `for_proposed_entry` agree on card types, colors, power/toughness and keywords.
+    #[test]
+    fn battlefield_entrant_projection_carried_effect_constructors_agree() {
+        let (state, source, bears) = rider_board(Entrant::GrizzlyBears);
+        let effect = carried_effect(source, storm_of_souls_rider());
+        let proposed = BattlefieldEntrantProjection::for_proposed_entry(
+            &state,
+            &carried_entry(bears, Zone::Battlefield, Some(effect.clone())),
+        )
+        .expect("projectable");
+        let mut moved = state.clone();
+        crate::game::zones::move_to_zone(&mut moved, bears, Zone::Battlefield, &mut Vec::new());
+        let entered =
+            BattlefieldEntrantProjection::entered(&moved, bears, &effect).expect("on battlefield");
+        let read = |projection: &BattlefieldEntrantProjection| {
+            let obj = &projection.scratch.objects[&projection.entrant];
+            (
+                obj.card_types.clone(),
+                obj.color.clone(),
+                obj.power,
+                obj.toughness,
+                obj.keywords.clone(),
+            )
+        };
+        let proposed_read = read(&proposed);
+        // Reach: the rider applied.
+        assert_eq!((proposed_read.2, proposed_read.3), (Some(1), Some(1)));
+        assert_eq!(proposed_read, read(&entered));
     }
 
     /// CR 614.12 + CR 712.14a + CR 400.4a (V-P6): the projection applies (a)

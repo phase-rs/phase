@@ -5344,6 +5344,7 @@ fn create_entry_copy_spec_for_replacement(
 fn retarget_intrinsic_entry_counters_to_copy(
     enter_with_counters: &mut Vec<(CounterType, u32)>,
     copy_spec: &CopyTokenSpec,
+    entrant_abilities: crate::types::proposed_event::EntrantAbilities,
 ) {
     // CR 306.5b + CR 310.4b + CR 614.12a: "enters as a copy" changes the
     // characteristics used for intrinsic loyalty/defense/lore entry counters.
@@ -5353,15 +5354,21 @@ fn retarget_intrinsic_entry_counters_to_copy(
             CounterType::Loyalty | CounterType::Defense | CounterType::Lore
         )
     });
-    enter_with_counters.extend(
-        crate::game::printed_cards::intrinsic_entry_counters_for_face(
-            copy_spec.values.printed_loyalty,
-            copy_spec.values.loyalty,
-            None,
-            None,
-            &copy_spec.values.card_types,
-        ),
-    );
+    // CR 306.5b + CR 310.4b + CR 714.3a + CR 613.1f + CR 611.2e: the copied intrinsic
+    // loyalty/defense/lore abilities are abilities of the entrant. An ability-removing effect
+    // of the resolution that puts it there applies with the entry, after the layer-1 copy, so
+    // they never add counters.
+    if entrant_abilities.own_abilities_apply() {
+        enter_with_counters.extend(
+            crate::game::printed_cards::intrinsic_entry_counters_for_face(
+                copy_spec.values.printed_loyalty,
+                copy_spec.values.loyalty,
+                None,
+                None,
+                &copy_spec.values.card_types,
+            ),
+        );
+    }
 }
 
 // CR 614.6 + CR 707.2: A copy replacement modifies how the token-entry event
@@ -10893,11 +10900,18 @@ fn apply_single_replacement(
                         to: Zone::Battlefield,
                         enter_as_copy,
                         enter_with_counters,
+                        with_entry_effect,
                         ..
                     },
                 ) = (entry_copy.clone(), &mut new_event)
                 {
-                    retarget_intrinsic_entry_counters_to_copy(enter_with_counters, &copy_spec);
+                    retarget_intrinsic_entry_counters_to_copy(
+                        enter_with_counters,
+                        &copy_spec,
+                        crate::types::proposed_event::EntrantAbilities::of(
+                            with_entry_effect.as_deref(),
+                        ),
+                    );
                     *enter_as_copy = Some(Box::new(copy_spec));
                 }
                 // CR 614.1c: Applied branch carries ETB counter data; add to the zone change.
@@ -14082,6 +14096,57 @@ mod tests {
 
     fn make_repl(event: ReplacementEvent) -> ReplacementDefinition {
         ReplacementDefinition::new(event)
+    }
+
+    /// R-U4 — CR 306.5b + CR 613.1f + CR 611.2e: an entrant entering as a copy of a
+    /// planeswalker (printed loyalty 3) gets the copied intrinsic loyalty only while its own
+    /// abilities apply. Under an ability-removing effect of the same resolution the stale
+    /// intrinsic Loyalty is dropped and no copied Loyalty is added; other counters stay. No
+    /// printed board reaches this (every printed enter-as-copy replacement is the entrant's own
+    /// and is withheld under such an effect); nearest printed cards Essence of the Wild
+    /// ("Creatures you control enter as a copy of this creature.") and Spark Double.
+    #[test]
+    fn retarget_copied_intrinsic_counters_needs_the_entrants_own_abilities() {
+        use crate::types::proposed_event::EntrantAbilities;
+        let mut walker = GameObject::new(
+            ObjectId(40),
+            CardId(4),
+            PlayerId(0),
+            "Copied Walker".into(),
+            Zone::Battlefield,
+        );
+        walker.base_card_types.core_types = vec![CoreType::Planeswalker];
+        walker.base_loyalty = Some(3);
+        let spec = CopyTokenSpec {
+            values: Box::new(crate::game::printed_cards::intrinsic_copiable_values(
+                &walker,
+            )),
+            display: Default::default(),
+            extra_keywords: vec![],
+            additional_modifications: vec![],
+            tapped: false,
+            enters_attacking: false,
+            attack_request: TokenAttackRequest::Unspecified,
+            sacrifice_at: None,
+            source_id: ObjectId(40),
+            controller: PlayerId(0),
+            // Test-only enter-as-copy fixture stages no donor.
+            donor: None,
+        };
+        for (entrant_abilities, expected) in [
+            (
+                EntrantAbilities::Retained,
+                vec![(CounterType::Plus1Plus1, 1), (CounterType::Loyalty, 3)],
+            ),
+            (
+                EntrantAbilities::RemovedWithEntry,
+                vec![(CounterType::Plus1Plus1, 1)],
+            ),
+        ] {
+            let mut counters = vec![(CounterType::Loyalty, 5), (CounterType::Plus1Plus1, 1)];
+            retarget_intrinsic_entry_counters_to_copy(&mut counters, &spec, entrant_abilities);
+            assert_eq!(counters, expected, "{entrant_abilities:?}");
+        }
     }
 
     fn shield_removal_commands(state: &GameState, object_id: ObjectId) -> usize {

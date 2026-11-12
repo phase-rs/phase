@@ -17,9 +17,10 @@
 //! precedes the entry (R4p); a pause after an entry has been delivered keeps the entry with its
 //! owner, and a rider that pauses before it applies (a ReturnAsAura host choice among two or
 //! more candidates) lets the post-action collector check the entry first (known gaps). A
-//! `ChangeZone` completed from an `EffectZoneChoice` resume (Ashiok, Nightmare Weaver's -X) still
-//! checks its entries at the owner, before the "is/has" effect exists (known gap; R19 covers only
-//! the carrier). The hand-off is made only when no later instruction that starts after the
+//! `ChangeZone` completed from an `EffectZoneChoice` resume (Ashiok, Nightmare Weaver's -X) has
+//! its entry read with the carried Nightmare rider (R-A), but the owner still checks its enter
+//! triggers before the "is/has" effect exists (known gap). The hand-off is made only when no
+//! later instruction that starts after the
 //! entry acts on a moved object (CR 608.2c): Call a Surprise Witness's "Put a flying counter on it." comes after the
 //! entry, so the owner checks the entry before it and Watcher of the Spheres does not trigger
 //! (R8c). Such an entry is then also checked before the "is/has" effect exists (known gap). R8c
@@ -40,6 +41,10 @@
 //! Lion's self-return of a Clone, CR 614.1c). Entry replacements that are not the entrant's own
 //! abilities still apply (R11 Deanna Troi, R13 Imposing Sovereign and Archelos). The carrier
 //! survives a CR 616.1 ordering pause (R13) and the `EffectZoneChoice` round-trip (R19).
+//!
+//! Consequence (c) — CR 614.12 + CR 611.2e: external entry replacements and
+//! `EntersWithAdditionalCounters` statics read the entrant with the resolution's simultaneous
+//! is/has effect applied: R20–R29, R-L2, R-A, R9m, R8m.
 //!
 //! REVERT DISCRIMINATORS:
 //! - Reverting the collection hand-off (making `change_zone::resolve` call the `Owner` delegate)
@@ -70,24 +75,36 @@
 //! - Dropping the carrier from the event across the pause leaves the Troll 1 counter in R13.
 //! - Restoring no with-entry effect (`None`) at the `EffectZoneChoice` resume leaves the Ghoul
 //!   tapped in R19.
+//! - Removing the `for_proposed_entry` read in `filter::matches_target_filter_on_battlefield_entry`
+//!   gives R20, R21, R22, R23, R-L2, R-A and R19' 0 counters, R25 1, R27 and R29 tapped, and
+//!   Grist exiled in R9m and R8m.
+//! - Removing the `entered` read in `zone_pipeline::enters_with_additional_counters_for_entry`
+//!   gives R28 1 counter.
+//! - Skipping the controller override on the projection's scratch gives R21h 1 counter and R21,
+//!   R-L2 and R-A 0.
 //!
 //! R-L1: Lorcan, Warlock Collector's trigger return carries its Warlock rider through a CR 616.1
 //! ordering pause; removing the triggering-object reading of `MovedObjectsSource::of` leaves the
 //! parked proposal without it.
 
 use engine::game::game_object::AttachTarget;
-use engine::game::layers::flush_layers;
+use engine::game::layers::{flush_layers, mark_layers_full};
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
-use engine::types::ability::{ContinuousModification, EffectKind, ExileConcealment};
+use engine::types::ability::{
+    ChosenAttribute, ContinuousModification, EffectKind, ExileConcealment,
+};
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
 use engine::types::counter::CounterType;
 use engine::types::events::GameEvent;
-use engine::types::game_state::{ReplacementChoiceKind, WaitingFor};
+use engine::types::game_state::{
+    CastPaymentMode, ExileLink, ExileLinkKind, ReplacementChoiceKind, WaitingFor,
+};
 use engine::types::identifiers::ObjectId;
 use engine::types::keywords::{Keyword, KeywordKind};
 use engine::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
+use engine::types::player::PlayerId;
 use engine::types::proposed_event::{EtbTapState, ProposedEvent, WithEntryEffect};
 use engine::types::zones::Zone;
 
@@ -1021,104 +1038,130 @@ fn zombify_returned_grist_enters_with_loyalty() {
     );
 }
 
-/// Tormod, the Desecrator {3}{B} Legendary Creature — Zombie Wizard 2/2 — verbatim.
+/// Tormod, the Desecrator {3}{B} Legendary Creature — Zombie Wizard 4/2 — verbatim.
 const TORMOD_THE_DESECRATOR: &str = "Whenever one or more cards leave your graveyard, create a tapped 2/2 black Zombie creature token.\nPartner (You can have two commanders if both have partner.)";
-/// Synthetic: Containment Priest's ("If a nontoken creature would enter and it wasn't cast, exile
-/// it instead.") replacement narrowed to Bears.
-const BEAR_CONTAINMENT: &str =
-    "If a nontoken Bear would enter and it wasn't cast, exile it instead.";
+/// Containment Priest {1}{W} Creature — Human Cleric 2/2 — verbatim.
+const CONTAINMENT_PRIEST: &str =
+    "Flash\nIf a nontoken creature would enter and it wasn't cast, exile it instead.";
 
 /// Ever After {4}{B}{B} Sorcery — verbatim.
 const EVER_AFTER: &str = "Return up to two target creature cards from your graveyard to the battlefield. Each of those creatures is a black Zombie in addition to its other colors and types. Put Ever After on the bottom of its owner's library.";
 
-/// A board for one return of Hill Giant and Grizzly Bears from P0's graveyard in which the Bears
-/// is exiled instead, observed by Tormod, the Desecrator.
-///
-/// Synthetic redirect: the printed board is Containment Priest with Grist, the Hunger Tide ("As
-/// long as Grist isn't on the battlefield, it's a 1/1 Insect creature in addition to its other
-/// types.") and Grizzly Bears, where Grist would not be a creature on the battlefield (CR 614.12),
-/// so the Priest exiles only the Bears. The engine exiles Grist too, so that board puts no member
-/// on the battlefield.
-fn mixed_destination_board() -> (GameScenario, ObjectId, ObjectId) {
-    let mut scenario = main_phase();
+/// Grizzly Bears {1}{G} Creature — Bear 2/2 (no Oracle text) in `player`'s graveyard.
+fn add_grizzly_bears_to_graveyard(scenario: &mut GameScenario, player: PlayerId) -> ObjectId {
     scenario
-        .add_creature_from_oracle(P0, "Tormod, the Desecrator", 2, 2, TORMOD_THE_DESECRATOR)
-        .with_subtypes(vec!["Zombie", "Wizard"])
-        .as_legendary();
-    scenario.add_creature_from_oracle(P0, "Bear Containment", 2, 2, BEAR_CONTAINMENT);
-    let giant = scenario
-        .add_creature_to_graveyard(P0, "Hill Giant", 3, 3)
-        .with_subtypes(vec!["Giant"])
-        .id();
-    let bears = scenario
-        .add_creature_to_graveyard(P0, "Grizzly Bears", 2, 2)
+        .add_creature_to_graveyard(player, "Grizzly Bears", 2, 2)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Green],
+            generic: 1,
+        })
         .with_subtypes(vec!["Bear"])
-        .id();
-    (scenario, giant, bears)
+        .id()
 }
 
-/// CR 603.2c + CR 603.10a + CR 614.6: the Giant entered with the rider's `subtype`, the Bears was
-/// exiled instead, and both left the graveyard in one event, so Tormod ("Whenever one or more
-/// cards leave your graveyard") triggered once: exactly one Zombie token.
-fn assert_one_batched_trigger(
-    runner: &GameRunner,
-    giant: ObjectId,
-    bears: ObjectId,
-    subtype: &str,
-) {
-    // Reach: one member entered with the rider applied and the other was exiled instead.
-    let giant_obj = &runner.state().objects[&giant];
-    assert_eq!(giant_obj.zone, Zone::Battlefield);
-    assert!(giant_obj.card_types.subtypes.iter().any(|s| s == subtype));
-    assert_eq!(runner.state().objects[&bears].zone, Zone::Exile);
-    let zombie_tokens = runner
-        .state()
-        .objects
-        .values()
-        .filter(|object| {
-            object.is_token
-                && object.zone == Zone::Battlefield
-                && object.card_types.subtypes.iter().any(|s| s == "Zombie")
+/// A board for one return of Grist, the Hunger Tide and Grizzly Bears from P0's graveyard with
+/// Containment Priest ("If a nontoken creature would enter and it wasn't cast, exile it
+/// instead.") on the battlefield, observed by Tormod, the Desecrator. CR 614.12 + CR 611.2e: the
+/// Priest checks each card as it would exist on the battlefield with the return's rider applied.
+/// Grist is a creature only while it isn't on the battlefield, so it is not exiled (Containment
+/// Priest ruling, 2021-03-19: a creature card that wasn't cast and "is entering the battlefield as
+/// a noncreature permanent … won't be exiled"); the Bears is still a creature with the rider, so
+/// it is exiled instead (CR 614.6).
+fn mixed_destination_board() -> (GameScenario, ObjectId, ObjectId) {
+    let mut scenario = main_phase();
+    add_tormod(&mut scenario);
+    scenario
+        .add_creature_from_oracle(P0, "Containment Priest", 2, 2, CONTAINMENT_PRIEST)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::White],
+            generic: 1,
         })
-        .count();
-    assert_eq!(zombie_tokens, 1, "Tormod triggers once for the one event");
+        .with_subtypes(vec!["Human", "Cleric"]);
+    let grist = add_grist(&mut scenario);
+    let bears = add_grizzly_bears_to_graveyard(&mut scenario, P0);
+    (scenario, grist, bears)
+}
+
+/// Build the mixed-destination board's runner with its layers applied.
+fn build_mixed_destination(scenario: GameScenario) -> GameRunner {
+    let mut runner = scenario.build();
+    // Grist is a creature card in the graveyard once its own static is applied.
+    runner.state_mut().layers_dirty.mark_full();
+    flush_layers(runner.state_mut());
+    runner
+}
+
+/// CR 603.2c + CR 603.10a + CR 614.6 + CR 205.3d: Grist entered as a planeswalker (the rider's
+/// creature subtype can't apply to it), the Bears was exiled instead, and both left the graveyard
+/// in one event, so Tormod ("Whenever one or more cards leave your graveyard") triggered once:
+/// exactly one Zombie token.
+fn assert_one_batched_trigger(runner: &GameRunner, grist: ObjectId, bears: ObjectId) {
+    // Reach: one member entered and the other was exiled instead.
+    let grist_obj = &runner.state().objects[&grist];
+    assert_eq!(grist_obj.zone, Zone::Battlefield, "Grist is not exiled");
+    assert!(
+        grist_obj
+            .card_types
+            .core_types
+            .contains(&CoreType::Planeswalker),
+        "{:?}",
+        grist_obj.card_types
+    );
+    assert!(
+        !grist_obj
+            .card_types
+            .core_types
+            .contains(&CoreType::Creature),
+        "{:?}",
+        grist_obj.card_types
+    );
+    assert_eq!(
+        grist_obj.counters.get(&CounterType::Loyalty).copied(),
+        Some(3)
+    );
+    assert_eq!(runner.state().objects[&bears].zone, Zone::Exile);
+    assert_eq!(
+        zombie_tokens(runner),
+        1,
+        "Tormod triggers once for the one event"
+    );
     assert_priority_with_empty_stack(runner);
 }
 
 /// R9m — a mixed-destination group at the mass (`ChangeZoneAll`) owner: Storm of Souls returns
-/// both cards, and the Giant enters as a Spirit.
+/// both cards; Grist enters as a planeswalker and the Bears is exiled instead.
 #[test]
 fn storm_of_souls_mixed_destination_return_triggers_a_batched_observer_once() {
-    let (mut scenario, giant, bears) = mixed_destination_board();
+    let (mut scenario, grist, bears) = mixed_destination_board();
     let storm = scenario
         .add_spell_to_hand_from_oracle(P0, "Storm of Souls", false, STORM_OF_SOULS)
         .id();
-    let mut runner = scenario.build();
+    let mut runner = build_mixed_destination(scenario);
 
     let _ = runner.cast(storm).resolve();
     runner.advance_until_stack_empty();
 
-    assert_one_batched_trigger(&runner, giant, bears, "Spirit");
+    assert_one_batched_trigger(&runner, grist, bears);
 }
 
 /// R8m — a mixed-destination group at the targeted (`ChangeZone`) owner: Ever After targets both
-/// cards, and the Giant enters as a Zombie.
+/// cards; Grist enters as a planeswalker and the Bears is exiled instead.
 #[test]
 fn ever_after_mixed_destination_return_triggers_a_batched_observer_once() {
-    let (mut scenario, giant, bears) = mixed_destination_board();
+    let (mut scenario, grist, bears) = mixed_destination_board();
     let ever_after = scenario
         .add_spell_to_hand_from_oracle(P0, "Ever After", false, EVER_AFTER)
         .id();
-    let mut runner = scenario.build();
+    let mut runner = build_mixed_destination(scenario);
 
     let _ = runner
         .cast(ever_after)
-        .target_object(giant)
+        .target_object(grist)
         .target_object(bears)
         .resolve();
     runner.advance_until_stack_empty();
 
-    assert_one_batched_trigger(&runner, giant, bears, "Zombie");
+    assert_one_batched_trigger(&runner, grist, bears);
 }
 
 fn zombie_tokens(runner: &GameRunner) -> usize {
@@ -1136,7 +1179,11 @@ fn zombie_tokens(runner: &GameRunner) -> usize {
 
 fn add_tormod(scenario: &mut GameScenario) {
     scenario
-        .add_creature_from_oracle(P0, "Tormod, the Desecrator", 2, 2, TORMOD_THE_DESECRATOR)
+        .add_creature_from_oracle(P0, "Tormod, the Desecrator", 4, 2, TORMOD_THE_DESECRATOR)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Black],
+            generic: 3,
+        })
         .with_subtypes(vec!["Zombie", "Wizard"])
         .as_legendary();
 }
@@ -1413,6 +1460,58 @@ fn effect_zone_choice_resume_restores_the_carried_with_entry_effect() {
     }
 }
 
+/// R19' — CR 611.2e + CR 614.12: the with-entry effect restored at the `EffectZoneChoice` resume
+/// feeds the CR 614.12 read. With a carried `[AddSubtype Skeleton]` (no removal), Metallic Mimic
+/// naming Skeleton ("Each other creature you control of the chosen type enters with an additional
+/// +1/+1 counter on it.") sees the Diregraf Ghoul as a Skeleton: one counter, and its own "enters
+/// tapped" still applies. The paired choice without a carried effect gets no counter. The carrier
+/// still installs nothing (no Skeleton subtype after the entry). Synthetic frame: a printed frame
+/// re-derives the same list, so only a constructed one can discriminate restoring the carried
+/// effect from re-deriving it; the printed route is R-A (Ashiok, Nightmare Weaver: "That creature
+/// is a Nightmare in addition to its other types.").
+#[test]
+fn effect_zone_choice_resume_feeds_the_carried_effect_to_the_entry_read() {
+    for (carries_skeleton, counters) in [(true, 1), (false, 0)] {
+        let mut scenario = main_phase();
+        let source = scenario.add_creature(P0, "Choice Source", 1, 1).id();
+        let mimic = add_metallic_mimic(&mut scenario, P0);
+        let ghoul = add_diregraf_ghoul(&mut scenario);
+        let mut runner = scenario.build();
+        name_creature_type(&mut runner, mimic, "Skeleton");
+        let carried = carries_skeleton.then(|| {
+            Box::new(WithEntryEffect {
+                source_id: source,
+                controller: P0,
+                modifications: vec![ContinuousModification::AddSubtype {
+                    subtype: "Skeleton".to_string(),
+                }],
+            })
+        });
+        runner.state_mut().waiting_for = change_zone_choice(source, ghoul, carried);
+
+        runner
+            .act(GameAction::SelectCards { cards: vec![ghoul] })
+            .expect("the selected card is a legal choice");
+
+        let ghoul_obj = &runner.state().objects[&ghoul];
+        assert_eq!(ghoul_obj.zone, Zone::Battlefield, "{carries_skeleton}");
+        assert!(
+            ghoul_obj.tapped,
+            "its own enters-tapped: {carries_skeleton}"
+        );
+        assert_eq!(
+            plus_one_counters(&runner, ghoul),
+            counters,
+            "Mimic's counter: {carries_skeleton}"
+        );
+        let types = subtypes(&runner, ghoul);
+        assert!(
+            !types.iter().any(|t| t == "Skeleton"),
+            "the carrier installs nothing: {types:?}"
+        );
+    }
+}
+
 /// Lorcan, Warlock Collector {5}{B}{B} Legendary Creature — Devil 6/6 — verbatim.
 const LORCAN_WARLOCK_COLLECTOR: &str = "Flying\nWhenever a creature card is put into an opponent's graveyard from anywhere, you may pay life equal to its mana value. If you do, put it onto the battlefield under your control. It's a Warlock in addition to its other types.\nIf a Warlock you control would die, exile it instead.";
 /// Orb of Dreams {3} Artifact — verbatim.
@@ -1572,4 +1671,614 @@ fn zombify_return_through_the_same_pause_carries_no_rider() {
     let types = subtypes(&runner, bears);
     assert!(!types.iter().any(|t| t == "Warlock"), "{types:?}");
     assert!(types.iter().any(|t| t == "Bear"), "{types:?}");
+}
+
+// ---------------------------------------------------------------------------
+// Consequence (c): external entry replacements and `EntersWithAdditionalCounters` statics read
+// the entrant with the resolution's simultaneous is/has effect applied (CR 614.12 + CR 611.2e).
+// ---------------------------------------------------------------------------
+
+/// Metallic Mimic {2} Artifact Creature — Shapeshifter 2/1 — verbatim.
+const METALLIC_MIMIC: &str = "As this creature enters, choose a creature type.\nThis creature is the chosen type in addition to its other types.\nEach other creature you control of the chosen type enters with an additional +1/+1 counter on it.";
+/// Valkyrie's Call {3}{W}{W} Enchantment — verbatim.
+const VALKYRIES_CALL: &str = "Whenever a nontoken, non-Angel creature you control dies, return that card to the battlefield under its owner's control with a +1/+1 counter on it. It has flying and is an Angel in addition to its other types.";
+/// Ashiok, Nightmare Weaver {1}{U}{B} Legendary Planeswalker — Ashiok, loyalty 3 — verbatim
+/// (card-data form of the loyalty costs).
+const ASHIOK_NIGHTMARE_WEAVER: &str = "[+2]: Exile the top three cards of target opponent's library.\n[\u{2212}X]: Put a creature card with mana value X exiled with Ashiok onto the battlefield under your control. That creature is a Nightmare in addition to its other types.\n[\u{2212}10]: Exile all cards from all opponents' hands and graveyards.";
+
+/// Metallic Mimic on `player`'s battlefield, with no creature type chosen yet.
+fn add_metallic_mimic(scenario: &mut GameScenario, player: PlayerId) -> ObjectId {
+    scenario
+        .add_creature_from_oracle(player, "Metallic Mimic", 2, 1, METALLIC_MIMIC)
+        .as_artifact_creature()
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![],
+            generic: 2,
+        })
+        .with_subtypes(vec!["Shapeshifter"])
+        .id()
+}
+
+/// The Mimic already on the battlefield chose `chosen` as it entered (board state).
+fn name_creature_type(runner: &mut GameRunner, mimic: ObjectId, chosen: &str) {
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&mimic)
+        .expect("the Mimic is on the board")
+        .chosen_attributes
+        .push(ChosenAttribute::CreatureType(chosen.to_string()));
+    mark_layers_full(runner.state_mut());
+    flush_layers(runner.state_mut());
+}
+
+/// CR 607.2a: `exiled` is a card exiled with `source`.
+fn link_exiled_with(runner: &mut GameRunner, exiled: ObjectId, source: ObjectId) {
+    runner.state_mut().exile_links.push(ExileLink {
+        exiled_id: exiled,
+        source_id: source,
+        kind: ExileLinkKind::TrackedBySource,
+    });
+}
+
+/// CR 606.4 + CR 107.3: activate `pw`'s loyalty ability `index`, announcing X = `x` for its
+/// `[−X]` cost, and stop at the next prompt.
+fn activate_loyalty_x(runner: &mut GameRunner, pw: ObjectId, index: usize, x: u32) {
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: pw,
+            ability_index: index,
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("loyalty activation announced");
+    if matches!(runner.state().waiting_for, WaitingFor::ChooseXValue { .. }) {
+        runner
+            .act(GameAction::ChooseX { value: x })
+            .expect("announce X for the loyalty cost");
+    }
+}
+
+fn hill_giant_in_graveyard(scenario: &mut GameScenario, player: PlayerId) -> ObjectId {
+    scenario
+        .add_creature_to_graveyard(player, "Hill Giant", 3, 3)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Red],
+            generic: 3,
+        })
+        .with_subtypes(vec!["Giant"])
+        .id()
+}
+
+fn grizzly_bears_on_battlefield(scenario: &mut GameScenario, player: PlayerId) -> ObjectId {
+    scenario
+        .add_creature(player, "Grizzly Bears", 2, 2)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Green],
+            generic: 1,
+        })
+        .with_subtypes(vec!["Bear"])
+        .id()
+}
+
+/// R20 (B1) — CR 614.12 + CR 611.2e: Xu-Ifit's "It's a Skeleton in addition to its other types and
+/// has no abilities" applies with the entry, so Metallic Mimic naming Skeleton sees the returned
+/// Barkhide Troll as a Skeleton and gives it a counter, while the Troll's own "enters with a +1/+1
+/// counter" is an ability removed with the entry: exactly one counter.
+#[test]
+fn xu_ifit_returned_troll_gets_mimics_counter_for_its_skeleton_type() {
+    let (mut scenario, xu) = returner_board(Returner::XuIfit);
+    let mimic = add_metallic_mimic(&mut scenario, P0);
+    let troll = add_barkhide_troll(&mut scenario);
+    let mut runner = scenario.build();
+    name_creature_type(&mut runner, mimic, "Skeleton");
+
+    return_card(&mut runner, Returner::XuIfit, xu, troll);
+
+    let troll_obj = &runner.state().objects[&troll];
+    assert_eq!(troll_obj.zone, Zone::Battlefield);
+    assert!(subtypes(&runner, troll).iter().any(|t| t == "Skeleton"));
+    assert!(troll_obj.abilities.is_empty(), "the Troll has no abilities");
+    assert_eq!(
+        plus_one_counters(&runner, troll),
+        1,
+        "Metallic Mimic's only"
+    );
+    assert_priority_with_empty_stack(&runner);
+}
+
+/// R20n — control: without Metallic Mimic the Troll's own counter stays withheld (0).
+#[test]
+fn xu_ifit_returned_troll_without_mimic_gets_no_counter() {
+    let (mut scenario, xu) = returner_board(Returner::XuIfit);
+    let troll = add_barkhide_troll(&mut scenario);
+    let mut runner = scenario.build();
+
+    return_card(&mut runner, Returner::XuIfit, xu, troll);
+
+    assert_eq!(runner.state().objects[&troll].zone, Zone::Battlefield);
+    assert!(subtypes(&runner, troll).iter().any(|t| t == "Skeleton"));
+    assert_eq!(plus_one_counters(&runner, troll), 0);
+    assert_priority_with_empty_stack(&runner);
+}
+
+/// R20c — control: Zombify has no rider, so the Troll is not a Skeleton and Mimic naming Skeleton
+/// does not apply; only the Troll's own counter (CR 614.1c), with no CR 616.1 ordering offered.
+#[test]
+fn zombify_returned_troll_gets_only_its_own_counter_beside_a_skeleton_mimic() {
+    let (mut scenario, zombify) = returner_board(Returner::Zombify);
+    let mimic = add_metallic_mimic(&mut scenario, P0);
+    let troll = add_barkhide_troll(&mut scenario);
+    let mut runner = scenario.build();
+    name_creature_type(&mut runner, mimic, "Skeleton");
+
+    return_card(&mut runner, Returner::Zombify, zombify, troll);
+
+    assert!(
+        !matches!(
+            runner.state().waiting_for,
+            WaitingFor::ReplacementChoice { .. }
+        ),
+        "no ordering: {:?}",
+        runner.state().waiting_for
+    );
+    let troll_obj = &runner.state().objects[&troll];
+    assert_eq!(troll_obj.zone, Zone::Battlefield);
+    assert_eq!(troll_obj.abilities.len(), 1);
+    assert_eq!(plus_one_counters(&runner, troll), 1, "its own counter only");
+    assert_priority_with_empty_stack(&runner);
+}
+
+/// A Rise from the Grave board: Hill Giant in P1's graveyard, and Metallic Mimic naming Zombie
+/// controlled by `mimic_controller`.
+fn rise_from_the_grave_mimic_board(mimic_controller: PlayerId) -> (GameRunner, ObjectId, ObjectId) {
+    let mut scenario = main_phase();
+    let mimic = add_metallic_mimic(&mut scenario, mimic_controller);
+    let giant = hill_giant_in_graveyard(&mut scenario, P1);
+    let rise = scenario
+        .add_spell_to_hand_from_oracle(P0, "Rise from the Grave", false, RISE_FROM_THE_GRAVE)
+        .id();
+    let mut runner = scenario.build();
+    name_creature_type(&mut runner, mimic, "Zombie");
+    (runner, rise, giant)
+}
+
+/// The Giant is on the battlefield under P0, owned by P1, a black Zombie.
+fn assert_risen_black_zombie(runner: &GameRunner, giant: ObjectId) {
+    let giant_obj = &runner.state().objects[&giant];
+    assert_eq!(giant_obj.zone, Zone::Battlefield);
+    assert_eq!(giant_obj.controller, P0);
+    assert_eq!(giant_obj.owner, P1);
+    assert!(giant_obj.card_types.subtypes.iter().any(|s| s == "Zombie"));
+    assert!(giant_obj.color.contains(&ManaColor::Black));
+}
+
+/// R21 — CR 614.12 + CR 611.2e + CR 110.2a: Rise from the Grave puts P1's Hill Giant onto the
+/// battlefield under P0's control as "a black Zombie in addition to its other colors and types",
+/// so P0's Metallic Mimic naming Zombie gives it a counter.
+#[test]
+fn rise_from_the_grave_returned_giant_gets_mimics_counter() {
+    let (mut runner, rise, giant) = rise_from_the_grave_mimic_board(P0);
+
+    let _ = runner.cast(rise).target_object(giant).resolve();
+
+    assert_risen_black_zombie(&runner, giant);
+    assert_eq!(plus_one_counters(&runner, giant), 1);
+    assert_priority_with_empty_stack(&runner);
+}
+
+/// R21h — hostile (multi-authority), CR 110.2a: the Giant is checked under the player it enters
+/// under (P0), not its owner (P1), so P1's Metallic Mimic naming Zombie ("Each other creature you
+/// control") gives it no counter.
+#[test]
+fn rise_from_the_grave_returned_giant_is_checked_under_its_new_controller() {
+    let (mut runner, rise, giant) = rise_from_the_grave_mimic_board(P1);
+
+    let _ = runner.cast(rise).target_object(giant).resolve();
+
+    assert_risen_black_zombie(&runner, giant);
+    assert_eq!(plus_one_counters(&runner, giant), 0);
+    assert_priority_with_empty_stack(&runner);
+}
+
+/// R22 — CR 614.12 + CR 611.2e, the mass route: Storm of Souls returns Hill Giant and Grizzly
+/// Bears, "Each of them is a 1/1 Spirit with flying", so Metallic Mimic naming Spirit gives each
+/// a counter: each is a 2/2.
+#[test]
+fn storm_of_souls_returned_creatures_each_get_mimics_counter() {
+    let mut scenario = main_phase();
+    let mimic = add_metallic_mimic(&mut scenario, P0);
+    let giant = hill_giant_in_graveyard(&mut scenario, P0);
+    let bears = add_grizzly_bears_to_graveyard(&mut scenario, P0);
+    let storm = scenario
+        .add_spell_to_hand_from_oracle(P0, "Storm of Souls", false, STORM_OF_SOULS)
+        .id();
+    let mut runner = scenario.build();
+    name_creature_type(&mut runner, mimic, "Spirit");
+
+    let _ = runner.cast(storm).resolve();
+
+    assert_eq!(runner.state().objects[&storm].zone, Zone::Exile);
+    for id in [giant, bears] {
+        let obj = &runner.state().objects[&id];
+        assert_eq!(obj.zone, Zone::Battlefield);
+        assert!(subtypes(&runner, id).iter().any(|t| t == "Spirit"));
+        assert_eq!(plus_one_counters(&runner, id), 1, "{}", obj.name);
+        assert_eq!(
+            (obj.power, obj.toughness),
+            (Some(2), Some(2)),
+            "{}",
+            obj.name
+        );
+    }
+    assert_priority_with_empty_stack(&runner);
+}
+
+/// R23 — CR 614.12 + CR 611.2e: Ever After's "Each of those creatures is a black Zombie" names
+/// the chain's tracked set, and Metallic Mimic naming Zombie gives the Giant a counter.
+#[test]
+fn ever_after_returned_giant_gets_mimics_counter() {
+    let mut scenario = main_phase();
+    let mimic = add_metallic_mimic(&mut scenario, P0);
+    let giant = hill_giant_in_graveyard(&mut scenario, P0);
+    let ever_after = scenario
+        .add_spell_to_hand_from_oracle(P0, "Ever After", false, EVER_AFTER)
+        .id();
+    let mut runner = scenario.build();
+    name_creature_type(&mut runner, mimic, "Zombie");
+
+    let _ = runner.cast(ever_after).target_object(giant).resolve();
+
+    let giant_obj = &runner.state().objects[&giant];
+    assert_eq!(giant_obj.zone, Zone::Battlefield);
+    assert!(giant_obj.card_types.subtypes.iter().any(|s| s == "Zombie"));
+    assert!(giant_obj.color.contains(&ManaColor::Black));
+    assert_eq!(
+        runner.state().players[0].library.back(),
+        Some(&ever_after),
+        "Ever After is on the bottom of its owner's library"
+    );
+    assert_eq!(plus_one_counters(&runner, giant), 1);
+    assert_priority_with_empty_stack(&runner);
+}
+
+/// A Valkyrie's Call board: Grizzly Bears and Metallic Mimic naming `chosen` on P0's
+/// battlefield, Murder in P0's hand.
+fn valkyries_call_board(chosen: &str) -> (GameRunner, ObjectId, ObjectId) {
+    let mut scenario = main_phase();
+    scenario.add_enchantment_from_oracle(P0, "Valkyrie's Call", VALKYRIES_CALL);
+    let mimic = add_metallic_mimic(&mut scenario, P0);
+    let bears = grizzly_bears_on_battlefield(&mut scenario, P0);
+    let murder = scenario
+        .add_spell_to_hand_from_oracle(P0, "Murder", true, MURDER)
+        .id();
+    let mut runner = scenario.build();
+    name_creature_type(&mut runner, mimic, chosen);
+    (runner, bears, murder)
+}
+
+/// Murder `victim`, then let every trigger resolve.
+fn murder_and_settle(runner: &mut GameRunner, murder: ObjectId, victim: ObjectId) {
+    let _ = runner.cast(murder).target_object(victim).resolve();
+    runner.advance_until_stack_empty();
+}
+
+/// R25 — CR 614.12 + CR 611.2e, a trigger return: Valkyrie's Call returns the dead Bears "with a
+/// +1/+1 counter on it. It has flying and is an Angel in addition to its other types." (its rider
+/// names the triggering object), so Metallic Mimic naming Angel adds a second counter. The Angel
+/// subtype is asserted, not flying (the rider's flying is a pre-existing parse defect).
+#[test]
+fn valkyries_call_returned_bears_gets_mimics_counter_as_an_angel() {
+    let (mut runner, bears, murder) = valkyries_call_board("Angel");
+
+    murder_and_settle(&mut runner, murder, bears);
+
+    assert_eq!(runner.state().objects[&bears].zone, Zone::Battlefield);
+    assert!(subtypes(&runner, bears).iter().any(|t| t == "Angel"));
+    assert_eq!(plus_one_counters(&runner, bears), 2);
+    assert_priority_with_empty_stack(&runner);
+}
+
+/// R25c — control: Metallic Mimic naming Elf does not apply to a Bear Angel; Valkyrie's Call's own
+/// counter is the only one.
+#[test]
+fn valkyries_call_returned_bears_beside_an_elf_mimic_gets_one_counter() {
+    let (mut runner, bears, murder) = valkyries_call_board("Elf");
+
+    murder_and_settle(&mut runner, murder, bears);
+
+    assert_eq!(runner.state().objects[&bears].zone, Zone::Battlefield);
+    assert!(subtypes(&runner, bears).iter().any(|t| t == "Angel"));
+    assert_eq!(plus_one_counters(&runner, bears), 1);
+    assert_priority_with_empty_stack(&runner);
+}
+
+/// A Lorcan board: Lorcan, Warlock Collector and Metallic Mimic naming `chosen` on P0's
+/// battlefield with Murder in P0's hand, and P1's Grizzly Bears on the battlefield.
+fn lorcan_mimic_board(chosen: &str) -> (GameRunner, ObjectId, ObjectId) {
+    let mut scenario = main_phase();
+    scenario.add_creature_from_oracle(
+        P0,
+        "Lorcan, Warlock Collector",
+        6,
+        6,
+        LORCAN_WARLOCK_COLLECTOR,
+    );
+    let mimic = add_metallic_mimic(&mut scenario, P0);
+    let bears = grizzly_bears_on_battlefield(&mut scenario, P1);
+    let murder = scenario
+        .add_spell_to_hand_from_oracle(P0, "Murder", true, MURDER)
+        .id();
+    let mut runner = scenario.build();
+    name_creature_type(&mut runner, mimic, chosen);
+    (runner, bears, murder)
+}
+
+/// Murder P1's Bears and pay Lorcan's life; the Bears returns under P0 as a Warlock Bear.
+fn murder_for_lorcan(runner: &mut GameRunner, murder: ObjectId, bears: ObjectId) {
+    let life_before = runner.life(P0);
+    let _ = runner
+        .cast(murder)
+        .target_object(bears)
+        .accept_optional()
+        .resolve();
+    runner.advance_until_stack_empty();
+    // Reach: Lorcan's payment was made and the Bears returned with its rider.
+    assert_eq!(
+        runner.life(P0),
+        life_before - 2,
+        "paid life equal to its mana value"
+    );
+    let bears_obj = &runner.state().objects[&bears];
+    assert_eq!(bears_obj.zone, Zone::Battlefield);
+    assert_eq!(bears_obj.controller, P0);
+    assert_eq!(bears_obj.owner, P1);
+    let types = subtypes(runner, bears);
+    for expected in ["Warlock", "Bear"] {
+        assert!(types.iter().any(|t| t == expected), "{expected}: {types:?}");
+    }
+}
+
+/// R-L2 — CR 614.12 + CR 611.2e + CR 110.2a: Lorcan, Warlock Collector puts P1's dead Grizzly
+/// Bears onto the battlefield under P0's control; "It's a Warlock in addition to its other types."
+/// applies with the entry, so P0's Metallic Mimic naming Warlock gives it a counter.
+#[test]
+fn lorcan_returned_bears_gets_mimics_counter_as_a_warlock() {
+    let (mut runner, bears, murder) = lorcan_mimic_board("Warlock");
+
+    murder_for_lorcan(&mut runner, murder, bears);
+
+    assert_eq!(plus_one_counters(&runner, bears), 1);
+    assert_priority_with_empty_stack(&runner);
+}
+
+/// R-L2c — control: Metallic Mimic naming Elf does not apply to a Warlock Bear.
+#[test]
+fn lorcan_returned_bears_beside_an_elf_mimic_gets_no_counter() {
+    let (mut runner, bears, murder) = lorcan_mimic_board("Elf");
+
+    murder_for_lorcan(&mut runner, murder, bears);
+
+    assert_eq!(plus_one_counters(&runner, bears), 0);
+    assert_priority_with_empty_stack(&runner);
+}
+
+/// An Ashiok board: Ashiok, Nightmare Weaver (loyalty 3) and Metallic Mimic naming `chosen` on
+/// P0's battlefield, and P1's Grizzly Bears and Runeclaw Bear ({1}{G} Creature — Bear 2/2, no
+/// Oracle text) exiled with Ashiok.
+fn ashiok_board(chosen: &str) -> (GameRunner, ObjectId, ObjectId, ObjectId) {
+    let mut scenario = main_phase();
+    let ashiok = scenario
+        .add_planeswalker_from_oracle(
+            P0,
+            "Ashiok, Nightmare Weaver",
+            "Ashiok",
+            3,
+            ASHIOK_NIGHTMARE_WEAVER,
+        )
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Blue, ManaCostShard::Black],
+            generic: 1,
+        })
+        .as_legendary()
+        .id();
+    let mimic = add_metallic_mimic(&mut scenario, P0);
+    let mut exiled_bear = |name: &str| {
+        scenario
+            .add_creature_to_exile(P1, name, 2, 2)
+            .with_mana_cost(ManaCost::Cost {
+                shards: vec![ManaCostShard::Green],
+                generic: 1,
+            })
+            .with_subtypes(vec!["Bear"])
+            .id()
+    };
+    let bears = exiled_bear("Grizzly Bears");
+    let runeclaw = exiled_bear("Runeclaw Bear");
+    let mut runner = scenario.build();
+    name_creature_type(&mut runner, mimic, chosen);
+    for exiled in [bears, runeclaw] {
+        link_exiled_with(&mut runner, exiled, ashiok);
+    }
+    (runner, ashiok, bears, runeclaw)
+}
+
+/// Activate Ashiok's −X with X = 2, resolve it to the zone choice, and put the Bears onto the
+/// battlefield. Reach: the choice is the `EffectZoneChoice` offering both exiled cards and
+/// carrying Ashiok's Nightmare rider; afterwards the Bears is a Nightmare under P0's control, the
+/// Runeclaw Bear is still exiled, and Ashiok has 1 loyalty.
+fn ashiok_returns_the_bears(runner: &mut GameRunner, ashiok: ObjectId, bears: ObjectId) {
+    activate_loyalty_x(runner, ashiok, 1, 2);
+    runner.resolve_top();
+    match &runner.state().waiting_for {
+        WaitingFor::EffectZoneChoice {
+            cards,
+            with_entry_effect,
+            ..
+        } => {
+            assert_eq!(cards.len(), 2, "both exiled Bears are eligible: {cards:?}");
+            assert!(cards.contains(&bears), "{cards:?}");
+            assert_eq!(
+                with_entry_effect.as_deref(),
+                Some(&WithEntryEffect {
+                    source_id: ashiok,
+                    controller: P0,
+                    modifications: vec![ContinuousModification::AddSubtype {
+                        subtype: "Nightmare".to_string(),
+                    }],
+                }),
+                "the parked choice carries Ashiok's rider"
+            );
+        }
+        other => panic!("expected Ashiok's zone choice, got {other:?}"),
+    }
+    runner
+        .act(GameAction::SelectCards { cards: vec![bears] })
+        .expect("the Bears is a legal choice");
+    runner.advance_until_stack_empty();
+
+    let bears_obj = &runner.state().objects[&bears];
+    assert_eq!(bears_obj.zone, Zone::Battlefield);
+    assert_eq!(bears_obj.controller, P0);
+    assert!(subtypes(runner, bears).iter().any(|t| t == "Nightmare"));
+    assert_eq!(
+        runner.state().objects[&ashiok]
+            .counters
+            .get(&CounterType::Loyalty)
+            .copied(),
+        Some(1)
+    );
+}
+
+/// R-A — CR 614.12 + CR 611.2e: Ashiok, Nightmare Weaver's "[−X]: Put a creature card with mana
+/// value X exiled with Ashiok onto the battlefield under your control. That creature is a
+/// Nightmare in addition to its other types." parks an `EffectZoneChoice` between two exiled
+/// Bears; the resume restores the carried Nightmare rider, so Metallic Mimic naming Nightmare
+/// gives the chosen Bears a counter.
+#[test]
+fn ashiok_returned_bears_gets_mimics_counter_as_a_nightmare() {
+    let (mut runner, ashiok, bears, runeclaw) = ashiok_board("Nightmare");
+
+    ashiok_returns_the_bears(&mut runner, ashiok, bears);
+
+    assert_eq!(runner.state().objects[&runeclaw].zone, Zone::Exile);
+    assert_eq!(plus_one_counters(&runner, bears), 1);
+    assert_priority_with_empty_stack(&runner);
+}
+
+/// R-Ac — control: Metallic Mimic naming Elf does not apply to a Nightmare Bear.
+#[test]
+fn ashiok_returned_bears_beside_an_elf_mimic_gets_no_counter() {
+    let (mut runner, ashiok, bears, runeclaw) = ashiok_board("Elf");
+
+    ashiok_returns_the_bears(&mut runner, ashiok, bears);
+
+    assert_eq!(runner.state().objects[&runeclaw].zone, Zone::Exile);
+    assert_eq!(plus_one_counters(&runner, bears), 0);
+    assert_priority_with_empty_stack(&runner);
+}
+
+/// Enduring Innocence {1}{W}{W} Enchantment Creature — Sheep Glimmer 2/1 on P0's battlefield.
+fn add_enduring_innocence(scenario: &mut GameScenario) -> ObjectId {
+    scenario
+        .add_creature_from_oracle(P0, "Enduring Innocence", 2, 1, ENDURING_INNOCENCE)
+        .as_enchantment()
+        .as_creature()
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::White, ManaCostShard::White],
+            generic: 1,
+        })
+        .with_subtypes(vec!["Sheep", "Glimmer"])
+        .id()
+}
+
+/// Innocence is back on the battlefield as an enchantment that is not a creature.
+fn assert_returned_as_noncreature_enchantment(runner: &GameRunner, innocence: ObjectId) {
+    let obj = &runner.state().objects[&innocence];
+    assert_eq!(obj.zone, Zone::Battlefield);
+    assert!(
+        obj.card_types.core_types.contains(&CoreType::Enchantment),
+        "{:?}",
+        obj.card_types
+    );
+    assert!(
+        !obj.card_types.core_types.contains(&CoreType::Creature),
+        "{:?}",
+        obj.card_types
+    );
+}
+
+/// R27 — CR 614.12 + CR 611.2e + CR 205.1a: Enduring Innocence returns "It's an enchantment.
+/// (It's not a creature.)", so P1's Imposing Sovereign ("Creatures your opponents control enter
+/// tapped.") does not apply: it enters untapped.
+#[test]
+fn enduring_innocence_returns_untapped_past_imposing_sovereign() {
+    let mut scenario = main_phase();
+    let innocence = add_enduring_innocence(&mut scenario);
+    scenario.add_creature_from_oracle(P1, "Imposing Sovereign", 2, 1, IMPOSING_SOVEREIGN);
+    let murder = scenario
+        .add_spell_to_hand_from_oracle(P0, "Murder", true, MURDER)
+        .id();
+    let mut runner = scenario.build();
+
+    murder_and_settle(&mut runner, murder, innocence);
+
+    assert_returned_as_noncreature_enchantment(&runner, innocence);
+    assert!(!runner.state().objects[&innocence].tapped);
+    assert_priority_with_empty_stack(&runner);
+}
+
+/// R28 — CR 614.12 + CR 611.2e + CR 614.1c, the delivered read: Enduring Innocence returns as a
+/// noncreature enchantment, so Deanna Troi's "Other creatures you control enter with an
+/// additional +1/+1 counter on them." does not apply: no counter.
+#[test]
+fn enduring_innocence_returns_without_deanna_trois_counter() {
+    let mut scenario = main_phase();
+    let innocence = add_enduring_innocence(&mut scenario);
+    scenario.add_creature_from_oracle(P0, "Deanna Troi, Psychic Counsel", 2, 2, DEANNA_TROI);
+    let murder = scenario
+        .add_spell_to_hand_from_oracle(P0, "Murder", true, MURDER)
+        .id();
+    let mut runner = scenario.build();
+
+    murder_and_settle(&mut runner, murder, innocence);
+
+    assert_returned_as_noncreature_enchantment(&runner, innocence);
+    assert_eq!(plus_one_counters(&runner, innocence), 0);
+    assert_priority_with_empty_stack(&runner);
+}
+
+/// R29 — CR 614.12 + CR 611.2e + CR 303.4: Bronzehide Lion returns as "an Aura enchantment with
+/// enchant creature you control", attached to P0's Grizzly Bears (its only candidate), so P1's
+/// Imposing Sovereign does not apply: it enters untapped.
+#[test]
+fn bronzehide_lion_returns_untapped_past_imposing_sovereign() {
+    let mut scenario = main_phase();
+    let lion = scenario
+        .add_creature_from_oracle(P0, "Bronzehide Lion", 3, 3, BRONZEHIDE_LION)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Green, ManaCostShard::White],
+            generic: 0,
+        })
+        .with_subtypes(vec!["Cat"])
+        .id();
+    let bears = grizzly_bears_on_battlefield(&mut scenario, P0);
+    scenario.add_creature_from_oracle(P1, "Imposing Sovereign", 2, 1, IMPOSING_SOVEREIGN);
+    let murder = scenario
+        .add_spell_to_hand_from_oracle(P0, "Murder", true, MURDER)
+        .id();
+    let mut runner = scenario.build();
+
+    murder_and_settle(&mut runner, murder, lion);
+
+    let lion_obj = &runner.state().objects[&lion];
+    assert_eq!(lion_obj.zone, Zone::Battlefield);
+    assert!(lion_obj.card_types.subtypes.iter().any(|s| s == "Aura"));
+    assert!(
+        !lion_obj.card_types.core_types.contains(&CoreType::Creature),
+        "{:?}",
+        lion_obj.card_types
+    );
+    assert_eq!(lion_obj.attached_to, Some(AttachTarget::Object(bears)));
+    assert!(!lion_obj.tapped);
+    assert_priority_with_empty_stack(&runner);
 }
