@@ -8978,9 +8978,16 @@ fn effect_slot_denotes_damage_any_target(effect: &Effect, slot: AbilityTargetSlo
 /// consumer that must judge a recorded announcement rather than re-derive legal targets.
 ///
 /// "Any target" is not unrestricted: on a damage effect it means "a creature, player,
-/// planeswalker or battle", and that narrowing lives in
-/// [`effect_slot_denotes_damage_any_target`]. A caller that evaluated the bare `Any`
-/// predicate would admit an enchantment-only snapshot the spell could never have announced.
+/// planeswalker or battle", and three of those four exist only on the battlefield. That
+/// narrowing lives in [`effect_slot_denotes_damage_any_target`]. A caller that evaluated
+/// the bare `Any` predicate would admit an enchantment-only snapshot the spell could never
+/// have announced.
+/// The domain's two halves are built by the same functions the LIVE enumeration uses
+/// (`TargetFilter::Player` and [`damage_any_target_object_filter`]), so the recorded
+/// requirement and the legal-target search cannot drift apart; in particular the object
+/// half's `InZone { Battlefield }` states the zone live selection imposes by searching
+/// `state.battlefield`, which is the only zone evidence left once the target has moved
+/// and its announcement pin gone stale (CR 400.7).
 /// A `Fight` is the other multi-slot shape whose slots do NOT share a filter (CR 601.2c:
 /// an appropriate object for each target the spell requires), and it is read from
 /// [`fight_declared_slot_filters`] — the cast path's own order authority — rather than
@@ -9060,18 +9067,66 @@ pub(crate) fn declared_slot_announcement_filter(
         AbilityTargetSlot::Declared { index, filter },
     ) {
         // CR 115.4: the damage domain, expressed as the filter a snapshot must satisfy.
+        // Both halves come from the LIVE domain's own builders, so a recorded
+        // announcement can never satisfy a domain the cast path would have refused.
+        // The object half is the load-bearing one here: its battlefield requirement
+        // is the zone live selection imposes by enumeration, and a recorded fact
+        // states the zone its announcement was made in — the only surviving
+        // authority once the target has moved and its pin gone stale (CR 400.7).
         return Some(TargetFilter::Or {
             filters: vec![
                 TargetFilter::Player,
-                TargetFilter::Typed(TypedFilter::default().with_type(TypeFilter::AnyOf(vec![
-                    TypeFilter::Creature,
-                    TypeFilter::Planeswalker,
-                    TypeFilter::Battle,
-                ]))),
+                damage_any_target_object_filter(damage_any_target_slot_properties(filter)),
             ],
         });
     }
     Some(filter.clone())
+}
+
+/// CR 115.4: the declaring slot's own predicates for a damage "any target"
+/// slot, which both readers conjoin with [`damage_any_target_object_filter`].
+/// The only shape `is_any_target_filter` admits with any is the bare "any other
+/// target" (`FilterProp::Another`); every other spelling of the domain carries
+/// none.
+fn damage_any_target_slot_properties(filter: &TargetFilter) -> &[FilterProp] {
+    match filter {
+        TargetFilter::Typed(tf) => tf.properties.as_slice(),
+        _ => &[],
+    }
+}
+
+/// CR 115.4: the OBJECT half of the damage "any target" domain — a creature,
+/// planeswalker or battle ON THE BATTLEFIELD. The domain's other half is
+/// `TargetFilter::Player`.
+///
+/// This is the single authority both the live enumeration
+/// ([`damage_any_target_legal_targets`]) and the recorded-announcement
+/// requirement ([`declared_slot_announcement_filter`]) build.
+///
+/// CR 109.2 + CR 115.4: the battlefield requirement is load-bearing, not
+/// decorative. The live path imposes it by searching `state.battlefield`; the
+/// recorded path has no board to search, so the requirement must be IN the
+/// filter or a fact stating a creature CARD in a graveyard — or in exile, or in a
+/// library — would satisfy a domain the cast path never offered. A bare type
+/// description means a permanent (CR 109.2), and a permanent's home is the
+/// battlefield.
+///
+/// `slot_properties` are the declaring slot's own predicates, conjoined with
+/// the domain by both readers so the two cannot drift.
+fn damage_any_target_object_filter(slot_properties: &[FilterProp]) -> TargetFilter {
+    TargetFilter::Typed(TypedFilter {
+        type_filters: vec![TypeFilter::AnyOf(vec![
+            TypeFilter::Creature,
+            TypeFilter::Planeswalker,
+            TypeFilter::Battle,
+        ])],
+        controller: None,
+        properties: std::iter::once(FilterProp::InZone {
+            zone: Zone::Battlefield,
+        })
+        .chain(slot_properties.iter().cloned())
+        .collect(),
+    })
 }
 
 fn damage_any_target_legal_targets(
@@ -9086,19 +9141,10 @@ fn damage_any_target_legal_targets(
     // CR 115.4: "any target" is a creature, player, planeswalker or battle
     let player_targets =
         targeting::find_legal_targets_for_ability(state, &TargetFilter::Player, ability);
-    let mut permanent_filter = TypedFilter::default().with_type(TypeFilter::AnyOf(vec![
-        TypeFilter::Creature,
-        TypeFilter::Planeswalker,
-        TypeFilter::Battle,
-    ]));
-    if let TargetFilter::Typed(tf) = slot.filter() {
-        permanent_filter.properties = tf.properties.clone();
-    }
-    let permanent_targets = targeting::find_legal_targets_for_ability(
-        state,
-        &TargetFilter::Typed(permanent_filter),
-        ability,
-    );
+    let permanent_filter =
+        damage_any_target_object_filter(damage_any_target_slot_properties(slot.filter()));
+    let permanent_targets =
+        targeting::find_legal_targets_for_ability(state, &permanent_filter, ability);
 
     Some(
         player_targets
@@ -16456,6 +16502,52 @@ mod tests {
                 TypedFilter::default().with_type(TypeFilter::Subtype("Equipment".to_string()))
             )),
             "a context-ref host declares nothing, so the attachment lands at position 0"
+        );
+    }
+
+    /// CR 115.4 + CR 109.2: a damage "any target" slot's RECORDED requirement is
+    /// the live damage domain — the player axis plus the object axis — and the
+    /// object axis names the BATTLEFIELD. A type set alone would admit a creature
+    /// CARD in a graveyard, which live selection never offers because it searches
+    /// `state.battlefield`. The two halves are built by the same functions the
+    /// live enumeration uses, so they cannot drift.
+    ///
+    /// Revert-probe: dropping the `InZone { Battlefield }` prop restores the
+    /// pre-fix filter, whose type set alone satisfies the equality below only if
+    /// this test stops pinning the zone — which is exactly what it is here to do.
+    #[test]
+    fn damage_slot_announcement_filter_names_the_battlefield_domain() {
+        let bolt = ResolvedAbility::new(
+            Effect::DealDamage {
+                target: TargetFilter::Any,
+                amount: QuantityExpr::Fixed { value: 3 },
+                damage_source: None,
+                excess: None,
+            },
+            vec![TargetRef::Object(ObjectId(2))],
+            ObjectId(1),
+            PlayerId(0),
+        );
+        assert_eq!(
+            declared_slot_announcement_filter(&bolt, 0),
+            Some(TargetFilter::Or {
+                filters: vec![
+                    TargetFilter::Player,
+                    TargetFilter::Typed(TypedFilter {
+                        type_filters: vec![TypeFilter::AnyOf(vec![
+                            TypeFilter::Creature,
+                            TypeFilter::Planeswalker,
+                            TypeFilter::Battle,
+                        ])],
+                        controller: None,
+                        properties: vec![FilterProp::InZone {
+                            zone: Zone::Battlefield,
+                        }],
+                    }),
+                ],
+            }),
+            "CR 115.4: the recorded damage domain is a creature, player, planeswalker or \
+             battle, and the permanents among those exist only on the BATTLEFIELD"
         );
     }
 

@@ -19997,7 +19997,10 @@ impl GameState {
                 // honest park has a stale pin and a still-binding recorded creature
                 // requirement: the creature it recorded is exactly what the declaring slot
                 // admitted, and a save that restates it as anything else was not this
-                // announcement.
+                // announcement. A requirement that names a ZONE is part of that record too —
+                // "any target" is a creature, player, planeswalker or battle, and a creature,
+                // planeswalker or battle is a permanent (CR 115.4 + CR 109.2) — so for a moved
+                // target the recorded zone is the only zone evidence left.
                 if let Some(filter) = entry.filter.as_ref() {
                     // CR 601.2c: the announcing cast is the filter's source authority — the
                     // spell itself, controlled by its controller. Nothing else is bound: this

@@ -44,6 +44,16 @@
 //! describe a different creature-shaped thing than the caster announced. The
 //! guard therefore refuses every declared-but-unlatched park rather than
 //! manufacturing facts from the board.
+//!
+//! A fifth pair covers the ZONE half of a declared requirement. Lightning Bolt is
+//! announced at Savannah Lions and the Lions is sacrificed to Ashnod's Altar
+//! during the payment window, so the target leaves the battlefield and its pin is
+//! stale: the live zone comparison is inapplicable and the recorded announcement
+//! is the only authority left. "Any target" is a creature, player, planeswalker
+//! or battle, and the permanents among those are permanents (CR 115.4 +
+//! CR 109.2), so the recorded requirement names the battlefield: the honest save
+//! restores, and a save that restates the fact's zone as the graveyard — the
+//! right TYPE in the wrong ZONE, which the live path never offered — is refused.
 
 use crate::support::shared_card_db;
 use engine::ai_support::legal_actions_full;
@@ -1007,6 +1017,72 @@ fn a_mid_payment_characteristics_change_without_a_latch_is_refused() {
     }
 }
 
+/// CR 601.2c: Printed **Doom Blade** is "{1}{B} — Destroy target creature."
+/// (Scryfall, oracle text verified). Its declared filter names a TYPE and no
+/// ZONE — a bare "target creature" — which leaves the LIVE zone comparison as
+/// the only check that can judge a restated zone for this slot. A requirement
+/// that DOES name a zone is answered by the recorded requirement first, with
+/// `SnapshotContradictsDeclaredFilter`: a damage "any target" names the
+/// battlefield (creature, player, planeswalker or battle — CR 115.4 + CR 109.2),
+/// and Reanimate's "creature card from a graveyard" names the graveyard
+/// (CR 109.2a).
+const DOOM_BLADE: &str = "Destroy target creature.";
+
+struct ZoneBoard {
+    runner: GameRunner,
+    spell: ObjectId,
+    target: ObjectId,
+}
+
+/// CR 601.2c: announce Doom Blade at P1's creature with `CastPaymentMode::Manual`
+/// so the cast parks at `WaitingFor::ManaPayment` holding its announced-target
+/// latch — the state a save at the payment boundary captures. The Bears is the
+/// only legal target, so the engine announces it without a prompt (the same
+/// sole-target shape the Reanimate witness relies on).
+fn doom_blade_parked_at_manual_payment() -> ZoneBoard {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let target = scenario.add_creature(P1, "Grizzly Bears", 2, 2).id();
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Doom Blade", true, DOOM_BLADE)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Black],
+            generic: 1,
+        })
+        .id();
+    let mut runner = scenario.build();
+    let card_id = runner.state().objects[&spell].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: spell,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Manual,
+        })
+        .expect("the manual Doom Blade cast is announced");
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::ManaPayment { .. }),
+        "reach guard: the sole legal target is announced and the cast parks on the manual mana \
+         payment, got {:?}",
+        runner.state().waiting_for
+    );
+    let pending = runner
+        .state()
+        .pending_cast
+        .as_deref()
+        .expect("reach-guard: the ManaPayment prompt owns the cast");
+    assert_eq!(
+        pending.ability.targets,
+        vec![TargetRef::Object(target)],
+        "reach-guard: the park announced the only legal creature"
+    );
+    ZoneBoard {
+        runner,
+        spell,
+        target,
+    }
+}
+
 /// CR 601.2c + CR 400.7: the same-TARGET inconsistency control. The object id, the
 /// announcement-time characteristics and every other field of the latch are the HONEST ones;
 /// only the stated ZONE is restated. An announcement pin that is still current proves the
@@ -1016,20 +1092,20 @@ fn a_mid_payment_characteristics_change_without_a_latch_is_refused() {
 ///
 /// The characteristics are deliberately left untouched: they are the announcement's record
 /// and are NOT re-derivable, so the guard binds the zone and never compares the live object.
+///
+/// The declared slot names no zone ("target creature"), so the RECORDED requirement has no
+/// zone axis to answer and the LIVE comparison against the still-current pin is what refuses
+/// the restated zone.
 #[test]
 fn a_latch_stating_a_zone_the_announcement_pin_forbids_is_refused() {
-    let MidPaymentBoard {
-        runner,
-        spell,
-        heliod,
-        ..
-    } = bolt_announced_at_a_creature_heliod_mid_payment();
+    let board = doom_blade_parked_at_manual_payment();
 
     // The control: this exact pack, unmodified, is admitted.
-    admitted(persisted_json(runner.state())).expect("reach-guard: the honest pack is admitted");
+    admitted(persisted_json(board.runner.state()))
+        .expect("reach-guard: the honest pack is admitted");
 
     // Same id, same announcement-time characteristics, only the zone restated.
-    let mut state = runner.state().clone();
+    let mut state = board.runner.state().clone();
     let parked = state
         .pending_cast
         .as_deref_mut()
@@ -1040,8 +1116,8 @@ fn a_latch_stating_a_zone_the_announcement_pin_forbids_is_refused() {
         .expect("reach-guard: the engine-written park carries its announced-target latch");
     let fact = latched
         .iter_mut()
-        .find(|fact| matches!(fact, ActivationTargetFact::Object { id, .. } if *id == heliod))
-        .expect("reach-guard: the latch names Heliod");
+        .find(|fact| matches!(fact, ActivationTargetFact::Object { id, .. } if *id == board.target))
+        .expect("reach-guard: the latch names the Bears");
     let ActivationTargetFact::Object { zone, .. } = fact else {
         unreachable!("filtered to the object fact above");
     };
@@ -1064,10 +1140,13 @@ fn a_latch_stating_a_zone_the_announcement_pin_forbids_is_refused() {
                 },
         }) => {
             assert_eq!(
-                spell_object_id, spell,
+                spell_object_id, board.spell,
                 "the refusal names the cast it is about"
             );
-            assert_eq!(target, heliod, "and the target whose zone it contradicts");
+            assert_eq!(
+                target, board.target,
+                "and the target whose zone it contradicts"
+            );
             assert_eq!(
                 stated,
                 AnnouncedTargetZone::Known(Zone::Graveyard),
@@ -1102,18 +1181,16 @@ fn a_latch_stating_a_zone_the_announcement_pin_forbids_is_refused() {
 /// with no pin for an object that HAS moved, this comparison would refuse it as a
 /// contradiction; that writer must also record the pin, which is what makes the zone
 /// checkable at all.
+///
+/// As in the pinned twin above, the declared slot names no zone ("target creature"), so the
+/// LIVE comparison is the check under test here.
 #[test]
 fn a_pinless_latch_still_cannot_state_a_zone_the_object_never_left() {
-    let MidPaymentBoard {
-        runner,
-        spell,
-        heliod,
-        ..
-    } = bolt_announced_at_a_creature_heliod_mid_payment();
+    let board = doom_blade_parked_at_manual_payment();
 
     // The honest pinless control: same latch, pins dropped, zone untouched — ADMITTED.
     {
-        let mut state = runner.state().clone();
+        let mut state = board.runner.state().clone();
         let parked = state
             .pending_cast
             .as_deref_mut()
@@ -1124,7 +1201,7 @@ fn a_pinless_latch_still_cannot_state_a_zone_the_object_never_left() {
     }
 
     // Same pack, pins dropped AND the zone restated — REFUSED.
-    let mut state = runner.state().clone();
+    let mut state = board.runner.state().clone();
     let parked = state
         .pending_cast
         .as_deref_mut()
@@ -1136,8 +1213,8 @@ fn a_pinless_latch_still_cannot_state_a_zone_the_object_never_left() {
         .expect("reach-guard: the engine-written park carries its announced-target latch");
     let fact = latched
         .iter_mut()
-        .find(|fact| matches!(fact, ActivationTargetFact::Object { id, .. } if *id == heliod))
-        .expect("reach-guard: the latch names Heliod");
+        .find(|fact| matches!(fact, ActivationTargetFact::Object { id, .. } if *id == board.target))
+        .expect("reach-guard: the latch names the Bears");
     let ActivationTargetFact::Object { zone, .. } = fact else {
         unreachable!("filtered to the object fact above");
     };
@@ -1153,8 +1230,8 @@ fn a_pinless_latch_still_cannot_state_a_zone_the_object_never_left() {
                     ..
                 },
         }) => {
-            assert_eq!(spell_object_id, spell, "the refusal names the cast");
-            assert_eq!(target, heliod, "and the target");
+            assert_eq!(spell_object_id, board.spell, "the refusal names the cast");
+            assert_eq!(target, board.target, "and the target");
             assert_eq!(pinned, Zone::Battlefield, "against the zone it never left");
         }
         other => panic!(
@@ -1331,6 +1408,249 @@ fn a_type_constrained_slot_refuses_a_snapshot_restating_the_post_payment_type() 
         other => panic!(
             "CR 601.2c + CR 115.4: a type-constrained slot must refuse a snapshot restating the \
              post-payment type, got {other:?}"
+        ),
+    }
+}
+
+/// CR 115.4: "any target" on a damage effect names a creature, player,
+/// planeswalker or battle — and three of those four are PERMANENTS, which exist
+/// only on the battlefield. The live domain therefore searches battlefield
+/// objects (`targeting::find_legal_targets_for_ability`, no explicit zone), so
+/// an announcement that names a creature CARD in a graveyard is one the spell
+/// could never have made: live selection never offers it.
+///
+/// The recorded requirement must say the same thing. Its snapshot answers the
+/// type axis, and only the fact's captured zone can answer WHERE the
+/// announcement was made — the live zone comparison cannot, because the target
+/// moved and its incarnation pin is stale (CR 400.7). That is exactly the board
+/// below: Lightning Bolt is announced at Savannah Lions, a legal creature on the
+/// battlefield, and the Lions is then sacrificed to Ashnod's Altar for `{C}{C}`
+/// during CR 601.2g mana payment, leaving `{R}` still owed.
+struct TargetLeftBoard {
+    runner: GameRunner,
+    spell: ObjectId,
+    lions: ObjectId,
+}
+
+fn bolt_announced_at_a_creature_that_left_mid_payment() -> TargetLeftBoard {
+    let db = shared_card_db().expect("the checked-in card fixture contains these cards");
+    let mut sc = GameScenario::new();
+    sc.at_phase(Phase::PreCombatMain);
+    let spell = sc.add_real_card(P0, "Lightning Bolt", Zone::Hand, db);
+    let lions = sc.add_real_card(P0, "Savannah Lions", Zone::Battlefield, db);
+    let altar = sc.add_real_card(P0, "Ashnod's Altar", Zone::Battlefield, db);
+    let mut runner = sc.build();
+    rehydrate_game_from_card_db(runner.state_mut(), db);
+
+    let card_id = runner.state().objects[&spell].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: spell,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Manual,
+        })
+        .expect("Lightning Bolt is announced");
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::TargetSelection { .. }
+        ),
+        "reach guard: the cast asks for its target, got {:?}",
+        runner.state().waiting_for
+    );
+    runner
+        .act(GameAction::SelectTargets {
+            targets: vec![TargetRef::Object(lions)],
+        })
+        .expect("Savannah Lions is a legal battlefield creature, so Lightning Bolt may target it");
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::ManaPayment { .. }),
+        "reach guard: the cast parks on the manual mana payment, got {:?}",
+        runner.state().waiting_for
+    );
+
+    // CR 601.2g: the Altar's mana ability sacrifices the ANNOUNCED TARGET itself,
+    // so the creature Bolt named leaves the battlefield before the cast has paid.
+    // Only `{C}{C}` is produced, so `{R}` stays owed and the park survives.
+    let altar_index = runner.state().objects[&altar]
+        .abilities
+        .iter()
+        .position(is_mana_ability)
+        .expect("Ashnod's Altar has its mana ability");
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: altar,
+            ability_index: altar_index,
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("the Altar's mana ability begins");
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::PayCost { .. }),
+        "reach guard: the Altar asks for the creature it sacrifices, got {:?}",
+        runner.state().waiting_for
+    );
+    runner
+        .act(GameAction::SelectCards { cards: vec![lions] })
+        .expect("the announced target pays the Altar's cost");
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::ManaPayment { .. }),
+        "reach guard: only {{C}}{{C}} were produced, so the red payment is still open, got {:?}",
+        runner.state().waiting_for
+    );
+
+    TargetLeftBoard {
+        runner,
+        spell,
+        lions,
+    }
+}
+
+/// Reach guards shared by both directions: the announced creature LEFT the
+/// battlefield, its pin is stale (so the live zone comparison is inapplicable),
+/// and the recorded fact still states the battlefield it was announced on.
+fn assert_target_left_reach_guards(board: &TargetLeftBoard) {
+    let state = board.runner.state();
+    assert_eq!(
+        state.objects[&board.lions].zone,
+        Zone::Graveyard,
+        "reach guard: the announced creature really left the battlefield"
+    );
+    let pending = state
+        .pending_cast
+        .as_deref()
+        .expect("reach guard: the ManaPayment prompt owns the cast");
+    assert_eq!(
+        pending.ability.targets,
+        vec![TargetRef::Object(board.lions)],
+        "reach guard: the park still names the creature it announced"
+    );
+    let pin = pending
+        .ability
+        .target_pins
+        .first()
+        .copied()
+        .flatten()
+        .expect("reach guard: the announced target carries an incarnation pin");
+    assert!(
+        !pin.is_current(state),
+        "CR 400.7: the announced creature changed zones, so its pin is STALE and the live zone \
+         comparison cannot answer where it was announced"
+    );
+    let facts = pending
+        .committed_target_facts
+        .as_deref()
+        .expect("reach guard: the engine-written park carries its announced-target latch");
+    let [ActivationTargetFact::Object { id, zone, lki, .. }] = facts else {
+        panic!("reach guard: the latch is one object fact, got {facts:?}");
+    };
+    assert_eq!(*id, board.lions, "reach guard: the latch names the Lions");
+    assert_eq!(
+        *zone,
+        AnnouncedTargetZone::Known(Zone::Battlefield),
+        "CR 601.2c: the honest fact states the battlefield it was announced on"
+    );
+    assert!(
+        lki.card_types.contains(&CoreType::Creature),
+        "reach guard: the recorded snapshot says the announced target was a creature"
+    );
+}
+
+/// WITNESS (honest direction): the recorded announcement named a legal creature
+/// on the battlefield, so the park restores even though the creature has since
+/// moved off it. CR 601.2c validates the declaration the caster made; the
+/// departure is a later event (CR 608.2b decides the spell's fate at
+/// resolution), and the stale pin must not turn the honest record into a
+/// contradiction.
+///
+/// This is the positive control for the battlefield requirement: the requirement
+/// is read from the RECORDED announcement, so a target that has left the
+/// battlefield still carries the zone the caster announced it in.
+#[test]
+fn a_damage_any_target_announced_at_a_creature_that_left_still_restores() {
+    let board = bolt_announced_at_a_creature_that_left_mid_payment();
+    assert_target_left_reach_guards(&board);
+
+    let restored = admitted(persisted_json(board.runner.state())).unwrap_or_else(|error| {
+        panic!(
+            "CR 601.2c + CR 115.4: the recorded announcement named a legal creature on the \
+             battlefield, so this save is admitted; the creature's later departure is not a \
+             contradiction — got {error:?}"
+        )
+    });
+    let pending = restored
+        .pending_cast
+        .as_deref()
+        .expect("the restored park keeps its cast");
+    assert_eq!(
+        pending.ability.targets,
+        vec![TargetRef::Object(board.lions)],
+        "the restored cast still names the creature it announced"
+    );
+}
+
+/// WITNESS (refusal direction): the same honest park with the fact's stated zone
+/// restated as the graveyard. The snapshot still says CREATURE — the type is
+/// right and only the zone is wrong — which is precisely the announcement
+/// CR 115.4 forbids: live damage selection searches battlefield objects, so a
+/// creature in a graveyard is not an "any target" the spell could have named.
+///
+/// Nothing else catches it: the target really did move, so its pin is stale and
+/// the live zone comparison is skipped (CR 400.7). The declaring slot's recorded
+/// requirement is the only remaining authority, and it must carry the battlefield
+/// with the type set.
+#[test]
+fn a_damage_any_target_fact_naming_its_creature_outside_the_battlefield_is_refused() {
+    let board = bolt_announced_at_a_creature_that_left_mid_payment();
+    assert_target_left_reach_guards(&board);
+
+    // The control: the untouched park is admitted.
+    admitted(persisted_json(board.runner.state()))
+        .expect("reach-guard: the honest park with the factual battlefield zone is admitted");
+
+    let mut state = board.runner.state().clone();
+    let parked = state
+        .pending_cast
+        .as_deref_mut()
+        .expect("reach-guard: the ManaPayment prompt owns the cast");
+    let latched = parked
+        .committed_target_facts
+        .as_deref_mut()
+        .expect("reach-guard: the engine-written park carries its announced-target latch");
+    let fact = latched
+        .iter_mut()
+        .find(|fact| matches!(fact, ActivationTargetFact::Object { id, .. } if *id == board.lions))
+        .expect("reach-guard: the latch names the Lions");
+    let ActivationTargetFact::Object { lki, zone, .. } = fact else {
+        unreachable!("filtered to the object fact above");
+    };
+    assert!(
+        lki.card_types.contains(&CoreType::Creature),
+        "reach-guard: the restated announcement keeps the CORRECT type; only its zone changes"
+    );
+    *zone = AnnouncedTargetZone::Known(Zone::Graveyard);
+
+    match PersistedGameState::capture(state).into_game_state() {
+        Err(PersistedRestoreError::ContradictoryAnnouncedTargetFacts {
+            spell_object_id,
+            reason:
+                AnnouncedTargetFactConflict::SnapshotContradictsDeclaredFilter {
+                    target: TargetRef::Object(refused),
+                },
+        }) => {
+            assert_eq!(
+                spell_object_id, board.spell,
+                "the refusal names the cast it is about"
+            );
+            assert_eq!(
+                refused, board.lions,
+                "and the target whose announcement contradicts its slot"
+            );
+        }
+        other => panic!(
+            "CR 115.4: a damage \"any target\" slot admits only battlefield creatures, players, \
+             planeswalkers and battles; a creature recorded in a graveyard was never a legal \
+             announcement, got {other:?}"
         ),
     }
 }
