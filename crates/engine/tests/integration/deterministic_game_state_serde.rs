@@ -616,6 +616,13 @@ fn expected_manifest() -> BTreeMap<String, OwnerSpec> {
             HASH_SET,
         ),
         (
+            "PendingBatchDeliveries",
+            None,
+            "pre_entry_battlefield",
+            "Option<HashSet>",
+            OPTION_HASH_SET,
+        ),
+        (
             "PendingBatchZoneChangeCause",
             Some("Draw"),
             "seed_applied",

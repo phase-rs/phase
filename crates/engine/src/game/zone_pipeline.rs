@@ -1304,14 +1304,48 @@ pub(crate) fn move_objects_simultaneously_then(
     let logical_zone_change_group =
         crate::game::triggers::allocate_logical_zone_change_group(state, &ids);
     let destination = reqs.first().map(|r| r.to);
-    match deliver_batch(
-        state,
-        reqs,
-        logical_zone_change_group,
-        BatchDeliveryParking::NewChild,
-        events,
-    ) {
+    // CR 614.12 + CR 614.1c: a simultaneous battlefield batch (Dig kept cards)
+    // snapshots the pre-entry battlefield before its first member enters. The
+    // batch frame owns the snapshot from the start, so a replacement pause
+    // re-parks it (see `stash_batch_tail`) and the resume never re-captures it.
+    let pre_entry_battlefield = destination.and_then(|zone| {
+        crate::game::engine_replacement::pre_entry_snapshot_for_entry(
+            state,
+            ids.iter().copied(),
+            zone,
+        )
+    });
+    let parking = if pre_entry_battlefield.is_some() {
+        state.push_batch_delivery(PendingBatchDeliveries {
+            logical_zone_change_group: logical_zone_change_group.clone(),
+            paused_current: None,
+            remaining: Vec::new(),
+            destination: destination.unwrap_or(Zone::Battlefield),
+            source_id: None,
+            enter_tapped: EtbTapState::Unspecified,
+            exile_tracking: ZoneDeliveryExileTracking::None,
+            library_placement: None,
+            completion: None,
+            replacement_applied: HashSet::new(),
+            requests: Vec::new(),
+            attempted: Vec::new(),
+            zone_change_record_start,
+            deferred_events: Vec::new(),
+            pre_entry_battlefield,
+        });
+        BatchDeliveryParking::ReparkActive
+    } else {
+        BatchDeliveryParking::NewChild
+    };
+    let owns_pre_entry_snapshot = matches!(parking, BatchDeliveryParking::ReparkActive);
+    match deliver_batch(state, reqs, logical_zone_change_group, parking, events) {
         BatchDeliveryResult::Done(mut logical_zone_change_group) => {
+            if owns_pre_entry_snapshot {
+                // The simultaneous entry is over; the snapshot ends with it.
+                state
+                    .take_active_batch_delivery()
+                    .expect("snapshot-owning batch frame must be the active owner");
+            }
             crate::game::triggers::complete_logical_zone_trigger_collection(
                 state,
                 &mut logical_zone_change_group,
@@ -1401,6 +1435,7 @@ fn ensure_batch_record(state: &mut GameState, destination: Zone) -> &mut Pending
             attempted: Vec::new(),
             zone_change_record_start,
             deferred_events: Vec::new(),
+            pre_entry_battlefield: None,
         });
     }
     state
@@ -1543,6 +1578,14 @@ fn stash_batch_tail(
         .into_iter()
         .map(ZoneMoveRequest::into_pending)
         .collect();
+    // CR 614.12: a re-parked batch keeps the snapshot captured before its first
+    // member entered.
+    let pre_entry_battlefield = match parking {
+        BatchDeliveryParking::ReparkActive => state
+            .active_batch_delivery()
+            .and_then(|active| active.pre_entry_battlefield.clone()),
+        BatchDeliveryParking::NewChild => None,
+    };
     let pending = PendingBatchDeliveries {
         logical_zone_change_group,
         paused_current,
@@ -1561,6 +1604,7 @@ fn stash_batch_tail(
         attempted: Vec::new(),
         zone_change_record_start: state.zone_changes_this_turn.len(),
         deferred_events: Vec::new(),
+        pre_entry_battlefield,
     };
     match parking {
         BatchDeliveryParking::NewChild => state.push_batch_delivery(pending),
@@ -1667,6 +1711,7 @@ pub(crate) fn drain_pending_batch_deliveries(state: &mut GameState, events: &mut
             attempted,
             zone_change_record_start,
             mut deferred_events,
+            pre_entry_battlefield: _,
         } = pending;
         deferred_events.append(events);
         let attempted = if attempted.is_empty() {
@@ -1873,6 +1918,7 @@ mod paused_search_audience_tests {
             attempted: Vec::new(),
             zone_change_record_start: 0,
             deferred_events: Vec::new(),
+            pre_entry_battlefield: None,
         });
 
         drain_pending_batch_deliveries(&mut state, &mut Vec::new());
@@ -1958,6 +2004,7 @@ mod paused_search_audience_tests {
             attempted: Vec::new(),
             zone_change_record_start: 0,
             deferred_events: Vec::new(),
+            pre_entry_battlefield: None,
         });
 
         // An answer pins the boundary, then changes the proposal.
@@ -6303,6 +6350,7 @@ mod w3_library_placement_tests {
             attempted: Vec::new(),
             zone_change_record_start: 0,
             deferred_events: Vec::new(),
+            pre_entry_battlefield: None,
         });
         install_library_to_exile_redirect(&mut state);
         install_library_to_exile_redirect(&mut state);

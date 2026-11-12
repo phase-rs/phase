@@ -518,6 +518,209 @@ fn acolyte_counts_preexisting_counters_but_not_co_entrants_in_mass_return() {
     }
 }
 
+const CLONE: &str =
+    "You may have this creature enter as a copy of any creature on the battlefield.";
+const GENESIS_ULTIMATUM: &str = "Look at the top five cards of your library. Put any number of permanent cards from among them onto the battlefield and the rest into your hand. Exile Genesis Ultimatum.";
+
+/// Genesis Ultimatum through the production Dig choice. Apprentice and Acolyte
+/// sit in the top five of P0's library (their library order is
+/// `library_acolyte_first`); the player keeps them in `select_acolyte_first`
+/// order. A pre-existing Ally with two counters is the positive control.
+/// With `clone_between`, a Clone sits between them in both orders: its optional
+/// copy replacement pauses the batch's delivery mid-batch (CR 616.1 / CR 707.9).
+fn genesis_ultimatum_dig(
+    library_acolyte_first: bool,
+    select_acolyte_first: bool,
+    clone_between: bool,
+) -> (GameRunner, ObjectId, ObjectId) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let ally = scenario.add_creature(P0, "Ally", 2, 2).id();
+    scenario.with_counter(ally, CounterType::Plus1Plus1, 2);
+    let mut b = scenario.add_creature_to_graveyard(P0, "Iron Apprentice", 1, 1);
+    b.from_oracle_text(IRON_APPRENTICE);
+    let apprentice = b.id();
+    let mut b = scenario.add_creature_to_graveyard(P0, "Ascendant Acolyte", 1, 1);
+    b.from_oracle_text(ASCENDANT_ACOLYTE);
+    let acolyte = b.id();
+    let mut b = scenario.add_creature_to_graveyard(P0, "Clone", 0, 0);
+    b.from_oracle_text(CLONE);
+    let clone = b.id();
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Genesis Ultimatum", false, GENESIS_ULTIMATUM)
+        .with_mana_cost(ManaCost::default())
+        .id();
+    let mut runner = scenario.build();
+    // Stage both creature cards as the top of P0's library, in the requested order.
+    let mut order = if library_acolyte_first {
+        vec![acolyte, apprentice]
+    } else {
+        vec![apprentice, acolyte]
+    };
+    if clone_between {
+        order.insert(1, clone);
+    }
+    for id in order.iter().copied().rev() {
+        let state = runner.state_mut();
+        let player = state.players.iter_mut().find(|p| p.id == P0).unwrap();
+        player.graveyard.retain(|&o| o != id);
+        player.library.push_front(id);
+        state.objects.get_mut(&id).unwrap().zone = Zone::Library;
+    }
+    let card_id = runner.state().objects[&spell].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: spell,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("free cast must be accepted");
+    let mut selection = if select_acolyte_first {
+        vec![acolyte, apprentice]
+    } else {
+        vec![apprentice, acolyte]
+    };
+    if clone_between {
+        selection.insert(1, clone);
+    }
+    let mut paused = false;
+    for _ in 0..48 {
+        match runner.state().waiting_for.clone() {
+            WaitingFor::DigChoice { cards, .. } => {
+                assert!(cards.contains(&acolyte) && cards.contains(&apprentice));
+                runner
+                    .act(GameAction::SelectCards {
+                        cards: selection.clone(),
+                    })
+                    .expect("keeping both permanents must be accepted");
+            }
+            WaitingFor::ReplacementChoice { .. } => {
+                paused = true;
+                runner
+                    .act(GameAction::ChooseReplacement { index: 0 })
+                    .expect("accepting Clone's copy replacement");
+            }
+            WaitingFor::CopyTargetChoice { valid_targets, .. } => {
+                paused = true;
+                let target = *valid_targets
+                    .iter()
+                    .find(|id| **id == ally)
+                    .expect("Clone may copy the Ally");
+                runner
+                    .act(GameAction::ChooseTarget {
+                        target: Some(TargetRef::Object(target)),
+                    })
+                    .expect("choosing Clone's copy target");
+            }
+            WaitingFor::Priority { .. } if runner.state().stack.is_empty() => break,
+            WaitingFor::Priority { .. } => {
+                runner.act(GameAction::PassPriority).expect("pass priority");
+            }
+            other => panic!("unexpected prompt: {other:?}"),
+        }
+    }
+    assert_eq!(
+        paused, clone_between,
+        "the batch pauses exactly when Clone is in it"
+    );
+    (runner, acolyte, apprentice)
+}
+
+/// CR 614.12 + CR 614.1c: permanents put onto the battlefield together by a
+/// Dig (Genesis Ultimatum) enter simultaneously, so Ascendant Acolyte's
+/// as-enters count excludes the counter Iron Apprentice enters with — in every
+/// library and selection order — while still counting the pre-existing Ally.
+#[test]
+fn acolyte_ignores_co_entrant_counters_when_dig_delivers_both() {
+    for library_acolyte_first in [true, false] {
+        for select_acolyte_first in [true, false] {
+            let (runner, acolyte, apprentice) =
+                genesis_ultimatum_dig(library_acolyte_first, select_acolyte_first, false);
+            let label = format!(
+                "library_first={library_acolyte_first} select_first={select_acolyte_first}"
+            );
+            assert_eq!(
+                runner.state().objects[&acolyte].zone,
+                Zone::Battlefield,
+                "{label}"
+            );
+            assert_eq!(
+                runner.state().objects[&apprentice].zone,
+                Zone::Battlefield,
+                "{label}"
+            );
+            assert_eq!(
+                counters(&runner, apprentice, &CounterType::Plus1Plus1),
+                1,
+                "Apprentice still enters with its own counter ({label})"
+            );
+            assert_eq!(
+                counters(&runner, acolyte, &CounterType::Plus1Plus1),
+                2,
+                "only the pre-existing Ally's counters count ({label})"
+            );
+            assert!(
+                runner
+                    .state()
+                    .active_pre_entry_battlefield_snapshot()
+                    .is_none(),
+                "the pre-entry snapshot ends with the batch ({label})"
+            );
+        }
+    }
+}
+
+/// CR 614.12 + CR 616.1: the same Dig batch, paused mid-delivery by Clone's
+/// optional copy replacement between Apprentice and Acolyte (and the reverse).
+/// The resumed batch keeps the snapshot captured before its first member
+/// entered, so Acolyte still excludes Apprentice's entering counter, and the
+/// snapshot does not outlive the batch on the resolution stack.
+#[test]
+fn acolyte_ignores_co_entrant_counters_across_a_paused_dig_batch() {
+    for library_acolyte_first in [true, false] {
+        for select_acolyte_first in [true, false] {
+            let (runner, acolyte, apprentice) =
+                genesis_ultimatum_dig(library_acolyte_first, select_acolyte_first, true);
+            let label = format!(
+                "library_first={library_acolyte_first} select_first={select_acolyte_first}"
+            );
+            assert_eq!(
+                runner.state().objects[&acolyte].zone,
+                Zone::Battlefield,
+                "{label}"
+            );
+            assert_eq!(
+                runner.state().objects[&apprentice].zone,
+                Zone::Battlefield,
+                "{label}"
+            );
+            assert_eq!(
+                counters(&runner, apprentice, &CounterType::Plus1Plus1),
+                1,
+                "{label}"
+            );
+            assert_eq!(
+                counters(&runner, acolyte, &CounterType::Plus1Plus1),
+                2,
+                "only the pre-existing Ally's counters count after the pause ({label})"
+            );
+            assert!(
+                runner
+                    .state()
+                    .active_pre_entry_battlefield_snapshot()
+                    .is_none(),
+                "{label}"
+            );
+            assert!(
+                runner.state().active_batch_delivery().is_none()
+                    && runner.state().resolution_stack.is_empty(),
+                "no batch frame or snapshot may outlive the batch ({label})"
+            );
+        }
+    }
+}
+
 /// The object-count class of the same read: a co-entrant is not "another
 /// creature you control" for an as-enters count.
 #[test]

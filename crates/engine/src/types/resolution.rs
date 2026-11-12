@@ -3531,6 +3531,22 @@ impl ResolutionStack {
         }
     }
 
+    /// The active BatchDelivery owner, or the one a post-replacement child
+    /// raised by its current member's move sits directly on. Mirrors
+    /// [`Self::active_change_zone_or_post_replacement_child`]; no deeper search.
+    pub fn active_batch_delivery_or_post_replacement_child(
+        &self,
+    ) -> Option<&PendingBatchDeliveries> {
+        match self.last() {
+            Some(ResolutionFrame::BatchDelivery(batch)) => Some(batch),
+            Some(ResolutionFrame::PostReplacement(_)) => match self.active_predecessor() {
+                Some(ResolutionFrame::BatchDelivery(batch)) => Some(batch),
+                Some(_) | None => None,
+            },
+            Some(_) | None => None,
+        }
+    }
+
     /// Consumes exactly the active general post-replacement frame.
     pub fn take_active_post_replacement(
         &mut self,
@@ -6954,6 +6970,7 @@ mod tests {
             attempted: Vec::new(),
             zone_change_record_start: state.zone_changes_this_turn.len(),
             deferred_events: Vec::new(),
+            pre_entry_battlefield: None,
         }))
     }
 
@@ -9090,6 +9107,7 @@ mod tests {
             attempted: Vec::new(),
             zone_change_record_start: batch.zone_changes_this_turn.len(),
             deferred_events: Vec::new(),
+            pre_entry_battlefield: None,
         };
         let mut batch = restore_v1_batch_delivery_fixture(batch, pending.clone());
         crate::game::zone_pipeline::drain_pending_batch_deliveries(&mut batch, &mut Vec::new());

@@ -176,6 +176,37 @@ pub(crate) fn object_needs_pre_entry_battlefield(state: &GameState, id: ObjectId
         || object_has_pre_entry_population_replacement(state, id)
 }
 
+/// CR 614.12 + CR 614.1c + CR 614.12a: single authority deciding whether a
+/// simultaneous multi-permanent entry needs the pre-entry battlefield snapshot,
+/// and capturing it. Returns the battlefield as it stands BEFORE the first member
+/// enters when any member needs it, so every co-entrant is excluded regardless of
+/// delivery order. An already-active snapshot (this or an outer entry's) is never
+/// re-captured, which keeps a resumed batch on its original snapshot.
+pub(crate) fn pre_entry_snapshot_for_entry(
+    state: &GameState,
+    members: impl IntoIterator<Item = ObjectId>,
+    destination: Zone,
+) -> Option<HashSet<ObjectId>> {
+    (destination == Zone::Battlefield
+        && state.active_pre_entry_battlefield_snapshot().is_none()
+        && members
+            .into_iter()
+            .any(|id| object_needs_pre_entry_battlefield(state, id)))
+    .then(|| state.battlefield.iter().copied().collect())
+}
+
+/// As [`pre_entry_snapshot_for_entry`], for the ChangeZone multi-entry loops:
+/// parks the snapshot in the loop's ChangeZone frame.
+pub(crate) fn capture_pre_entry_snapshot_for_entry(
+    state: &mut GameState,
+    members: impl IntoIterator<Item = ObjectId>,
+    destination: Zone,
+) {
+    if let Some(snapshot) = pre_entry_snapshot_for_entry(state, members, destination) {
+        state.push_devour_change_zone_snapshot(snapshot);
+    }
+}
+
 /// CR 701.50a + CR 614.5 + CR 616.1f: drain a deferred connive whose leading
 /// Draw link parked a replacement-ordering choice. Runs only when the dedicated
 /// stack-owned Connive re-entry is set (the connive applier's parked-draw

@@ -1491,14 +1491,11 @@ pub fn resolve(
     // targeted multi-`ChangeZone` co-entry that brings in one or more devourers.
     // Captured before any member enters so every co-arriver (and the devourers
     // themselves) is excluded regardless of iteration order.
-    if dest_zone == Zone::Battlefield
-        && state.active_devour_eligible_snapshot().is_none()
-        && targeted_objects.iter().any(|id| {
-            crate::game::engine_replacement::object_needs_pre_entry_battlefield(state, *id)
-        })
-    {
-        state.push_devour_change_zone_snapshot(state.battlefield.iter().copied().collect());
-    }
+    crate::game::engine_replacement::capture_pre_entry_snapshot_for_entry(
+        state,
+        targeted_objects.iter().copied(),
+        dest_zone,
+    );
 
     // CR 603.6a + CR 614.12: one event — every member's gates read the board
     // before any member moves.
@@ -3051,14 +3048,11 @@ pub fn resolve_all(
     // battlefield is still the pre-entry set) so every co-arriver is excluded.
     // `is_none`-gated so a nested/resumed pass doesn't re-capture; cleared on the
     // event-completion paths below.
-    if dest_zone == Zone::Battlefield
-        && state.active_devour_eligible_snapshot().is_none()
-        && matching.iter().any(|id| {
-            crate::game::engine_replacement::object_needs_pre_entry_battlefield(state, *id)
-        })
-    {
-        state.push_devour_change_zone_snapshot(state.battlefield.iter().copied().collect());
-    }
+    crate::game::engine_replacement::capture_pre_entry_snapshot_for_entry(
+        state,
+        matching.iter().copied(),
+        dest_zone,
+    );
 
     // CR 401.4: When multiple objects are placed at the same library position
     // simultaneously and `random_order` is false, the owner arranges their

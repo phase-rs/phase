@@ -6941,6 +6941,17 @@ pub struct PendingBatchDeliveries {
     /// the full action settles so one co-departure/LKI batch is observable.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub deferred_events: Vec<GameEvent>,
+    /// CR 614.12 + CR 614.1c: the battlefield as it stood before this
+    /// simultaneous battlefield entry began, captured once before the first
+    /// member entered. The batch owns it across every replacement pause so each
+    /// later member's as-enters read excludes co-entrants delivered earlier
+    /// (never re-captured on resume); it ends with the batch.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "crate::types::deterministic_serde::option_hash_set"
+    )]
+    pub pre_entry_battlefield: Option<HashSet<ObjectId>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -30630,7 +30641,11 @@ impl GameState {
     /// Devour sacrifice pool or population-counting as-enters replacement).
     /// The same frame-owned snapshot as [`Self::active_devour_eligible_snapshot`].
     pub fn active_pre_entry_battlefield_snapshot(&self) -> Option<&HashSet<ObjectId>> {
-        self.active_devour_eligible_snapshot()
+        self.active_devour_eligible_snapshot().or_else(|| {
+            self.resolution_stack
+                .active_batch_delivery_or_post_replacement_child()
+                .and_then(|batch| batch.pre_entry_battlefield.as_ref())
+        })
     }
 
     /// Begins a Devour co-entry in a frame that remains authoritative even
@@ -59477,6 +59492,7 @@ mod restored_exact_attack_authority_tests {
                         attempted: Vec::new(),
                         zone_change_record_start: 0,
                         deferred_events: Vec::new(),
+                        pre_entry_battlefield: None,
                     });
                     state.waiting_for.clone()
                 }
