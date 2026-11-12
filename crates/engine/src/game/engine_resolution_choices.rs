@@ -1242,7 +1242,10 @@ pub(super) fn is_mid_resolution_pause(waiting_for: &WaitingFor) -> bool {
             | WaitingFor::RippleBottomOrder { .. }
             | WaitingFor::OutsideGameChoice { .. }
             | WaitingFor::ResolutionOptionalPaymentChoice { .. }
-            | WaitingFor::DiscardChoice { discard_frame: Some(_), .. }
+            | WaitingFor::DiscardChoice {
+                discard_frame: Some(_),
+                ..
+            }
             | WaitingFor::ReturnAsAuraTarget { .. }
             | WaitingFor::TargetSelection { .. }
     )

@@ -971,8 +971,11 @@ fn drain_or_clear_deferred_triggers_after_elimination(
     events: &mut Vec<GameEvent>,
 ) {
     // CR 117.5 + CR 603.3b: a post-action pass in progress places its queue whole at its
-    // settle to priority.
+    // settle to priority. For ScannedByCaller, the caller's post-action scan will
+    // place the combined batch; do not drain here to avoid splitting the batch
+    // (issue #10157).
     if departure_triggers == DepartureTriggers::PlacedByPass
+        || departure_triggers == DepartureTriggers::ScannedByCaller
         || state.deferred_triggers.is_empty()
         || state.pending_trigger.is_some()
         || state.pending_trigger_order.is_some()

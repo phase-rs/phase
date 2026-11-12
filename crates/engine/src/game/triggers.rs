@@ -9338,38 +9338,33 @@ pub(crate) fn collect_departure_look_back_triggers(
     end: usize,
 ) {
     let consumed = state.consumed_before_priority_trigger_events.clone();
-    let mut looked_back_events = Vec::new();
-    let mut occurrences = Vec::new();
-    for index in event_start..end {
-        let event = &events[index];
-        if !departure_event_looks_back(event) {
-            continue;
-        }
-        let occurrence = trigger_event_occurrence(events, index);
-        let claimed = consumed.iter().any(|claim| {
-            claim.event == *event
-                && claim.occurrence == occurrence
-                && claim.scope.consumes(TriggerCollectionRequester::Ordinary)
-        });
-        if claimed {
-            continue;
-        }
-        looked_back_events.push(event.clone());
-        occurrences.push(ConsumedTriggerEventOccurrence {
-            event: event.clone(),
-            occurrence,
-            scope: ConsumedTriggerEventScope::OrdinaryCollectorsOnly,
-        });
-    }
-    if looked_back_events.is_empty() {
+    let mut unclaimed = unclaimed_trigger_events_from(
+        events,
+        event_start,
+        TriggerCollectionRequester::Ordinary,
+        &consumed,
+    );
+    // Keep only departure look-back events (ZoneChanged leaving game, Unattached,
+    // PermanentPhasedOut, PlayerLost) per CR 603.10a/c/b/f.
+    unclaimed.retain(departure_event_looks_back);
+    if unclaimed.events.is_empty() {
         return;
     }
-    observers.collect_into_deferred(state, &looked_back_events);
-    // CR 603.7b: the claim is ordinary-scope only, so a delayed ability is still
-    // entitled to the same occurrence on its own scan.
-    state
-        .consumed_before_priority_trigger_events
-        .extend(occurrences);
+    // Collect against the latched observers.
+    observers.collect_into_deferred(state, &unclaimed.events);
+    // CR 603.2c + CR 603.7b: claim the occurrences at their full-buffer identity
+    // for the ordinary collector only, so a delayed scan still sees them.
+    state.consumed_before_priority_trigger_events.extend(
+        unclaimed
+            .events
+            .iter()
+            .zip(&unclaimed.positions)
+            .map(|(event, position)| ConsumedTriggerEventOccurrence {
+                event: event.clone(),
+                occurrence: trigger_event_occurrence(events, *position),
+                scope: ConsumedTriggerEventScope::OrdinaryCollectorsOnly,
+            }),
+    );
 }
 
 /// Collect `events`' triggers into the queue stamped `origin`: a priority
