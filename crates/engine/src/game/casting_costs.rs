@@ -13472,7 +13472,9 @@ impl CostLockInput {
         pending
             .committed_target_facts
             .clone_from(&self.committed_target_facts);
-        // CR 601.2h: a cast that already paid must not reach the finalizer as unpaid.
+        // CR 601.2h: a cast that already paid must not reach the finalizer as unpaid. The
+        // CARRIER wins: its value was taken from the parked cast, which is the one the restore
+        // boundary validated, so it must outrank anything the rebuild already carries.
         pending.prepaid_actual_mana_spent = self
             .prepaid_actual_mana_spent
             .or(pending.prepaid_actual_mana_spent);

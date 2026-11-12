@@ -15017,8 +15017,9 @@ fn x_distribution_park() -> (GameRunner, ObjectId) {
         })
         .id();
     let fuel = scenario.add_spell_to_graveyard(P0, "Delve Fuel", true).id();
-    // A REAL source, so the copy carries producer snapshots — the fact the producer-forgery
-    // leg forges and the CR 601.2i history publishes.
+    // A REAL source, so the copy carries producer snapshots. The producer-forgery witness was
+    // withdrawn from this control (a forged copy here is cleared rather than published); the
+    // boundary forgery witness this Mountain backs is the Gang Up one further up this file.
     let mountain = scenario.add_basic_land(P0, ManaColor::Red);
     scenario.with_mana_pool(
         P0,
@@ -15140,7 +15141,58 @@ fn restore_validates_the_x_distribution_park_against_the_journal() {
         );
     }
 
-    // (b) The ERASE + FORGE attack: the amount deleted and the copy forged. Restore cannot
+    // (b) The PAYER swap: the SAME paid park with only the prompt's player changed. The
+    // resume credits `WaitingFor::DistributeAmong::player`, so a save naming the opponent
+    // would credit the opponent's Expend with the caster's mana. The payer is read from that
+    // same prompt, so the split check sees a player the journal does not credit and refuses.
+    {
+        let mut state = runner.state().clone();
+        let WaitingFor::DistributeAmong { player, .. } = &mut state.waiting_for else {
+            panic!("reach-guard: the distribution prompt owns the cast");
+        };
+        assert_eq!(*player, P0, "reach-guard: the live prompt names the caster");
+        *player = P1;
+        let error = PersistedGameState::capture(state)
+            .into_game_state()
+            .expect_err(
+                "CR 700.14: a park whose prompt names a player the journal does not credit \
+                 must be refused, or the resume moves the caster's Expend to the opponent",
+            );
+        assert!(
+            error.to_string().contains("settled spend records"),
+            "the refusal is the payer-split check, got: {error}"
+        );
+    }
+
+    // The unchanged twin settles exactly once — control (a) above already resumes it, and
+    // this asserts the damaged save never reached that state.
+    // (c) The ERASE-ONLY attack: the amount erased and the copy HONEST. The write-back proves
+    // the amount and re-stamps it, so the resumed cast must record what the journal holds —
+    // this is the only leg that exercises that path, since the forged twin refuses first.
+    {
+        let mut state = runner.state().clone();
+        state
+            .pending_cast
+            .as_deref_mut()
+            .expect("reach-guard: the distribution prompt owns the cast")
+            .prepaid_actual_mana_spent = None;
+        let restored = PersistedGameState::capture(state)
+            .into_game_state()
+            .expect("CR 601.2h: an honest park is admitted even when it states no amount");
+        let mut resumed = GameRunner::from_state(restored);
+        resumed
+            .act(GameAction::DistributeAmong {
+                distribution: vec![],
+            })
+            .expect("the honest distribution completes");
+        assert_eq!(
+            resumed.state().objects[&spell].mana_spent_to_cast_amount,
+            settled,
+            "the write-back records the proven amount, not zero, for an erased honest park"
+        );
+    }
+
+    // (d) The ERASE + FORGE attack: the amount deleted and the copy forged. Restore cannot
     // see this (the erasure makes the park look unpaid to any save-derived test — see the
     // three predicate branches), so the check runs where the copy is CONSUMED: completing
     // the distribution must refuse rather than stamp the forged amount into
@@ -15176,7 +15228,7 @@ fn restore_validates_the_x_distribution_park_against_the_journal() {
         );
     }
 
-    // (c) The forged copy with the amount KEPT: REFUSED. Nothing else in the save states an amount the resume
+    // (e) The forged copy with the amount KEPT: REFUSED. Nothing else in the save states an amount the resume
     // could corroborate, so the copy is the only witness and it must agree with the journal.
     let mut state = runner.state().clone();
     state

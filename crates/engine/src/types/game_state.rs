@@ -19334,8 +19334,28 @@ impl GameState {
         let stated = match owner {
             // The external announcement carrier is resumed by the mana-payment prompt that
             // owns it; the prompt states the payer of the outer spell cost.
+            // CR 601.2c + CR 700.14: the prompt that holds the cast STATES who acts on it, and
+            // that is the `player` its continuation hands the finalizer — `DistributeAmong`
+            // credits its own `player` (`engine.rs`, the distribution resume), not the cast's
+            // controller. Every cast-continuing prompt here carries both the cast and that
+            // field, so the payer is read from the same root the resume reads rather than
+            // guessed from `ability.controller`.
             PendingCastOwner::External => match &self.waiting_for {
-                WaitingFor::ManaPayment { player, .. } => Some(*player),
+                WaitingFor::ManaPayment { player, .. }
+                | WaitingFor::TargetSelection { player, .. }
+                | WaitingFor::ChooseXValue { player, .. }
+                | WaitingFor::ModeChoice { player, .. }
+                | WaitingFor::DistributeAmong { player, .. }
+                | WaitingFor::OptionalCostChoice { player, .. }
+                | WaitingFor::ChooseGiftRecipient { player, .. }
+                | WaitingFor::SpliceOffer { player, .. }
+                | WaitingFor::DefilerPayment { player, .. }
+                | WaitingFor::OrderCostReductions { player, .. }
+                | WaitingFor::ActivationCostOneOfChoice { player, .. }
+                | WaitingFor::CostTypeChoice { player, .. }
+                | WaitingFor::BlightChoice { player, .. }
+                | WaitingFor::HarmonizeTapChoice { player, .. }
+                | WaitingFor::ChooseAnnouncingOpponent { player, .. } => Some(*player),
                 _ => None,
             },
             PendingCastOwner::Prompt => match &self.waiting_for {
