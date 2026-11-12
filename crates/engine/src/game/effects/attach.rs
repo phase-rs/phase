@@ -5445,7 +5445,11 @@ mod tests {
         }
         attach_to(&mut state, equipment, host);
 
-        let grant_source = spawn_grant_source(&mut state, "Blessing", 11);
+        let grant_source = spawn_grant_source(
+            &mut state,
+            "Synthetic rider source (Benevolent Blessing analogue)",
+            11,
+        );
         apply_protection_grant(
             &mut state,
             grant_source,
@@ -5570,7 +5574,11 @@ mod tests {
         let equipment = spawn_equipment(&mut state, "Sword", 20);
         attach_to(&mut state, equipment, host);
 
-        let grant_source = spawn_grant_source(&mut state, "Blessing", 21);
+        let grant_source = spawn_grant_source(
+            &mut state,
+            "Synthetic rider source (Benevolent Blessing analogue)",
+            21,
+        );
         apply_protection_grant(
             &mut state,
             grant_source,
@@ -5626,7 +5634,11 @@ mod tests {
         }
         attach_to(&mut state, equipment, host);
 
-        let rider_source = spawn_grant_source(&mut state, "Blessing", 31);
+        let rider_source = spawn_grant_source(
+            &mut state,
+            "Synthetic rider source (Benevolent Blessing analogue)",
+            31,
+        );
         apply_protection_grant(
             &mut state,
             rider_source,
@@ -5676,7 +5688,11 @@ mod tests {
         }
         attach_to(&mut state, equipment, host);
 
-        let grant_source = spawn_grant_source(&mut state, "Dual Blessing", 41);
+        let grant_source = spawn_grant_source(
+            &mut state,
+            "Synthetic recolored rider source (Benevolent Blessing analogue)",
+            41,
+        );
         apply_protection_grant(
             &mut state,
             grant_source,
@@ -5744,7 +5760,11 @@ mod tests {
         }
         attach_to(&mut state, equipment, host);
 
-        let grant_source = spawn_grant_source(&mut state, "Blessing", 51);
+        let grant_source = spawn_grant_source(
+            &mut state,
+            "Synthetic rider source (Benevolent Blessing analogue)",
+            51,
+        );
         apply_protection_grant(
             &mut state,
             grant_source,

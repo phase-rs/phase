@@ -245,6 +245,10 @@ fn ridered_static_index(state: &GameState, object: ObjectId) -> usize {
 /// snapshots its controller's attachments when its effect starts. Humility
 /// ("All creatures lose all abilities…"), cast later, removes the resulting
 /// protection, but the effect never stopped applying, so the snapshot survives.
+/// A second Pacifism attaches while Humility is out; once Demystify ("Destroy
+/// target enchantment.") destroys Humility, protection from white returns and
+/// exempts only the Pacifism attached when the effect started, so the late one
+/// is put into its owner's graveyard (CR 704.5m).
 #[test]
 fn cr_702_16p_snapshot_survives_later_ability_removal() {
     let mut s = scenario();
@@ -252,6 +256,8 @@ fn cr_702_16p_snapshot_survives_later_ability_removal() {
     let pacifism = s.add_real_card(P0, "Pacifism", Zone::Hand, db());
     let blessing = s.add_real_card(P0, "Benevolent Blessing", Zone::Hand, db());
     let humility = s.add_real_card(P0, "Humility", Zone::Hand, db());
+    let late_pacifism = s.add_real_card(P0, "Pacifism", Zone::Hand, db());
+    let demystify = s.add_real_card(P0, "Demystify", Zone::Hand, db());
     let mut runner = s.build();
     cast(&mut runner, P0, pacifism, Some(host), None);
     cast(&mut runner, P0, blessing, Some(host), Some("white"));
@@ -284,6 +290,25 @@ fn cr_702_16p_snapshot_survives_later_ability_removal() {
         printed_snapshot_ids(runner.state(), blessing, def_index, 0, host),
         snapshot,
         "the effect never stopped applying, so its start snapshot must survive"
+    );
+
+    cast(&mut runner, P0, late_pacifism, Some(host), None);
+    attached(&runner, late_pacifism, host);
+    cast(&mut runner, P0, demystify, Some(humility), None);
+    assert_eq!(runner.state().objects[&humility].zone, Zone::Graveyard);
+    assert!(
+        runner.state().objects[&host]
+            .keywords
+            .contains(&Keyword::Protection(ProtectionTarget::Color(
+                ManaColor::White
+            ))),
+        "reach guard: protection from white returns once Humility is gone"
+    );
+    attached(&runner, pacifism, host);
+    assert_eq!(
+        runner.state().objects[&late_pacifism].zone,
+        Zone::Graveyard,
+        "the Pacifism attached after the effect started is not exempt"
     );
 }
 

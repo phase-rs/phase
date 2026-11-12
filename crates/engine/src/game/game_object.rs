@@ -826,7 +826,9 @@ pub struct GameObject {
     /// CR 702.16p: snapshots an older save stored under slot keys. Read, never
     /// written; the persisted restore boundary (`finalize_persisted_restore`)
     /// migrates each one whose host is still present to
-    /// [`Self::protection_start_snapshots`] and empties this map.
+    /// [`Self::protection_start_snapshots`] and empties this map. The older
+    /// writer held entries only on battlefield sources and cleared them on
+    /// zone exit, so the migration's battlefield scan reaches every entry.
     #[serde(
         default,
         rename = "protection_start_exempt_attachments",

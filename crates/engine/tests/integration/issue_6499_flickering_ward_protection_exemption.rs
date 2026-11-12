@@ -422,7 +422,7 @@ fn cr_702_16p_snapshots_matching_controlled_attachment_at_grant_start() {
         &mut state,
         CardId(3),
         PlayerId(0),
-        "Blessing".to_string(),
+        "Synthetic rider source (Benevolent Blessing analogue)".to_string(),
         Zone::Battlefield,
     );
     apply_host_protection_grant(
@@ -492,7 +492,7 @@ fn cr_702_16p_does_not_retain_attachment_that_becomes_matching_later() {
         &mut state,
         CardId(12),
         PlayerId(0),
-        "Blessing".to_string(),
+        "Synthetic rider source (Benevolent Blessing analogue)".to_string(),
         Zone::Battlefield,
     );
     apply_host_protection_grant(
@@ -566,7 +566,7 @@ fn cr_702_16p_second_unridered_protection_grant_still_removes_despite_snapshot()
         &mut state,
         CardId(22),
         PlayerId(0),
-        "Blessing".to_string(),
+        "Synthetic rider source (Benevolent Blessing analogue)".to_string(),
         Zone::Battlefield,
     );
     apply_host_protection_grant(
@@ -645,7 +645,7 @@ fn cr_702_16p_same_source_second_effect_does_not_inherit_first_snapshot() {
         &mut state,
         CardId(32),
         PlayerId(0),
-        "Dual Blessing".to_string(),
+        "Synthetic recolored rider source (Benevolent Blessing analogue)".to_string(),
         Zone::Battlefield,
     );
     apply_host_protection_grant(
@@ -748,7 +748,7 @@ fn cr_702_16p_opponent_controlled_matching_attachment_not_exempt() {
         &mut state,
         CardId(42),
         PlayerId(0),
-        "Blessing".to_string(),
+        "Synthetic rider source (Benevolent Blessing analogue)".to_string(),
         Zone::Battlefield,
     );
     apply_host_protection_grant(
