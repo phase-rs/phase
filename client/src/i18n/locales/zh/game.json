@@ -1427,6 +1427,11 @@
     "subtitle": "选择该永久物进场时由哪位对手操控。",
     "title": "选择进场时的操控者"
   },
+  "replacementDecisionOrder": {
+    "title": "选择先做哪个决定",
+    "subtitle": "这些替代选择同时发生。请选择先做哪一个。",
+    "unknownObject": "未知对象"
+  },
   "freeCastWindow": {
     "castNamed": "施放{{name}}",
     "castSuffix": "（不支付其法术力费用）",

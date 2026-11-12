@@ -2105,6 +2105,11 @@
     "title": "Scegli il controllore all'entrata",
     "subtitle": "Scegli quale avversario controlla questo permanente mentre entra."
   },
+  "replacementDecisionOrder": {
+    "title": "Scegli quale decisione prendere prima",
+    "subtitle": "Queste scelte di sostituzione avvengono nello stesso momento. Scegli quale fare per prima.",
+    "unknownObject": "Oggetto sconosciuto"
+  },
   "optionalCost": {
     "gift": {
       "title": "Promettere un dono?",

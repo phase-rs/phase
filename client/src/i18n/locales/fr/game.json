@@ -2105,6 +2105,11 @@
     "title": "Choisir le contrôleur à l'arrivée",
     "subtitle": "Choisissez quel adversaire contrôle ce permanent à son arrivée."
   },
+  "replacementDecisionOrder": {
+    "title": "Choisissez la première décision",
+    "subtitle": "Ces choix de remplacement ont lieu en même temps. Choisissez celui à faire en premier.",
+    "unknownObject": "Objet inconnu"
+  },
   "optionalCost": {
     "gift": {
       "title": "Promettre un cadeau ?",

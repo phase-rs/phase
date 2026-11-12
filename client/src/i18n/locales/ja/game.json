@@ -2143,6 +2143,11 @@
     "title": "戦場に出る際のコントローラーを選択",
     "subtitle": "このパーマネントが戦場に出る際にコントロールする対戦相手を選択"
   },
+  "replacementDecisionOrder": {
+    "title": "先に行う選択を選ぶ",
+    "subtitle": "これらの置換の選択は同時に行われます。先に行う選択を選んでください。",
+    "unknownObject": "不明なオブジェクト"
+  },
   "optionalCost": {
     "gift": {
       "title": "贈り物を約束しますか？",

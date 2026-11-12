@@ -2105,6 +2105,11 @@
     "title": "Wybierz kontrolującego przy wejściu",
     "subtitle": "Wybierz przeciwnika, który kontroluje ten permanent, gdy wchodzi na pole bitwy."
   },
+  "replacementDecisionOrder": {
+    "title": "Wybierz, którą decyzję podjąć najpierw",
+    "subtitle": "Te wybory zastąpienia zachodzą jednocześnie. Wybierz, którego dokonasz najpierw.",
+    "unknownObject": "Nieznany obiekt"
+  },
   "optionalCost": {
     "gift": {
       "title": "Obiecać prezent?",

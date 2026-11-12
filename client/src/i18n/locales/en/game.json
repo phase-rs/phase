@@ -2143,6 +2143,11 @@
     "title": "Choose Entry Controller",
     "subtitle": "Choose which opponent controls this permanent as it enters."
   },
+  "replacementDecisionOrder": {
+    "title": "Choose Which Decision First",
+    "subtitle": "These replacement choices happen at the same time. Choose which one to make first.",
+    "unknownObject": "Unknown object"
+  },
   "optionalCost": {
     "gift": {
       "title": "Promise a gift?",
