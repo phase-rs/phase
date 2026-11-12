@@ -16917,6 +16917,7 @@ fn apply_non_priority_pass_action(
         }
         (waiting_for, action) if engine_resolution_choices::handles(waiting_for) => {
             let carrier = state.resolving_stack_entry.as_ref().map(|entry| entry.id);
+            let action_event_start = events.len();
             match engine_resolution_choices::handle_resolution_choice(
                 state,
                 waiting_for.clone(),
@@ -16924,14 +16925,27 @@ fn apply_non_priority_pass_action(
                 &mut events,
             )? {
                 engine_resolution_choices::ResolutionChoiceOutcome::WaitingFor(waiting_for) => {
-                    if matches!(waiting_for, WaitingFor::Priority { .. })
-                        && state.game_end.is_none()
-                        && state.payment_transaction.is_none()
-                        && !state.payment_transaction_replay
-                        && state.resolving_stack_entry.is_none()
-                        && !triggers::is_pending_trigger_construction_active(state)
-                    {
-                        completed_resolution = carrier;
+                    if matches!(waiting_for, WaitingFor::Priority { .. }) {
+                        if state.game_end.is_none()
+                            && state.payment_transaction.is_none()
+                            && !state.payment_transaction_replay
+                            && state.resolving_stack_entry.is_none()
+                            && !triggers::is_pending_trigger_construction_active(state)
+                        {
+                            completed_resolution = carrier;
+                        }
+                    } else {
+                        // CR 603.6a + CR 614.12a: an answer that puts an entrant onto the
+                        // battlefield and stops on a co-entrant's prompt (a copied
+                        // "as this creature enters, choose …" answered before the next
+                        // token's copy offer) reaches no pipeline; its battlefield entries
+                        // go to the entry gate, as a replacement or copy-choice answer's do.
+                        state.waiting_for = waiting_for.clone();
+                        triggers::park_entry_observer_triggers_if_paused(
+                            state,
+                            &mut events,
+                            action_event_start,
+                        );
                     }
                     waiting_for
                 }

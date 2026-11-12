@@ -25445,7 +25445,8 @@ declare_game_state! {
     /// (`effects::settle_entries_before_instruction` past its pending-choice guard, whether or
     /// not that boundary deferred the entry observations), written only while no battlefield
     /// entry is in progress (`triggers::battlefield_entry_in_progress`: a rider chain run inside
-    /// an entry has boundaries of its own). Every battlefield entry below it is a completed entry
+    /// an entry has boundaries of its own) and no player-scope clause is between its seat legs
+    /// (`resolving_player_scope_tail`: CR 101.4 makes its seats' actions one event). Every battlefield entry below it is a completed entry
     /// event, so `triggers::settle_entry_batch_scan` never holds it. Cleared with the ledger, and
     /// zeroed with it by the loop projection (`analysis::resource::project_out_resources`).
     #[serde(default, skip_serializing_if = "is_zero_usize")]

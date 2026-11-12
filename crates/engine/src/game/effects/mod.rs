@@ -5269,8 +5269,12 @@ fn settle_entries_before_instruction(
     // recorded so far is a completed entry event, whether or not its observation is deferred.
     // Not while a battlefield entry is still being made: a chain run inside that entry (a copy
     // or post-replacement rider) has boundaries of its own, and the instruction that put its
-    // earlier co-entrants onto the battlefield has not completed.
-    if !crate::game::triggers::battlefield_entry_in_progress(state) {
+    // earlier co-entrants onto the battlefield has not completed. Nor between the seat legs of
+    // a player-scope clause still in progress (`resolving_player_scope_tail`): its seats'
+    // actions are one simultaneous event (CR 101.4), completed at its `after_scope` boundary.
+    if !crate::game::triggers::battlefield_entry_in_progress(state)
+        && state.resolving_player_scope_tail.is_none()
+    {
         state.completed_instruction_zone_changes = state.zone_changes_this_turn.len();
     }
     if entry_observation_deferred(state, next, completed) {
@@ -64433,6 +64437,43 @@ mod entry_observation_settlement_tests {
             state.battlefield_entry_observations.len(),
             1,
             "G1 positive pair"
+        );
+    }
+
+    /// CR 608.2c + CR 101.4: a boundary records the completed-instruction bound
+    /// even when it defers the entry observation (D3: a phase trigger stamps every
+    /// node with its player), but not between the seat legs of a player-scope
+    /// clause still in progress, whose seats' actions are one simultaneous event.
+    #[test]
+    fn boundary_records_the_completed_instruction_bound_outside_seat_legs() {
+        let mut seat_scoped = node(put_counter());
+        seat_scoped.scoped_player = Some(PlayerId(0));
+
+        let mut state = GameState::new_two_player(3);
+        let (_, events) = entered(&mut state, 1);
+        settle_entries_before_instruction(&mut state, &events, &seat_scoped, None);
+        assert!(
+            state.battlefield_entry_observations.is_empty(),
+            "reach guard: D3 defers the observation"
+        );
+        assert_eq!(
+            state.completed_instruction_zone_changes,
+            state.zone_changes_this_turn.len(),
+            "the completed instruction's entry is below the bound"
+        );
+
+        let mut state = GameState::new_two_player(3);
+        let (source, events) = entered(&mut state, 1);
+        state.resolving_player_scope_tail = Some(PendingPlayerScopeTail {
+            source_id: source,
+            after_scope: Box::new(node(put_counter())),
+            linked_exile_batch: Vec::new(),
+            created_tokens: None,
+        });
+        settle_entries_before_instruction(&mut state, &events, &seat_scoped, None);
+        assert_eq!(
+            state.completed_instruction_zone_changes, 0,
+            "the next seat leg is part of the same clause"
         );
     }
 

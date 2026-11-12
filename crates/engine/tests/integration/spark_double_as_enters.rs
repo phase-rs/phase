@@ -2648,6 +2648,48 @@ mod feldon_tokens {
         finish_and_sacrifice(&mut runner, &[first, second], &[donor]);
     }
 
+    /// CR 603.6a + CR 614.12a: the first Spark Double token copies Painter's
+    /// Servant and enters once its copied "As this creature enters, choose a
+    /// color." is answered; that answer then stops on the second token's copy
+    /// offer. Its entry is part of the one event, so Soul Warden ("Whenever
+    /// another creature enters, you gain 1 life.") sees both tokens.
+    #[test]
+    fn a_copied_as_enters_choice_answer_keeps_its_entrant_for_the_completed_event() {
+        let (mut scenario, feldon) = setup();
+        let donor = scenario
+            .add_creature_from_oracle(P0, "Painter's Servant", 1, 3, PAINTERS_SERVANT)
+            .as_artifact_creature()
+            .with_subtypes(vec!["Scarecrow"])
+            .id();
+        let laezel = scenario
+            .add_creature_from_oracle(P0, "Lae'zel, Vlaakith's Champion", 3, 3, LAEZEL)
+            .as_legendary()
+            .id();
+        let season = scenario
+            .add_enchantment_from_oracle(P0, "Doubling Season", SEASON)
+            .id();
+        scenario.add_creature_from_oracle(P0, "Soul Warden", 1, 1, SOUL_WARDEN);
+        let card = graveyard_copier(&mut scenario, false);
+        let mut runner = scenario.build();
+        let life = runner.life(P0);
+        let first = activate_copy(&mut runner, feldon, card, donor);
+        choose_counter_replacement(&mut runner, laezel);
+        choose_color(&mut runner, first, "blue");
+        // Reach guard: the color answer put the first token onto the battlefield
+        // and stopped on the second token's copy offer.
+        assert_eq!(runner.state().objects[&first].zone, Zone::Battlefield);
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::ReplacementChoice { .. }
+        ));
+        let (second, _) = choose_copy(&mut runner, donor);
+        assert_ne!(first, second);
+        choose_counter_replacement(&mut runner, season);
+        choose_color(&mut runner, second, "red");
+        assert_token_entry_complete(&mut runner);
+        assert_eq!(runner.life(P0) - life, 2, "Soul Warden sees both tokens");
+    }
+
     #[test]
     fn t5a_decline_enters_and_dies_once_without_a_copy() {
         let (mut scenario, feldon) = setup();
