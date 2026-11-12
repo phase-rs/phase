@@ -36,7 +36,6 @@ from __future__ import annotations
 
 import argparse
 import csv
-import fcntl
 import fnmatch
 import hashlib
 import json
@@ -237,6 +236,17 @@ REQUIRED_ARTIFACT_H2_HEADINGS = (
     "anchored on",
     "final review-impl",
 )
+# The H2 heading matcher both the artifact audit and `scripts/check-pr-body.sh` parse with:
+# one definition, so a body cannot be split one way for one reader and another way for the
+# other.
+H2_HEADING_PATTERN = re.compile(r"^##\s+(.+?)\s*$")
+
+# The two head-bound PR-body lines, as AI-CONTRIBUTOR §5-6 prints them. Module constants
+# because a second reader (scripts/check-pr-body.sh) must test the SAME patterns the
+# artifact audit matches, rather than a copy that can drift.
+GATE_A_PASS_PATTERN = r"(?m)^Gate A PASS head=([0-9a-f]{40}) base=([0-9a-f]{40})$"
+FINAL_REVIEW_IMPL_PASS_PATTERN = r"(?m)^Final review-impl PASS head=([0-9a-f]{40})$"
+
 REQUIRED_VERIFICATION_CHECKBOX_LABELS = (
     "Required checks ran clean, or the exact CI-owned alternative is stated below.",
     "Gate A output below is for the current committed head.",
@@ -606,6 +616,9 @@ def normalize_event(event: dict[str, Any]) -> dict[str, Any]:
 
 
 def append_event(state_dir: Path, event: dict[str, Any]) -> bool:
+    # Pure PR-body consumers do not require POSIX event-log locking.
+    import fcntl
+
     normalized = normalize_event(event)
     state_dir.mkdir(parents=True, exist_ok=True)
     log_path = state_dir / "review-events.jsonl"
@@ -630,6 +643,8 @@ def append_event(state_dir: Path, event: dict[str, Any]) -> bool:
 
 
 def all_events(state_dir: Path) -> list[dict[str, Any]]:
+    import fcntl
+
     log_path = state_dir / "review-events.jsonl"
     if not log_path.exists():
         return []
@@ -1924,7 +1939,7 @@ def markdown_sections(body: str | None) -> dict[str, list[str]]:
     current: str | None = None
     for line in (body or "").splitlines():
         stripped = line.strip()
-        match = re.match(r"^##\s+(.+?)\s*$", stripped)
+        match = H2_HEADING_PATTERN.match(stripped)
         if match:
             current = match.group(1).casefold()
             sections.setdefault(current, [])
@@ -1936,7 +1951,7 @@ def markdown_sections(body: str | None) -> dict[str, list[str]]:
 def relevant_h2_heading_counts(body: str | None) -> dict[str, int]:
     counts = {heading: 0 for heading in REQUIRED_ARTIFACT_H2_HEADINGS}
     for line in (body or "").splitlines():
-        match = re.match(r"^##\s+(.+?)\s*$", line.strip())
+        match = H2_HEADING_PATTERN.match(line.strip())
         if match:
             heading = match.group(1).casefold()
             if heading in counts:
@@ -1998,11 +2013,11 @@ def artifact_profile(
         heading for heading, count in heading_counts.items() if count > 1
     )
     gate_matches = re.findall(
-        r"(?m)^Gate A PASS head=([0-9a-f]{40}) base=([0-9a-f]{40})$",
+        GATE_A_PASS_PATTERN,
         section_text(sections, "gate a"),
     )
     review_matches = re.findall(
-        r"(?m)^Final review-impl PASS head=([0-9a-f]{40})$",
+        FINAL_REVIEW_IMPL_PASS_PATTERN,
         section_text(sections, "final review-impl"),
     )
     anchor_pattern = re.compile(r"^-\s+([^\s:][^:]*):([1-9][0-9]*)\s+(?:—|-)\s+.+$")
@@ -4468,6 +4483,8 @@ def unfinished_disposition(row: dict[str, Any], node: dict[str, Any], acting_log
 
 
 def command_dashboard_data(args: argparse.Namespace) -> int:
+    import fcntl
+
     args.state_dir.mkdir(parents=True, exist_ok=True)
     with (args.state_dir / "github-discovery.lock").open("a", encoding="utf-8") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
