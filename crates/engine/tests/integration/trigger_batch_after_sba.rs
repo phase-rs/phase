@@ -560,7 +560,10 @@ fn drive(runner: &mut GameRunner, answers: &Answers) -> Trace {
                             StackEntryKind::TriggeredAbility { description, .. } => {
                                 description.clone().unwrap_or_default()
                             }
-                            _ => String::new(),
+                            StackEntryKind::Spell { .. }
+                            | StackEntryKind::ActivatedAbility { .. }
+                            | StackEntryKind::KeywordAction { .. }
+                            | StackEntryKind::CombatDamage { .. } => String::new(),
                         })
                         .collect(),
                     deferred: state.deferred_triggers.len(),
@@ -2210,7 +2213,10 @@ fn player_loss_at_cleanup_discard_safety_net_collects_triggers() {
                                 StackEntryKind::TriggeredAbility { description, .. } => {
                                     description.clone().unwrap_or_default()
                                 }
-                                _ => String::new(),
+                                StackEntryKind::Spell { .. }
+                                | StackEntryKind::ActivatedAbility { .. }
+                                | StackEntryKind::KeywordAction { .. }
+                                | StackEntryKind::CombatDamage { .. } => String::new(),
                             })
                             .collect(),
                         deferred: state.deferred_triggers.len(),
@@ -2223,17 +2229,7 @@ fn player_loss_at_cleanup_discard_safety_net_collects_triggers() {
                         }
                     }
                     eprintln!("Iteration {i}: Priority wait, player={player:?}, active_player={:?}, phase={:?}, hit_cleanup={}", state.active_player, state.phase, hit_cleanup);
-                    if hit_cleanup
-                        && state.stack.is_empty()
-                        && state.phase == Phase::Cleanup
-                        && *player == P1
-                    {
-                        // This is the cleanup discard prompt for P1
-                        eprintln!("Iteration {i}: SelectCards at cleanup");
-                        GameAction::SelectCards { cards: vec![] }
-                    } else {
-                        GameAction::PassPriority
-                    }
+                    GameAction::PassPriority
                 }
                 WaitingFor::DiscardChoice { player, cards, .. } if *player == P1 => {
                     // Cleanup discard - safety net should run here
@@ -2268,6 +2264,13 @@ fn player_loss_at_cleanup_discard_safety_net_collects_triggers() {
                         .first()
                         .and_then(|slot| slot.legal_targets.first().cloned());
                     GameAction::ChooseTarget { target }
+                }
+                WaitingFor::DeclareAttackers { .. } => {
+                    // Empty attacker declaration to advance through combat to cleanup
+                    GameAction::DeclareAttackers {
+                        attacks: vec![],
+                        bands: vec![],
+                    }
                 }
                 other => panic!("unhandled prompt {}", other.variant_name()),
             };
