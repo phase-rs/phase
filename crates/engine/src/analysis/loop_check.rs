@@ -547,8 +547,9 @@ pub(crate) fn live_mandatory_loop_winner(
     }
     // CR 704.5a + CR 704.5c: the live shortcut needs an opponent's life or poison loss axis,
     // never a pure advantage engine or mill.
-    if !(opponent_loses_along(winner, &delta.life, -1)
-        || opponent_loses_along(winner, &delta.poison, 1))
+    let not_winner = |pid: PlayerId| pid != winner;
+    if !(opponent_loses_along(&not_winner, &delta.life, -1)
+        || opponent_loses_along(&not_winner, &delta.poison, 1))
     {
         return None;
     }
@@ -648,15 +649,15 @@ pub(crate) fn fallers_lives_pairwise_equal(frames: &[&GameState], fallers: &[Pla
     })
 }
 
-/// CR 704.5a / CR 704.5c: whether `axis` moves a player other than `controller` toward a loss,
+/// CR 704.5a / CR 704.5c: whether `axis` moves a player `is_opponent` names toward a loss,
 /// `sign` being the losing direction (-1 for life, +1 for poison).
 fn opponent_loses_along(
-    controller: PlayerId,
+    is_opponent: &dyn Fn(PlayerId) -> bool,
     axis: &std::collections::BTreeMap<PlayerId, i64>,
     sign: i64,
 ) -> bool {
     axis.iter()
-        .any(|(pid, &n)| sign * n > 0 && *pid != controller)
+        .any(|(pid, &n)| sign * n > 0 && is_opponent(*pid))
 }
 
 /// Derive the [`WinKind`] from the measured per-cycle delta.
@@ -672,8 +673,8 @@ fn opponent_loses_along(
 ///
 /// `controller` distinguishes "an opponent" from the loop's controller: life loss from
 /// / poison on / mill on a player who is *not* the loop's controller is an
-/// opponent loss condition; the corpus rows are two-player, so any non-controller
-/// player is the opponent.
+/// opponent loss condition. With a `state`, the controller's teammates are no opponents
+/// (CR 102.3), and each opponent's life and poison headroom is its loss pool's.
 ///
 /// `state` supplies the library storage authority (`GameState::zone_storage_seat`).
 /// With no state, each seat is its own storage.
@@ -682,26 +683,36 @@ pub(crate) fn classify_win_kind(
     delta: &ResourceVector,
     state: Option<&GameState>,
 ) -> WinKind {
+    // CR 102.3: a teammate is no opponent.
+    let is_opponent = |pid: PlayerId| match state {
+        Some(state) => crate::game::players::opponents(state, controller).contains(&pid),
+        None => pid != controller,
+    };
     // CR 704.5a: unbounded life *loss* from an opponent (drain loops report a
     // negative life delta on the victim) is lethal. A life *gain* on the
     // controller is advantage, not a win.
-    if opponent_loses_along(controller, &delta.life, -1) {
+    if opponent_loses_along(&is_opponent, &delta.life, -1) {
         // CR 704.3 + CR 704.5a + CR 704.5c: whole repetitions order the thresholds; two in the
         // same final repetition are ordered only inside it, so neither axis names the win.
+        // CR 704.6a + CR 704.6b: a team's thresholds are its pool's, moved by every member.
         let order = state.and_then(|state| {
+            use crate::game::players::LossPool;
             let fewest = |axis: &std::collections::BTreeMap<PlayerId, i64>,
-                          headroom: fn(&crate::types::player::Player) -> i64,
+                          pool: fn(&GameState, PlayerId) -> Option<LossPool>,
                           sign: i64| {
-                axis.iter()
-                    .filter(|(pid, _)| **pid != controller)
-                    .filter_map(|(pid, &n)| {
-                        let player = state.players.iter().find(|p| p.id == *pid)?;
-                        ResourceVector::narrowed_repetitions(&[(headroom(player), sign * n)])
+                axis.keys()
+                    .filter(|pid| is_opponent(**pid))
+                    .filter_map(|pid| {
+                        let pool = pool(state, *pid)?;
+                        ResourceVector::narrowed_repetitions(&[(
+                            pool.to_threshold - 1,
+                            sign * pool.moved_by(axis),
+                        )])
                     })
                     .min()
             };
-            let life = fewest(&delta.life, |p| i64::from(p.life) - 1, -1)?;
-            let poison = fewest(&delta.poison, |p| 9 - i64::from(p.poison_counters), 1)?;
+            let life = fewest(&delta.life, LossPool::life, -1)?;
+            let poison = fewest(&delta.poison, LossPool::poison, 1)?;
             Some(poison.cmp(&life))
         });
         return match order {
@@ -711,7 +722,7 @@ pub(crate) fn classify_win_kind(
         };
     }
     // CR 704.5c: unbounded poison counters on an opponent.
-    if opponent_loses_along(controller, &delta.poison, 1) {
+    if opponent_loses_along(&is_opponent, &delta.poison, 1) {
         return WinKind::PoisonLoss;
     }
     // CR 104.3c / CR 121.4: an unbounded *downward* library delta on a player
@@ -1275,6 +1286,57 @@ mod tests {
             classify_win_kind(pid(1), &delta, None),
             WinKind::Advantage,
             "self-mill (controller == victim) is advantage, not a deck-out win"
+        );
+    }
+
+    fn two_headed_giant(seats: &[(usize, i32, u32)]) -> GameState {
+        let mut state = GameState::new(
+            crate::types::format::FormatConfig::two_headed_giant(),
+            4,
+            42,
+        );
+        for &(seat, life, poison) in seats {
+            state.players[seat].life = life;
+            state.players[seat].poison_counters = poison;
+        }
+        state
+    }
+
+    /// CR 704.6a + CR 704.6b: the opposing team's 1 + 12 life less 4 a repetition outlasts its
+    /// 5 + 5 poison plus 2 a repetition, so the loop is a poison win; with no state the life
+    /// axis names it.
+    #[test]
+    fn classify_win_kind_reads_a_teams_shared_thresholds() {
+        use std::collections::BTreeMap;
+        let state = two_headed_giant(&[(2, 1, 5), (3, 12, 5)]);
+        let delta = ResourceVector {
+            life: BTreeMap::from([(pid(2), -2), (pid(3), -2)]),
+            poison: BTreeMap::from([(pid(2), 1), (pid(3), 1)]),
+            ..ResourceVector::default()
+        };
+        assert_eq!(
+            classify_win_kind(pid(0), &delta, Some(&state)),
+            WinKind::PoisonLoss
+        );
+        assert_eq!(
+            classify_win_kind(pid(0), &delta, None),
+            WinKind::LethalDamage
+        );
+    }
+
+    /// CR 102.3: the controller's teammate losing life is no opponent's loss.
+    #[test]
+    fn classify_win_kind_ignores_a_teammates_life() {
+        use std::collections::BTreeMap;
+        let state = two_headed_giant(&[(0, 5, 0), (1, 5, 0), (2, 15, 0), (3, 15, 0)]);
+        let delta = ResourceVector {
+            life: BTreeMap::from([(pid(1), -2)]),
+            poison: BTreeMap::from([(pid(2), 1), (pid(3), 1)]),
+            ..ResourceVector::default()
+        };
+        assert_eq!(
+            classify_win_kind(pid(0), &delta, Some(&state)),
+            WinKind::PoisonLoss
         );
     }
 

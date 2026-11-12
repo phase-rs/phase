@@ -895,11 +895,26 @@ impl PeriodicDelta {
         })
     }
 
-    /// CR 704.5c: the first repetition after which `seat`, holding `held` poison counters, holds
-    /// ten or more, or `None` when no repetition up to `horizon` gives it that many.
-    pub fn first_poison_crossing(&self, seat: PlayerId, held: u32, horizon: u32) -> Option<u32> {
-        self.first_rate_crossing(9 - i64::from(held), horizon, |at| {
-            at.delta.poison.get(&seat).copied().unwrap_or(0)
+    /// CR 704.5c / CR 704.6b: the first repetition after which `seat`'s poison pool holds ten or
+    /// more counters, fifteen where its team shares them, or `None` when no repetition up to
+    /// `horizon` gives it that many or the seat is out of the game.
+    pub fn first_poison_crossing(
+        &self,
+        state: &GameState,
+        seat: PlayerId,
+        horizon: u32,
+    ) -> Option<u32> {
+        let pool = crate::game::players::LossPool::poison(state, seat)?;
+        self.pool_poison_crossing(&pool, horizon)
+    }
+
+    fn pool_poison_crossing(
+        &self,
+        pool: &crate::game::players::LossPool,
+        horizon: u32,
+    ) -> Option<u32> {
+        self.first_rate_crossing(pool.to_threshold - 1, horizon, |at| {
+            pool.moved_by(&at.delta.poison)
         })
         .filter(|&crossing| crossing <= horizon)
     }
@@ -1269,9 +1284,9 @@ impl PeriodicDelta {
         }
     }
 
-    /// CR 704.3 + CR 704.5a: [`Self::first_life_crossing`] over
-    /// [`Self::declared_seat_life_charges`], the same answer for every input, computed without
-    /// stepping through repetitions whose charge cannot differ from the one before.
+    /// CR 704.3 + CR 704.5a / CR 704.6a: [`Self::first_life_crossing`] of `seat`'s life pool over
+    /// its members' [`Self::declared_seat_life_charges`], the same answer for every input, computed
+    /// without stepping through repetitions whose charge cannot differ from the one before.
     ///
     /// On one board a constant period's charge depends on its index only through the two templates'
     /// resolutions and, for a slot that leads, the latched aim its first repetition reads and the
@@ -1305,18 +1320,18 @@ impl PeriodicDelta {
         state: &GameState,
         bound: ChargeBound,
         lead: AnnouncedLead<'_>,
-        remaining_life: i64,
         horizon: u32,
     ) -> Option<u32> {
+        let pool = crate::game::players::LossPool::life(state, seat)?;
         self.declared_seat_life_crossing_after(
-            seat,
+            &pool.members,
             declaration,
             observed,
             points,
             state,
             bound,
             lead,
-            remaining_life,
+            pool.to_threshold,
             horizon,
             &[],
         )
@@ -1327,7 +1342,7 @@ impl PeriodicDelta {
     #[allow(clippy::too_many_arguments)]
     fn declared_seat_life_crossing_after(
         &self,
-        seat: PlayerId,
+        members: &[PlayerId],
         declaration: Option<&DecisionTemplate>,
         observed: Option<&DecisionTemplate>,
         points: &[DecisionPoint],
@@ -1338,16 +1353,33 @@ impl PeriodicDelta {
         horizon: u32,
         departed: &[(u32, PlayerId)],
     ) -> Option<u32> {
-        let charge_at = self.declared_seat_life_charge_at(
-            seat,
-            declaration,
-            observed,
-            points,
-            state,
-            bound,
-            lead,
-            departed,
-        );
+        let member_charges: Vec<_> = members
+            .iter()
+            .map(|&member| {
+                self.declared_seat_life_charge_at(
+                    member,
+                    declaration,
+                    observed,
+                    points,
+                    state,
+                    bound,
+                    lead,
+                    departed,
+                )
+            })
+            .collect();
+        // CR 810.9: each member's charge is applied to the shared total.
+        let charge_at = |index: IterationIndex| {
+            member_charges
+                .iter()
+                .fold(DeclaredLifeCharge { net: 0, dip: 0 }, |sum, charge_at| {
+                    let charge = charge_at(index);
+                    DeclaredLifeCharge {
+                        net: sum.net + charge.net,
+                        dip: sum.dip + charge.dip,
+                    }
+                })
+        };
         // A growing period's charge changes at every repetition, so no stretch outlasts one.
         if !self.is_constant() {
             return Self::first_life_crossing((0..).map(charge_at), remaining_life, horizon);
@@ -1652,8 +1684,8 @@ impl PeriodicDelta {
     /// crosses a CR 704 threshold under `declaration`, or `None` when no axis takes it there.
     ///
     /// The minimum over the three axes, each measured against the headroom its own rule leaves:
-    /// the seat's whole life total (CR 704.5a: 0 or less loses), one short of ten poison
-    /// (CR 704.5c), and the whole remaining library (CR 104.3c + CR 121.4: an empty library is
+    /// its life pool's whole total (CR 704.5a / CR 704.6a: 0 or less loses), one short of its
+    /// poison pool's threshold (CR 704.5c / CR 704.6b), and the whole remaining library (CR 104.3c + CR 121.4: an empty library is
     /// lethal at the next DRAW ATTEMPT and not on state alone, so every card left is headroom).
     ///
     /// `horizon` is the WALK's, not this seat's, for the reason
@@ -1661,7 +1693,8 @@ impl PeriodicDelta {
     ///
     /// Beside the repetition, the departure's RANK: the position in [`PeriodicDelta::victim_slot`]
     /// (resolution order) of the charged slot whose resolution takes the seat, `None` when the
-    /// slot hits alone do not account for it ([`PeriodicDelta::departure_rank`]).
+    /// slot hits alone do not account for it ([`PeriodicDelta::departure_rank`]) or the life pool is
+    /// shared, its crossing being the members' summed charge rather than one seat's slot.
     // Each parameter is a separate authority the caller states at the call — the two templates,
     // the published points, the walk's horizon, the bound direction and the announced lead — and
     // bundling them would hide which question a call site is asking.
@@ -1678,24 +1711,26 @@ impl PeriodicDelta {
         lead: AnnouncedLead<'_>,
         departed: &[(u32, PlayerId)],
     ) -> Option<SeatDeparture> {
-        // CR 704.5a: 0 or less life loses, so the whole total is the headroom. A living seat
-        // ALREADY at 0 or less — which a committed board carries — crosses on the first
+        // CR 704.5a / CR 704.6a: 0 or less life loses, so the pool's whole total is the headroom.
+        // A living seat ALREADY at 0 or less — which a committed board carries — crosses on the first
         // repetition, since `net` and `dip` are non-negative and the fatal test is `>=`. That
         // non-negativity holds under both `ChargeBound`s, and under `Attributable` it is the
         // producer's clamp that keeps it.
-        let remaining_life = i64::from(p.life);
-        let life = self.declared_seat_life_crossing_after(
-            p.id,
-            declaration,
-            observed,
-            points,
-            state,
-            bound,
-            lead,
-            remaining_life,
-            horizon,
-            departed,
-        );
+        let life_pool = crate::game::players::LossPool::life(state, p.id);
+        let life = life_pool.as_ref().and_then(|pool| {
+            self.declared_seat_life_crossing_after(
+                &pool.members,
+                declaration,
+                observed,
+                points,
+                state,
+                bound,
+                lead,
+                pool.to_threshold,
+                horizon,
+                departed,
+            )
+        });
         // Each non-life axis crosses where `first_rate_crossing` says, over its own headroom.
         // CR 701.17a + CR 121.1 + CR 704.5b: milling an empty library loses nothing, so the
         // library crosses only on a draw; each repetition mills first, so the draw that finds it
@@ -1713,14 +1748,21 @@ impl PeriodicDelta {
                 0
             }
         };
-        let poison = self.first_rate_crossing(9 - i64::from(p.poison_counters), horizon, |at| {
-            at.delta.poison.get(&p.id).copied().unwrap_or(0)
+        let poison = crate::game::players::LossPool::poison(state, p.id).and_then(|pool| {
+            self.first_rate_crossing(pool.to_threshold - 1, horizon, |at| {
+                pool.moved_by(&at.delta.poison)
+            })
         });
         let library =
             self.first_rate_crossing(state.library_of(p.id).len() as i64, horizon, library_rate);
         let crossing = [life, poison, library].into_iter().flatten().min()?;
-        let rank = (life == Some(crossing))
-            .then(|| {
+        let lone = life_pool
+            .as_ref()
+            .filter(|pool| pool.members.len() == 1)
+            .map(|pool| pool.to_threshold);
+        let rank = lone
+            .filter(|_| life == Some(crossing))
+            .and_then(|remaining_life| {
                 self.departure_rank(
                     p,
                     declaration,
@@ -1731,9 +1773,9 @@ impl PeriodicDelta {
                     bound,
                     lead,
                     departed,
+                    remaining_life,
                 )
-            })
-            .flatten();
+            });
         Some((crossing, rank))
     }
 
@@ -1755,6 +1797,7 @@ impl PeriodicDelta {
         bound: ChargeBound,
         lead: AnnouncedLead<'_>,
         departed: &[(u32, PlayerId)],
+        remaining_life: i64,
     ) -> Option<usize> {
         let names_seat = |decisions: &[ConcreteDecision], slot: &DecisionSlot| {
             decisions.iter().find_map(|decision| match decision {
@@ -1803,7 +1846,7 @@ impl PeriodicDelta {
             .take(crossing.saturating_sub(1) as usize)
             .map(|charge| charge.net)
             .sum();
-        let remaining = i64::from(p.life) - netted;
+        let remaining = remaining_life - netted;
         if remaining <= 0 {
             return None;
         }
@@ -3219,18 +3262,19 @@ impl ResourceVector {
         // an absent seat is one `seat_life_charges` measured no positive per-period life
         // magnitude for, and the arming guard in [`ResourceVector::narrowed_repetitions`] leaves
         // its life axis out of the narrowing.
-        let life_magnitude = seat_life_charge
-            .iter()
-            .find(|(seat, _)| *seat == p.id)
-            .map_or(0, |(_, magnitude)| *magnitude);
+        let charges: std::collections::BTreeMap<PlayerId, i64> =
+            seat_life_charge.iter().copied().collect();
+        let life = crate::game::players::LossPool::life(state, p.id).map_or((0, 0), |pool| {
+            (pool.to_threshold - 1, pool.moved_by(&charges))
+        });
+        let poison = crate::game::players::LossPool::poison(state, p.id).map_or((0, 0), |pool| {
+            (pool.to_threshold - 1, pool.moved_by(&self.poison))
+        });
         Self::narrowed_repetitions(&[
-            (p.life as i64 - 1, life_magnitude),
+            life,
             // CR 704.5c (ten or more poison counters lose): a positive poison delta is the
             // per-period gain.
-            (
-                9 - p.poison_counters as i64,
-                self.poison.get(&p.id).copied().unwrap_or(0),
-            ),
+            poison,
             // CR 104.3c + CR 121.4 (drawing from an empty library loses): a negative
             // library delta is the per-period drain.
             (
@@ -16669,8 +16713,8 @@ mod tests {
                                             horizon,
                                         );
                                         assert_eq!(
-                                            period.declared_seat_life_crossing(
-                                                seat,
+                                            period.declared_seat_life_crossing_after(
+                                                &[seat],
                                                 Some(declaration),
                                                 Some(seen),
                                                 &points,
@@ -16679,6 +16723,7 @@ mod tests {
                                                 lead,
                                                 remaining_life,
                                                 horizon,
+                                                &[],
                                             ),
                                             stepped,
                                             "{name}, {seen_name}, {lead_name}, {seat:?}, \
@@ -23413,8 +23458,8 @@ mod tests {
                 192,
                 400,
             );
-            let read = period.declared_seat_life_crossing(
-                PlayerId(1),
+            let read = period.declared_seat_life_crossing_after(
+                &[PlayerId(1)],
                 None,
                 None,
                 &[],
@@ -23423,6 +23468,7 @@ mod tests {
                 AnnouncedLead::None,
                 192,
                 400,
+                &[],
             );
             (stepped, read)
         };
@@ -23452,12 +23498,77 @@ mod tests {
             },
             ..PeriodicDelta::default()
         };
-        assert_eq!(poison(1).first_poison_crossing(PlayerId(1), 0, 20), Some(4));
-        assert_eq!(poison(1).first_poison_crossing(PlayerId(1), 0, 3), None);
-        assert_eq!(
-            poison(0).first_poison_crossing(PlayerId(1), 0, 20),
-            Some(10)
+        let pool = crate::game::players::LossPool {
+            members: vec![PlayerId(1)],
+            to_threshold: 10,
+        };
+        assert_eq!(poison(1).pool_poison_crossing(&pool, 20), Some(4));
+        assert_eq!(poison(1).pool_poison_crossing(&pool, 3), None);
+        assert_eq!(poison(0).pool_poison_crossing(&pool, 20), Some(10));
+    }
+
+    /// A period draining and poisoning `seats` by `life` and `poison` a repetition each, its life
+    /// published as each seat's per-repetition charge.
+    fn draining_and_poisoning(seats: &[u8], life: i64, poison: i64) -> PeriodicDelta {
+        PeriodicDelta {
+            delta: ResourceVector {
+                life: seats.iter().map(|&n| (PlayerId(n), -life)).collect(),
+                poison: seats.iter().map(|&n| (PlayerId(n), poison)).collect(),
+                ..ResourceVector::default()
+            },
+            seat_life_charge: seats.iter().map(|&n| (PlayerId(n), life)).collect(),
+            ..PeriodicDelta::default()
+        }
+    }
+
+    fn life_crossing(period: &PeriodicDelta, state: &GameState, seat: u8) -> Option<u32> {
+        period.declared_seat_life_crossing(
+            PlayerId(seat),
+            None,
+            None,
+            &[],
+            state,
+            ChargeBound::Ceiling,
+            AnnouncedLead::None,
+            40,
+        )
+    }
+
+    /// CR 704.6a + CR 704.6b + CR 810.9 + CR 810.10: a Two-Headed Giant team crosses where its
+    /// summed movement reaches the team's threshold: 5 + 5 shared poison plus 2 a repetition
+    /// reaches fifteen at the third; 3 + 30 shared life less 4 a repetition reaches 0 at the ninth.
+    #[test]
+    fn a_team_crosses_where_its_shared_total_reaches_the_threshold() {
+        let mut state = GameState::new(
+            crate::types::format::FormatConfig::two_headed_giant(),
+            4,
+            42,
         );
+        for (seat, life, poison) in [(2, 3, 5), (3, 30, 5)] {
+            state.players[seat].life = life;
+            state.players[seat].poison_counters = poison;
+        }
+        let period = draining_and_poisoning(&[2, 3], 2, 1);
+        assert_eq!(
+            period.first_poison_crossing(&state, PlayerId(2), 20),
+            Some(3)
+        );
+        assert_eq!(life_crossing(&period, &state, 2), Some(9));
+    }
+
+    /// CR 704.5a + CR 704.5c: an unshared seat crosses on its own totals: 5 poison plus 1 a
+    /// repetition reaches ten at the fifth; 3 life less 2 a repetition reaches 0 at the second.
+    #[test]
+    fn an_unshared_seat_crosses_where_its_own_total_reaches_the_threshold() {
+        let mut state = GameState::new_two_player(42);
+        state.players[1].life = 3;
+        state.players[1].poison_counters = 5;
+        let period = draining_and_poisoning(&[1], 2, 1);
+        assert_eq!(
+            period.first_poison_crossing(&state, PlayerId(1), 20),
+            Some(5)
+        );
+        assert_eq!(life_crossing(&period, &state, 1), Some(2));
     }
 
     /// CR 732.2a: what the first n repetitions move together is the sum of each one's charge.

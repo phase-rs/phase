@@ -9673,3 +9673,172 @@ fn a_repetition_eliminating_one_of_two_opponents_is_not_offered_as_won() {
         "reach: the next repetition eliminates P1 and ends no game"
     );
 }
+
+/// Kilo, Apogee Mind ("Whenever Kilo becomes tapped, proliferate.") tapped by Relic of Legends
+/// and untapped by Freed from the Real, with Scheming Aspirant ("Whenever you proliferate, each
+/// opponent loses 2 life and you gain 2 life."), on a Two-Headed Giant board: one live cycle,
+/// its proliferate naming `named`, leaves each seat at `offered` (life, poison) under the offer.
+fn two_headed_giant_kilo_offer(
+    offered: [(i32, u32); 4],
+    named: &[PlayerId],
+    db: &CardDatabase,
+) -> GameRunner {
+    use crate::kilo_live_offer_from_real_dump::{FREED_UNTAP, RELIC_TAP_MANA};
+    let mut scenario = GameScenario::new_with_format(FormatConfig::two_headed_giant(), 4, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    // The live cycle gains P0 2 life and costs each opponent 2.
+    for (seat, (life, _)) in offered.iter().enumerate() {
+        let start = match seat {
+            0 => life - 2,
+            1 => *life,
+            _ => life + 2,
+        };
+        scenario.with_life(PlayerId(seat as u8), start);
+    }
+    let kilo = scenario.add_real_card(P0, "Kilo, Apogee Mind", Zone::Battlefield, db);
+    let relic = scenario.add_real_card(P0, "Relic of Legends", Zone::Battlefield, db);
+    scenario.add_real_card(P0, "Scheming Aspirant", Zone::Battlefield, db);
+    let mut runner = scenario.build();
+    runner.state_mut().loop_detection = LoopDetectionMode::Interactive;
+    for (seat, (_, poison)) in offered.iter().enumerate() {
+        let gained = u32::from(named.contains(&PlayerId(seat as u8)));
+        runner.state_mut().players[seat].poison_counters = poison - gained;
+    }
+    let freed = place(runner.state_mut(), P0, "Freed from the Real", db);
+    attach_to(runner.state_mut(), freed, kilo);
+    let wanted: Vec<TargetRef> = named.iter().copied().map(TargetRef::Player).collect();
+    let score = |action: &GameAction| {
+        names(&[kilo])(action)
+            + chooses_color(ManaType::Blue)(action)
+            + i32::from(matches!(action, GameAction::SelectTargets { targets }
+                if targets == &wanted))
+    };
+    activate(&mut runner, relic, RELIC_TAP_MANA);
+    settle(&mut runner, &score);
+    activate(&mut runner, freed, FREED_UNTAP);
+    settle(&mut runner, &score);
+    assert_eq!(seat_totals(runner.state()), offered, "reach");
+    runner
+}
+
+fn seat_totals(state: &GameState) -> Vec<(i32, u32)> {
+    state
+        .players
+        .iter()
+        .map(|p| (p.life, p.poison_counters))
+        .collect()
+}
+
+fn predicted_winner(runner: &GameRunner) -> Option<PlayerId> {
+    let WaitingFor::LoopShortcut {
+        predicted_winner, ..
+    } = runner.state().waiting_for
+    else {
+        panic!("an offer, got {:?}", runner.state().waiting_for);
+    };
+    predicted_winner
+}
+
+/// CR 704.6a + CR 704.6b + CR 104.2c: the opposing team's 5 + 5 shared poison plus 2 a repetition
+/// reaches fifteen at the third, while its 3 + 30 shared life less 4 a repetition is still 25
+/// after the second; the offer counts and names that poison loss, including when a proposer's
+/// teammate is below 0 life but the team total is not.
+#[test]
+fn a_two_headed_giant_offer_counts_the_opposing_teams_shared_loss() {
+    let Some(db) = shared_card_db() else { return };
+    let opponents = [PlayerId(2), PlayerId(3)];
+    for offered in [
+        [(13, 0), (15, 0), (3, 5), (30, 5)],
+        [(30, 0), (-3, 0), (3, 5), (30, 5)],
+    ] {
+        let mut runner = two_headed_giant_kilo_offer(offered, &opponents, db);
+        let (count, capacity, certificate) = offered_parts(&runner);
+        assert_eq!(
+            (count, capacity),
+            (IterationCount::Fixed(3), 3),
+            "{offered:?}"
+        );
+        assert_eq!(
+            certificate.win_kind,
+            Some(WinKind::PoisonLoss),
+            "{offered:?}"
+        );
+        assert_eq!(predicted_winner(&runner), Some(P0), "{offered:?}");
+        let events = take(&mut runner, 3);
+        assert_eq!(
+            losses_in(&events),
+            [
+                (PlayerId(2), BTreeSet::from([LossReason::Poison])),
+                (PlayerId(3), BTreeSet::from([LossReason::Poison])),
+            ],
+            "{offered:?}"
+        );
+        assert!(
+            matches!(
+                runner.state().waiting_for,
+                WaitingFor::GameOver { winner: Some(P0) }
+            ),
+            "{offered:?}: {:?}",
+            runner.state().waiting_for
+        );
+    }
+}
+
+/// CR 704.6b + CR 732.2a: the proposer's team holds 12 shared poison plus 1 a repetition and
+/// reaches fifteen at the third, before the opponents' 8 plus 2 does at the fourth, so the most
+/// the offer counts is 2, and a declared 3 is refused.
+#[test]
+fn a_two_headed_giant_offer_never_eliminates_the_proposers_team() {
+    let Some(db) = shared_card_db() else { return };
+    let offered = [(13, 0), (15, 12), (30, 4), (30, 4)];
+    let mut runner = two_headed_giant_kilo_offer(offered, &[P1, PlayerId(2), PlayerId(3)], db);
+    let (count, capacity, _) = offered_parts(&runner);
+    assert_eq!((count, capacity), (IterationCount::Fixed(2), 2));
+    assert_eq!(predicted_winner(&runner), None);
+
+    let mut over = GameRunner::from_state(runner.state().clone());
+    over.act(GameAction::DeclareShortcut {
+        count: IterationCount::Fixed(3),
+        template: None,
+    })
+    .expect("an over-capacity declaration is answered, not an error");
+    assert!(matches!(
+        over.state().waiting_for,
+        WaitingFor::Priority { player: P0 }
+    ));
+    assert_eq!(seat_totals(over.state()), offered);
+
+    let events = take(&mut runner, 2);
+    assert!(losses_in(&events).is_empty());
+    assert!(eliminated(runner.state()).is_empty());
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { player: P0 }
+    ));
+}
+
+/// CR 704.6b + CR 104.2c: the opposing team's 10 shared poison plus 2 a repetition reaches
+/// fifteen at the third, ending the game while the proposer's team, at 10 plus 1, holds 13.
+#[test]
+fn a_two_headed_giant_offer_ends_at_the_opposing_teams_earlier_crossing() {
+    let Some(db) = shared_card_db() else { return };
+    let offered = [(13, 0), (15, 10), (30, 5), (30, 5)];
+    let mut runner = two_headed_giant_kilo_offer(offered, &[P1, PlayerId(2), PlayerId(3)], db);
+    let (count, _, certificate) = offered_parts(&runner);
+    assert_eq!(count, IterationCount::Fixed(3));
+    assert_eq!(certificate.win_kind, Some(WinKind::PoisonLoss));
+    assert_eq!(predicted_winner(&runner), Some(P0));
+    let events = take(&mut runner, 3);
+    assert_eq!(
+        losses_in(&events),
+        [
+            (PlayerId(2), BTreeSet::from([LossReason::Poison])),
+            (PlayerId(3), BTreeSet::from([LossReason::Poison])),
+        ]
+    );
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::GameOver { winner: Some(P0) }
+    ));
+    assert!(!runner.state().players[1].is_eliminated);
+}

@@ -423,7 +423,6 @@ fn cycles_to_proposer_elimination(
         // repetition times the count can only make it decline, never declare a fatal count.
         PeriodSignature::OneRepetition(period) => period,
     };
-    let player = state.players.get(proposer.0 as usize)?;
 
     // CR 704.3 + CR 704.5a: the first repetition inside which the proposer can reach 0 or less
     // life, off the engine's own authority. A scheduled pin may name the proposer at some
@@ -450,15 +449,15 @@ fn cycles_to_proposer_elimination(
             state,
             ChargeBound::Ceiling,
             AnnouncedLead::None,
-            i64::from(player.life),
             declared,
         )
         .map(i64::from);
 
-    // CR 704.5c: the first repetition inside the declared count after which the proposer holds
-    // ten poison counters, off the engine's own per-repetition authority.
+    // CR 704.5c / CR 704.6b: the first repetition inside the declared count after which the
+    // proposer's poison pool holds ten counters, fifteen where the team shares them, off the
+    // engine's own per-repetition authority.
     let poison_fatal = period
-        .first_poison_crossing(proposer, player.poison_counters, declared)
+        .first_poison_crossing(state, proposer, declared)
         .map(i64::from);
 
     // No library term — see the CR 121.4 exclusion in this function's doc comment.
@@ -2067,5 +2066,27 @@ mod tests {
                 run.stop
             );
         }
+    }
+
+    /// CR 704.6b: the proposer's team shares one poison pool, so the teammate's 12 plus one a
+    /// repetition reaches fifteen at the third and that count is refused; two still scores.
+    #[test]
+    fn loop_shortcut_declare_reads_the_proposers_team_poison() {
+        let mut team = GameState::new(
+            engine::types::format::FormatConfig::two_headed_giant(),
+            4,
+            0,
+        );
+        team.players[P1.0 as usize].poison_counters = 12;
+        let state =
+            bounded_offer_declaring(team, 10, periodic_poison(&[(P1, 1)]), Vec::new(), None);
+        assert_eq!(
+            kind_of(&verdict_for(&state, &declare(IterationCount::Fixed(3)))),
+            "loop_shortcut_declare_eliminates_proposer"
+        );
+        assert_eq!(
+            kind_of(&verdict_for(&state, &declare(IterationCount::Fixed(2)))),
+            "loop_shortcut_bounded_declare_progress"
+        );
     }
 }

@@ -651,61 +651,13 @@ fn cant_lose_active_for(state: &GameState, player_id: PlayerId) -> bool {
 }
 
 /// CR 704.5a/704.5b/704.5c/704.6c: Whether a player-loss SBA would currently
-/// eliminate at least one non-eliminated player. This is intentionally narrower
-/// than running the full SBA loop: callers that are only trying to avoid waiting
-/// on a dead player during a non-priority continuation should not trigger
-/// unrelated SBA choice prompts such as commander-zone or legend-rule choices.
+/// eliminate at least one non-eliminated player, read from the same collectors
+/// the SBA check runs. This is intentionally narrower than running the full SBA
+/// loop: callers that are only trying to avoid waiting on a dead player during a
+/// non-priority continuation should not trigger unrelated SBA choice prompts such
+/// as commander-zone or legend-rule choices.
 pub(crate) fn has_pending_player_loss_sba(state: &GameState) -> bool {
-    let life_loss = state.players.iter().any(|player| {
-        // CR 704.5a + CR 810.8c: A player (or team) with 0 or less life loses.
-        !player.is_eliminated
-            && !player.is_phased_out()
-            && super::players::team_life_total(state, player.id) <= 0
-            && !player_has_cant_lose(state, player.id)
-    });
-    if life_loss {
-        return true;
-    }
-
-    let drew_from_empty = state.players.iter().any(|player| {
-        // CR 704.5b: A player who attempted to draw from an empty library loses
-        // the game the next time state-based actions are checked.
-        !player.is_eliminated
-            && player.drew_from_empty_library
-            && !player_has_cant_lose(state, player.id)
-    });
-    if drew_from_empty {
-        return true;
-    }
-
-    let poison_loss = state.players.iter().any(|player| {
-        // CR 704.5c + CR 810.8d: 10+ individually, or 15+ shared by the team.
-        // Archenemy Commander takes the individual branch for every seat —
-        // CR 904.13c keeps poison unshared even though life is shared.
-        !player.is_eliminated
-            && if super::topology::has_shared_poison(state, player.id) {
-                super::players::team_poison_total(state, player.id) >= 15
-            } else {
-                player.poison_counters >= 10
-            }
-            && !player_has_cant_lose(state, player.id)
-    });
-    if poison_loss {
-        return true;
-    }
-
-    let threshold = match state.format_config.commander_damage_threshold {
-        Some(threshold) => threshold as u32,
-        None => return false,
-    };
-
-    state.commander_damage.iter().any(|entry| {
-        // CR 704.6c: In Commander, a player dealt 21+ combat damage by the same
-        // commander over the course of the game loses.
-        entry.damage >= threshold
-            && !state.eliminated_players.contains(&entry.player)
-            && !player_has_cant_lose(state, entry.player)
-    })
+    !player_losses(state).is_empty()
 }
 
 /// Check if a static ability from `source_controller` with the given `affected` filter
@@ -806,8 +758,7 @@ fn collect_life_losers(state: &GameState) -> Vec<PlayerId> {
         // is never a CR 704.5a "0 or less life" loser. Belt-and-suspenders with
         // the life-loss→mill redirect (its life never drops), but this makes
         // "no life total" a hard guarantee independent of the redirect.
-        .filter(|p| !super::horde::player_has_no_life_total(state, p.id))
-        .filter(|p| super::players::team_life_total(state, p.id) <= 0)
+        .filter(|p| super::players::LossPool::life(state, p.id).is_some_and(|pool| pool.reached()))
         .filter(|p| !player_has_cant_lose(state, p.id))
         .map(|p| p.id)
         .collect()
@@ -836,13 +787,7 @@ fn collect_poison_losers(state: &GameState) -> Vec<PlayerId> {
         .iter()
         .filter(|p| !p.is_eliminated)
         .filter(|p| {
-            // Twin of the `has_pending_player_loss_sba` poison branch above:
-            // Archenemy Commander takes the individual branch (CR 904.13c).
-            if super::topology::has_shared_poison(state, p.id) {
-                super::players::team_poison_total(state, p.id) >= 15
-            } else {
-                p.poison_counters >= 10
-            }
+            super::players::LossPool::poison(state, p.id).is_some_and(|pool| pool.reached())
         })
         .filter(|p| !player_has_cant_lose(state, p.id))
         .map(|p| p.id)
@@ -5140,6 +5085,38 @@ mod tests {
             state.waiting_for,
             WaitingFor::GameOver { winner: Some(_) }
         ));
+    }
+
+    /// CR 704.5a: the pending-loss check reads the collectors, so the Horde seat, which has no
+    /// life total, is no pending loser at 0 life.
+    #[test]
+    fn pending_player_loss_reads_the_collectors() {
+        let mut state = GameState::new(
+            FormatConfig::horde(
+                crate::types::format::ChallengeDeck::CybermanHorde.default_ruleset(),
+            ),
+            3,
+            42,
+        );
+        assert!(crate::game::horde::player_has_no_life_total(
+            &state,
+            PlayerId(0)
+        ));
+        state.players[0].life = 0;
+        assert!(player_losses(&state).is_empty());
+        assert!(!has_pending_player_loss_sba(&state));
+
+        state.players[0].life = 20;
+        state.players[1].life = 0;
+        state.players[2].life = 0;
+        assert_eq!(
+            player_losses(&state),
+            BTreeMap::from([
+                (PlayerId(1), BTreeSet::from([LossReason::LifeTotal])),
+                (PlayerId(2), BTreeSet::from([LossReason::LifeTotal])),
+            ])
+        );
+        assert!(has_pending_player_loss_sba(&state));
     }
 
     #[test]
