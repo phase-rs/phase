@@ -3678,17 +3678,17 @@ pub(crate) fn loop_states_equal_modulo_resources_side<'a, C: CurrentSide<'a>>(
 /// fact read straight off that producer would otherwise differ every cycle and refuse
 /// the loop it exists to certify (`corpus::drive_offline_priest_umbral`).
 ///
-/// EACH FACT IS PAIRED WITH THE UNIT THAT CARRIES IT, AND KEPT AS MANY TIMES AS IT OCCURS.
-/// The comparison is the multiset of (unit shape, fact) pairs rather than a flat set of
-/// facts, and rather than a set of pairs: the same fact on a DIFFERENT shape is a different
-/// position, because the shape is what a payment selects on (CR 107.4a: coloured mana in a
-/// cost can be paid only with the appropriate colour of mana), and a fact on MORE units is
-/// more evidence, because a price that counts the mana counts each unit. One red and one blue
-/// unit holding the same two facts are therefore two DIFFERENT positions when the proof sits
-/// on the red unit in one and on the blue unit in the other; and three same-shaped units with
-/// two provable Treasures among them are a different position from three with one, which a
-/// set of pairs cannot say. See [`spendable_unit_producer_facts`] and
-/// [`same_producer_fact_multiset`].
+/// EACH FACT IS PAIRED WITH THE UNIT THAT CARRIES IT, AND THE LIST IS COMPARED BY POSITION.
+/// The comparison walks both lists in canonical-pip order and requires each position to match:
+/// the same fact on a DIFFERENT shape is a different position, because the shape is what a
+/// payment selects on (CR 107.4a: coloured mana in a cost can be paid only with the appropriate
+/// colour of mana); and the same fact on an EARLIER unit is a different position from a later
+/// one, because `mana_payment` spends the FIRST eligible unit, so which unit carries the proof
+/// decides what a cast is recorded as having spent. One red and one blue unit holding the same
+/// two facts are therefore two DIFFERENT positions when the proof sits on the red unit in one
+/// and on the blue unit in the other; and three same-shaped units with the Treasure proof on
+/// the first are a different position from three with it on the third. See
+/// [`spendable_unit_producer_facts`] and [`same_producer_facts_in_pip_order`].
 ///
 /// A unit whose producer cannot be resolved at all contributes the distinct fact `None` —
 /// "this mana, but I cannot say from what" — so an unprovable unit is distinguishable from a
@@ -3817,9 +3817,9 @@ fn payer_producer_facts_match(
 ///
 /// The counts are compared by OCCURRENCE rather than by sorting: a canonical order over
 /// [`LKISnapshot`] would be a second, hand-written notion of identity for a fact whose
-/// identity is its own equality. Both lists are bounded by one payer's pool, and the length
-/// conjunct is what makes "every left count matches its right count" a full multiset
-/// equality rather than a one-sided inclusion.
+/// identity is its own equality. Both lists are one payer's pool, so they hold the same number
+/// of units exactly when the payer's mana is unchanged; the position-by-position conjuncts are
+/// then what decide the comparison.
 fn same_producer_facts_in_pip_order(left: &[UnitProducerFact], right: &[UnitProducerFact]) -> bool {
     left.len() == right.len()
         && left
