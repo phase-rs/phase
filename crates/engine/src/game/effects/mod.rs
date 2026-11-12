@@ -19868,6 +19868,7 @@ fn set_player_scope_sacrifice_waiting_for(
         conditional_enter_with_counters: vec![],
         count_param: 0,
         library_position: None,
+        library_shuffle: crate::types::ability::LibraryShuffleMode::PerObject,
         mass_library_order: None,
         is_cost_payment: false,
         enters_modified_if: None,
@@ -29758,88 +29759,98 @@ mod tests {
 
     #[test]
     fn phase_out_context_union_dependency_proof_is_bounded() {
-        use TargetFilter::{Or, ParentTarget, SelfRef};
         for (target, expected) in [
             (
-                Or {
-                    filters: vec![SelfRef, ParentTarget],
+                TargetFilter::Or {
+                    filters: vec![TargetFilter::SelfRef, TargetFilter::ParentTarget],
                 },
                 Some(false),
             ),
             (
-                Or {
-                    filters: vec![ParentTarget, TargetFilter::TriggeringSource],
+                TargetFilter::Or {
+                    filters: vec![TargetFilter::ParentTarget, TargetFilter::TriggeringSource],
                 },
                 Some(false),
             ),
             (
-                Or {
-                    filters: vec![SelfRef, TargetFilter::Typed(TypedFilter::creature())],
+                TargetFilter::Or {
+                    filters: vec![
+                        TargetFilter::SelfRef,
+                        TargetFilter::Typed(TypedFilter::creature()),
+                    ],
                 },
                 None,
             ),
             (
-                Or {
+                TargetFilter::Or {
                     filters: vec![
-                        ParentTarget,
-                        Or {
-                            filters: vec![SelfRef, SelfRef],
+                        TargetFilter::ParentTarget,
+                        TargetFilter::Or {
+                            filters: vec![TargetFilter::SelfRef, TargetFilter::SelfRef],
                         },
                     ],
                 },
                 Some(false),
             ),
             (
-                Or {
+                TargetFilter::Or {
                     filters: vec![
-                        ParentTarget,
-                        Or {
-                            filters: vec![ParentTarget],
+                        TargetFilter::ParentTarget,
+                        TargetFilter::Or {
+                            filters: vec![TargetFilter::ParentTarget],
                         },
                     ],
                 },
                 Some(true),
             ),
-            (Or { filters: vec![] }, Some(true)),
+            (TargetFilter::Or { filters: vec![] }, Some(true)),
             (
-                Or {
-                    filters: vec![Or { filters: vec![] }],
+                TargetFilter::Or {
+                    filters: vec![TargetFilter::Or { filters: vec![] }],
                 },
                 Some(true),
             ),
             (
-                Or {
-                    filters: vec![TargetFilter::Any, SelfRef, ParentTarget],
-                },
-                None,
-            ),
-            (
-                Or {
-                    filters: vec![SelfRef, ParentTarget, TargetFilter::Any],
-                },
-                None,
-            ),
-            (
-                Or {
+                TargetFilter::Or {
                     filters: vec![
-                        SelfRef,
-                        Or {
+                        TargetFilter::Any,
+                        TargetFilter::SelfRef,
+                        TargetFilter::ParentTarget,
+                    ],
+                },
+                None,
+            ),
+            (
+                TargetFilter::Or {
+                    filters: vec![
+                        TargetFilter::SelfRef,
+                        TargetFilter::ParentTarget,
+                        TargetFilter::Any,
+                    ],
+                },
+                None,
+            ),
+            (
+                TargetFilter::Or {
+                    filters: vec![
+                        TargetFilter::SelfRef,
+                        TargetFilter::Or {
                             filters: vec![TargetFilter::Any],
                         },
                     ],
                 },
                 None,
             ),
-            (ParentTarget, None),
+            (TargetFilter::ParentTarget, None),
             (
                 TargetFilter::And {
-                    filters: vec![SelfRef, ParentTarget],
+                    filters: vec![TargetFilter::SelfRef, TargetFilter::ParentTarget],
                 },
                 None,
             ),
             (
                 TargetFilter::Not {
-                    filter: Box::new(SelfRef),
+                    filter: Box::new(TargetFilter::SelfRef),
                 },
                 None,
             ),
@@ -29858,7 +29869,7 @@ mod tests {
         }
         assert_eq!(
             phase_out_context_union_requires_parent(&Effect::Destroy {
-                target: ParentTarget,
+                target: TargetFilter::ParentTarget,
                 cant_regenerate: false
             }),
             None
@@ -29870,16 +29881,15 @@ mod tests {
     // CR 115.6 + CR 608.2c + CR 609.3: zero targets omit only dependent work.
     #[test]
     fn phase_out_optional_parent_chain_preserves_independent_tail() {
-        use TargetFilter::{Or, ParentTarget, SelfRef};
         for (target, selected, stale, reaches, phases_source) in [
-            (ParentTarget, false, false, false, false),
-            (ParentTarget, true, false, true, false),
+            (TargetFilter::ParentTarget, false, false, false, false),
+            (TargetFilter::ParentTarget, true, false, true, false),
             (
-                Or {
+                TargetFilter::Or {
                     filters: vec![
-                        ParentTarget,
-                        Or {
-                            filters: vec![ParentTarget],
+                        TargetFilter::ParentTarget,
+                        TargetFilter::Or {
+                            filters: vec![TargetFilter::ParentTarget],
                         },
                     ],
                 },
@@ -29889,8 +29899,8 @@ mod tests {
                 false,
             ),
             (
-                Or {
-                    filters: vec![SelfRef, ParentTarget],
+                TargetFilter::Or {
+                    filters: vec![TargetFilter::SelfRef, TargetFilter::ParentTarget],
                 },
                 false,
                 false,
@@ -29898,11 +29908,11 @@ mod tests {
                 true,
             ),
             (
-                Or {
+                TargetFilter::Or {
                     filters: vec![
-                        ParentTarget,
-                        Or {
-                            filters: vec![SelfRef, SelfRef],
+                        TargetFilter::ParentTarget,
+                        TargetFilter::Or {
+                            filters: vec![TargetFilter::SelfRef, TargetFilter::SelfRef],
                         },
                     ],
                 },
@@ -29912,8 +29922,8 @@ mod tests {
                 true,
             ),
             (
-                Or {
-                    filters: vec![SelfRef, ParentTarget],
+                TargetFilter::Or {
+                    filters: vec![TargetFilter::SelfRef, TargetFilter::ParentTarget],
                 },
                 false,
                 true,
@@ -29921,8 +29931,8 @@ mod tests {
                 false,
             ),
             (
-                Or {
-                    filters: vec![SelfRef, ParentTarget],
+                TargetFilter::Or {
+                    filters: vec![TargetFilter::SelfRef, TargetFilter::ParentTarget],
                 },
                 true,
                 false,
@@ -29930,8 +29940,12 @@ mod tests {
                 true,
             ),
             (
-                Or {
-                    filters: vec![SelfRef, ParentTarget, TargetFilter::Any],
+                TargetFilter::Or {
+                    filters: vec![
+                        TargetFilter::SelfRef,
+                        TargetFilter::ParentTarget,
+                        TargetFilter::Any,
+                    ],
                 },
                 false,
                 false,
@@ -29939,18 +29953,28 @@ mod tests {
                 false,
             ),
             (
-                Or {
-                    filters: vec![TargetFilter::Any, ParentTarget, SelfRef],
+                TargetFilter::Or {
+                    filters: vec![
+                        TargetFilter::Any,
+                        TargetFilter::ParentTarget,
+                        TargetFilter::SelfRef,
+                    ],
                 },
                 false,
                 false,
                 false,
                 false,
             ),
-            (Or { filters: vec![] }, false, false, true, false),
             (
-                Or {
-                    filters: vec![Or { filters: vec![] }],
+                TargetFilter::Or { filters: vec![] },
+                false,
+                false,
+                true,
+                false,
+            ),
+            (
+                TargetFilter::Or {
+                    filters: vec![TargetFilter::Or { filters: vec![] }],
                 },
                 false,
                 false,
@@ -39476,6 +39500,7 @@ mod tests {
             conditional_enter_with_counters: vec![],
             count_param: 0,
             library_position: None,
+            library_shuffle: crate::types::ability::LibraryShuffleMode::PerObject,
             mass_library_order: None,
             is_cost_payment: false,
             enters_modified_if: None,
@@ -48081,6 +48106,7 @@ mod tests {
             conditional_enter_with_counters: vec![],
             count_param: 0,
             library_position: None,
+            library_shuffle: crate::types::ability::LibraryShuffleMode::PerObject,
             mass_library_order: None,
             is_cost_payment: false,
             enters_modified_if: None,
@@ -48127,6 +48153,7 @@ mod tests {
                 conditional_enter_with_counters: vec![],
                 count_param: 0,
                 library_position: None,
+                library_shuffle: crate::types::ability::LibraryShuffleMode::PerObject,
                 mass_library_order: None,
                 is_cost_payment: false,
                 enters_modified_if: None,

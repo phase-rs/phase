@@ -461,6 +461,9 @@ fn resolution_zone_candidates(
                 // CR 108.2 + CR 109.1: a zone scan chooses among the cards in
                 // the zone; the CR 722.3c retained prepare copy is not one.
                 && object.is_card_population_member()
+                // CR 730.2 + CR 730.2b: a merged component is part of one
+                // permanent, not a permanent the player can choose by itself.
+                && !state.is_absorbed_merge_component(**id)
                 && crate::game::filter::matches_target_filter_for_zone(
                     state,
                     **id,
@@ -1463,6 +1466,7 @@ pub fn resolve(
             conditional_enter_with_counters: effect_conditional_enter_with_counters.clone(),
             count_param: 0,
             library_position: library_placement.clone(),
+            library_shuffle,
             mass_library_order: None,
             is_cost_payment: false,
             // CR 614.12: carry the moved-object type gate across the
@@ -2160,6 +2164,7 @@ fn mass_library_order_effect_zone_choice(
         conditional_enter_with_counters: vec![],
         count_param: 0,
         library_position: Some(library_position),
+        library_shuffle: crate::types::ability::LibraryShuffleMode::PerObject,
         mass_library_order: Some(batch),
         is_cost_payment: false,
         enters_modified_if: None,
@@ -14239,6 +14244,7 @@ mod tests {
             conditional_enter_with_counters: vec![],
             count_param: 0,
             library_position: None,
+            library_shuffle: crate::types::ability::LibraryShuffleMode::PerObject,
             mass_library_order: None,
             is_cost_payment: false,
             enters_modified_if: None,
