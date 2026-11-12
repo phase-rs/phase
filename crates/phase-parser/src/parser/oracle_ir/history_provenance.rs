@@ -152,9 +152,10 @@ pub(crate) struct HistoryTransport {
 
 /// A producer's transport handle: its effect allocation, and that effect's variant.
 /// The address follows the node through moves and wrapping. It can only be reused
-/// after the producer's effect was dropped, and a reused allocation is accepted only
-/// if it holds the same kind of instruction, so an unrelated node that took the
-/// address is a dangling producer, which the audit reports.
+/// after the producer's effect was dropped; a reused allocation holding a different
+/// kind of instruction then dangles, and the audit reports it. Limit: a reused
+/// allocation holding the same kind of instruction still matches, since nothing
+/// short of an identity carried on the definition itself tells them apart.
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct Handle {
     address: usize,
@@ -705,6 +706,53 @@ mod tests {
         assert!(flagged(text, &finished));
         // Keep the original allocation live through transport sealing.
         assert!(!flagged(text, &lowered));
+    }
+
+    /// The transport follows a producer into a choice branch: sealed, the record
+    /// locates `[ChoiceBranch(0)]` and the audit reads that branch.
+    #[test]
+    fn transport_locates_a_producer_inside_a_choice_branch() {
+        let text = "Tap all creatures ~ blocked this turn.";
+        let tap = lower(text, source_context());
+        let transport = HistoryTransport::from_lowered(&tap.value, tap.history.clone());
+        let other = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::SetTapState {
+                target: bare(),
+                scope: crate::types::ability::EffectScope::All,
+                state: crate::types::ability::TapStateChange::Untap,
+            },
+        );
+        let choice = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::ChooseOneOf {
+                chooser: crate::types::ability::PlayerFilter::Controller,
+                branches: vec![tap.value, other.clone(), other],
+                kind: crate::types::ability::ChooseOneOfKind::Ordinary,
+            },
+        );
+        let finished = transport.finish(choice);
+        assert_eq!(
+            finished.history[0].locator,
+            Some(InstructionPath(vec![InstructionStep::ChoiceBranch(0)]))
+        );
+        assert!(!flagged(text, &finished));
+    }
+
+    /// A producer whose allocation now holds another kind of instruction dangles.
+    #[test]
+    fn a_different_instruction_at_the_producer_allocation_dangles() {
+        let text = "Tap all creatures ~ blocked this turn.";
+        let mut lowered = lower(text, source_context());
+        let transport = HistoryTransport::from_lowered(&lowered.value, lowered.history.clone());
+        // Same allocation, another instruction written into it.
+        *lowered.value.effect = Effect::DestroyAll {
+            target: population(CombatRelationSubject::Source),
+            cant_regenerate: false,
+        };
+        let finished = transport.finish(lowered.value);
+        assert_eq!(finished.history[0].locator, None);
+        assert!(flagged(text, &finished));
     }
 
     #[test]
