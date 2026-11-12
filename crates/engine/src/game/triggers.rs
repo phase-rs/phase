@@ -9254,13 +9254,15 @@ impl ImmediatelyBeforeObservers {
 /// CR 603.10: the events of a player's departure that the abilities they
 /// trigger look back on: an object leaving the game with its owner
 /// (CR 603.10a: leaves-the-battlefield abilities are the only ones that see it),
-/// an Aura or Equipment becoming unattached from it (CR 603.10c), and a
-/// permanent phasing out (CR 603.10b). Everything else, such as the monarch or
-/// the initiative changing hands, is checked immediately after it.
+/// an Aura or Equipment becoming unattached from it (CR 603.10c), a permanent
+/// phasing out (CR 603.10b), and a player losing the game (CR 603.10f).
+/// Everything else, such as the monarch or the initiative changing hands, is
+/// checked immediately after it.
 fn departure_event_looks_back(event: &GameEvent) -> bool {
     match event {
         GameEvent::ZoneChanged { record, .. } => record.departure.left_game(),
         GameEvent::Unattached { .. } | GameEvent::PermanentPhasedOut { .. } => true,
+        GameEvent::PlayerLost { .. } => true,
         _ => false,
     }
 }

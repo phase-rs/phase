@@ -1697,9 +1697,12 @@ fn counters_on(r: &GameRunner, id: ObjectId) -> u32 {
 /// CR 603.3b + CR 603.10f + CR 800.4a (issue #10157): three players; P1 at 2
 /// life. P0's Magma Jet deals 2 damage to P1, then P0 scries 2. P1 leaves the
 /// game while the scry is open, triggering Withengar Unbound; answering the scry
-/// triggers Lost Isle Calling and runs the spell's final part (CR 608.2n). No
-/// player received priority between the two, so both go on the stack as one P0
-/// batch: one ordering prompt, and neither trigger is lost or placed alone.
+/// Magma Jet deals 2 damage to P1 (reducing them to 0 life), then scrys 2.
+/// Lost Isle Calling triggers on the scry; Withengar Unbound triggers when P1 loses.
+/// CR 704.3 + CR 704.4: SBAs do not run during resolution. The scry choice is
+/// answered first, then the post-action pipeline runs the final part and SBAs.
+/// Both triggers (Lost Isle Calling from scry, Withengar from player loss) are
+/// collected in the same post-action pass and placed as one batch.
 ///
 /// Oracle text (Scryfall):
 ///   Magma Jet: "Magma Jet deals 2 damage to any target. Scry 2."
@@ -1732,32 +1735,140 @@ fn final_part_elimination_keeps_the_survivors_batch_whole() {
             0,
             "{mode:?}: Magma Jet's {{1}}{{R}} was paid"
         );
+        // Drive through the entire action: scry choice is answered automatically,
+        // then post-action pipeline runs final part + SBAs, triggers are placed.
         let trace = drive(&mut r, &Answers::default());
 
-        // Reach: the scry paused the resolution with Magma Jet off the stack,
-        // and Withengar's trigger waited behind it for the scry's own trigger.
+        // At the scry choice (which was answered during drive), P1 was at 0 life
+        // but not yet eliminated (SBAs don't run during resolution per CR 704.3/704.4).
         let scry = trace.choice("ScryChoice");
         assert_eq!(scry.stack, Vec::<String>::new(), "{mode:?}");
+        // At the scry choice, no triggers have been placed yet; the deferred
+        // queue is empty because the scry hasn't completed and SBAs haven't run.
         assert_eq!(
             scry.deferred_sources,
-            names(&["Withengar Unbound"]),
-            "{mode:?}"
+            Vec::<String>::new(),
+            "{mode:?}: no triggers deferred at scry choice"
         );
-        assert!(eliminated(&r, P1), "{mode:?}");
-        let prompt = trace.the_prompt();
-        assert_eq!(prompt.player, P0, "{mode:?}");
+        // P1 is not eliminated at the scry choice; elimination happens after
+        // the scry completes and the post-action pipeline runs SBAs.
+
+        // After scry, post-action pipeline runs: final part (spell to graveyard),
+        // then SBAs eliminate P1. Both triggers fire in the same pass and are
+        // placed as one batch with a single ordering prompt.
+        let order_prompt = trace.the_prompt();
+        assert_eq!(order_prompt.player, P0, "{mode:?}");
         assert_eq!(
-            sorted(prompt.sources.clone()),
+            sorted(order_prompt.sources.clone()),
             names(&["Lost Isle Calling", "Withengar Unbound"]),
             "{mode:?}"
         );
+        let ability_stack = trace.first_ability_stack();
         assert_eq!(
-            sorted(trace.first_ability_stack().stack.clone()),
+            sorted(ability_stack.stack.clone()),
             names(&["Lost Isle Calling", "Withengar Unbound"]),
             "{mode:?}"
         );
         assert_eq!(counters_on(&r, calling), 1, "{mode:?}");
         assert_eq!(counters_on(&r, withengar), 13, "{mode:?}");
+        assert!(r.state().stack.is_empty(), "{mode:?}");
+    }
+}
+
+/// CR 603.10f + CR 800.4a + CR 800.4d: a permanent owned by P0 but controlled
+/// by P1 has a "whenever a player loses the game" trigger. When P1 loses the
+/// game, the trigger looks back to the game state before the loss (CR 603.10f)
+/// and is attributed to P1 as the controller at that time. CR 800.4d then
+/// removes the trigger from the queue because P1 has left the game. P0 should
+/// not receive the trigger.
+///
+/// CR 704.3 + CR 704.4: SBAs do not run during resolution. The scry choice is
+/// answered first, then the post-action pipeline runs SBAs. At the scry choice,
+/// neither player has lost yet. After the scry, P1 loses, Withengar's trigger
+/// is attributed to P1 (look-back) and removed by CR 800.4d. Only Lost Isle
+/// Calling's trigger (from the scry) is placed.
+///
+/// Oracle text (Scryfall):
+///   Withengar Unbound: "Flying, intimidate, trample / Whenever a player loses
+///    the game, put thirteen +1/+1 counters on Withengar Unbound."
+///   Control Magic: "Enchant creature / You control enchanted creature."
+#[test]
+fn player_loss_trigger_looks_back_to_pre_loss_controller() {
+    for mode in MODES {
+        let db = shared_card_db().expect("card db");
+        let mut sc = GameScenario::new_n_player(3, 42);
+        sc.at_phase(Phase::PreCombatMain);
+        sc.with_life(P1, 2);
+        // P0 owns Withengar Unbound
+        let withengar = sc.add_real_card(P0, "Withengar Unbound", Zone::Battlefield, db);
+        // P1 gains control of it (simulated via base_controller)
+        // P0 has Lost Isle Calling to observe the trigger batch
+        let calling = sc.add_real_card(P0, "Lost Isle Calling", Zone::Battlefield, db);
+        let jet = sc.add_real_card(P0, "Magma Jet", Zone::Hand, db);
+        for _ in 0..3 {
+            sc.add_real_card(P0, "Island", Zone::Library, db);
+        }
+        let mut mana = pool(1, ManaType::Red);
+        mana.extend(pool(1, ManaType::Colorless));
+        sc.with_mana_pool(P0, mana);
+        let mut r = start(sc, mode);
+        // Simulate P1 controlling P0's Withengar Unbound
+        r.state_mut()
+            .objects
+            .get_mut(&withengar)
+            .unwrap()
+            .controller = P1;
+        r.state_mut()
+            .objects
+            .get_mut(&withengar)
+            .unwrap()
+            .base_controller = Some(P1);
+        drop(r.cast(jet).target_player(P1).commit());
+        assert_eq!(
+            r.state().players[0].mana_pool.total(),
+            0,
+            "{mode:?}: Magma Jet's {{1}}{{R}} was paid"
+        );
+        // Drive through the entire action: scry choice is answered automatically,
+        // then post-action pipeline runs final part + SBAs.
+        let trace = drive(&mut r, &Answers::default());
+
+        // At the scry choice (answered during drive), P1 was at 0 life but not
+        // yet eliminated (SBAs don't run during resolution per CR 704.3/704.4).
+        let scry = trace.choice("ScryChoice");
+        assert_eq!(scry.stack, Vec::<String>::new(), "{mode:?}");
+        // At the scry choice, no triggers have been placed yet; the deferred
+        // queue is empty because the scry hasn't completed and SBAs haven't run.
+        assert_eq!(
+            scry.deferred_sources,
+            Vec::<String>::new(),
+            "{mode:?}: no triggers deferred at scry choice"
+        );
+        // P1 is not eliminated at the scry choice; elimination happens after
+        // the scry completes and the post-action pipeline runs SBAs.
+
+        // After scry, post-action pipeline runs: final part, then SBAs eliminate P1.
+        // Withengar's trigger looks back to P1 as controller (CR 603.10f), but
+        // P1 is eliminated and CR 800.4d removes P1's triggers from the queue.
+        // Only Lost Isle Calling's trigger (from the scry) is placed.
+        // With only one trigger, no ordering prompt occurs; it goes directly on the stack.
+        let ability_stack = trace.first_ability_stack();
+        assert_eq!(
+            sorted(ability_stack.stack.clone()),
+            names(&["Lost Isle Calling"]),
+            "{mode:?}: Lost Isle Calling should be on the stack alone"
+        );
+        assert_eq!(
+            counters_on(&r, calling),
+            1,
+            "{mode:?}: verse counter from scry"
+        );
+        // Withengar's trigger was removed by CR 800.4d, so no counters added.
+        assert_eq!(
+            counters_on(&r, withengar),
+            0,
+            "{mode:?}: P1's trigger removed by CR 800.4d"
+        );
         assert!(r.state().stack.is_empty(), "{mode:?}");
     }
 }

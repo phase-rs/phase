@@ -1182,6 +1182,68 @@ pub(super) fn handles(waiting_for: &WaitingFor) -> bool {
     )
 }
 
+/// CR 704.4: Whether the given `WaitingFor` represents a mid-resolution
+/// pause where state-based actions must not run. This is narrower than
+/// `handles()` — it only includes choices that are unambiguously part of
+/// spell/ability resolution (CR 608.2). Choices like `DiscardChoice`,
+/// `CommanderZoneChoice`, `ChooseLegend`, etc. can occur outside of
+/// resolution and are NOT included here.
+pub(super) fn is_mid_resolution_pause(waiting_for: &WaitingFor) -> bool {
+    matches!(
+        waiting_for,
+        WaitingFor::ScryChoice { .. }
+            | WaitingFor::ArrangePlanarDeckTopChoice { .. }
+            | WaitingFor::DigChoice { .. }
+            | WaitingFor::DigRestSplitChoice { .. }
+            | WaitingFor::SurveilChoice { .. }
+            | WaitingFor::RevealChoice { .. }
+            | WaitingFor::SearchChoice { .. }
+            | WaitingFor::SearchPartitionChoice { .. }
+            | WaitingFor::ClashCardPlacement { .. }
+            | WaitingFor::BeholdChoice { .. }
+            | WaitingFor::LearnChoice { .. }
+            | WaitingFor::TopOrBottomChoice { .. }
+            | WaitingFor::PopulateChoice { .. }
+            | WaitingFor::ManifestDreadChoice { .. }
+            | WaitingFor::RevealUntilKeptChoice { .. }
+            | WaitingFor::RevealUntilBottomOrder { .. }
+            | WaitingFor::ChooseFromZoneChoice { .. }
+            | WaitingFor::EmpowerJaceChoice { .. }
+            | WaitingFor::SpellCopyOrderChoice { .. }
+            | WaitingFor::ChooseOneOfBranch { .. }
+            | WaitingFor::MeldPairChoice { .. }
+            | WaitingFor::MeldAttackTargetChoice { .. }
+            | WaitingFor::EntryAttackTargetChoice { .. }
+            | WaitingFor::RedistributeLifeTotals { .. }
+            | WaitingFor::CoinFlipKeepChoice { .. }
+            | WaitingFor::DieKeepChoice { .. }
+            | WaitingFor::CastOffer {
+                kind: CastOfferKind::Discover { .. },
+                ..
+            }
+            | WaitingFor::CastOffer {
+                kind: CastOfferKind::GraveyardPaidCast { .. },
+                ..
+            }
+            | WaitingFor::CastOffer {
+                kind: CastOfferKind::Cascade { .. },
+                ..
+            }
+            | WaitingFor::CastOffer {
+                kind: CastOfferKind::Ripple { .. },
+                ..
+            }
+            | WaitingFor::CastOffer {
+                kind: CastOfferKind::FreeCastWindow { .. },
+                ..
+            }
+            | WaitingFor::RippleRevealChoice { .. }
+            | WaitingFor::RippleBottomOrder { .. }
+            | WaitingFor::OutsideGameChoice { .. }
+            | WaitingFor::ResolutionOptionalPaymentChoice { .. }
+    )
+}
+
 /// CR 608.2c: Expressive Iteration-style dig tails chain a
 /// `PutAtLibraryPosition { TrackedSet }` step before exiling from the same
 /// looked-at pile. Those continuations publish and route via the **unkept**
