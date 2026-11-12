@@ -5,11 +5,11 @@ use crate::types::ability::{
     ActivationManaPaymentRestriction, AdditionalCost, AttachmentReferent, BoardWideCostModifier,
     CardPlayMode, CardSelectionMode, CardTypeSetSource, CastCostModifier, CastTimingPermission,
     CastingPermission, ChoiceType, CombatRelationSubject, ContinuousModification, ControllerRef,
-    CostObjectCount, CostPaidObjectSnapshot, CostReduction, CounterCostSelection, Duration, Effect,
-    EffectKind, FilterProp, GameRestriction, ModalSelectionCondition, NameStickerSet, ObjectScope,
-    ParsedCondition, PlayerFilter, PlayerScope, ProhibitedActivity, QuantityExpr, QuantityRef,
-    ResolvedAbility, RestrictionExpiry, RestrictionPlayerScope, SacrificeCost,
-    SacrificeRequirement, StaticCondition, StaticDefinition, SubAbilityLink,
+    CostMoveOutcome, CostObjectCount, CostPaidObjectSnapshot, CostReduction, CounterCostSelection,
+    Duration, Effect, EffectKind, FilterProp, GameRestriction, ModalSelectionCondition,
+    NameStickerSet, ObjectScope, ParsedCondition, PlayerFilter, PlayerScope, ProhibitedActivity,
+    QuantityExpr, QuantityRef, ResolvedAbility, RestrictionExpiry, RestrictionPlayerScope,
+    SacrificeCost, SacrificeRequirement, StaticCondition, StaticDefinition, SubAbilityLink,
     TapCreaturesRequirement, TargetFilter, TargetRef, TypeFilter, TypedFilter,
 };
 use crate::types::actions::{AlternativeCastDecision, GameAction};
@@ -24087,6 +24087,8 @@ pub fn can_pay_ability_mana_cost_after_auto_tap_excluding(
     cost: &crate::types::mana::ManaCost,
     excluded_sources: &HashSet<ObjectId>,
 ) -> bool {
+    #[cfg(feature = "test-support")]
+    crate::game::perf_counters::record_ability_mana_auto_tap_probe_clone();
     let mut simulated = state.clone();
     super::layers::flush_layers(&mut simulated);
 
@@ -26304,6 +26306,66 @@ fn has_self_ref_discard_cost(cost: &AbilityCost) -> bool {
         } => true,
         AbilityCost::Composite { costs } => costs.iter().any(has_self_ref_discard_cost),
         _ => false,
+    }
+}
+
+/// CR 118.3 + CR 608.2k + CR 400.7j: Bind the cost-paid referent for a
+/// deterministic "exile the top N cards of your library" activation cost BEFORE
+/// the payment moves them.
+///
+/// `QuantityRef::ObjectManaValue { scope: ObjectScope::CostPaidObject }` is how
+/// "the exiled card's mana value" resolves (Phyrexian Devourer), and the
+/// snapshot must be captured while the card is still a live object — once the
+/// cost has moved it to exile the pre-move characteristics are gone. The single
+/// snapshot binds the top card (the singular referent the card text names);
+/// every exiled id is also recorded so a multi-card cost (Whirling Catapult
+/// exiles two) is not misrepresented by that one snapshot.
+pub(crate) fn stamp_top_library_exile_cost_paid_object(
+    state: &GameState,
+    player: PlayerId,
+    ability: &mut ResolvedAbility,
+    cost: &AbilityCost,
+) -> Vec<ObjectId> {
+    let Some(count) = top_library_exile_cost_count(cost) else {
+        return Vec::new();
+    };
+    let Some(top) = state.players.get(player.0 as usize).map(|p| {
+        p.library
+            .iter()
+            .copied()
+            .take(count as usize)
+            .collect::<Vec<_>>()
+    }) else {
+        return Vec::new();
+    };
+    if top.len() < count as usize {
+        return Vec::new();
+    }
+    let snapshots = top
+        .iter()
+        .map(|id| {
+            let obj = state.objects.get(id).expect("library object must exist");
+            CostPaidObjectSnapshot::capture(obj, obj.snapshot_for_mana_spent())
+        })
+        .collect::<Vec<_>>();
+    if let Some(snapshot) = snapshots.first() {
+        ability.set_cost_paid_object_recursive(snapshot.clone());
+    }
+    ability.add_cost_paid_objects_recursive(&snapshots);
+    top
+}
+
+/// The deterministic top-of-library exile shape, recursing into `Composite` so a
+/// combined cost ("{2}, Exile the top two cards of your library") is covered.
+fn top_library_exile_cost_count(cost: &AbilityCost) -> Option<u32> {
+    match cost {
+        AbilityCost::Exile {
+            count,
+            zone: Some(Zone::Library),
+            filter: None,
+        } => Some(*count),
+        AbilityCost::Composite { costs } => costs.iter().find_map(top_library_exile_cost_count),
+        _ => None,
     }
 }
 
@@ -28711,8 +28773,8 @@ fn manual_activation_life_retry_possible(
     let Some(def) = activation_ability_definition(state, source_id, ability_index) else {
         return false;
     };
-    // CR 605.3a: a mana ability is activated during a payment, not paid for by
-    // hand, so it has no manual payment to relax.
+    // CR 605.3a: a mana ability's manual offer is derived from its automatic one
+    // (`interaction::actor_candidates`), so no life retry is offered for it here.
     if super::mana_abilities::is_mana_ability(&def) {
         return false;
     }
@@ -29324,22 +29386,40 @@ fn activation_mana_leg_waits_for_player(pending: &PendingCast) -> bool {
 
 /// CR 605.3a + CR 605.3b: whether `action` activates a mana ability, wherever its
 /// source sits (battlefield, hand, graveyard). A mana ability is itself what pays
-/// a mana payment, resolves at once without the stack, and has no payment window
-/// of its own, so there is no manual way to pay for it.
+/// a mana payment and resolves at once without the stack.
 pub(crate) fn activates_mana_ability(state: &GameState, action: &GameAction) -> bool {
+    activated_mana_ability(state, action).is_some()
+}
+
+/// CR 605.3a + CR 601.2g: `action` activates a mana ability whose cost holds no
+/// mana payment (Sol Ring, Krark-Clan Ironworks, Elvish Spirit Guide) — it has
+/// no payment window of its own, so there is no manual way to pay it.
+pub(crate) fn activates_mana_ability_without_mana_payment(
+    state: &GameState,
+    action: &GameAction,
+) -> bool {
+    activated_mana_ability(state, action)
+        .is_some_and(|ability| super::mana_abilities::mana_sub_cost_of(&ability.cost).is_none())
+}
+
+/// The mana ability `action` activates, if it activates one.
+fn activated_mana_ability<'a>(
+    state: &'a GameState,
+    action: &GameAction,
+) -> Option<&'a AbilityDefinition> {
     let GameAction::ActivateAbility {
         source_id,
         ability_index,
         ..
     } = action
     else {
-        return false;
+        return None;
     };
     state
         .objects
         .get(source_id)
         .and_then(|obj| obj.abilities.get(*ability_index))
-        .is_some_and(super::mana_abilities::is_mana_ability)
+        .filter(|ability| super::mana_abilities::is_mana_ability(ability))
 }
 
 /// CR 602.2b + CR 601.2g: whether the player chose to activate the mana
@@ -29351,7 +29431,7 @@ pub(super) fn activation_pays_mana_manually(pending: &PendingCast) -> bool {
 /// CR 602.2b + CR 601.2g: the payment mode in which the player activates the mana
 /// abilities that pay an activation themself. `AutoExceptSacrificialMana` is an
 /// automatic mode for an activation.
-pub(super) fn payment_mode_pays_mana_manually(payment_mode: CastPaymentMode) -> bool {
+pub(crate) fn payment_mode_pays_mana_manually(payment_mode: CastPaymentMode) -> bool {
     match payment_mode {
         CastPaymentMode::Manual => true,
         CastPaymentMode::Auto | CastPaymentMode::AutoExceptSacrificialMana => false,
@@ -31586,6 +31666,9 @@ fn activate_with_cost_carrier(
         )? {
             return Ok(waiting);
         }
+        // CR 400.2 + CR 401.2: keep the unpaid library card hidden if mana payment pauses.
+        let top_library_exile_cost_ids =
+            stamp_top_library_exile_cost_paid_object(state, player, &mut resolved, cost);
         // CR 602.2b: this activation's own payment writes its removed-counter
         // count onto `resolved`, which the pause clones and the push consumes.
         if let PaymentOutcome::Paused { remaining_cost } = pay_ability_cost_for_activation(
@@ -31612,6 +31695,11 @@ fn activate_with_cost_carrier(
             }
             return Ok(state.waiting_for.clone());
         }
+        resolved.settle_cost_paid_provenance_recursive(
+            state,
+            &top_library_exile_cost_ids,
+            CostMoveOutcome::Relocation,
+        );
     }
 
     // CR 702.170b + CR 116.2k: Exiling a card using its plot ability is a
@@ -33790,10 +33878,13 @@ pub enum ActivationCostGuardSite {
     /// `handle_sacrifice_for_cost`'s source tap/untap leg, paid before a
     /// sacrifice that includes the source.
     SacrificeSource = 9,
+    /// `surface_next_interactive_activation_cost_leg`'s first-tier settle,
+    /// paid before a library-to-public aggregate exile prompt (CR 601.2h).
+    LibraryAggregateTierOne = 10,
 }
 
 impl ActivationCostGuardSite {
-    pub const COUNT: usize = 10;
+    pub const COUNT: usize = 11;
 }
 
 /// CR 601.2f + CR 601.2h: an activation's cost is paid only after its total is

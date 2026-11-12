@@ -567,9 +567,9 @@
     "tournamentEliminationDesc": "Los jugadores son eliminados tras perder una partida hasta que queda un único ganador.",
     "podPolicy": "Política del pod",
     "policyCompetitive": "Competitiva",
-    "policyCompetitiveDesc": "Elecciones cronometradas, elecciones automáticas al agotarse el tiempo y avance automático de rondas.",
+    "policyCompetitiveDesc": "Elecciones cronometradas, elecciones automáticas al agotarse el tiempo y avance automático de rondas. Los mazos enviados son definitivos; solo puedes usar el banquillo entre partidas de un enfrentamiento.",
     "policyCasual": "Casual",
-    "policyCasualDesc": "Elecciones sin tiempo, avance manual de rondas y controles del anfitrión para resolver problemas.",
+    "policyCasualDesc": "Elecciones sin tiempo, avance manual de rondas, controles del anfitrión para resolver problemas y cambios de mazo entre rondas.",
     "podSize": "Tamaño del pod",
     "podSizeDesc": "{{count}} asientos en total. Los asientos vacíos se pueden rellenar con bots desde la sala de espera antes de que empiece el draft.",
     "playerCount": "{{count}} jugadores",
@@ -615,11 +615,21 @@
     "roundComplete": "Ronda completada",
     "waitingNextRound": "Esperando a que el anfitrión inicie la siguiente ronda...",
     "nextRoundShortly": "La siguiente ronda empezará en breve...",
+    "editDeck": "Editar mazo",
+    "backToStandings": "Volver a la clasificación",
+    "editDeckHint": "Pod casual: puedes cambiar tu mazo antes de que empiece la siguiente ronda.",
     "pauseReason": {
       "PlayerDisconnected": "Draft en pausa — un jugador está desconectado.",
       "PausedByHost": "Draft pausado por el anfitrión.",
       "DisconnectGraceExpired": "Un jugador no ha vuelto antes de que acabe el tiempo."
     }
+  },
+  "deckSubmitConfirm": {
+    "title": "¿Enviar este mazo?",
+    "confirm": "Confirmar envío",
+    "competitive": "Este es un pod competitivo: el mazo que envíes es definitivo para todas las rondas. Aún puedes usar el banquillo entre partidas de un enfrentamiento Bo3.",
+    "casual": "Aún puedes cambiar tu mazo entre rondas.",
+    "final": "El mazo que envíes es definitivo."
   },
   "betweenGames": {
     "game": "Partida {{number}}",

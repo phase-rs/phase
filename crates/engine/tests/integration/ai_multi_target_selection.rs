@@ -6,7 +6,8 @@ use engine::game::zones::create_object;
 use engine::types::ability::{Effect, QuantityExpr, ResolvedAbility, TargetFilter};
 use engine::types::actions::GameAction;
 use engine::types::game_state::{
-    CostResume, GameState, ManaAbilityResume, PayCostKind, PendingManaAbility, WaitingFor,
+    CastPaymentMode, CostResume, GameState, ManaAbilityResume, PayCostKind, PendingManaAbility,
+    WaitingFor,
 };
 use engine::types::identifiers::{CardId, ObjectId};
 use engine::types::player::PlayerId;
@@ -61,6 +62,8 @@ fn mana_ability_resume() -> CostResume {
             chosen_tappers: None,
             chosen_discards: Vec::new(),
             chosen_mana_payment: None,
+            payment_mode: CastPaymentMode::Auto,
+            pinned_pool_units: Vec::new(),
             chosen_counter_counts: Vec::new(),
             chosen_x: None,
             collected_evidence: Vec::new(),

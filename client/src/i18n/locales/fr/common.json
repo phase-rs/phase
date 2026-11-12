@@ -87,6 +87,7 @@
     "sandboxTools": "Outils bac à sable",
     "sandboxToolsTitle": "Outils bac à sable — configurez n'importe quel état du plateau (`)",
     "openSandboxTools": "Ouvrir les outils bac à sable",
+    "clickMode": "Mode clic",
     "clickModeButton": "Bouton mode clic",
     "shown": "Affiché",
     "hidden": "Masqué",
@@ -256,6 +257,10 @@
         "title": "Panneau de débogage avancé",
         "body": "Ouvrir le panneau de débogage avancé. La plupart des joueurs devraient d'abord commencer par les outils de récupération."
       },
+      "toggleClickMode": {
+        "title": "Basculer le mode clic",
+        "body": "Dans les parties avec outils bac à sable, active ou désactive le mode clic. Tant qu'il est actif, cliquer sur une carte ouvre son menu de débogage (zones, F/E, marqueurs, mots-clés) au lieu de la jouer."
+      },
       "reportOrExportState": {
         "title": "Signaler ou exporter l'état",
         "body": "Si une carte se comporte mal, exportez l'état actuel de la partie afin que la position exacte du plateau puisse être reproduite."
@@ -298,16 +303,13 @@
     "skip": "Toucher pour passer",
     "continue": "Toucher pour continuer",
     "you": "Vous",
-    "youPlayFirst": "Vous jouez en premier",
-    "playerPlaysFirst": "{{name}} joue en premier",
+    "youWonRoll": "Vous avez gagné le tirage",
+    "playerWonRoll": "{{name}} a gagné le tirage",
     "heads": "Face",
     "tails": "Pile",
     "coinFlip": "Pile ou face",
     "wonCoinFlip": "{{name}} a gagné le pile ou face",
     "lostCoinFlip": "{{name}} a perdu le pile ou face",
-    "turnOrder": "Ordre des tours",
-    "turnOrderItem": "Tour {{turn}} : {{name}}",
-    "youTakeTurn": "Vous jouez au tour {{turn}}",
     "ignoredDie": "Ignoré"
   },
   "chrome": {

@@ -80,6 +80,7 @@ fn rhythm_of_the_wild_grants_riot_on_library_to_battlefield_put() {
 
     let ability = ResolvedAbility::new(
         Effect::ChangeZone {
+            library_shuffle: Default::default(),
             origin: Some(Zone::Library),
             destination: Zone::Battlefield,
             target: TargetFilter::SpecificObject { id: wurm },

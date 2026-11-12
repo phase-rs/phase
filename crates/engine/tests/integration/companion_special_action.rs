@@ -49,6 +49,7 @@ fn redirect_exile_to_graveyard() -> ReplacementDefinition {
         .execute(AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 destination: Zone::Graveyard,
                 origin: None,
                 target: TargetFilter::SelfRef,

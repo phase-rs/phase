@@ -450,5 +450,42 @@ expect_rc 'legacy-quantity: a call planted in phase-parser fails' 1
 expect_listed 'legacy-quantity: only the call planted in phase-parser is listed' "  crates/phase-parser/src/parser/oracle_cost.rs:
     +$L_PLANTED"
 
+
+# --- check-parser-combinators.sh: family (D) detector failure --------------
+# A detector that cannot run is an INSTRUMENT error, not "no findings": before
+# #10351 the call was `... || true` with stderr discarded, so any detector
+# failure (an import error, a malformed record) silently passed the gate. The
+# stub below stands in for that failure and the gate must fail loud.
+P_BENIGN='fn added_by_the_fixture() { let _ = 1; }'
+parser_fixture
+put crates/engine/src/parser/clause.rs 'use super::*;' 'fn other() {}'
+# The (D0) seam suite imports the detector; stub that too so the ONLY failure is family D.
+put scripts/lib/detect_cross_product_alts_tests.py 'import sys' 'sys.exit(0)'
+put scripts/lib/detect-cross-product-alts.py \
+    'import sys' \
+    'sys.stderr.write("stub detector: cannot import zone_authority_census\n")' \
+    'sys.exit(3)'
+commit_base
+put crates/engine/src/parser/clause.rs 'use super::*;' "$P_BENIGN" 'fn other() {}'
+commit 'added parser line'
+run_gate
+expect_rc 'parser: a family-D detector failure fails the gate' 1
+expect_out 'parser: the detector failure names the file' \
+    'crates/engine/src/parser/clause.rs: family D cross-product detector failed'
+expect_out 'parser: the detector failure reports its exit code' 'failed (exit 3)'
+expect_out 'parser: the detector failure surfaces the detector stderr' \
+    'stub detector: cannot import zone_authority_census'
+
+# Exit 0 with empty output is still "no findings": the same fixture with the
+# real detector passes, which keeps the passing format unchanged.
+parser_fixture
+put crates/engine/src/parser/clause.rs 'use super::*;' 'fn other() {}'
+commit_base
+put crates/engine/src/parser/clause.rs 'use super::*;' "$P_BENIGN" 'fn other() {}'
+commit 'added parser line'
+run_gate
+expect_rc 'parser: a clean family-D run still passes' 0
+expect_out 'parser: the clean run reaches Gate A PASS' 'Gate A PASS head='
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]

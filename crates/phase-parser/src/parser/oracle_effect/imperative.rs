@@ -58,7 +58,7 @@ use crate::types::ability::{
     CopyRetargetPermission, CountBinding, CountScope, CounterAdjustment, CounterKindChooser,
     CounterKindDomain, DigSource, DoorLockOp, Duration, Effect, EffectScope, ExtraPhaseAnchor,
     ExtraPhaseRecipient, FaceDownProfile, FilterProp, ForceBlockAttackerRef, GrantedAbilityScope,
-    LibraryPosition, MassLibraryShuffleMode, MultiTargetSpec, ObjectSelectionCardinality,
+    LibraryPosition, LibraryShuffleMode, MultiTargetSpec, ObjectSelectionCardinality,
     ObjectSelectionEligibility, OutsideGameSourcePool, PerPlayerScope, PlayerFilter,
     PlayerRelation, PlayerScope, PossessionAxis, PreventionAmount, PreventionScope, PtStat,
     PtValue, QuantityExpr, QuantityRef, ReassembleControlMode, ReturnResultReadSpec,
@@ -2988,6 +2988,7 @@ pub(super) fn lower_targeted_action_ast(ast: TargetedImperativeAst) -> Effect {
                 );
             }
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin,
                 destination: Zone::Battlefield,
                 target,
@@ -3021,6 +3022,7 @@ pub(super) fn lower_targeted_action_ast(ast: TargetedImperativeAst) -> Effect {
             up_to,
             multi_target: _,
         } => Effect::ChangeZone {
+            library_shuffle: Default::default(),
             origin,
             destination,
             target,
@@ -9629,7 +9631,7 @@ pub(super) fn parse_put_ast(
                 // never moved as part of THIS clause, so the clause text gives
                 // no origin (`infer_origin_zone` → None). When a producer clause
                 // earlier in the chain published the set's source zone
-                // (`pending_tracked_set_origin`, e.g. Breach the Multiverse's
+                // (`pending_tracked_set`, e.g. Breach the Multiverse's
                 // graveyard choose), bind it here. An impulse/cascade producer
                 // leaves the context unset, so the exile default in
                 // `lower_put_ast` still governs those reanimations.
@@ -9637,7 +9639,7 @@ pub(super) fn parse_put_ast(
                     (
                         None,
                         TargetFilter::TrackedSet { .. } | TargetFilter::TrackedSetFiltered { .. },
-                    ) => ctx.pending_tracked_set_origin.or(origin),
+                    ) => ctx.pending_tracked_set.map(|set| set.zone).or(origin),
                     _ => origin,
                 };
                 Some(PutImperativeAst::ZoneChange {
@@ -9820,6 +9822,7 @@ pub(super) fn lower_put_ast(ast: PutImperativeAst) -> Effect {
                 }
             } else {
                 Effect::ChangeZone {
+                    library_shuffle: Default::default(),
                     origin,
                     destination,
                     target,
@@ -10611,6 +10614,14 @@ pub(super) fn parse_shuffle_ast(text: &str, lower: &str) -> Option<ShuffleImpera
             } else {
                 None
             };
+            let target = if !all
+                && origin == Some(Zone::Graveyard)
+                && matches!(&target, TargetFilter::Typed(_))
+            {
+                super::add_inferred_origin_constraints_to_target(target, origin, lower)
+            } else {
+                target
+            };
             return Some(ShuffleImperativeAst::TargetedChangeZoneToLibrary {
                 target,
                 origin,
@@ -10669,6 +10680,7 @@ pub(super) fn lower_shuffle_ast(ast: ShuffleImperativeAst) -> ParsedEffectClause
             // possessive classification. See the construction site for the
             // detection grammar and the owner-scoped terminal Shuffle.
             let effect = Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: None,
                 destination: Zone::Library,
                 target,
@@ -10760,6 +10772,7 @@ pub(super) fn lower_shuffle_ast(ast: ShuffleImperativeAst) -> ParsedEffectClause
                 with_shuffle_sub_ability(effect)
             } else {
                 let effect = Effect::ChangeZone {
+                    library_shuffle: Default::default(),
                     origin,
                     destination: Zone::Library,
                     target,
@@ -10881,6 +10894,7 @@ pub(super) fn lower_multi_filter_search_library(
     // ends at a `SearchLibrary` (the last extra filter) so the outer intrinsic
     // continuation can append the terminal `ChangeZone` for that last search.
     let change_zone_effect = || Effect::ChangeZone {
+        library_shuffle: Default::default(),
         origin: Some(Zone::Library),
         destination,
         target: TargetFilter::Any,
@@ -11044,13 +11058,41 @@ pub(super) fn with_shuffle_sub_ability(mut effect: Effect) -> ParsedEffectClause
         _ => TargetFilter::Controller,
     };
     let tracks_owner_population = matches!(&effect, Effect::ChangeZoneAll { .. });
-    if let Effect::ChangeZoneAll {
-        destination: Zone::Library,
-        library_shuffle,
-        ..
-    } = &mut effect
-    {
-        *library_shuffle = MassLibraryShuffleMode::TerminalShuffle;
+    // A selected graveyard population explicitly owned by the caster or the
+    // declared player has one library subject. ParentTarget/SelfRef moves do
+    // not establish that guarantee: their receiving owner may differ from the
+    // terminal actor. Keep those existing routes unchanged. Mass operations
+    // already carry their complete owner-population scope.
+    let single_library_population = matches!(
+        &effect,
+        Effect::ChangeZone {
+            origin: Some(Zone::Graveyard),
+            destination: Zone::Library,
+            target: TargetFilter::Typed(filter),
+            owner_library: false,
+            ..
+        } if filter.properties.iter().any(|property| matches!(
+            property,
+            FilterProp::Owned {
+                controller:
+                    ControllerRef::You
+                    | ControllerRef::TargetPlayer
+                    | ControllerRef::ScopedPlayer
+            }
+        ))
+    );
+    match &mut effect {
+        Effect::ChangeZone {
+            library_shuffle, ..
+        } if single_library_population => {
+            *library_shuffle = LibraryShuffleMode::TerminalShuffle;
+        }
+        Effect::ChangeZoneAll {
+            destination: Zone::Library,
+            library_shuffle,
+            ..
+        } => *library_shuffle = LibraryShuffleMode::TerminalShuffle,
+        _ => {}
     }
     // CR 701.24c-e + CR 400.3: the terminal shuffle is driven by the owners of
     // the exact prospective subject population. Cause filtering prevents an
@@ -11103,7 +11145,7 @@ fn change_zone_all_to_library_effect(origin: Zone, target: TargetFilter) -> Effe
         enter_with_counters: vec![],
         face_down_profile: None,
         library_position: None,
-        library_shuffle: MassLibraryShuffleMode::TerminalShuffle,
+        library_shuffle: LibraryShuffleMode::TerminalShuffle,
         random_order: false,
     }
 }
@@ -17117,6 +17159,7 @@ pub(super) fn lower_imperative_family_ast(ast: ImperativeFamilyAst) -> ParsedEff
             // the Grave, Reanimate — store Some(Graveyard); that is a different
             // phrase and not this card's.)
             let mut clause = parsed_clause(Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: None,
                 destination: Zone::Battlefield,
                 target,
@@ -18832,6 +18875,7 @@ pub(super) fn lower_zone_counter_ast(ast: ZoneCounterImperativeAst) -> Effect {
                 }
             } else {
                 Effect::ChangeZone {
+                    library_shuffle: Default::default(),
                     origin,
                     destination: Zone::Exile,
                     target,
