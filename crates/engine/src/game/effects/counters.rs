@@ -1485,7 +1485,7 @@ pub fn apply_resolved_counter_edit(
                 Some(CounterAddedRecord {
                     actor: *actor,
                     object_id: object.id,
-                    incarnation: object.incarnation,
+                    incarnation: Some(object.incarnation),
                     counter_type: command.counter_type.clone(),
                     count: *count,
                     name: object.name.clone(),

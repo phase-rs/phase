@@ -2919,9 +2919,11 @@ pub struct CounterAddedRecord {
     pub object_id: ObjectId,
     /// CR 400.7: the recipient's incarnation when the counters were put on it. A zone
     /// change reuses the storage `ObjectId` but is a new object, so current-object
-    /// readers (`FilterProp::CountersPutOnThisTurn`) must match this too.
+    /// readers (`FilterProp::CountersPutOnThisTurn`) must match this too. `None` only for a
+    /// record restored from a save that predates the stamp: its recipient incarnation is
+    /// unprovable, so readers fall back to the object-id-only match.
     #[serde(default)]
-    pub incarnation: u64,
+    pub incarnation: Option<u64>,
     pub counter_type: CounterType,
     pub count: u32,
     pub name: String,
@@ -35386,6 +35388,8 @@ impl GameState {
     /// times can compare equal on everything a mandatory action could change.
     pub(crate) fn normalize_for_loop(&self) -> GameState {
         let mut clone = self.clone();
+        // CR 608.2h: collected before the trigger identities below are cleared.
+        let departed_sources = clone.departed_trigger_source_refs();
         // apply() resets these at the start of every player action, so a position compares as
         // the next action starts from it.
         clone.clear_player_action_transients();
@@ -35711,7 +35715,7 @@ impl GameState {
         // keeps apart; entries are append-only and immutable, so two samples
         // of one game hold equal entries at every common position anyway.
 
-        clone.retain_carrier_referenced_lki();
+        clone.retain_carrier_referenced_lki_with(departed_sources);
         // CR 104.4b + CR 608.2h: last-known copiable values no ability can still
         // read as its own copy source are history, not position — pruned against
         // the set captured above, before the identities were erased.
@@ -35754,7 +35758,67 @@ impl GameState {
         }
     }
 
+    /// CR 400.7 + CR 608.2h: the incarnations of departed triggered sources that a
+    /// stack or pending trigger ability still reads through its `TriggerSourceContext`
+    /// (`quantity::source_counters_lki_for_context` reads the exit snapshot of exactly
+    /// that incarnation). A source still live at its observed incarnation reads the
+    /// object itself, so it names no snapshot.
+    pub(crate) fn departed_trigger_source_refs(&self) -> HashSet<ObjectIncarnationRef> {
+        let mut refs = HashSet::new();
+        let mut record = |ability: &ResolvedAbility| {
+            ability.for_each_trigger_source(&mut |source| {
+                if matches!(source.source_read(self), TriggerSourceRead::Latched(_)) {
+                    refs.insert(source.identity.reference);
+                }
+            });
+        };
+        for entry in self.stack.iter().chain(self.resolving_stack_entry.iter()) {
+            if let Some(ability) = entry.ability() {
+                record(ability);
+            }
+        }
+        let ordering = self
+            .pending_trigger_order
+            .iter()
+            .flat_map(|order| order.groups.iter())
+            .flat_map(|group| group.triggers.iter())
+            .map(|context| &context.pending);
+        for pending in self
+            .pending_trigger
+            .as_deref()
+            .into_iter()
+            .chain(
+                self.deferred_triggers
+                    .iter()
+                    .map(|deferred| &deferred.pending),
+            )
+            .chain(ordering)
+        {
+            record(&pending.ability);
+        }
+        if let Some(resume) = self.pending_triggered_mana_resume.as_deref() {
+            record(&resume.current.pending.ability);
+            for context in resume.accepted_tail.iter() {
+                record(&context.pending.ability);
+            }
+            for batch in resume.collected_batches.iter() {
+                for context in batch.contexts.iter() {
+                    record(&context.pending.ability);
+                }
+            }
+        }
+        refs
+    }
+
     pub(crate) fn retain_carrier_referenced_lki(&mut self) {
+        let departed_sources = self.departed_trigger_source_refs();
+        self.retain_carrier_referenced_lki_with(departed_sources);
+    }
+
+    fn retain_carrier_referenced_lki_with(
+        &mut self,
+        departed_sources: HashSet<ObjectIncarnationRef>,
+    ) {
         // CR 104.4b + CR 732.2a: incarnation-versioned LKI is historical support
         // state, not independently loop-material state. Retain only snapshots
         // reachable from trigger-event carriers that can still resume or resolve
@@ -35764,7 +35828,7 @@ impl GameState {
         // WaitingFor copies are intentionally not a separate authority: every
         // trigger-event-bearing prompt has one of those pending/continuation
         // carriers, and loop samples are taken at the post-pipeline Priority frame.
-        let mut referenced_lki = HashSet::new();
+        let mut referenced_lki = departed_sources;
         let mut record_event = |event: &GameEvent| {
             if let GameEvent::ZoneChanged {
                 object_id, record, ..
@@ -36377,6 +36441,13 @@ impl GameState {
                 present.entry(object_id).or_default().push(*incarnation);
             });
         });
+        // CR 122.6 + CR 400.7: a counter record's recipient stamp is ranked with the live
+        // incarnation it is compared against, so a stale stamp stays distinct from the current one.
+        for record in self.counter_added_this_turn.iter() {
+            if let Some(stamp) = record.incarnation {
+                present.entry(record.object_id).or_default().push(stamp);
+            }
+        }
         let mut grants: HashMap<ObjectId, Vec<u64>> = HashMap::new();
         may_trigger_origins(self, &mut |definition_ref| {
             definition_ref.for_each_incarnation_mut(&mut |object_id, incarnation| {
@@ -36546,6 +36617,11 @@ impl GameState {
                 }
             }
         });
+        for record in self.counter_added_this_turn.iter_mut() {
+            if let Some(stamp) = record.incarnation.as_mut() {
+                *stamp = canonical(record.object_id, *stamp);
+            }
+        }
         let rank_block_history = |pairs: HashSet<BlockHistoryPair>| -> HashSet<BlockHistoryPair> {
             pairs
                 .into_iter()
@@ -48735,6 +48811,153 @@ mod tests {
             "a targeter naming the other spell is a different position"
         );
         assert_eq!(early.next_spell_announcement, 0);
+    }
+
+    fn counter_record(object_id: ObjectId, stamp: Option<u64>) -> CounterAddedRecord {
+        CounterAddedRecord {
+            actor: PlayerId(0),
+            object_id,
+            incarnation: stamp,
+            counter_type: crate::types::counter::CounterType::Plus1Plus1,
+            count: 1,
+            name: "Runner".to_string(),
+            core_types: vec![crate::types::card_type::CoreType::Creature],
+            subtypes: Vec::new(),
+            supertypes: Vec::new(),
+            keywords: Vec::new(),
+            power: Some(2),
+            toughness: Some(2),
+            colors: Vec::new(),
+            mana_value: 0,
+            controller: PlayerId(0),
+            owner: PlayerId(0),
+            counters: HashMap::new(),
+        }
+    }
+
+    /// CR 122.6 + CR 400.7 + CR 104.4b: normalization remaps a counter record's recipient
+    /// stamp with the same map as the object's live incarnation, so the current stamp still
+    /// matches and a stale one stays distinct.
+    #[test]
+    fn normalize_for_loop_remaps_counter_stamps_with_the_object_incarnation() {
+        use crate::game::filter::{matches_target_filter, FilterContext};
+        use crate::types::ability::{FilterProp, TargetFilter, TypedFilter};
+        use crate::types::counter::CounterMatch;
+        let mut state = GameState::new_two_player(7);
+        let runner = create_object(
+            &mut state,
+            CardId(710),
+            PlayerId(0),
+            "Runner".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let object = state.objects.get_mut(&runner).unwrap();
+            object.incarnation = 5;
+            object.card_types.core_types = vec![crate::types::card_type::CoreType::Creature];
+        }
+        for stamp in [Some(5), Some(3)] {
+            state
+                .counter_added_this_turn
+                .push_back(counter_record(runner, stamp));
+        }
+        // Only the current-incarnation record counts: exactly one counter, not two.
+        let filter: TargetFilter = TypedFilter::creature()
+            .properties(vec![FilterProp::CountersPutOnThisTurn {
+                actor: crate::types::ability::CountScope::Controller,
+                counters: CounterMatch::OfType(crate::types::counter::CounterType::Plus1Plus1),
+                comparator: crate::types::ability::Comparator::EQ,
+                count: 1,
+            }])
+            .into();
+        let read = |state: &GameState| {
+            matches_target_filter(
+                state,
+                runner,
+                &filter,
+                &FilterContext::from_source(state, runner),
+            )
+        };
+        assert!(read(&state), "reach guard: the stale stamp is excluded");
+        let normalized = state.normalize_for_loop();
+        assert!(
+            read(&normalized),
+            "the current stamp is remapped with the object"
+        );
+        let live = normalized.objects[&runner].incarnation;
+        let stamps: Vec<Option<u64>> = normalized
+            .counter_added_this_turn
+            .iter()
+            .map(|record| record.incarnation)
+            .collect();
+        assert_eq!(stamps.iter().filter(|s| **s == Some(live)).count(), 1);
+        assert!(stamps.iter().all(Option::is_some));
+        // A legacy record (no stamp) keeps the object-id-only match and survives normalization.
+        state
+            .counter_added_this_turn
+            .push_back(counter_record(runner, None));
+        assert!(!read(&state), "legacy record adds a second counter");
+        assert!(!read(&state.normalize_for_loop()));
+    }
+
+    /// CR 400.7 + CR 608.2h + CR 104.4b: a pending trigger whose source has left the battlefield
+    /// reads that incarnation's exit snapshot; normalization must keep that row.
+    #[test]
+    fn normalize_for_loop_keeps_the_exit_snapshot_a_pending_departed_source_trigger_reads() {
+        use crate::game::filter::exit_lki_for_incarnation;
+        use crate::game::zones::move_to_zone;
+        use crate::types::counter::{parse_counter_type, CounterType};
+        let mut state = GameState::new_two_player(7);
+        let runner = create_object(
+            &mut state,
+            CardId(720),
+            PlayerId(0),
+            "Runner".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let object = state.objects.get_mut(&runner).unwrap();
+            object.counters.insert(CounterType::Plus1Plus1, 1);
+            object.counters.insert(parse_counter_type("oil"), 1);
+        }
+        let context = crate::game::triggers::trigger_source_context_for_latch(
+            &state,
+            &state.objects[&runner],
+        );
+        let departed = context.identity.reference;
+        let mut ability = ResolvedAbility::new(Effect::NoOp, Vec::new(), runner, PlayerId(0));
+        ability.trigger_source = Some(context);
+        state.pending_trigger = Some(Box::new(crate::game::triggers::PendingTrigger {
+            source_id: runner,
+            controller: PlayerId(0),
+            condition: None,
+            ability: Box::new(ability),
+            timestamp: 0,
+            target_constraints: Vec::new(),
+            distribute: None,
+            trigger_event: None,
+            modal: None,
+            mode_abilities: vec![],
+            description: None,
+            may_trigger_origin: None,
+            subject_match_count: None,
+            die_result: None,
+            provenance: None,
+        }));
+        move_to_zone(&mut state, runner, Zone::Exile, &mut Vec::new());
+        let kinds = |state: &GameState, incarnation: u64| {
+            exit_lki_for_incarnation(state, runner, incarnation).map(|lki| lki.counters.len())
+        };
+        assert_eq!(
+            kinds(&state, departed.incarnation),
+            Some(2),
+            "reach guard: the departure recorded both counter kinds"
+        );
+        assert_eq!(state.departed_trigger_source_refs().len(), 1);
+        let normalized = state.normalize_for_loop();
+        let rows = &normalized.lki_by_incarnation[&runner];
+        assert_eq!(rows.len(), 1, "the pending trigger's exit row is retained");
+        assert_eq!(rows.values().next().unwrap().counters.len(), 2);
     }
 
     fn announced_departure(

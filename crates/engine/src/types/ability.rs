@@ -4745,6 +4745,17 @@ impl ResolvedAbility {
         }
     }
 
+    /// Yields each triggered-source context in this ability tree (CR 603.4), so loop
+    /// normalization can retain the exit last-known information they still read.
+    pub(crate) fn for_each_trigger_source(&self, f: &mut impl FnMut(&TriggerSourceContext)) {
+        if let Some(source) = self.trigger_source.as_ref() {
+            f(source);
+        }
+        for (_, child) in self.child_links() {
+            child.for_each_trigger_source(f);
+        }
+    }
+
     /// Clears provenance that distinguishes otherwise identical triggered
     /// abilities for structural comparison. This deliberately clears the
     /// complete owned authorities together; retaining either a source context

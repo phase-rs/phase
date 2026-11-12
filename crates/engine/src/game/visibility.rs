@@ -5548,7 +5548,7 @@ mod tests {
         let counter_record = |object_id: ObjectId, name: &str| CounterAddedRecord {
             actor: owner,
             object_id,
-            incarnation: 0,
+            incarnation: Some(0),
             counter_type: CounterType::Plus1Plus1,
             count: 1,
             name: name.to_string(),

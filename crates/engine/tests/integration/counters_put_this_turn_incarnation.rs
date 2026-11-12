@@ -108,3 +108,34 @@ fn la_forge_ignores_a_permanent_that_was_blinked_after_getting_the_counter() {
     activate_la_forge(&mut b);
     assert_eq!(faeries(&b.runner), 0);
 }
+
+/// A record restored from a save that predates the stamp carries no incarnation. Its
+/// recipient incarnation is unprovable, so it keeps the object-id-only match: a permanent that
+/// never moved still counts, even when its current incarnation is nonzero.
+#[test]
+fn legacy_unstamped_record_still_counts_for_a_permanent_that_never_moved() {
+    let mut b = board();
+    put_counter_on_bear(&mut b);
+    let record = b.runner.state().counter_added_this_turn[0].clone();
+    let mut json = serde_json::to_value(&record).expect("serialize record");
+    json.as_object_mut()
+        .expect("record is an object")
+        .remove("incarnation");
+    let legacy: engine::types::game_state::CounterAddedRecord =
+        serde_json::from_value(json).expect("a legacy record without the stamp loads");
+    assert_eq!(legacy.incarnation, None);
+    b.runner.state_mut().counter_added_this_turn.clear();
+    b.runner
+        .state_mut()
+        .counter_added_this_turn
+        .push_back(legacy);
+    b.runner
+        .state_mut()
+        .objects
+        .get_mut(&b.bear)
+        .unwrap()
+        .bump_incarnation();
+    assert_ne!(b.runner.state().objects[&b.bear].incarnation, 0);
+    activate_la_forge(&mut b);
+    assert_eq!(faeries(&b.runner), 1);
+}

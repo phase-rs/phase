@@ -10993,7 +10993,10 @@ fn matches_filter_prop(
                 .iter()
                 .filter(|record| {
                     record.object_id == object_id
-                        && record.incarnation == current_incarnation
+                        // `None` is a legacy record with no provable stamp: object-id-only.
+                        && record
+                            .incarnation
+                            .is_none_or(|stamp| stamp == current_incarnation)
                         && counters.matches(&record.counter_type)
                         && filter_count_scope_actor_matches(actor, controller, record.actor)
                 })
