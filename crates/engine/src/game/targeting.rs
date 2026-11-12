@@ -3850,14 +3850,18 @@ fn add_stack_spells(
 /// Enlightened Master (hexproof) on the stack, Disallow targets a
 /// protection-from-blue creature spell, and Unearth targets a
 /// protection-from-black creature card in the graveyard. Only a
-/// functioning `StaticMode::CantBeTargeted` (CR 113.6b: it functions only in the
-/// zones it names) still applies.
+/// `StaticMode::CantBeTargeted` still applies: one on the candidate itself
+/// (CR 113.6b: it functions only in the zones it names), or one on a
+/// battlefield object (CR 113.6: its source functions on the battlefield) whose
+/// `affected` filter names the candidate's zone — Ground Seal's "cards in
+/// graveyards can't be the targets of spells or abilities".
 fn can_target_off_battlefield(
     obj: &crate::game::game_object::GameObject,
     source_controller: PlayerId,
     state: &GameState,
 ) -> bool {
     !own_cant_be_targeted_prohibits(obj, source_controller, state)
+        && !functioning_static_cant_be_targeted_prohibits(obj, source_controller, state)
 }
 
 /// CR 702.18a + CR 702.11b + CR 109.5 + CR 113.6b: whether a
@@ -4158,6 +4162,63 @@ fn can_target(
     )
 }
 
+/// CR 113.6 + CR 113.6b: whether a functioning `StaticMode::CantBeTargeted` of
+/// some OTHER object (Shielding Plax, Ground Seal, an anthem-style "creatures you
+/// control" restriction) prohibits `source_controller` from targeting `obj`. The
+/// static's source functions where its own zones of function say (the battlefield
+/// by default); `obj` may be anywhere. The single scan authority for both
+/// [`can_target_with_source_name`] (battlefield) and
+/// [`can_target_off_battlefield`] (stack, graveyard, exile, ...).
+///
+/// CR 109.2 + CR 109.2a: a filter that names no zone ("creatures you control",
+/// "enchanted creature") describes permanents on the battlefield, so for an
+/// off-battlefield `obj` a static applies only when its `affected` filter
+/// explicitly names `obj`'s current zone ("cards in graveyards").
+fn functioning_static_cant_be_targeted_prohibits(
+    obj: &crate::game::game_object::GameObject,
+    source_controller: PlayerId,
+    state: &GameState,
+) -> bool {
+    if !super::functioning_abilities::static_kind_present(
+        state,
+        crate::types::statics::StaticModeKind::CantBeTargeted,
+    ) {
+        return false;
+    }
+    super::functioning_abilities::game_functioning_statics(state).any(|(source_obj, def)| {
+        let crate::types::statics::StaticMode::CantBeTargeted { ref who } = def.mode else {
+            return false;
+        };
+        let Some(ref filter) = def.affected else {
+            return false;
+        };
+        (obj.zone == Zone::Battlefield || filter.extract_in_zone() == Some(obj.zone))
+            && crate::game::filter::matches_target_filter(
+                state,
+                obj.id,
+                filter,
+                &crate::game::filter::FilterContext::from_source(state, source_obj.id),
+            )
+            && super::static_abilities::static_condition_matches_context(
+                state,
+                source_obj.id,
+                source_obj.controller,
+                def,
+                &super::static_abilities::StaticCheckContext {
+                    target_id: Some(obj.id),
+                    ..Default::default()
+                },
+            )
+            && super::static_abilities::prohibition_scope_matches_player_anchored(
+                who,
+                source_controller,
+                source_obj,
+                def.source_controller.unwrap_or(source_obj.controller),
+                state,
+            )
+    })
+}
+
 /// CR 702.16b + CR 608.2h: Full battlefield targeting check taking an optional source name
 /// into account for `ProtectionTarget::ChosenCardName`.
 fn can_target_with_source_name(
@@ -4217,40 +4278,9 @@ fn can_target_with_source_name(
         return false;
     }
 
-    // 2. Battlefield-scoped statics (e.g. Shielding Plax on an enchanted creature, or an anthem):
-    if super::functioning_abilities::static_kind_present(
-        state,
-        crate::types::statics::StaticModeKind::CantBeTargeted,
-    ) {
-        for (source_obj, def) in super::functioning_abilities::game_functioning_statics(state) {
-            if let crate::types::statics::StaticMode::CantBeTargeted { ref who } = def.mode {
-                if let Some(ref filter) = def.affected {
-                    if crate::game::filter::matches_target_filter(
-                        state,
-                        obj.id,
-                        filter,
-                        &crate::game::filter::FilterContext::from_source(state, source_obj.id),
-                    ) && super::static_abilities::static_condition_matches_context(
-                        state,
-                        source_obj.id,
-                        source_obj.controller,
-                        def,
-                        &super::static_abilities::StaticCheckContext {
-                            target_id: Some(obj.id),
-                            ..Default::default()
-                        },
-                    ) && super::static_abilities::prohibition_scope_matches_player_anchored(
-                        who,
-                        source_controller,
-                        source_obj,
-                        def.source_controller.unwrap_or(source_obj.controller),
-                        state,
-                    ) {
-                        return false;
-                    }
-                }
-            }
-        }
+    // 2. Statics of other battlefield objects (e.g. Shielding Plax on an enchanted creature).
+    if functioning_static_cant_be_targeted_prohibits(obj, source_controller, state) {
+        return false;
     }
     // CR 702.21a: Ward is a triggered ability, not a targeting restriction.
     // Targeting is legal; the ward trigger fires via process_triggers() and
