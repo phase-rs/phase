@@ -21,7 +21,9 @@ use crate::types::game_state::{
     WaitingFor,
 };
 use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
-use crate::types::mana::{ManaColor, ManaCost, ManaPool, ManaType, PaymentContext};
+use crate::types::mana::{
+    ManaColor, ManaCost, ManaPool, ManaType, PaymentContext, TapsForManaSelection,
+};
 #[cfg(test)]
 use crate::types::phase::Phase;
 use crate::types::player::PlayerId;
@@ -482,6 +484,56 @@ pub(super) fn resolve_mana_ability_excluding(
     resume: Option<&ManaAbilityResume>,
     parent: Option<&ManaAbilityCostParent>,
 ) -> Result<(), EngineError> {
+    let prepared = prepare_mana_ability_excluding(
+        state,
+        source_id,
+        player,
+        ability_def,
+        events,
+        color_override,
+        Vec::new(),
+        excluded_sources,
+        sub_cost_demand,
+        resume,
+        parent,
+    )?;
+    execute_prepared_mana_ability(state, prepared, events)
+}
+
+/// The announced activation and its unpaid cursor exist before a nested
+/// funding activation can suspend the synchronous call frame.
+pub(super) struct PreparedManaAbility {
+    pending: PendingManaAbility,
+    cursor: ManaAbilityCostCursor,
+    waiting_before: WaitingFor,
+    cost_event_start: usize,
+}
+
+impl PreparedManaAbility {
+    pub(super) fn cost_parent(&self) -> ManaAbilityCostParent {
+        ManaAbilityCostParent {
+            pending: Box::new(self.pending.clone()),
+            cursor: Box::new(self.cursor.clone()),
+            lifecycle: ManaAbilityCostParentLifecycle::Synchronous,
+            current_action_event_start: self.cost_event_start,
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn prepare_mana_ability_excluding(
+    state: &mut GameState,
+    source_id: ObjectId,
+    player: PlayerId,
+    ability_def: &AbilityDefinition,
+    events: &[GameEvent],
+    color_override: Option<ProductionOverride>,
+    selected_taps_for_mana: Vec<TapsForManaSelection>,
+    excluded_sources: &HashSet<ObjectId>,
+    sub_cost_demand: Option<&mana_payment::ColorDemand>,
+    resume: Option<&ManaAbilityResume>,
+    parent: Option<&ManaAbilityCostParent>,
+) -> Result<PreparedManaAbility, EngineError> {
     let waiting_before = state.waiting_for.clone();
     // CR 602.5: Defense-in-depth: enforce activation prohibitions at resolution time.
     if super::casting::is_blocked_by_cant_be_activated(state, player, source_id, ability_def) {
@@ -523,6 +575,7 @@ pub(super) fn resolve_mana_ability_excluding(
         // synchronous auto-tap recursively retry its still-live caller.
         resume: ManaAbilityResume::Priority,
         cost_move_resume: resume.cloned(),
+        selected_taps_for_mana,
         chosen_tappers: None,
         chosen_discards: Vec::new(),
         chosen_mana_payment: None,
@@ -546,19 +599,33 @@ pub(super) fn resolve_mana_ability_excluding(
     // snapshot without duplicating the root's eventual scan.
     let prepared_parent =
         parent.map(|parent| parent_snapshot_with_current_cost_events(parent, events));
-    let waiting_for = continue_mana_ability_cost_payment(
-        state,
+    Ok(PreparedManaAbility {
         pending,
-        mana_ability_cost_cursor(
+        cursor: mana_ability_cost_cursor(
             &ability_def.cost,
             excluded_sources,
             sub_cost_demand,
             ManaAbilityCostResolutionMode::AutoResolved,
             prepared_parent.as_ref(),
         ),
-        events,
+        waiting_before,
         cost_event_start,
-    )?;
+    })
+}
+
+pub(super) fn execute_prepared_mana_ability(
+    state: &mut GameState,
+    prepared: PreparedManaAbility,
+    events: &mut Vec<GameEvent>,
+) -> Result<(), EngineError> {
+    let PreparedManaAbility {
+        pending,
+        cursor,
+        waiting_before,
+        cost_event_start,
+    } = prepared;
+    let waiting_for =
+        continue_mana_ability_cost_payment(state, pending, cursor, events, cost_event_start)?;
     // CR 605.3b + CR 601.2g-h: a mana ability that resolved returns to the
     // payment that activated it; only a cost move paused on a prompt replaces
     // the caller's root.
@@ -950,6 +1017,31 @@ pub fn activate_mana_ability(
     resume: ManaAbilityResume,
     color_override: Option<ProductionOverride>,
 ) -> Result<WaitingFor, EngineError> {
+    activate_mana_ability_with_selected_taps(
+        state,
+        source_id,
+        player,
+        ability_index,
+        ability_def,
+        events,
+        resume,
+        color_override,
+        Vec::new(),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn activate_mana_ability_with_selected_taps(
+    state: &mut GameState,
+    source_id: ObjectId,
+    player: PlayerId,
+    ability_index: usize,
+    ability_def: &AbilityDefinition,
+    events: &mut Vec<GameEvent>,
+    resume: ManaAbilityResume,
+    color_override: Option<ProductionOverride>,
+    selected_taps_for_mana: Vec<TapsForManaSelection>,
+) -> Result<WaitingFor, EngineError> {
     let source = state
         .objects
         .get(&source_id)
@@ -1039,6 +1131,7 @@ pub fn activate_mana_ability(
             color_override,
             resume,
             cost_move_resume: None,
+            selected_taps_for_mana,
             chosen_tappers: None,
             chosen_discards: Vec::new(),
             chosen_mana_payment: None,
@@ -1443,6 +1536,13 @@ pub fn handle_choose_mana_color(
             events,
         );
     });
+
+    settle_selected_tap_mana_triggers(
+        state,
+        events,
+        choice_action_start,
+        &pending.selected_taps_for_mana,
+    );
 
     // CR 603.2 + CR 605.3c + CR 605.4a: the second typed half of the colour
     // seam. The frame this choice completes is a completed mana frame with an
@@ -3526,6 +3626,31 @@ fn pay_mana_ability_cost_component(
     }
 }
 
+/// CR 106.3 + CR 605.4a: publish only the completed producer's choices at its
+/// own immediate-trigger boundary. Cost payment and production subchains must
+/// never consume another, still-unproduced activation's selected Aura tail.
+fn settle_selected_tap_mana_triggers(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+    start: usize,
+    selected: &[TapsForManaSelection],
+) {
+    let enclosing = std::mem::take(&mut state.pending_taps_for_mana_overrides);
+    state
+        .pending_taps_for_mana_overrides
+        .extend(selected.iter().map(|selection| {
+            (
+                crate::types::ability::TriggerDefinitionRef {
+                    source: selection.source,
+                    occurrence: selection.occurrence.clone(),
+                },
+                selection.production_override.clone(),
+            )
+        }));
+    super::triggers::resolve_tap_mana_triggers_inline(state, events, start);
+    state.pending_taps_for_mana_overrides = enclosing;
+}
+
 fn finish_mana_ability_cost_payment(
     state: &mut GameState,
     mut pending: PendingManaAbility,
@@ -3695,7 +3820,12 @@ fn finish_mana_ability_cost_payment(
     // CR 605.4a: A triggered mana ability resolves immediately after the mana
     // ability that triggered it, before the enclosing payment path collects
     // ordinary triggers or resumes its payment prompt.
-    super::triggers::resolve_tap_mana_triggers_inline(state, events, production_events_start);
+    settle_selected_tap_mana_triggers(
+        state,
+        events,
+        production_events_start,
+        &pending.selected_taps_for_mana,
+    );
     if let Some(parent) = parent {
         let mut parent_cursor = *parent.cursor;
         // CR 603.2 + CR 603.3b: Move the suspended child's frame-local batch
@@ -12365,6 +12495,7 @@ mod tests {
             color_override: None,
             resume: ManaAbilityResume::Priority,
             cost_move_resume: None,
+            selected_taps_for_mana: Vec::new(),
             chosen_tappers: None,
             chosen_discards: Vec::new(),
             chosen_mana_payment: None,
@@ -12469,6 +12600,7 @@ mod tests {
             color_override: None,
             resume: ManaAbilityResume::Priority,
             cost_move_resume: None,
+            selected_taps_for_mana: Vec::new(),
             chosen_tappers: None,
             chosen_discards: Vec::new(),
             chosen_mana_payment: None,
@@ -12682,6 +12814,7 @@ mod tests {
                 color_override: None,
                 resume: ManaAbilityResume::Priority,
                 cost_move_resume: None,
+                selected_taps_for_mana: Vec::new(),
                 chosen_tappers: None,
                 chosen_discards: Vec::new(),
                 chosen_mana_payment: None,
@@ -12917,6 +13050,7 @@ mod tests {
             color_override: None,
             resume: ManaAbilityResume::Priority,
             cost_move_resume: None,
+            selected_taps_for_mana: Vec::new(),
             chosen_tappers: None,
             chosen_discards: Vec::new(),
             chosen_mana_payment: None,
@@ -13025,6 +13159,7 @@ mod tests {
             color_override: None,
             resume: ManaAbilityResume::Priority,
             cost_move_resume: None,
+            selected_taps_for_mana: Vec::new(),
             chosen_tappers: None,
             chosen_discards: Vec::new(),
             chosen_mana_payment: None,
@@ -14165,6 +14300,7 @@ mod tests {
             color_override: None,
             resume: ManaAbilityResume::Priority,
             cost_move_resume: None,
+            selected_taps_for_mana: Vec::new(),
             chosen_tappers: None,
             chosen_discards: Vec::new(),
             chosen_mana_payment: None,
@@ -15092,6 +15228,7 @@ mod tests {
             color_override: None,
             resume: ManaAbilityResume::Priority,
             cost_move_resume: None,
+            selected_taps_for_mana: Vec::new(),
             chosen_tappers: None,
             chosen_discards: Vec::new(),
             chosen_mana_payment: None,
@@ -15541,6 +15678,7 @@ mod tests {
             color_override: None,
             resume: ManaAbilityResume::Priority,
             cost_move_resume: None,
+            selected_taps_for_mana: Vec::new(),
             chosen_tappers: None,
             chosen_discards: Vec::new(),
             chosen_mana_payment: None,
@@ -16108,6 +16246,7 @@ mod tests {
             color_override: None,
             resume: ManaAbilityResume::Priority,
             cost_move_resume: None,
+            selected_taps_for_mana: Vec::new(),
             chosen_tappers: None,
             chosen_discards: Vec::new(),
             chosen_mana_payment: None,
@@ -16183,6 +16322,7 @@ mod tests {
             color_override: Some(ProductionOverride::SingleColor(ManaType::Black)),
             resume: ManaAbilityResume::Priority,
             cost_move_resume: None,
+            selected_taps_for_mana: Vec::new(),
             chosen_tappers: None,
             chosen_discards: Vec::new(),
             chosen_mana_payment: None,
@@ -16316,6 +16456,7 @@ mod tests {
             color_override: Some(ProductionOverride::SingleColor(ManaType::Green)),
             resume: ManaAbilityResume::Priority,
             cost_move_resume: None,
+            selected_taps_for_mana: Vec::new(),
             chosen_tappers: None,
             chosen_discards: Vec::new(),
             chosen_mana_payment: None,
@@ -16384,6 +16525,7 @@ mod tests {
             color_override: Some(ProductionOverride::SingleColor(ManaType::Red)),
             resume: ManaAbilityResume::Priority,
             cost_move_resume: None,
+            selected_taps_for_mana: Vec::new(),
             chosen_tappers: None,
             chosen_discards: Vec::new(),
             chosen_mana_payment: None,
@@ -16544,6 +16686,7 @@ mod tests {
             color_override: Some(ProductionOverride::SingleColor(ManaType::Green)),
             resume: ManaAbilityResume::Priority,
             cost_move_resume: None,
+            selected_taps_for_mana: Vec::new(),
             chosen_tappers: None,
             chosen_discards: Vec::new(),
             chosen_mana_payment: None,
