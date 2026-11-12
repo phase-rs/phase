@@ -35,7 +35,7 @@ use crate::types::player::PlayerId;
 use crate::types::proposed_event::TokenAttackRequest;
 #[cfg(debug_assertions)]
 use crate::types::resolution::debug_assert_runtime_resolution_invariants;
-use crate::types::resolution::ResolutionStack;
+use crate::types::resolution::{ResolutionFrame, ResolutionStack};
 use crate::types::resolved_commands::{
     ResolvedInformationAudience, ResolvedInformationEdit, ResolvedInformationLifetime,
     ResolvedOncePerTurnPermission, ResolvedRulesCommand,
@@ -10167,14 +10167,6 @@ pub(crate) fn drain_pending_cost_move_resume(
     Ok(Some(waiting_for))
 }
 
-/// CR 605.3b + CR 616.1 + CR 608.2c: the common priority boundary. One pass
-/// for every state except a parked counter-cost root whose replacement subtree
-/// is still live: `resume_resolution_frames` advances one top frame per pass,
-/// so a subtree several frames deep needs several, and the root resumes in the
-/// pass that retires the last of it (a due root resumes mid-pass through
-/// `resume_due_counter_cost_root`; the cost-move drain admits it at
-/// `PriorityBoundary`). A repeat needs the position to strictly decrease, so
-/// the loop ends.
 /// CR 118.11 + CR 614.11a: only a bare activation whose own cost is the draw
 /// instruction may resume at the common boundary; a cast or activation paused
 /// on an unrelated choice keeps its existing owner.
@@ -10221,6 +10213,19 @@ pub(crate) fn cost_includes_draw_instruction(cost: &crate::types::ability::Abili
     }
 }
 
+/// CR 605.3b + CR 616.1 + CR 608.2c: the common priority boundary. One pass
+/// for every state except two. First, a parked counter-cost root whose
+/// replacement subtree is still live: `resume_resolution_frames` advances one
+/// top frame per pass, so a subtree several frames deep needs several, and the
+/// root resumes in the pass that retires the last of it (a due root resumes
+/// mid-pass through `resume_due_counter_cost_root`; the cost-move drain admits
+/// it at `PriorityBoundary`). Second (CR 117.2e + CR 614.6), a pass that leaves
+/// a copy owner or a post-replacement drain on top at priority: a substitute's
+/// retired drain or completed inner copy owner exposed it, and the work it
+/// belongs to is unfinished (for a copy owner, the ability whose creation was
+/// replaced is still resolving). That repeat follows the whole pass, so the
+/// pass's entry commits (CR 614.12a) land before the exposed owner completes.
+/// A repeat needs the position to strictly decrease, so the loop ends.
 pub(super) fn resume_pending_continuation_if_priority(
     state: &mut GameState,
     events: &mut Vec<GameEvent>,
@@ -10229,8 +10234,20 @@ pub(super) fn resume_pending_continuation_if_priority(
         let before = SubtreePosition::at(&state.resolution_stack);
         resume_pending_continuation_pass(state, events)?;
         let after = SubtreePosition::at(&state.resolution_stack);
+        // CR 117.2e + CR 608.2 + CR 614.6: a pass that shrinks the subtree and
+        // leaves a copy owner or a post-replacement drain on top has exposed it (a
+        // substitute's drain retired, or an inner copy owner completed). The work
+        // that frame belongs to is unfinished (for a copy owner, the ability whose
+        // creation the substitute replaced is still resolving), so no player may
+        // receive priority: pass again. The repeat follows the whole pass, so that
+        // pass's entry commits land first (CR 614.12a).
+        let exposes_resolving_owner = matches!(
+            state.resolution_stack.last(),
+            Some(ResolutionFrame::CopyToken(_) | ResolutionFrame::PostReplacement(_))
+        );
         if !matches!(state.waiting_for, WaitingFor::Priority { .. })
-            || state.counter_cost_root_subtree() != CounterCostRootSubtree::Unfinished
+            || (state.counter_cost_root_subtree() != CounterCostRootSubtree::Unfinished
+                && !exposes_resolving_owner)
             || !after.is_strictly_inside(&before)
         {
             // CR 614.11a + CR 118.11: a bare cast/activation whose draw cost
