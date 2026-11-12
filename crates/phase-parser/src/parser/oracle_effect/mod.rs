@@ -106,13 +106,13 @@ use super::oracle_quantity::{
     parse_for_each_object_filter_clause_with_context,
 };
 use super::oracle_target::{
-    parse_anaphoric_target_ref, parse_definite_anaphor, parse_definite_parent_reference,
-    parse_event_context_ref, parse_fight_target, parse_parent_target_controller_population,
-    parse_target, parse_target_with_ctx, parse_target_with_disjunctive_restriction,
-    parse_target_with_syntax, parse_type_phrase_folding, parse_type_phrase_folding_with_ctx,
-    population_drops_block_history_clause, resolve_singular_exiled_card_target,
-    strip_block_history_clauses, unique_slot_for_anaphor, AnaphorNoun, AnaphorZoneClass,
-    DefiniteAnaphor, TargetSyntax,
+    history_clause_subject, parse_anaphoric_target_ref, parse_definite_anaphor,
+    parse_definite_parent_reference, parse_event_context_ref, parse_fight_target,
+    parse_parent_target_controller_population, parse_target, parse_target_with_ctx,
+    parse_target_with_disjunctive_restriction, parse_target_with_syntax, parse_type_phrase_folding,
+    parse_type_phrase_folding_with_ctx, population_drops_block_history_clause,
+    resolve_singular_exiled_card_target, strip_block_history_clauses, unique_slot_for_anaphor,
+    AnaphorNoun, AnaphorZoneClass, DefiniteAnaphor, TargetSyntax,
 };
 use super::oracle_util::{
     contains_possessive, first_sentence, has_unconsumed_conditional, parse_count_expr,
@@ -27098,15 +27098,19 @@ fn anaphor_rewrite_would_drop_this_way_binding(text_lower: &str, effect: &Effect
 /// as a legal target, so the caller fails the instruction closed. The populations are read
 /// across the clause's compound "and" chain, where a mass conjunct sits ("destroy it and
 /// all creatures it blocked this turn"), and from a broadcast grant's statics.
-fn instruction_drops_block_partner(clause: &ParsedEffectClause, lower: &str) -> bool {
-    let populations: Vec<&TargetFilter> = std::iter::once(&clause.effect)
+fn instruction_drops_block_partner(
+    clause: &ParsedEffectClause,
+    lower: &str,
+    ctx: &ParseContext,
+) -> bool {
+    let instructions: Vec<Vec<&TargetFilter>> = std::iter::once(&clause.effect)
         .chain(
             std::iter::successors(clause.sub_ability.as_deref(), |def| {
                 def.sub_ability.as_deref()
             })
             .map(|def| &*def.effect),
         )
-        .flat_map(|effect| {
+        .map(|effect| {
             // `mass_population_target` adds `ChangeZoneAll`, which the parser-side
             // list does not carry. CR 701.27a + CR 115.10a: a scope-`All` Transform
             // ("transform all Humans") keeps a population neither shared list names,
@@ -27140,18 +27144,33 @@ fn instruction_drops_block_partner(clause: &ParsedEffectClause, lower: &str) -> 
                 .into_iter()
                 .chain(grant_populations)
                 .chain(effect.target_filter())
+                .collect::<Vec<_>>()
         })
         .collect();
-    !populations.is_empty() && population_drops_block_history_clause(lower, &populations)
+    instructions
+        .iter()
+        .any(|populations| !populations.is_empty())
+        && population_drops_block_history_clause(lower, &instructions, |word| {
+            history_clause_subject(word, ctx)
+        })
 }
 
 #[cfg(test)]
 mod instruction_drops_block_partner_tests {
     use super::{instruction_drops_block_partner, parse_effect_chain, parsed_clause};
+    use crate::parser::oracle_ir::context::ParseContext;
     use crate::types::ability::{
         AbilityKind, BlockPairDirection, CombatHistoryScope, CombatRelation, CombatRelationSubject,
         Effect, EffectScope, FilterProp, TargetFilter, TypedFilter,
     };
+
+    /// A context whose bare "it" names the ability's source.
+    fn source_ctx() -> ParseContext {
+        ParseContext {
+            subject: Some(TargetFilter::SelfRef),
+            ..Default::default()
+        }
+    }
 
     /// "Creatures ~ blocked this turn", as `parse_block_history_clause` binds it.
     fn blocked_by_source_this_turn() -> TargetFilter {
@@ -27177,16 +27196,25 @@ mod instruction_drops_block_partner_tests {
         assert!(
             !instruction_drops_block_partner(
                 &parsed_clause(population(blocked_by_source_this_turn())),
-                &represented
+                &represented,
+                &source_ctx()
             ),
             "{verb}: a represented partner binds"
         );
         assert!(
-            instruction_drops_block_partner(&parsed_clause(population(bare.clone())), &represented),
+            instruction_drops_block_partner(
+                &parsed_clause(population(bare.clone())),
+                &represented,
+                &source_ctx()
+            ),
             "{verb}: a declined partner fails closed"
         );
         assert!(
-            instruction_drops_block_partner(&parsed_clause(population(bare)), &unbound),
+            instruction_drops_block_partner(
+                &parsed_clause(population(bare)),
+                &unbound,
+                &source_ctx()
+            ),
             "{verb}: an unbound partner fails closed"
         );
     }
@@ -50177,7 +50205,7 @@ fn parse_effect_chain_ir_body(
                 replace_target_with_parent(&mut clause.effect);
             }
         }
-        if instruction_drops_block_partner(&clause, &text_lower) {
+        if instruction_drops_block_partner(&clause, &text_lower, ctx) {
             clause.effect = Effect::unimplemented("block_history_partner", text.as_str());
             clause.sub_ability = None;
             clause.multi_target = None;

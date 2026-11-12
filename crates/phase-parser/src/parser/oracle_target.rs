@@ -7173,22 +7173,34 @@ pub(crate) fn strip_block_history_clauses(lower: &str) -> String {
     stripped
 }
 
-/// CR 608.2c + CR 608.2i: does `lower` hold a block-history clause that `populations`
+/// CR 608.2c + CR 608.2i: does `lower` hold a block-history clause that `instructions`
 /// don't carry as a restricting `BlockPairing` filter of the clause's own direction and
-/// window? Each clause consumes one such filter, so a represented clause can't vouch for a
-/// second clause of the same shape (`restricting_block_pairings`).
+/// window, on the subject `bind` resolves its partner word to? Each instruction (one
+/// conjunct's populations) vouches once per distinct relation, and each clause consumes
+/// one, so a represented clause can't vouch for a second clause of the same shape, and
+/// two populations of one instruction can't cover another instruction's dropped clause.
 /// Both ways a parse drops the clause land here: a partner no subject word covers
 /// (Triton Tactics: "one of those creatures"; Time to Reflect's filter phrase "a Zombie"),
 /// and a recognized "it" or "that creature" whose antecedent `resolve_relation_subject`
 /// rejects ("destroy target creature and all creatures it blocked this turn").
 pub(crate) fn population_drops_block_history_clause(
     lower: &str,
-    populations: &[&TargetFilter],
+    instructions: &[Vec<&TargetFilter>],
+    bind: impl Fn(CombatRelationSubjectWord) -> Option<CombatRelationSubject>,
 ) -> bool {
-    let mut available: Vec<BlockHistoryKey> = populations
-        .iter()
-        .flat_map(|population| restricting_block_pairings(population))
-        .collect();
+    let mut available: Vec<BlockHistoryKey> = Vec::new();
+    for populations in instructions {
+        let mut keys: Vec<BlockHistoryKey> = Vec::new();
+        for key in populations
+            .iter()
+            .flat_map(|population| restricting_block_pairings(population))
+        {
+            if !keys.contains(&key) {
+                keys.push(key);
+            }
+        }
+        available.extend(keys);
+    }
     let mut remaining = lower;
     while let Some((_, clause, rest)) =
         nom_primitives::scan_preceded(remaining, parse_block_history_clause)
@@ -7196,10 +7208,12 @@ pub(crate) fn population_drops_block_history_clause(
         let HistoryPartner::Subject(word) = clause.partner else {
             return true;
         };
-        match available
-            .iter()
-            .position(|key| key.represents(clause.direction, clause.scope, Some(word)))
-        {
+        let Some(subject) = bind(word) else {
+            return true;
+        };
+        match available.iter().position(|key| {
+            key.direction == clause.direction && key.scope == clause.scope && key.subject == subject
+        }) {
             Some(index) => {
                 available.swap_remove(index);
             }
@@ -7208,6 +7222,15 @@ pub(crate) fn population_drops_block_history_clause(
         remaining = rest;
     }
     false
+}
+
+/// CR 608.2c + CR 115.10a: the subject a history clause naming `word` binds under
+/// `ctx`, as the lowering binds it (`resolve_relation_subject`).
+pub(crate) fn history_clause_subject(
+    word: CombatRelationSubjectWord,
+    ctx: &ParseContext,
+) -> Option<CombatRelationSubject> {
+    resolve_relation_subject(word, CombatClauseKind::History, ctx)
 }
 
 /// One restricting history relation: the direction, window and subject a
@@ -13080,6 +13103,31 @@ mod tests {
         }
     }
 
+    /// The guard with each population its own instruction and "it" bound to `it`.
+    fn drops_with(
+        lower: &str,
+        instructions: &[Vec<&TargetFilter>],
+        it: CombatRelationSubject,
+    ) -> bool {
+        population_drops_block_history_clause(lower, instructions, |word| match word {
+            CombatRelationSubjectWord::Pronoun => Some(it),
+            CombatRelationSubjectWord::SelfName => Some(CombatRelationSubject::Source),
+            CombatRelationSubjectWord::Demonstrative => {
+                Some(CombatRelationSubject::AnaphoricTarget)
+            }
+            CombatRelationSubjectWord::TargetCreature => Some(CombatRelationSubject::ParentTarget),
+        })
+    }
+
+    /// [`drops_with`], each population its own instruction, "it" naming the source.
+    fn drops(lower: &str, populations: &[&TargetFilter]) -> bool {
+        let instructions: Vec<Vec<&TargetFilter>> = populations
+            .iter()
+            .map(|population| vec![*population])
+            .collect();
+        drops_with(lower, &instructions, CombatRelationSubject::Source)
+    }
+
     /// CR 608.2c: the anaphor text drops every history clause, wherever it sits,
     /// and keeps the rest; the guard reader flags a clause with an unnamed partner,
     /// and a named one whose population lacks the clause's own filter.
@@ -13097,47 +13145,44 @@ mod tests {
         );
         let bare = TargetFilter::Typed(TypedFilter::creature());
         let blocked_by_source = blocked_by_source_creatures(CombatHistoryScope::ThisTurn);
-        assert!(population_drops_block_history_clause(
+        assert!(drops(
             "tap each creature that was blocked by one of those creatures this turn",
             &[&blocked_by_source]
         ));
-        assert!(population_drops_block_history_clause(
+        assert!(drops(
             "destroy all creatures that were blocked by target wall this turn.",
             &[&bare]
         ));
         // A recognized "it" whose binding was declined leaves the bare population.
-        assert!(population_drops_block_history_clause(
+        assert!(drops(
             "destroy all creatures it blocked this turn.",
             &[&bare]
         ));
         // The filter must match the clause's own direction and window.
-        assert!(population_drops_block_history_clause(
+        assert!(drops(
             "destroy all creatures it blocked this combat.",
             &[&blocked_by_source]
         ));
-        assert!(population_drops_block_history_clause(
+        assert!(drops(
             "destroy all creatures that blocked or were blocked by it this turn.",
             &[&blocked_by_source]
         ));
-        assert!(!population_drops_block_history_clause(
+        assert!(!drops(
             "destroy all creatures it blocked this turn.",
             &[&blocked_by_source]
         ));
-        assert!(!population_drops_block_history_clause(
+        assert!(!drops(
             "destroy each creature that blocked or was blocked this turn.",
             &[&bare]
         ));
         // Each clause needs its own filter: the first represented clause can't vouch
         // for a second one of the same shape whose filter was dropped.
         let two_clauses = "destroy all creatures it blocked this turn, then tap all creatures it blocked this turn.";
-        assert!(!population_drops_block_history_clause(
+        assert!(!drops(
             two_clauses,
             &[&blocked_by_source, &blocked_by_source]
         ));
-        assert!(population_drops_block_history_clause(
-            two_clauses,
-            &[&blocked_by_source, &bare]
-        ));
+        assert!(drops(two_clauses, &[&blocked_by_source, &bare]));
         // A negated or disjunctive relation doesn't restrict the population.
         let relation = || FilterProp::CombatRelation {
             relation: CombatRelation::BlockPairing {
@@ -13162,11 +13207,11 @@ mod tests {
             },
         ] {
             assert!(
-                population_drops_block_history_clause(clause, &[&unrestricted]),
+                drops(clause, &[&unrestricted]),
                 "{unrestricted:?} doesn't represent the clause"
             );
         }
-        assert!(!population_drops_block_history_clause(
+        assert!(!drops(
             clause,
             &[&TargetFilter::And {
                 filters: vec![bare.clone(), blocked_by_source.clone()],
@@ -13176,10 +13221,7 @@ mod tests {
         // cover the second instruction's clause, whose population dropped it.
         let repeated =
             TargetFilter::Typed(TypedFilter::creature().properties(vec![relation(), relation()]));
-        assert!(population_drops_block_history_clause(
-            two_clauses,
-            &[&repeated, &bare]
-        ));
+        assert!(drops(two_clauses, &[&repeated, &bare]));
         // The relation must be on a subject the clause's partner can bind: "~" is
         // the source, not an earlier instruction's target.
         let on_earlier_target = TargetFilter::Typed(TypedFilter::creature().properties(vec![
@@ -13191,18 +13233,37 @@ mod tests {
                 subject: CombatRelationSubject::AnaphoricTarget,
             },
         ]));
-        assert!(population_drops_block_history_clause(
+        assert!(drops(
             "destroy all creatures ~ blocked this turn.",
             &[&on_earlier_target]
         ));
-        assert!(!population_drops_block_history_clause(
+        assert!(!drops(
             "destroy all creatures ~ blocked this turn.",
             &[&blocked_by_source]
         ));
-        // "it" binds either, by its antecedent.
-        assert!(!population_drops_block_history_clause(
+        // "it" binds the one subject its antecedent resolves to.
+        assert!(drops(clause, &[&on_earlier_target]));
+        assert!(!drops_with(
             clause,
-            &[&on_earlier_target]
+            &[vec![&on_earlier_target]],
+            CombatRelationSubject::AnaphoricTarget
+        ));
+        assert!(drops_with(
+            clause,
+            &[vec![&blocked_by_source]],
+            CombatRelationSubject::AnaphoricTarget
+        ));
+        // Two populations of one instruction vouch once: they can't cover the
+        // second instruction's clause, whose population dropped it.
+        assert!(drops_with(
+            two_clauses,
+            &[vec![&blocked_by_source, &blocked_by_source], vec![&bare]],
+            CombatRelationSubject::Source
+        ));
+        assert!(!drops_with(
+            two_clauses,
+            &[vec![&blocked_by_source], vec![&blocked_by_source]],
+            CombatRelationSubject::Source
         ));
     }
 

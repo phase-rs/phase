@@ -6453,21 +6453,16 @@ fn detect_combat_history_relation(
     evidence: &UnitEvidence,
     diagnostics: &mut Vec<OracleDiagnostic>,
 ) {
-    // CR 608.2i: each typed filter's own restricting relations, one per distinct
-    // relation (`restricting_block_pairings`). A filter under a negation or a
-    // disjunction, or one a property names (a reference, not the affected set),
-    // doesn't restrict, so the walk stops at those.
+    // CR 608.2i: each whole filter's own restricting relations, one per distinct
+    // relation (`restricting_block_pairings`), so leaves repeated under one `And`
+    // vouch once. The walk reads a filter whole and stops there; a filter a
+    // property names (a reference, not the affected set) is never reached.
     let mut available = evidence.collect_outside::<TargetFilter, BlockHistoryKey>(
         |node| {
             <FilterProp as serde::Deserialize>::deserialize(node).is_ok()
-                || <TargetFilter as serde::Deserialize>::deserialize(node).is_ok_and(|filter| {
-                    matches!(filter, TargetFilter::Not { .. } | TargetFilter::Or { .. })
-                })
+                || <TargetFilter as serde::Deserialize>::deserialize(node).is_ok()
         },
-        |filter| match filter {
-            TargetFilter::Typed(_) => restricting_block_pairings(filter),
-            _ => Vec::new(),
-        },
+        restricting_block_pairings,
     );
     // Each clause needs its own relation, of its direction and window and on a
     // subject its partner can bind, so a represented clause can't vouch for a
@@ -16059,6 +16054,24 @@ this spell's mana cost.\nDestroy target attacking creature without flying.",
                 with(vec![])
             ]),
             "one filter repeating a relation vouches for one clause"
+        );
+        assert!(
+            flagged(vec![
+                TargetFilter::And {
+                    filters: vec![restricting.clone(), restricting.clone()],
+                },
+                with(vec![]),
+            ]),
+            "one And repeating a leaf vouches for one clause"
+        );
+        assert!(
+            !flagged(vec![
+                TargetFilter::And {
+                    filters: vec![with(vec![]), restricting.clone()],
+                },
+                restricting.clone(),
+            ]),
+            "a relation under an outer And restricts"
         );
         let on_earlier_target = with(vec![FilterProp::CombatRelation {
             relation: CombatRelation::BlockPairing {
