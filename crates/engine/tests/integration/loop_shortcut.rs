@@ -617,23 +617,15 @@ fn setup_3p_optional_cascade(mode: LoopDetectionMode) -> (GameRunner, ObjectId) 
 }
 
 /// Worldgorger Dragon in P0's graveyard and Animate Dead in P0's hand with {B}{B} floating, at
-/// `seats` players and with each card of `p0_battlefield` under P0. Animate Dead on the Dragon
-/// starts a loop of mandatory triggers: the Dragon exiles Animate Dead and those cards, Animate
-/// Dead's leaving sacrifices the Dragon, and the Dragon's leaving returns them. Returns the runner,
-/// Animate Dead and the Dragon.
-fn setup_worldgorger(
-    seats: u8,
-    p0_battlefield: &[&str],
-    mode: LoopDetectionMode,
-) -> (GameRunner, ObjectId, ObjectId) {
+/// `seats` players. Animate Dead on the Dragon starts a loop of mandatory triggers: the Dragon
+/// exiles Animate Dead, Animate Dead's leaving sacrifices the Dragon, and the Dragon's leaving
+/// returns it. Returns the runner, Animate Dead and the Dragon.
+fn setup_worldgorger(seats: u8, mode: LoopDetectionMode) -> (GameRunner, ObjectId, ObjectId) {
     let db = crate::support::shared_card_db().expect("the committed card fixture loads");
     let mut scenario = GameScenario::new_n_player(seats, 7);
     scenario.at_phase(Phase::PreCombatMain);
     let dragon = scenario.add_real_card(P0, "Worldgorger Dragon", Zone::Graveyard, db);
     let animate = scenario.add_real_card(P0, "Animate Dead", Zone::Hand, db);
-    for &name in p0_battlefield {
-        scenario.add_real_card(P0, name, Zone::Battlefield, db);
-    }
     scenario.with_mana_pool(
         P0,
         (0..2)
@@ -648,7 +640,7 @@ fn setup_worldgorger(
 /// Three players, Worldgorger Dragon and Animate Dead alone: the loop moves no player toward
 /// losing and no player can stop it.
 fn setup_3p_draw(mode: LoopDetectionMode) -> (GameRunner, ObjectId, ObjectId) {
-    setup_worldgorger(3, &[], mode)
+    setup_worldgorger(3, mode)
 }
 
 /// Drive PassPriority/OrderTriggers beats, accumulating events, until a state OTHER than
@@ -10903,10 +10895,8 @@ fn r5_board() -> (GameRunner, ObjectId, ObjectId, ObjectId) {
         .add_enchantment_from_oracle(P0, "Sanguine Bond", SANGUINE_BOND)
         .id();
     scenario.add_creature_from_oracle(P0, "Bloodthirsty Conqueror", 5, 5, BLOODTHIRSTY_CONQUEROR);
-    let hexproof_src = scenario
-        .add_creature_to_hand_from_oracle(P1, "Leyline of Sanctity", 0, 0, LEYLINE_OF_SANCTITY)
-        .as_enchantment()
-        .id();
+    let db = crate::support::shared_card_db().expect("the committed card fixture loads");
+    let hexproof_src = scenario.add_real_card(P1, "Leyline of Sanctity", Zone::Hand, db);
     let kickoff = scenario
         .add_spell_to_hand_from_oracle(P0, "Blessed Wine", true, BLESSED_WINE)
         .id();
@@ -12285,12 +12275,12 @@ fn a_natural_drain_death_in_a_best_of_three_reaches_sideboarding() {
     );
 }
 
-/// CR 104.4b + CR 732.4: "Whenever you gain life, you gain 1 life." after a life gain is a
-/// mandatory loop that moves nobody toward losing — a drawn game, which a best-of-three scores
-/// and follows with sideboarding.
+/// CR 104.4b + CR 732.4: Animate Dead on Worldgorger Dragon is a mandatory loop that moves
+/// nobody toward losing — a drawn game, which a best-of-three scores and follows with
+/// sideboarding.
 #[test]
 fn a_mandatory_no_loss_loop_draw_in_a_best_of_three_reaches_sideboarding() {
-    let (mut runner, animate, dragon) = setup_worldgorger(2, &[], LoopDetectionMode::Interactive);
+    let (mut runner, animate, dragon) = setup_worldgorger(2, LoopDetectionMode::Interactive);
     install_match(&mut runner, MatchType::Bo3, LoopDetectionMode::Interactive);
     let _ = runner.cast(animate).target_object(dragon).resolve();
     let _ = drive_collect(&mut runner, 500);
