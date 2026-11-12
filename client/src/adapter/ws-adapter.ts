@@ -2470,9 +2470,10 @@ export class WebSocketAdapter implements EngineAdapter {
           // parked when B is retired, and never touch an already-adopted C.
           previousPending = this.rejectSocketRequests(false) || previousPending;
         }
-        // A never-adopted candidate's failure always moves the sticky policy
-        // (its close usually did already); an adopted, since superseded one
-        // never poisons its replacement. Only an attachment that still owns the
+        // A never-adopted candidate's failure always moves the sticky policy,
+        // even when a successor already exists: a successor started from a
+        // listener selects its codec lease after this, against the policy. An
+        // adopted, since superseded one never poisons its replacement. Only an attachment that still owns the
         // episode, with no current socket, records it as the latest binding.
         const ownsEpisode = this.stateCodecPreparation === preparation;
         if (!this.disposed && bootstrap.failure !== null && (ownsEpisode || bootstrap.socket === null)) {
@@ -2603,14 +2604,6 @@ export class WebSocketAdapter implements EngineAdapter {
         // A natural close already released the wrapper's resources; later
         // disposal must not request another physical close.
         closed = true;
-        // A never-adopted candidate's terminal codec failure, published just
-        // before this close, moves the sticky delivery policy now: before any
-        // continuation or listener can start a successor that would negotiate
-        // again. Policy only (`consumeFailure`); an adopted binding's failure
-        // already degraded it, and a retired one never poisons its replacement.
-        if (!this.disposed && bootstrap.socket === null && bootstrap.failure !== null) {
-          this.stateCodec.consumeFailure(bootstrap);
-        }
         confirmation?.closed();
         if (this.ws !== socket.ws) return;
         this.ws = null;
@@ -2852,7 +2845,19 @@ export class WebSocketAdapter implements EngineAdapter {
         // its own reply, which must follow every already-admitted frame.
         for (let index = 0; index < messages.length; index++) {
           if (this.disposed || this.ws !== socket.ws || this.stateCodecPreparation !== preparation) return;
-          handleSocketMessage(messages[index]!);
+          if (confirmation === null) {
+            handleSocketMessage(messages[index]!);
+            continue;
+          }
+          // A confirmed reconnect's buffered frames are the server's answers,
+          // which the merge base delivered to the live handler: a throwing
+          // listener there does not undo the committed adoption, just as it
+          // does not on live delivery (the transports isolate it).
+          try {
+            handleSocketMessage(messages[index]!);
+          } catch {
+            // The adopted socket and the remaining frames carry on.
+          }
         }
       }
       if (this.disposed || this.ws !== socket.ws || this.stateCodecPreparation !== preparation) return;
@@ -2922,9 +2927,10 @@ export class WebSocketAdapter implements EngineAdapter {
     // takeback, previews, export, seat mutation, abandon) are not gated: on the
     // merge base they went to the candidate, adopted at the handshake. Now, with
     // no incumbent (every product reconnect episode starts after the current
-    // socket closed), they fail locally until the bootstrap adopts the
-    // candidate; with a live incumbent (public API only) they go to it, where
-    // a refusal answers only that request.
+    // socket closed), they meet the closed-socket path until the bootstrap
+    // adopts the candidate, as they do during the backoff and handshake:
+    // `send` reports an `error`. With a live incumbent (public API only) they
+    // go to it, where a refusal answers only that request.
     if (this.confirmingPreparation !== null) {
       throw new AdapterError(
         AdapterErrorCode.ACTION_NOT_SENT,

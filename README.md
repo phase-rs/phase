@@ -455,11 +455,11 @@ draft reattach is answered by a plain frame first, so this server never puts a
 decode there). A draft `DraftActionRejected` adopts the candidate instead, as before:
 the server sends it both for refusals and after it has already moved the seat
 to the candidate, so the rejection replays there and rejects the reattach. A
-candidate's terminal codec failure moves the sticky snapshot-only policy: the
-game adapter applies it when the candidate closes, before anything is
-notified; the draft adapter applies it when it retires the candidate, and a
-successor started meanwhile still opens snapshot-only because its codec lease
-is checked against the policy when it arrives. After a close or the bound the game adapter retries through
+candidate's terminal codec failure moves the sticky snapshot-only policy: each
+adapter applies it when it retires the candidate (`retireSocket`,
+`abandonCandidate`), and a successor started meanwhile from a listener still
+opens snapshot-only because its codec lease is checked against the policy when
+it arrives. After a close or the bound the game adapter retries through
 `attemptReconnect`, a refusal ends the episode, and nothing retries a draft
 reattach. Two game attachments keep the write-time cutover: native sidecar
 sockets (`nativeAi` / `nativePregame`), whose transport this change leaves as it

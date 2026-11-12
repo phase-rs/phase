@@ -1483,7 +1483,19 @@ export class ServerDraftAdapter implements EngineAdapter {
       // replies are drained in wire order.
       for (let index = 0; index < setupMessages.length; index++) {
         if (!this.sockets.has(sourceSocket)) return;
-        handleMessage(setupMessages[index]!);
+        if (confirmation === null) {
+          handleMessage(setupMessages[index]!);
+          continue;
+        }
+        // A confirmed reattach's buffered frames are the server's answers,
+        // which the merge base delivered to the live handler: a throwing
+        // listener, or a frame that does not parse, does not undo the
+        // committed adoption, just as it does not on live delivery.
+        try {
+          handleMessage(setupMessages[index]!);
+        } catch {
+          // The adopted socket and the remaining frames carry on.
+        }
       }
       if (!this.sockets.has(sourceSocket)) return;
       sourceSocket.onmessage = handleMessage;

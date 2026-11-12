@@ -137,8 +137,9 @@ export class StateCodecAttachment {
   /** `null` while delivery is healthy; never holds `"ready"`. */
   private recovery: "recovering" | null = null;
   /**
-   * Delivery policy of the owning adapter. The first qualifying failure of the
-   * current attachment wins. Binding begin/adopt/reset/accept, recovery
+   * Delivery policy of the owning adapter. The first qualifying failure wins:
+   * the current attachment's, or a never-adopted candidate's when its owner
+   * retires it (`consumeFailure`). Binding begin/adopt/reset/accept, recovery
    * completion, healthy delivery, a new match and reconnect never reset it;
    * only {@link release} (adapter disposal) does. No clock, global or user
    * toggle re-enables negotiation.
@@ -237,8 +238,8 @@ export class StateCodecAttachment {
    * has its join credentials replaced by `null`. It degrades the adapter's policy
    * immediately only when `binding` is current and owns `currentSocket`: a
    * retired attachment never poisons its replacement, and a still-pending one's
-   * failure is applied by its owner (`consumeFailure`, policy only) when that
-   * candidate closes or is retired. It does not touch the recovery gate, which the close that
+   * failure is applied by its owner (`consumeFailure`, policy only) when it
+   * retires that candidate. It does not touch the recovery gate, which the close that
    * follows clears.
    */
   handleRecovery(

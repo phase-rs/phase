@@ -4146,8 +4146,11 @@ describe("ServerDraftAdapter — negotiated StateCodecV1", () => {
         // Reach guard: the codec was offered and the setup is on the wire.
         expect(offeredCodec(candidate)).toBe(true);
         expect(policyOf(adapter)).toEqual({ kind: "negotiate" });
-        // The server's codec confirmation, arriving after the write, contradicts
-        // the offer: a terminal confirmationFailure before adoption.
+        // Synthetic (adapter contract; this server cannot produce it: it sends a
+        // confirmation only when it selected StateCodecV1 and echoes that
+        // selection, phase-server socket_decode.rs:264-275): a confirmation that
+        // contradicts the offer after the write, a terminal confirmationFailure
+        // before adoption.
         candidate.dispatchSynthetic("message", JSON.stringify({
           type: "ServerHello", data: { server_version: "0.0.0-test", selected_state_codec: null },
         }));
@@ -4198,7 +4201,8 @@ describe("ServerDraftAdapter — negotiated StateCodecV1", () => {
             expect.stringContaining('"type":"ReconnectDraft"'),
           ));
           expect(offeredCodec(candidate)).toBe(true);
-          // A codec confirmation that contradicts the offer, after the write.
+          // Synthetic (adapter contract; this server cannot produce it, see
+          // above): a confirmation that contradicts the offer, after the write.
           candidate.dispatchSynthetic("message", JSON.stringify({
             type: "ServerHello", data: { server_version: "0.0.0-test", selected_state_codec: null },
           }));
@@ -4367,11 +4371,20 @@ describe("ServerDraftAdapter — negotiated StateCodecV1", () => {
         expect(ws.send.mock.calls.slice(incumbentSends)).toEqual([]);
         expect(candidate.send.mock.calls.slice(candidateSends)).toEqual([]);
         // attach_current_draft_match answers the candidate's reattach with the
-        // current match (phase-server main.rs:2795-2815).
+        // current match, its GameStarted and the view, in that order
+        // (phase-server main.rs:2812-2818).
         receive(candidate, "DraftMatchStart", roundTwo);
+        candidate.dispatchSynthetic("message", draftFrame("Full", {
+          type: "GameStarted",
+          data: { state: matchState("round-two-start"), your_player: 0, full_key: roundTwo.full_key },
+        }));
         receive(candidate, "DraftStateUpdate", { view: createMockDraftView({ status: "MatchInProgress" }) });
         await vi.waitFor(() => expect(reconnecting.value()).toEqual({ resolvedWith: undefined }));
         expect(adapter.currentMatchId).toBe("r2-t0");
+        // The new match runs on the candidate: its next command goes out there.
+        const command = adapter.submitAction({ type: "PassPriority" } as GameAction, 0).catch((error: unknown) => error);
+        await vi.waitFor(() => expect(candidate.send).toHaveBeenCalledWith(expect.stringContaining('"type":"Action"')));
+        void command;
         expect(events).not.toContainEqual(expect.objectContaining({ type: "draftActionRejected" }));
         expect(candidate.close).not.toHaveBeenCalled();
       } finally {
@@ -4524,7 +4537,8 @@ describe("ServerDraftAdapter — negotiated StateCodecV1", () => {
         await vi.advanceTimersByTimeAsync(SETUP_CONFIRMATION_TIMEOUT_MS + 130_000);
         expect(candidate.close).not.toHaveBeenCalled();
         expect(MockWebSocket.last).toBe(dialed);
-        // A later broadcast to that seat still lands.
+        // A later broadcast to that seat still lands (synthetic for the refusal
+        // made before the install, where the server routes nothing here).
         const view = createMockDraftView({ pick_number: 5 });
         receive(candidate, "DraftStateUpdate", { view });
         await vi.waitFor(() => expect(events).toContainEqual({ type: "draftViewUpdated", view }));
@@ -4551,6 +4565,50 @@ describe("ServerDraftAdapter — negotiated StateCodecV1", () => {
         }));
         await vi.waitFor(() => expect(command.value()).toMatchObject({ code: "WS_CLOSED" }));
         expect(candidate.close).toHaveBeenCalled();
+      } finally {
+        adapter.dispose();
+        vi.useRealTimers();
+      }
+    });
+
+    it("keeps the adopted candidate when a listener throws while its bootstrap is dispatched", async () => {
+      vi.useFakeTimers();
+      const { adapter, candidate, reconnecting } = await sentCandidate();
+      let armed = true;
+      adapter.onEvent((event) => {
+        if (event.type !== "draftViewUpdated" || !armed) return;
+        armed = false;
+        throw new Error("draftViewUpdated listener failed");
+      });
+      try {
+        receive(candidate, "DraftStateUpdate", { view: createMockDraftView() });
+        await vi.waitFor(() => expect(reconnecting.value()).toEqual({ resolvedWith: undefined }));
+        expect(armed).toBe(false);
+        expect(candidate.close).not.toHaveBeenCalled();
+        const pick = adapter.submitPick("picked-after-throw").catch((error: unknown) => error);
+        await vi.waitFor(() => expect(candidate.send).toHaveBeenCalledWith(
+          expect.stringContaining('"type":"DraftAction"'),
+        ));
+        void pick;
+      } finally {
+        adapter.dispose();
+        vi.useRealTimers();
+      }
+    });
+
+    it("keeps a malformed frame ahead of the bootstrap from undoing the adopted reattach", async () => {
+      vi.useFakeTimers();
+      const { adapter, candidate, reconnecting } = await sentCandidate();
+      const events: unknown[] = [];
+      adapter.onEvent((event) => events.push(event));
+      try {
+        candidate.dispatchSynthetic("message", '{"type":"DraftStateUpdate","data":{"view":');
+        receive(candidate, "DraftStateUpdate", { view: createMockDraftView() });
+        await vi.waitFor(() => expect(reconnecting.value()).toEqual({ resolvedWith: undefined }));
+        expect(candidate.close).not.toHaveBeenCalled();
+        const view = createMockDraftView({ pick_number: 6 });
+        receive(candidate, "DraftStateUpdate", { view });
+        await vi.waitFor(() => expect(events).toContainEqual({ type: "draftViewUpdated", view }));
       } finally {
         adapter.dispose();
         vi.useRealTimers();

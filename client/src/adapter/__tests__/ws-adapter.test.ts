@@ -6639,6 +6639,31 @@ describe("WebSocketAdapter — acquired socket ownership", () => {
       }
     });
 
+    it("keeps the adopted candidate when a listener throws while its bootstrap is dispatched", async () => {
+      const { adapter, raw, candidate, events } = await sentCandidate();
+      let armed = true;
+      adapter.onEvent((event) => {
+        if (event.type !== "reconnected" || !armed) return;
+        armed = false;
+        throw new Error("reconnected listener failed");
+      });
+      try {
+        deliverCodec(candidate, "Full", codecGameStarted(5, 5));
+        await vi.waitFor(() => expect(events).toContainEqual({ type: "reconnected", inGame: true }));
+        await vi.waitFor(() => expect(raw.close).toHaveBeenCalledOnce());
+        expect(armed).toBe(false);
+        // The throw does not undo the adoption: the candidate stays open and
+        // carries the next command, as it would on live delivery.
+        expect(candidate.close).not.toHaveBeenCalled();
+        const command = adapter.submitAction({ type: "PassPriority" } as GameAction, 0).catch((error: unknown) => error);
+        await vi.waitFor(() => expect(candidate.send).toHaveBeenCalledWith(expect.stringContaining('"type":"Action"')));
+        expect(events).not.toContainEqual({ type: "reconnectFailed" });
+        void command;
+      } finally {
+        adapter.dispose();
+      }
+    });
+
     it("does not adopt on a truncated canonical bootstrap: the bound retires both sockets and retries once", async () => {
       const random = vi.spyOn(Math, "random").mockReturnValue(0);
       const { adapter, raw, candidate, pending, events } = await sentCandidate();
