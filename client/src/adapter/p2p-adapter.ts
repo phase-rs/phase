@@ -4640,7 +4640,7 @@ export class P2PHostAdapter implements EngineAdapter {
       const transition = await this.applyBrowserMutation(() => this.wasm.submitAction(action, target.submitter));
       await this.publishHostSnapshot(transition.result);
       await this.broadcastStateUpdate(transition, undefined, true);
-      await this.runAiLoop();
+      await this.runAiLoop(true);
       void this.persistAuthoritativeState();
     } catch (err) {
       // Refused — e.g. while a takeback vote is pending. The payment stays
@@ -5445,7 +5445,30 @@ export class P2PHostAdapter implements EngineAdapter {
           break;
         }
         // Applied — same delivery contract as the "action" case above (#7924).
-        const isSaying = transition.result.events.some((e) => e.type === "PhraseSaid");
+        // Classify as a saying if the engine was waiting for a SayPhrase payment
+        // before this interaction. The expired-opaque-choice path sacrifices Toy Boat
+        // without emitting PhraseSaid (CR 702.24a), so event-based classification
+        // fails for lapses. Use the authoritative waiting_for state, as the Full
+        // server route does at crates/phase-server/src/main.rs:9189.
+        let isSaying = false;
+        try {
+          if (this.nativeBridge) {
+            const hostSnapshot = this.nativeBridge.viewerSnapshot(0);
+            const waitingFor = hostSnapshot.state.waiting_for;
+            isSaying =
+              waitingFor?.type === "UnlessPayment" &&
+              waitingFor.data.cost?.type === "SayPhrase";
+          } else {
+            const state = await this.wasm.getState();
+            const waitingFor = state.waiting_for;
+            isSaying =
+              waitingFor?.type === "UnlessPayment" &&
+              waitingFor.data.cost?.type === "SayPhrase";
+          }
+        } catch {
+          // If we can't determine, conservatively assume not a saying.
+          isSaying = false;
+        }
         try {
           await this.publishHostSnapshot(transition.result);
           await this.broadcastStateUpdate(transition, undefined, isSaying);
