@@ -214,6 +214,14 @@ export function isFormatConfigShape(value: unknown): value is FormatConfig {
     return false;
   }
 
+  if (
+    value.deck_size_origin !== undefined
+    && value.deck_size_origin !== "Registry"
+    && value.deck_size_origin !== "DraftSession"
+  ) {
+    return false;
+  }
+
   // The engine's `validate_custom_rules_consistency` invariant, mirrored:
   // `format == Custom(id) <=> custom_rules == Some(rules with that id)`. Both
   // directions, because a built-in config carrying rules is just as malformed

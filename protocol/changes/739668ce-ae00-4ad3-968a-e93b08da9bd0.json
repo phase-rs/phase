@@ -1,0 +1,7 @@
+{
+  "surfaces": [
+    "full",
+    "wire"
+  ],
+  "reason": "FormatConfig gains an optional deck_size_origin (Registry|DraftSession); a Cube draft session's Limited minimum deck size is carried as DraftSession provenance and is rejected without it, so older peers refuse such a config at decode."
+}

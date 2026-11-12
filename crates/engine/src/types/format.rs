@@ -1552,6 +1552,31 @@ fn default_deck_copy_limit_fallback() -> DeckCopyLimit {
     DeckCopyLimit::UpTo(1)
 }
 
+/// Provenance of a [`FormatConfig`]'s `deck_size` magnitude.
+///
+/// CR 100.2b: a Limited deck has a minimum size, and a Cube draft session
+/// configures that minimum when the draft is set up (it may be 20 or 50 rather
+/// than 40). That is a session decision, not a registry rule, so it is carried
+/// as typed provenance rather than by loosening Limited's registry check: a
+/// payload claims the session's authority explicitly, and only a Limited
+/// payload may.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DeckSizeOrigin {
+    /// The format registry's own deck-size rule (or a closed option list it
+    /// declares, `GameFormat::deck_size_authority`).
+    #[default]
+    Registry,
+    /// The draft session's configured minimum deck size. Admitted only for
+    /// `GameFormat::Limited` with a `Minimum(n)` rule, `n >= 1`.
+    DraftSession,
+}
+
+impl DeckSizeOrigin {
+    fn is_registry(&self) -> bool {
+        matches!(self, DeckSizeOrigin::Registry)
+    }
+}
+
 /// Configuration for a game format, describing player counts, starting life, deck rules, etc.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(remote = "Self")]
@@ -1567,6 +1592,13 @@ pub struct FormatConfig {
     /// format with a minimum; CR 903.13f(1) makes Commander Draft another).
     /// Compare through `DeckSizeRule::accepts`, never by hand.
     pub deck_size: DeckSizeRule,
+    /// Where `deck_size`'s magnitude was decided. `Registry` (the default, and
+    /// every payload that predates this field) means the format registry's own
+    /// rule, so the built-in gate holds it to the registry's value or option
+    /// list. `DraftSession` means a draft session resolved it at configuration
+    /// time; only Limited admits that (see [`DeckSizeOrigin`]).
+    #[serde(default, skip_serializing_if = "DeckSizeOrigin::is_registry")]
+    pub deck_size_origin: DeckSizeOrigin,
     pub singleton: bool,
     pub command_zone: bool,
     pub commander_damage_threshold: Option<u8>,
@@ -1896,6 +1928,12 @@ fn built_in_axes_no_looser_than_rules(config: &FormatConfig) -> Result<(), Strin
     // closed because this field is live in `DeckSizeRule::accepts`
     // (`game::deck_validation`) and `DeckSizeRule::min_cards`
     // (`game::match_flow`).
+    //
+    // SESSION-AUTHORIZED MAGNITUDE — CR 100.2b: a Cube draft session
+    // configures its own minimum deck size. A payload claims that with
+    // `DeckSizeOrigin::DraftSession`, which only Limited admits and only on
+    // the `Minimum` shape (the discriminant stays locked), with at least one
+    // card. Without the claim, Limited is held to the registry's 40.
     let deck_size_ok = match (config.deck_size, rules.deck_size) {
         // Same discriminant: fall through to the magnitude rule.
         (DeckSizeRule::Minimum(declared), DeckSizeRule::Minimum(registry))
@@ -1906,6 +1944,9 @@ fn built_in_axes_no_looser_than_rules(config: &FormatConfig) -> Result<(), Strin
                     .deck_size_authority()
                     .options()
                     .contains(&declared)
+                || (config.deck_size_origin == DeckSizeOrigin::DraftSession
+                    && config.format == GameFormat::Limited
+                    && declared >= 1)
         }
         // Different discriminant: refused outright, never consulted against
         // the option list. This is the arm that makes the magnitude set safe.
@@ -1925,6 +1966,17 @@ fn built_in_axes_no_looser_than_rules(config: &FormatConfig) -> Result<(), Strin
                 [] => String::new(),
                 options => format!(" (count may also be one of {options:?})"),
             },
+        ));
+    }
+
+    // deck_size_origin: only Limited may claim a draft session's authority.
+    if config.deck_size_origin == DeckSizeOrigin::DraftSession
+        && config.format != GameFormat::Limited
+    {
+        return Err(format!(
+            "FormatConfig.deck_size_origin is DraftSession, but {} is not a draft format — only \
+             Limited deck sizes are configured by a draft session",
+            config.format,
         ));
     }
 
@@ -4270,6 +4322,7 @@ impl FormatConfig {
             allow_debug_actions: false,
             horde_ruleset: None,
             custom_rules: None,
+            deck_size_origin: Default::default(),
         }
     }
 
@@ -4293,6 +4346,7 @@ impl FormatConfig {
             allow_debug_actions: false,
             horde_ruleset: None,
             custom_rules: None,
+            deck_size_origin: Default::default(),
         }
     }
 
@@ -4333,6 +4387,7 @@ impl FormatConfig {
             allow_debug_actions: false,
             horde_ruleset: None,
             custom_rules: None,
+            deck_size_origin: Default::default(),
         }
     }
 
@@ -4428,6 +4483,7 @@ impl FormatConfig {
             allow_debug_actions: false,
             horde_ruleset: None,
             custom_rules: None,
+            deck_size_origin: Default::default(),
         }
     }
 
@@ -4455,6 +4511,7 @@ impl FormatConfig {
             allow_debug_actions: false,
             horde_ruleset: None,
             custom_rules: None,
+            deck_size_origin: Default::default(),
         }
     }
 
@@ -4517,6 +4574,7 @@ impl FormatConfig {
             allow_debug_actions: false,
             horde_ruleset: None,
             custom_rules: None,
+            deck_size_origin: Default::default(),
         }
     }
 
@@ -4542,6 +4600,7 @@ impl FormatConfig {
             allow_debug_actions: false,
             horde_ruleset: None,
             custom_rules: None,
+            deck_size_origin: Default::default(),
         }
     }
 
@@ -4576,6 +4635,7 @@ impl FormatConfig {
             allow_debug_actions: false,
             horde_ruleset: None,
             custom_rules: None,
+            deck_size_origin: Default::default(),
         }
     }
 
@@ -4601,6 +4661,19 @@ impl FormatConfig {
             allow_debug_actions: false,
             horde_ruleset: None,
             custom_rules: None,
+            deck_size_origin: Default::default(),
+        }
+    }
+
+    /// Limited under a draft session's configured minimum deck size (CR 100.2b).
+    /// The session, not the registry, decided `minimum`, so the config says so
+    /// through `DeckSizeOrigin::DraftSession`; `FormatConfig`'s decoder admits
+    /// that claim for Limited alone.
+    pub fn limited_for_draft_session(minimum: u16) -> Self {
+        FormatConfig {
+            deck_size: DeckSizeRule::Minimum(minimum),
+            deck_size_origin: DeckSizeOrigin::DraftSession,
+            ..Self::limited()
         }
     }
 
@@ -4637,6 +4710,7 @@ impl FormatConfig {
             allow_debug_actions: false,
             horde_ruleset: None,
             custom_rules: None,
+            deck_size_origin: Default::default(),
         }
     }
 
@@ -4663,6 +4737,7 @@ impl FormatConfig {
             allow_debug_actions: false,
             horde_ruleset: None,
             custom_rules: None,
+            deck_size_origin: Default::default(),
         }
     }
 
@@ -4686,6 +4761,7 @@ impl FormatConfig {
             allow_debug_actions: false,
             horde_ruleset: None,
             custom_rules: None,
+            deck_size_origin: Default::default(),
         }
     }
 
@@ -4720,6 +4796,7 @@ impl FormatConfig {
             allow_debug_actions: false,
             horde_ruleset: None,
             custom_rules: None,
+            deck_size_origin: Default::default(),
         }
     }
 
@@ -4746,6 +4823,7 @@ impl FormatConfig {
             allow_debug_actions: false,
             horde_ruleset: None,
             custom_rules: None,
+            deck_size_origin: Default::default(),
         }
     }
 
@@ -4774,6 +4852,7 @@ impl FormatConfig {
             allow_debug_actions: false,
             horde_ruleset: None,
             custom_rules: None,
+            deck_size_origin: Default::default(),
         }
     }
 
@@ -4806,6 +4885,7 @@ impl FormatConfig {
             allow_debug_actions: false,
             horde_ruleset: None,
             custom_rules: None,
+            deck_size_origin: Default::default(),
         }
     }
 
@@ -4831,6 +4911,7 @@ impl FormatConfig {
             allow_debug_actions: false,
             horde_ruleset: None,
             custom_rules: None,
+            deck_size_origin: Default::default(),
         }
     }
 
@@ -4900,6 +4981,7 @@ impl FormatConfig {
             allow_debug_actions: false,
             horde_ruleset: Some(ruleset),
             custom_rules: None,
+            deck_size_origin: Default::default(),
         }
     }
 
@@ -5087,6 +5169,7 @@ impl FormatConfig {
             allow_debug_actions: false,
             horde_ruleset: None,
             custom_rules: Some(Box::new(rules.clone())),
+            deck_size_origin: Default::default(),
         }
     }
 }
@@ -5228,6 +5311,7 @@ mod tests {
             min_players: _,
             max_players: _,
             deck_size: _,
+            deck_size_origin: _,
             singleton: _,
             command_zone: _,
             commander_damage_threshold: _,

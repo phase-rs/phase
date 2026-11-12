@@ -1406,17 +1406,58 @@ function sameNameMultiset(left: readonly string[], right: readonly string[]): bo
 }
 
 /**
- * The local workspace's partition when it projects the replay-accepted main deck, else null: a name-only
- * main deck cannot tell a drafted card from a virtual one of the same name.
+ * The local workspace and its partition when it projects the replay-accepted main deck, else null: a
+ * name-only main deck cannot tell a drafted card from a virtual one of the same name.
  */
 function recoveredSubmissionPartition(
   mainDeck: readonly string[],
   pool: DraftPlayerView["pool"],
-): DraftWorkspacePartition | null {
+): { workspace: DraftWorkspaceState; partition: DraftWorkspacePartition } | null {
   const { workspaceState } = useMultiplayerDraftStore.getState();
   if (!workspaceState) return null;
-  const partition = projectWorkspacePartition(reconcileWorkspaceState(workspaceState, pool), pool);
-  return sameNameMultiset(partition.mainDeck, mainDeck) ? partition : null;
+  const workspace = reconcileWorkspaceState(workspaceState, pool);
+  const partition = projectWorkspacePartition(workspace, pool);
+  return sameNameMultiset(partition.mainDeck, mainDeck) ? { workspace, partition } : null;
+}
+
+/**
+ * The single authority for recording a deck submission the host ACCEPTED: the deck, its partition and the
+ * companion it designated (CR 702.139a) are stored together, so a later re-edit (Casual RoundComplete)
+ * starts from exactly what was accepted and an unchanged resubmit cannot drop the companion. Both the
+ * ordinary submit path and the reconnect-recovery path (a replayed acceptance with no surviving caller)
+ * record through here. `nextView` is the host's post-submit view, installed with the workspace; a guest
+ * has none and only records the submission. A null `partition` (a recovered deck the local workspace
+ * cannot project) still records the accepted deck and companion.
+ */
+function recordAcceptedSubmission(input: {
+  view: DraftPlayerView;
+  nextView?: DraftPlayerView;
+  mainDeck: readonly string[];
+  partition: DraftWorkspacePartition | null;
+  workspace: DraftWorkspaceState | null;
+  commanders: readonly string[];
+  companion: string | null;
+}): void {
+  const patch: Partial<MultiplayerDraftState> = {
+    submittedDeck: [...input.mainDeck],
+    submittedPartition: input.partition,
+    submittedCompanion: input.companion,
+    ...(input.workspace ? { submittedWorkspaceState: cloneWorkspace(input.workspace) } : {}),
+  };
+  if (input.nextView && input.workspace) {
+    installWorkspace({ view: input.nextView, base: input.workspace, publish: false, patch });
+  } else {
+    useMultiplayerDraftStore.setState(patch);
+  }
+  if (input.partition) {
+    void autosaveDraftDeck({
+      view: input.view,
+      setCode: null,
+      partition: input.partition,
+      commanders: [...input.commanders],
+      companion: input.companion,
+    });
+  }
 }
 
 function disposeMatchController(): void {
@@ -2421,31 +2462,29 @@ export const useMultiplayerDraftStore = create<
       const nextView = companion
         ? await activeHostAdapter.submitDeck(partition.mainDeck, commanders, companion)
         : await activeHostAdapter.submitDeck(partition.mainDeck, commanders);
-      installWorkspace({
-        view: nextView,
-        base: workspace,
-        publish: false,
-        patch: {
-          submittedDeck: partition.mainDeck,
-          submittedWorkspaceState: cloneWorkspace(workspace),
-          submittedPartition: partition,
-          submittedCompanion: companion,
-        },
+      recordAcceptedSubmission({
+        view,
+        nextView,
+        mainDeck: partition.mainDeck,
+        partition,
+        workspace,
+        commanders,
+        companion,
       });
-      void autosaveDraftDeck({ view, setCode: null, partition, commanders, companion });
     } else if (role === "guest" && activeGuestAdapter) {
       if (companion) {
         await activeGuestAdapter.submitDeck(partition.mainDeck, commanders, companion);
       } else {
         await activeGuestAdapter.submitDeck(partition.mainDeck, commanders);
       }
-      set({
-        submittedDeck: partition.mainDeck,
-        submittedWorkspaceState: cloneWorkspace(workspace),
-        submittedPartition: partition,
-        submittedCompanion: companion,
+      recordAcceptedSubmission({
+        view,
+        mainDeck: partition.mainDeck,
+        partition,
+        workspace,
+        commanders,
+        companion,
       });
-      void autosaveDraftDeck({ view, setCode: null, partition, commanders, companion });
     }
   },
 
@@ -3972,8 +4011,15 @@ function handleGuestEvent(event: DraftPodGuestEvent, set: SetFn): void {
       // Informational — standings update comes via viewUpdated
       break;
     case "recoveredDeckSubmissionAccepted": {
-      const partition = recoveredSubmissionPartition(event.mainDeck, event.view.pool);
-      if (partition) void autosaveDraftDeck({ view: event.view, setCode: null, partition, commanders: event.commanders, companion: event.companion });
+      const recovered = recoveredSubmissionPartition(event.mainDeck, event.view.pool);
+      recordAcceptedSubmission({
+        view: event.view,
+        mainDeck: event.mainDeck,
+        partition: recovered?.partition ?? null,
+        workspace: recovered?.workspace ?? null,
+        commanders: event.commanders,
+        companion: event.companion ?? null,
+      });
       break;
     }
   }

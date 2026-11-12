@@ -12893,6 +12893,7 @@ mod tests {
         // it directly.
         let config = FormatConfig {
             custom_rules: None,
+            deck_size_origin: Default::default(),
             ..FormatConfig::for_custom_rules(&base_custom_rules(
                 DeckSizeRule::Minimum(60),
                 DeckCopyLimit::Unlimited,
@@ -13151,6 +13152,7 @@ mod tests {
         // still construct it directly, as this row does.
         let missing_config = FormatConfig {
             custom_rules: None,
+            deck_size_origin: Default::default(),
             ..FormatConfig::for_custom_rules(&base_custom_rules(
                 DeckSizeRule::Minimum(60),
                 DeckCopyLimit::Unlimited,

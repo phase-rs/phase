@@ -9052,6 +9052,7 @@ mod deck_list_seat_validation_tests {
     use engine::types::card_type::{CardType, CoreType, Supertype};
     use engine::types::custom_format::CustomFormatId;
     use engine::types::format::ChallengeDeck;
+    use engine::types::keywords::{CompanionCondition, Keyword};
     use engine::types::mana::ManaColor;
     use std::collections::BTreeMap;
 
@@ -9360,6 +9361,135 @@ mod deck_list_seat_validation_tests {
             opponent,
             ..Default::default()
         }
+    }
+
+    /// A draft-session Limited config round-tripped through the SAME decoder the
+    /// WASM boundary applies (`FormatConfig::deserialize`), then resolved and
+    /// validated by the initializer's own helpers.
+    fn init_format_config(config: &FormatConfig) -> Result<FormatConfig, String> {
+        let decoded: Result<FormatConfig, String> =
+            serde_json::from_value(serde_json::to_value(config).unwrap())
+                .map_err(|error| error.to_string());
+        let decoded = parse_initialize_format_config(decoded)
+            .map_err(|envelope| envelope["reasons"][0].as_str().unwrap().to_string())?;
+        resolve_and_validate_initialize_format_config(Some(decoded), 2)
+    }
+
+    fn yorion() -> CardFace {
+        CardFace {
+            name: "Yorion, Sky Nomad".to_string(),
+            keywords: vec![Keyword::Companion(CompanionCondition::MinDeckSizeOver(20))],
+            card_type: CardType {
+                supertypes: Vec::new(),
+                core_types: vec![CoreType::Creature],
+                subtypes: Vec::new(),
+            },
+            ..CardFace::default()
+        }
+    }
+
+    fn yorion_db() -> CardDatabase {
+        let mut entries = BTreeMap::new();
+        for face in [forest(), yorion()] {
+            entries.insert(
+                face.name.to_lowercase(),
+                serde_json::to_value(&face).unwrap(),
+            );
+        }
+        CardDatabase::from_json_str(&serde_json::to_string(&entries).unwrap()).unwrap()
+    }
+
+    fn forest_deck_with_companion(main: usize, companion: Option<&str>) -> PlayerDeckList {
+        PlayerDeckList {
+            main_deck: std::iter::repeat_n("Forest".to_string(), main).collect(),
+            companion: companion.map(str::to_string).into_iter().collect(),
+            ..Default::default()
+        }
+    }
+
+    /// CR 100.2b: a Cube's configured minimum (20, 50) is legal at the real
+    /// initialization boundary, and the game it creates carries that rule.
+    #[test]
+    fn cube_session_minimum_initializes_a_game_without_a_companion() {
+        let db = test_db();
+        for minimum in [20u16, 50] {
+            let config = init_format_config(&FormatConfig::limited_for_draft_session(minimum))
+                .unwrap_or_else(|reason| panic!("minimum {minimum} refused: {reason}"));
+            let state = GameState::new(config.clone(), 2, 42);
+            assert_eq!(
+                state.format_config.deck_size,
+                engine::types::format::DeckSizeRule::Minimum(minimum)
+            );
+            let deck = forest_deck_with_companion(usize::from(minimum), None);
+            assert_eq!(
+                validate_deck_list_seats(
+                    &db,
+                    &two_seat_list(deck.clone(), deck),
+                    &config,
+                    Some(MatchType::Bo1),
+                    2,
+                ),
+                None
+            );
+        }
+    }
+
+    /// CR 100.2b + CR 702.139b: with a valid Yorion (twenty more than the
+    /// session's minimum) the match initializes; one card short is refused.
+    #[test]
+    fn cube_session_minimum_initializes_a_game_with_a_valid_yorion() {
+        let db = yorion_db();
+        for (minimum, deck_size) in [(50u16, 70usize), (20, 40)] {
+            let config =
+                init_format_config(&FormatConfig::limited_for_draft_session(minimum)).unwrap();
+            let check = |main| {
+                let deck = forest_deck_with_companion(main, Some("Yorion, Sky Nomad"));
+                validate_deck_list_seats(
+                    &db,
+                    &two_seat_list(deck.clone(), deck),
+                    &config,
+                    Some(MatchType::Bo1),
+                    2,
+                )
+            };
+            assert_eq!(
+                check(deck_size),
+                None,
+                "minimum {minimum}, deck {deck_size}"
+            );
+            let refused = check(deck_size - 1).expect("one card short of the Yorion threshold");
+            assert!(
+                refused[0].contains("not a legal companion"),
+                "minimum {minimum}: {refused:?}"
+            );
+        }
+    }
+
+    /// The session's minimum is authorized by provenance, not by the number: a
+    /// plain Limited config claiming a sub-40 minimum is still refused, and the
+    /// draft-session claim is admitted for Limited alone.
+    #[test]
+    fn limited_minimum_without_session_provenance_is_refused_at_initialization() {
+        for minimum in [20u16, 39, 50] {
+            let mut hand_edited = FormatConfig::limited();
+            hand_edited.deck_size = engine::types::format::DeckSizeRule::Minimum(minimum);
+            let reason = init_format_config(&hand_edited)
+                .expect_err("a Limited minimum with Registry provenance must be refused");
+            assert!(
+                reason.contains("Format config deserialization failed")
+                    && reason.contains("deck_size"),
+                "{reason}"
+            );
+        }
+        let mut standard = FormatConfig::standard();
+        standard.deck_size_origin = engine::types::format::DeckSizeOrigin::DraftSession;
+        assert!(init_format_config(&standard)
+            .expect_err("only Limited admits the draft-session claim")
+            .contains("DraftSession"));
+        let mut exact = FormatConfig::limited_for_draft_session(40);
+        exact.deck_size = engine::types::format::DeckSizeRule::Exactly(40);
+        assert!(init_format_config(&exact).is_err());
+        assert!(init_format_config(&FormatConfig::limited_for_draft_session(0)).is_err());
     }
 
     #[test]

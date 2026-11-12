@@ -6,7 +6,10 @@ import type { FormatConfig } from "../adapter/types";
  * a minimum other than 40, and the engine reads `deck_size` for every
  * "minimum deck size" rule, notably Yorion's companion condition
  * (CR 702.139b), so the launch must hand it over rather than the registry
- * default. `undefined` (no session minimum known) keeps the base config.
+ * default. The override is tagged `deck_size_origin: "DraftSession"`, the
+ * provenance the engine's `FormatConfig` decoder requires before it accepts a
+ * Limited minimum other than the registry's 40. `undefined` (no session
+ * minimum known) keeps the base config.
  */
 export function limitedFormatConfigForSession(
   base: FormatConfig,
@@ -14,7 +17,11 @@ export function limitedFormatConfigForSession(
 ): FormatConfig {
   if (sessionMinDeckSize == null || base.deck_size.type !== "Minimum") return base;
   if (base.deck_size.data === sessionMinDeckSize) return base;
-  return { ...base, deck_size: { type: "Minimum", data: sessionMinDeckSize } };
+  return {
+    ...base,
+    deck_size: { type: "Minimum", data: sessionMinDeckSize },
+    deck_size_origin: "DraftSession",
+  };
 }
 
 /**

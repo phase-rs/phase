@@ -12,16 +12,22 @@ describe("limitedFormatConfigForSession", () => {
     const config = limitedFormatConfigForSession(base, 50);
     expect(config.deck_size).toEqual({ type: "Minimum", data: 50 });
     expect(minimumDeckSizeOf(config)).toBe(50);
+    // The override carries the session provenance the engine decoder requires.
+    expect(config.deck_size_origin).toBe("DraftSession");
     // Everything else about the format is untouched.
-    expect({ ...config, deck_size: base.deck_size }).toEqual(base);
+    const { deck_size_origin: _origin, ...rest } = config;
+    expect({ ...rest, deck_size: base.deck_size }).toEqual(base);
   });
 
   it("supports a minimum below 40", () => {
-    expect(limitedFormatConfigForSession(base, 20).deck_size).toEqual({ type: "Minimum", data: 20 });
+    const config = limitedFormatConfigForSession(base, 20);
+    expect(config.deck_size).toEqual({ type: "Minimum", data: 20 });
+    expect(config.deck_size_origin).toBe("DraftSession");
   });
 
   it("keeps the base config when the session minimum is the format's own or unknown", () => {
     expect(limitedFormatConfigForSession(base, 40)).toBe(base);
+    expect(base.deck_size_origin).toBeUndefined();
     expect(limitedFormatConfigForSession(base, undefined)).toBe(base);
     expect(limitedFormatConfigForSession(base, null)).toBe(base);
   });
