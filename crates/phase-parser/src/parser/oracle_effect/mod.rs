@@ -29404,6 +29404,59 @@ fn withhold_resolution_timing_from_choices_feeding_printed_targets(clauses: &mut
     }
 }
 
+/// CR 608.2c + CR 608.2d: the choices of one instruction sequence are made in the
+/// order written. A bare choice the producer did not time `Resolution` stays a
+/// cast-time pick: another player's choice ("then each opponent chooses a
+/// creature they control with equal or lesser power", Sculpted Sunburst; "They
+/// choose a creature they control, then you choose a creature you control",
+/// Tunnel of Love), which `TargetOnly` cannot prompt that player for as the effect
+/// is applied, or a controller choice outside the producer's gates. Moving only
+/// the other choices of the chain to resolution would reorder them, so while the
+/// chain holds such a cast-time bare choice, its bare choices keep the timing they
+/// had before the bare-choice producer existed. A bare choice is a `TargetOnly` in
+/// a clause that prints no "target". Runs before
+/// `withhold_resolution_timing_from_choices_feeding_printed_targets`, whose
+/// withheld choices are kept at cast for their own reason and do not hold the rest
+/// of the chain back.
+fn withhold_resolution_timing_beside_a_cast_time_choice(clauses: &mut [ClauseIr]) {
+    let holds_cast_time_choice = clauses.iter().any(|clause| {
+        lower::PrintedTargetWord::from_clauses(std::slice::from_ref(clause))
+            == lower::PrintedTargetWord::Absent
+            && (cast_time_bare_choice(
+                &clause.parsed.effect,
+                clause.declared_target_choice_timing.unwrap_or_default(),
+            ) || std::iter::successors(clause.parsed.sub_ability.as_deref(), |node| {
+                node.sub_ability.as_deref()
+            })
+            .any(|node| cast_time_bare_choice(&node.effect, node.target_choice_timing)))
+    });
+    if !holds_cast_time_choice {
+        return;
+    }
+    for clause in clauses.iter_mut() {
+        if clause.declared_target_choice_timing == Some(TargetChoiceTiming::Resolution)
+            && matches!(clause.parsed.effect, Effect::TargetOnly { .. })
+            && clause.parsed.sub_ability.is_none()
+        {
+            clause.declared_target_choice_timing = None;
+        }
+        let mut node = clause.parsed.sub_ability.as_deref_mut();
+        while let Some(def) = node {
+            if def.target_choice_timing == TargetChoiceTiming::Resolution
+                && matches!(def.effect.as_ref(), Effect::TargetOnly { .. })
+                && def.sub_ability.is_none()
+            {
+                def.target_choice_timing = TargetChoiceTiming::Stack;
+            }
+            node = def.sub_ability.as_deref_mut();
+        }
+    }
+}
+
+fn cast_time_bare_choice(effect: &Effect, timing: TargetChoiceTiming) -> bool {
+    timing != TargetChoiceTiming::Resolution && matches!(effect, Effect::TargetOnly { .. })
+}
+
 /// The nearest object-naming node of one clause, read from its own sub chain
 /// (deepest first, the order it resolves back from) and then from its head.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -51637,6 +51690,7 @@ fn parse_effect_chain_ir_body(
     // CR 601.2c: before the anaphor binder reads the clauses' timing, so a
     // withheld choice is bound exactly as it was before the bare-choice producer
     // existed.
+    withhold_resolution_timing_beside_a_cast_time_choice(builder.clauses_mut());
     withhold_resolution_timing_from_choices_feeding_printed_targets(builder.clauses_mut());
     // CR 608.2c: after player tagging, so a producer's player group is final and
     // the object-group stamp cannot suppress it.

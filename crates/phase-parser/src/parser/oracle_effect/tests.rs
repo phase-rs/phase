@@ -79680,8 +79680,8 @@ fn bare_choose_printed_cards_use_resolution_timing() {
 /// SHAPE: printed cards whose controller-choice "choose a <object> you control"
 /// follows an earlier instruction declare `Resolution` timing (CR 115.10a: the
 /// choice is not a target; CR 608.2d: it is announced as the effect is applied).
-/// Tunnel of Love's opponent choice ("They choose a creature they control")
-/// is not the controller's and stays stack-time.
+/// Tunnel of Love, whose controller choice follows an opponent's, is in
+/// `bare_choose_beside_a_cast_time_choice_keeps_base_timing`.
 #[test]
 fn bare_choose_later_chunk_printed_cards_use_resolution_timing() {
     fn assert_you_choice(name: &str, node: &AbilityDefinition) {
@@ -79759,36 +79759,6 @@ fn bare_choose_later_chunk_printed_cards_use_resolution_timing() {
             .and_then(|execute| execute.sub_ability.as_deref())
             .and_then(|pay| pay.sub_ability.as_deref())
             .expect("Canoptek Wraith: the choice must follow the pay-and-sacrifice instructions"),
-    );
-
-    // The Visit-trigger gate requires the Attraction subtype.
-    let tunnel = parse_oracle_text(
-        "Visit — Choose an opponent. They choose a creature they control, then you choose a creature you control. You may exile the chosen creatures. If you do, return them to the battlefield under their owners' control at the beginning of the next end step. Otherwise, the chosen creatures fight each other.",
-        "Tunnel of Love",
-        &[],
-        &["Artifact".to_string()],
-        &["Attraction".to_string()],
-    );
-    let opponent_choice = tunnel.triggers[0]
-        .execute
-        .as_deref()
-        .and_then(|execute| execute.sub_ability.as_deref())
-        .expect("Tunnel of Love: the opponent's choice must follow 'Choose an opponent'");
-    assert!(
-        matches!(opponent_choice.effect.as_ref(), Effect::TargetOnly { .. }),
-        "Tunnel of Love: the opponent's choice must be a TargetOnly node: {opponent_choice:#?}"
-    );
-    assert_eq!(
-        opponent_choice.target_choice_timing,
-        TargetChoiceTiming::Stack,
-        "Tunnel of Love: the opponent's choice keeps its pre-change Stack timing (unchanged baseline, not a rules claim): {opponent_choice:#?}"
-    );
-    assert_you_choice(
-        "Tunnel of Love",
-        opponent_choice
-            .sub_ability
-            .as_deref()
-            .expect("Tunnel of Love: the controller's choice must follow the opponent's"),
     );
 
     let brudiclad = parse_card(
@@ -80716,6 +80686,87 @@ fn compound_choice_controller_object_and_player_chain_keeps_resolution_timing() 
     assert_eq!(chain, vec![TargetChoiceTiming::Resolution], "{text}");
 }
 
+/// SHAPE: a bare choice moves to resolution only when no other bare choice of its
+/// chain stays a cast-time pick: the choices are made in the order written (CR
+/// 608.2c), and moving only one of them would reorder them. Another player's bare
+/// choice stays at cast because `TargetOnly` cannot prompt that player as the
+/// effect is applied, so the controller's choice beside it keeps the `Stack` timing
+/// it had before the producer existed (pinned as the unchanged baseline, not as a
+/// rules claim). Printed cards: Sculpted Sunburst, whose opponents' choice depends
+/// on the controller's ("with equal or lesser power"), and Tunnel of Love. The
+/// matched control is a synthetic chain of two controller choices (Final
+/// Showdown's mode twice), which both move.
+#[test]
+fn bare_choose_beside_a_cast_time_choice_keeps_base_timing() {
+    let sunburst = parse_card(
+        "Choose a creature you control, then each opponent chooses a creature they control with equal or lesser power. If you chose a creature this way, exile each creature not chosen by any player this way.",
+        "Sculpted Sunburst",
+        &[],
+        &["Sorcery"],
+    );
+    let head = &sunburst.abilities[0];
+    let opponents = head
+        .sub_ability
+        .as_deref()
+        .expect("Sculpted Sunburst: the opponents' choice follows the controller's");
+    assert!(
+        matches!(
+            (head.effect.as_ref(), opponents.effect.as_ref()),
+            (Effect::TargetOnly { .. }, Effect::TargetOnly { .. })
+        ),
+        "Sculpted Sunburst: reach guard for the two bare choices: {head:#?}"
+    );
+    assert_eq!(
+        (head.target_choice_timing, opponents.target_choice_timing),
+        (TargetChoiceTiming::Stack, TargetChoiceTiming::Stack),
+        "Sculpted Sunburst: the controller's choice is not moved past the opponents'"
+    );
+
+    // The Visit-trigger gate requires the Attraction subtype.
+    let tunnel = parse_oracle_text(
+        "Visit — Choose an opponent. They choose a creature they control, then you choose a creature you control. You may exile the chosen creatures. If you do, return them to the battlefield under their owners' control at the beginning of the next end step. Otherwise, the chosen creatures fight each other.",
+        "Tunnel of Love",
+        &[],
+        &["Artifact".to_string()],
+        &["Attraction".to_string()],
+    );
+    let opponent_choice = tunnel.triggers[0]
+        .execute
+        .as_deref()
+        .and_then(|execute| execute.sub_ability.as_deref())
+        .expect("Tunnel of Love: the opponent's choice must follow 'Choose an opponent'");
+    let own_choice = opponent_choice
+        .sub_ability
+        .as_deref()
+        .expect("Tunnel of Love: the controller's choice must follow the opponent's");
+    assert!(
+        matches!(
+            (opponent_choice.effect.as_ref(), own_choice.effect.as_ref()),
+            (Effect::TargetOnly { .. }, Effect::TargetOnly { .. })
+        ),
+        "Tunnel of Love: reach guard for the two bare choices: {opponent_choice:#?}"
+    );
+    assert_eq!(
+        (
+            opponent_choice.target_choice_timing,
+            own_choice.target_choice_timing
+        ),
+        (TargetChoiceTiming::Stack, TargetChoiceTiming::Stack),
+        "Tunnel of Love: both choices keep their base timing"
+    );
+
+    let control = "Choose a creature you control. It gains indestructible until end of turn. Choose a creature you control. It gains flying until end of turn.";
+    let def = parse_effect_chain(control, AbilityKind::Spell);
+    assert_eq!(
+        target_only_chain_timings(&def),
+        vec![
+            TargetChoiceTiming::Resolution,
+            TargetChoiceTiming::Resolution
+        ],
+        "{control}"
+    );
+}
+
 /// SHAPE: Log Flume's printed Visit choice cannot enter the single-object chooser.
 #[test]
 fn bare_choose_stripped_quantifier_does_not_declare_resolution_timing() {
@@ -80747,8 +80798,10 @@ fn bare_choose_stripped_quantifier_does_not_declare_resolution_timing() {
     assert_eq!(ir.clauses[0].declared_target_choice_timing, None);
 
     // Synthetic Oracle: no printed card chains Log Flume's choice before Final
-    // Showdown's. A later singular, unquantified choice declares Resolution at any
-    // chain position, even after a quantified head that stays undeclared.
+    // Showdown's. The quantified head stays an undeclared cast-time pick, so the
+    // later singular choice keeps its base timing too rather than being made after
+    // a choice printed after it (CR 608.2c; see
+    // `bare_choose_beside_a_cast_time_choice_keeps_base_timing`).
     let chain = format!("{log_flume} {final_showdown}");
     let ir = parse_effect_chain_ir(&chain, AbilityKind::Spell, &mut ParseContext::default());
     assert_eq!(ir.clauses.len(), 2);
@@ -80759,10 +80812,7 @@ fn bare_choose_stripped_quantifier_does_not_declare_resolution_timing() {
     );
     assert_eq!(ir.clauses[0].declared_target_choice_timing, None);
     assert_eq!(ir.clauses[1].parsed.effect, Effect::TargetOnly { target });
-    assert_eq!(
-        ir.clauses[1].declared_target_choice_timing,
-        Some(TargetChoiceTiming::Resolution)
-    );
+    assert_eq!(ir.clauses[1].declared_target_choice_timing, None);
 }
 
 /// SHAPE: an exact-count choice cannot enter the single-object chooser.
