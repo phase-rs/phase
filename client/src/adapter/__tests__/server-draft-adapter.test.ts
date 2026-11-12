@@ -4576,15 +4576,21 @@ describe("ServerDraftAdapter — negotiated StateCodecV1", () => {
       vi.useFakeTimers();
       const { adapter, candidate, reconnecting } = await sentCandidate();
       let armed = true;
+      const failure = new Error("draftViewUpdated listener failed");
       adapter.onEvent((event) => {
         if (event.type !== "draftViewUpdated" || !armed) return;
         armed = false;
-        throw new Error("draftViewUpdated listener failed");
+        throw failure;
       });
+      // Reported as an uncaught error, which telemetry records as js_error.
+      const reported: unknown[] = [];
+      const onError = (event: ErrorEvent) => { reported.push(event.error); event.preventDefault(); };
+      window.addEventListener("error", onError);
       try {
         receive(candidate, "DraftStateUpdate", { view: createMockDraftView() });
         await vi.waitFor(() => expect(reconnecting.value()).toEqual({ resolvedWith: undefined }));
         expect(armed).toBe(false);
+        expect(reported).toEqual([failure]);
         expect(candidate.close).not.toHaveBeenCalled();
         const pick = adapter.submitPick("picked-after-throw").catch((error: unknown) => error);
         await vi.waitFor(() => expect(candidate.send).toHaveBeenCalledWith(
@@ -4592,6 +4598,7 @@ describe("ServerDraftAdapter — negotiated StateCodecV1", () => {
         ));
         void pick;
       } finally {
+        window.removeEventListener("error", onError);
         adapter.dispose();
         vi.useRealTimers();
       }

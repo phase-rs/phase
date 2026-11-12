@@ -4391,7 +4391,7 @@ describe("WebSocketAdapter — negotiated StateCodecV1", () => {
       adapter.onEvent(events);
       adapter.onEvent((event) => {
         if (rejectApplication && event.type === "bootstrapDelivered") {
-          throw new Error("application rejected the delivery before caching it");
+          throw new Error("application failed while the delivery was being announced");
         }
       });
       try {
@@ -6727,6 +6727,94 @@ describe("WebSocketAdapter — acquired socket ownership", () => {
         }
       },
     );
+
+    /** A join still in pregame (no board) on A, then a reconnect whose Reconnect B has written. */
+    async function pregameIncumbentWithCandidate() {
+      MockWebSocket.last = null;
+      const adapter = new WebSocketAdapter(
+        "wss://localhost:9374/ws", "join", { main_deck: [], sideboard: [] }, "GAME01",
+        undefined, undefined, undefined, { stateCodecSessionProvider: null },
+      );
+      const events: unknown[] = [];
+      adapter.onEvent((event) => events.push(event));
+      const init = observe(adapter.initialize());
+      await vi.waitFor(() => expect(MockWebSocket.last).not.toBeNull());
+      const raw = latestSocket();
+      raw.dispatchSynthetic("message", SERVER_HELLO);
+      await vi.waitFor(() => expect(raw.send).toHaveBeenCalledWith(
+        expect.stringContaining('"type":"JoinGameWithPassword"'),
+      ));
+      expect(adapter.tryReconnect(session() as never)).toBe(true);
+      await vi.waitFor(() => expect(MockWebSocket.last).not.toBe(raw));
+      const candidate = latestSocket();
+      candidate.dispatchSynthetic("message", SERVER_HELLO);
+      await vi.waitFor(() => expect(candidate.send).toHaveBeenCalledWith(
+        expect.stringContaining('"type":"Reconnect"'),
+      ));
+      return { adapter, raw, candidate, events, init };
+    }
+
+    it.each(["board-less StateWithheld", "PasswordRequired"] as const)(
+      "keeps an incumbent %s from failing the candidate's episode; the candidate's close retries once",
+      async (frame) => {
+        const random = vi.spyOn(Math, "random").mockReturnValue(0);
+        const { adapter, raw, candidate, events } = await pregameIncumbentWithCandidate();
+        const timers = vi.spyOn(globalThis, "setTimeout");
+        try {
+          raw.dispatchSynthetic("message", JSON.stringify(frame === "PasswordRequired"
+            ? { type: "PasswordRequired", data: { game_code: "GAME01" } }
+            : {
+              type: "StateWithheld",
+              data: {
+                full_key: REPLY_OWNERSHIP_FULL_KEY, state_revision: 1,
+                withheld: { type: "GameStarted", data: { your_player: 0 } }, reason: "too large",
+              },
+            }));
+          await vi.advanceTimersByTimeAsync(0);
+          // Reach guard: the incumbent's frame was handled.
+          expect(events).toContainEqual(expect.objectContaining({
+            type: frame === "PasswordRequired" ? "passwordRequired" : "operationFailed",
+          }));
+          expect(events).not.toContainEqual({ type: "reconnectFailed" });
+          candidate.readyState = 3;
+          candidate.dispatchSynthetic("close");
+          await vi.waitFor(() => expect(events).toContainEqual(expect.objectContaining({ type: "reconnecting" })));
+          expect(scheduledRetryDelays(timers)).toHaveLength(1);
+          const dialed = MockWebSocket.last;
+          await vi.advanceTimersByTimeAsync(800);
+          await vi.waitFor(() => expect(MockWebSocket.last).not.toBe(dialed));
+          expect(events).not.toContainEqual({ type: "reconnectFailed" });
+        } finally {
+          timers.mockRestore();
+          random.mockRestore();
+          adapter.dispose();
+        }
+      },
+    );
+
+    it("retires the open candidate when the incumbent's identity is rejected inside the interval", async () => {
+      const { adapter, raw, candidate, events } = await pregameIncumbentWithCandidate();
+      try {
+        // A GameStarted for another generation of the session is an identity
+        // rejection on the incumbent.
+        raw.dispatchSynthetic("message", JSON.stringify({
+          type: "GameStarted",
+          data: {
+            state_revision: 1, state: createMockState(), your_player: 0,
+            player_token: "codec-token", full_key: { game_code: "GAME01", generation: 9 },
+          },
+        }));
+        await vi.waitFor(() => expect(events).toContainEqual(expect.objectContaining({ type: "error" })));
+        await vi.waitFor(() => expect(candidate.close).toHaveBeenCalled());
+        // The candidate is never adopted for the rejected identity.
+        candidate.dispatchSynthetic("message", JSON.stringify(codecGameStarted(5, 5)));
+        await vi.advanceTimersByTimeAsync(0);
+        expect(events).not.toContainEqual(expect.objectContaining({ type: "reconnected" }));
+        expect(events).not.toContainEqual(expect.objectContaining({ type: "bootstrapDelivered" }));
+      } finally {
+        adapter.dispose();
+      }
+    });
 
     it("does not adopt on a truncated canonical bootstrap: the bound retires both sockets and retries once", async () => {
       const random = vi.spyOn(Math, "random").mockReturnValue(0);

@@ -1492,8 +1492,8 @@ export class ServerDraftAdapter implements EngineAdapter {
         // which the merge base delivered to the live socket handler. A throw
         // there, or a frame that does not parse, does not undo the committed
         // adoption: it is reported as an uncaught error (as a raw socket's
-        // handler reports it) and the adopted socket and the remaining frames
-        // carry on.
+        // handler reports it; the gzip and codec transports swallow it on live
+        // delivery) and the adopted socket and the remaining frames carry on.
         try {
           handleMessage(setupMessages[index]!);
         } catch (error) {

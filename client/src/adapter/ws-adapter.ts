@@ -2853,8 +2853,9 @@ export class WebSocketAdapter implements EngineAdapter {
           // A confirmed reconnect's buffered frames are the server's answers,
           // which the merge base delivered to the live socket handler. A throw
           // there does not undo the committed adoption: it is reported as an
-          // uncaught error (as a raw socket's handler reports it) and the
-          // adopted socket and the remaining frames carry on.
+          // uncaught error (as a raw socket's handler reports it; the gzip and
+          // codec transports swallow it on live delivery) and the adopted
+          // socket and the remaining frames carry on.
           try {
             handleSocketMessage(messages[index]!);
           } catch (error) {
@@ -4053,6 +4054,9 @@ export class WebSocketAdapter implements EngineAdapter {
         // `GameStarted` that will never come.
         const data = msg.data as { game_code: string };
         this.emit({ type: "passwordRequired", gameCode: data.game_code });
+        // An incumbent's answer inside a reconnect interval does not decide
+        // the candidate's episode (see `frameDecidesEpisode`).
+        if (!this.frameDecidesEpisode()) break;
         if (this.reconnectInFlight) this.failReconnect("failed");
         if (this.initReject) {
           this.initReject(
@@ -4323,10 +4327,14 @@ export class WebSocketAdapter implements EngineAdapter {
           this._playerId = seat;
           this.emit({ type: "bootstrapDelivered" });
           this.emit({ type: "playerIdentity", playerId: seat, opponentName: null });
-          this.rejectInitialization(new AdapterError(AdapterErrorCode.REQUEST_FAILED, data.reason, true));
-          if (this.reconnectInFlight) {
-            this.failReconnect("failed");
-            this.withheldBootstrapFailed = true;
+          // An incumbent's notice inside a reconnect interval does not decide
+          // the candidate's episode (see `frameDecidesEpisode`).
+          if (this.frameDecidesEpisode()) {
+            this.rejectInitialization(new AdapterError(AdapterErrorCode.REQUEST_FAILED, data.reason, true));
+            if (this.reconnectInFlight) {
+              this.failReconnect("failed");
+              this.withheldBootstrapFailed = true;
+            }
           }
           this.emit({ type: "operationFailed", message: data.reason });
           break;
@@ -4764,6 +4772,9 @@ export class WebSocketAdapter implements EngineAdapter {
     // reports the identity failure through its initialization only.
     const fallback = this.initialFallbackActive();
     this.sessionIdentityRejected = true;
+    // A reconnect interval that is open belongs to the rejected identity too:
+    // its candidate is retired through the attachment's abort, never adopted.
+    this.confirmingPreparation?.abort(error);
     this.finishSocketDiagnostics("failed");
     if (this.pingInterval) {
       clearInterval(this.pingInterval);
