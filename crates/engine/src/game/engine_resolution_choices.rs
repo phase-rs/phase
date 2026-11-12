@@ -9849,6 +9849,10 @@ fn move_library_origin_cards_in_selection_order(
     library_position: &LibraryPosition,
     events: &mut Vec<GameEvent>,
 ) {
+    // CR 701.20d: the owner's arrangement is one reorder of the library even
+    // though each card is repositioned separately; settle reveal retirement for
+    // the whole arrangement once every card is in place.
+    let library_reorder = zones::LibraryReorderOperation::begin(state, chosen);
     match library_position {
         LibraryPosition::Bottom => {
             for &card_id in chosen {
@@ -9872,6 +9876,7 @@ fn move_library_origin_cards_in_selection_order(
             unreachable!("EffectZoneChoice normalizes unsupported library positions to Top")
         }
     }
+    library_reorder.finish(state);
 }
 
 /// CR 401.4 + CR 400.3 + CR 608.2c: Preserve the raw arm's selected-card interleaving
@@ -9896,6 +9901,9 @@ fn reposition_library_origins_after_batch_delivery(
                 .is_some_and(|object| object.zone == Zone::Library)
         })
         .collect();
+    // CR 701.20d: repositioning the library-origin cards is one reorder of each
+    // affected library; settle reveal retirement once all of them are placed.
+    let library_reorder = zones::LibraryReorderOperation::begin(state, library_origin);
     for holder in library_holders_of(state, library_origin) {
         let library = state
             .library_of(holder)
@@ -9918,6 +9926,7 @@ fn reposition_library_origins_after_batch_delivery(
             }
         }
     }
+    library_reorder.finish(state);
 }
 
 /// CR 401.4 + CR 101.4: the one completion of a (possibly multi-owner)
