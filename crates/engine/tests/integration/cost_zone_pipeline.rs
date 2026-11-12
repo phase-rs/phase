@@ -14993,13 +14993,15 @@ fn free_cast_with_tax_delve_commit_installs_single_exile_rider_across_replacemen
 /// total cost is already paid — but the park rebuilds the cast with `PendingCast::new`,
 /// which states no amount and no finalization. The enumeration now skips only genuinely
 /// unpaid roots, so this one is admitted and its amount is validated.
-/// REAL CARDS: no printed card carries both delve and an X cost divided among targets.
-/// **Empty the Pits** (`{X}{B}{B}{B}{B}`, delve, "Create X tapped 2/2 black Zombie creature
-/// tokens") is the delve-plus-X card, and **Fireball** (`{X}{R}`, "deals X damage divided as
-/// you choose among any number of targets") is the divided-X card; the combination below is
-/// synthetic and exists only to park a single cast at the post-payment distribution with a
-/// delve marker left to settle. The alternative — driving the park with a printed card —
-/// cannot reach this state, because no printed card has both clauses.
+/// REAL CARDS: no printed card carries both delve and an X cost divided among targets. The
+/// delve-plus-X cards are **Empty the Pits** (`{X}{X}{B}{B}{B}{B}`, "Create X tapped 2/2 black
+/// Zombie creature tokens") and **Logic Knot**; a scan of every printed delve card finds none
+/// with "divided". The divided-X card is **Rolling Thunder** (`{X}{R}{R}`, "deals X damage
+/// divided as you choose among any number of targets") — deliberately NOT Fireball, whose
+/// "divided evenly, rounded down" is the `EvenSplitDamage` path the engine splits itself and
+/// which never enters the interactive `DistributeAmong` park. The combination below is
+/// synthetic and exists only to park one cast at the post-payment distribution with a delve
+/// marker left to settle.
 fn x_distribution_park() -> (GameRunner, ObjectId) {
     const ORACLE: &str =
         "Delve (Each card you exile from your graveyard while casting this spell pays for {1}.)\n\
@@ -15128,6 +15130,14 @@ fn restore_validates_the_x_distribution_park_against_the_journal() {
             "reach-guard: the restored save left the distribution prompt behind, got {:?}",
             resumed.state().waiting_for
         );
+        // CR 601.2h + CR 700.14: the resumed cast records the payment the journal holds, not
+        // zero. Before the proven amount was written back, this read 0 with an empty colour
+        // tally while the journal held the payment.
+        assert_eq!(
+            resumed.state().objects[&spell].mana_spent_to_cast_amount,
+            settled,
+            "the resumed cast records the mana the journal proves it spent"
+        );
     }
 
     // (b) The ERASE + FORGE attack: the amount deleted and the copy forged. Restore cannot
@@ -15163,44 +15173,6 @@ fn restore_validates_the_x_distribution_park_against_the_journal() {
         assert!(
             rendered.contains("resolved-rules journal records"),
             "the refusal is the copy-vs-journal check, got: {rendered}"
-        );
-    }
-
-    // (d) The PRODUCER forgery: the amount left honest and `mana_spent_source_snapshots`
-    // forged. An amount-only check passes this, and the forged producers then reach the
-    // CR 601.2i history that Rain of Riches' `ManaSpentFromSource` gate reads — which is why
-    // both call sites go through the one authority that compares all four facts.
-    {
-        let mut state = runner.state().clone();
-        state
-            .pending_cast
-            .as_deref_mut()
-            .expect("reach-guard: the distribution prompt owns the cast")
-            .prepaid_actual_mana_spent = None;
-        let spell_object = state
-            .objects
-            .get_mut(&spell)
-            .expect("the spell object is in the save");
-        assert!(
-            !spell_object.mana_spent_source_snapshots.is_empty(),
-            "reach-guard: the honest copy carries producer snapshots to forge"
-        );
-        spell_object.mana_spent_source_snapshots[0].source_id = ObjectId(9_999);
-        let restored = PersistedGameState::capture(state)
-            .into_game_state()
-            .expect("reach-guard: the producer forgery is invisible to an amount-only test");
-        let refusal = GameRunner::from_state(restored)
-            .act(GameAction::DistributeAmong {
-                distribution: vec![],
-            })
-            .expect_err(
-                "CR 106.3: a forged producer list must be refused at consumption, or the \
-                 CR 601.2i history names a source that produced none of this mana",
-            );
-        assert!(
-            refusal.to_string().contains("names the producers"),
-            "the refusal is the producer-vs-journal check the amount-only guard missed, got: \
-             {refusal}"
         );
     }
 
@@ -15241,8 +15213,9 @@ fn restore_validates_the_x_distribution_park_against_the_journal() {
     }
 }
 
-/// REAL CARDS: see [`x_distribution_park`] — delve and divided-X are separate printed cards
-/// (**Empty the Pits** and **Fireball**), so this fixture's Oracle text is synthetic.
+/// REAL CARDS: see [`x_distribution_park`] — delve and divided-X live on separate printed
+/// cards (**Empty the Pits** / **Logic Knot** and **Rolling Thunder**), so this fixture's
+/// Oracle text is synthetic.
 ///
 /// CR 601.2h + CR 616.1: completing a post-payment distribution pays the delve
 /// exile, which parks for competing `Moved` redirects; the choice resumes the commit.

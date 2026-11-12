@@ -19218,9 +19218,6 @@ impl GameState {
         // stated amount or a `prepaid_finalization`) and still resume against an
         // unvalidated copy.
         //
-        // Every OTHER completion parks a cost move that has not paid the cast's mana, so
-        // it has no payment to validate; the wildcard states that negative rather than
-        // defaulting a paid shape open.
         // The completion decides whether this park has already paid the cast's mana, so the
         // match is exhaustive over BOTH enums: a wildcard here would be the same
         // default-open shape this whole change exists to remove, and a future completion

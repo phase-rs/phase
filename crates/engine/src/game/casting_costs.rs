@@ -4375,9 +4375,23 @@ pub(super) fn pay_delve_after_distribution(
     // validated — so only the fallback needs proving here. A save cannot erase its way past
     // a check that runs after it is loaded.
     if pending.prepaid_actual_mana_spent.is_none() {
-        state
+        let proven = state
             .prove_prepaid_spell_copy(pending, None, player)
             .map_err(|error| EngineError::InvalidAction(error.to_string()))?;
+        // CR 601.2h + CR 700.14: WRITE THE PROVEN AMOUNT BACK. Proving it is not enough:
+        // `pay_delve_at_commit` stamps it on a CLONE, and when the delve move list is empty
+        // or settles inline `move_cost_objects` returns `None`, so the caller finishes with
+        // the ORIGINAL pending — whose amount is still `None` after an erasure. The finalizer
+        // then takes its `is_none()` branch, pays `NoCost`, clears the copy, and the cast is
+        // recorded with 0 mana spent while the journal holds the payment. A printed X-divided
+        // spell at X=0 reaches this park precisely because `extract_distribution_total`
+        // returns `None` for total 0.
+        //
+        // A ZERO proof stays `None`: a park the journal proves spent nothing is not a prepaid
+        // continuation, and marking it one would make an unpaid cast skip its payment.
+        if proven > 0 {
+            pending.prepaid_actual_mana_spent = Some(proven as u32);
+        }
     }
     let spent = pending
         .prepaid_actual_mana_spent
@@ -13417,6 +13431,13 @@ pub(super) struct CostLockInput {
     /// deferred declaration pays its costs first), whose declaration fills it
     /// when the cast comes back through that authority.
     pub committed_target_facts: Option<Vec<crate::types::game_state::ActivationTargetFact>>,
+    /// CR 601.2h + CR 700.14: the amount this cast has ALREADY paid, when its mana ran
+    /// before the pipeline rebuilds it. `None` is the ordinary unpaid cast. Carried here
+    /// because the rebuild is the one place a paid cast can silently become an unpaid one:
+    /// the finalizer's `is_none()` branch pays `NoCost`, clears the spell copy, and records
+    /// a real payment as 0 mana spent — so the paid facts and CR 700.14's Expend ledger
+    /// would both be wrong for a cast that spent mana.
+    pub prepaid_actual_mana_spent: Option<u32>,
 }
 
 impl CostLockInput {
@@ -13431,6 +13452,7 @@ impl CostLockInput {
             election: pending.cost_reduction_election.clone(),
             alternative_cost_election: pending.alternative_cost_election,
             committed_target_facts: pending.committed_target_facts.clone(),
+            prepaid_actual_mana_spent: pending.prepaid_actual_mana_spent,
         }
     }
 
@@ -13450,6 +13472,10 @@ impl CostLockInput {
         pending
             .committed_target_facts
             .clone_from(&self.committed_target_facts);
+        // CR 601.2h: a cast that already paid must not reach the finalizer as unpaid.
+        pending.prepaid_actual_mana_spent = self
+            .prepaid_actual_mana_spent
+            .or(pending.prepaid_actual_mana_spent);
     }
 }
 
@@ -18714,6 +18740,12 @@ fn finalize_mana_payment_with_resume(
             // ride along here too, or a paid cost that moved a target would be
             // re-read from the moved object.
             pending_resumed.committed_target_facts = pending.committed_target_facts.clone();
+            // NOT COPIED: `assist_state` / `assist_contributed_units`. The shared authority's
+            // split check reads `pending.assist_contribution()`, so an Assist-paid park would
+            // fail the split with "no helper" and refuse an honest save. Unreachable today —
+            // no printed card combines Assist with a divided-X effect — but a future card
+            // that does would turn this rebuild into a false refusal; copy the contribution
+            // here at the same time.
             // CR 601.2h + CR 700.14: the total cost is ALREADY PAID here — X had to be known
             // before the mana could be spent — but `PendingCast::new` states no amount and
             // this park copies neither `prepaid_actual_mana_spent` nor
@@ -19203,6 +19235,12 @@ pub fn finalize_mana_payment_with_phyrexian_choices(
             // ride along here too, or a paid cost that moved a target would be
             // re-read from the moved object.
             pending_resumed.committed_target_facts = pending.committed_target_facts.clone();
+            // NOT COPIED: `assist_state` / `assist_contributed_units`. The shared authority's
+            // split check reads `pending.assist_contribution()`, so an Assist-paid park would
+            // fail the split with "no helper" and refuse an honest save. Unreachable today —
+            // no printed card combines Assist with a divided-X effect — but a future card
+            // that does would turn this rebuild into a false refusal; copy the contribution
+            // here at the same time.
             // CR 601.2h + CR 700.14: the total cost is ALREADY PAID here — X had to be known
             // before the mana could be spent — but `PendingCast::new` states no amount and
             // this park copies neither `prepaid_actual_mana_spent` nor
