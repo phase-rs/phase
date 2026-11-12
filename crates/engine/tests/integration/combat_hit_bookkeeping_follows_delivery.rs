@@ -171,3 +171,104 @@ fn unredirected_commander_hit_is_commander_damage() {
     attack_as_level_four_ring_bearer(&mut runner, commander, None);
     assert_eq!(commander_damage_to(&runner, P1), 5);
 }
+
+const RHOX_ORACLE: &str = "Lifelink (Damage dealt by this creature also causes you to gain that much life.)\nIf you would gain life, you gain twice that much life instead.";
+const ANGEL_OF_VITALITY_ORACLE: &str = "Flying\nIf you would gain life, you gain that much life plus 1 instead.\nThis creature gets +2/+2 as long as you have 25 or more life.";
+
+/// CR 702.15e + CR 616.1 + CR 101.4: two lifelink creatures trade blows in a
+/// blocked combat. The blocker's damage to the ACTIVE player's creature would
+/// sort first by damaged seat, but each lifelink gain is its own event whose
+/// replacement order belongs to the GAINING player, so the active player is
+/// asked first, then the nonactive player. Rhox Faithmender (x2) and Angel of
+/// Vitality (+1) make the order material: 2 life gains 6 (Angel first) or 5
+/// (Rhox first). Each seat's life reflects its own answer, each gain once.
+#[test]
+fn lifelink_gain_choices_follow_the_gaining_seats_apnap_order() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let attacker = scenario
+        .add_creature_from_oracle(P0, "Rhox Faithmender", 2, 5, RHOX_ORACLE)
+        .lifelink()
+        .id();
+    let blocker = scenario
+        .add_creature_from_oracle(P1, "Rhox Faithmender", 2, 5, RHOX_ORACLE)
+        .lifelink()
+        .id();
+    let p0_angel = scenario
+        .add_creature_from_oracle(P0, "Angel of Vitality", 2, 2, ANGEL_OF_VITALITY_ORACLE)
+        .id();
+    let p1_angel = scenario
+        .add_creature_from_oracle(P1, "Angel of Vitality", 2, 2, ANGEL_OF_VITALITY_ORACLE)
+        .id();
+    let p0_rhox = attacker;
+    let p1_rhox = blocker;
+    let mut runner = scenario.build();
+    runner.advance_to_combat();
+    runner
+        .declare_attackers(&[(attacker, AttackTarget::Player(P1))])
+        .expect("declare attacker");
+    for _ in 0..8 {
+        if matches!(
+            runner.state().waiting_for,
+            WaitingFor::DeclareBlockers { .. }
+        ) {
+            break;
+        }
+        runner.act(GameAction::PassPriority).expect("to blockers");
+    }
+    runner
+        .declare_blockers(&[(blocker, attacker)])
+        .expect("declare blockers");
+    for _ in 0..8 {
+        if matches!(
+            runner.state().waiting_for,
+            WaitingFor::ReplacementChoice { .. }
+        ) {
+            break;
+        }
+        runner.act(GameAction::PassPriority).expect("to damage");
+    }
+
+    let mut answers = vec![(P0, p0_angel), (P1, p1_rhox)];
+    let _ = (p0_rhox, p1_angel);
+    for (chooser, source) in answers.drain(..) {
+        let WaitingFor::ReplacementChoice {
+            player, candidates, ..
+        } = runner.state().waiting_for.clone()
+        else {
+            panic!(
+                "expected {chooser:?} gain choice, got {:?} phase {:?} life {} {} dmg {} {} lifelink {}",
+                runner.state().waiting_for,
+                runner.state().phase,
+                runner.life(P0),
+                runner.life(P1),
+                runner.state().objects[&p0_rhox].damage_marked,
+                runner.state().objects[&p1_rhox].damage_marked,
+                runner.state().objects[&p0_rhox].has_keyword(&engine::types::keywords::Keyword::Lifelink)
+            );
+        };
+        assert_eq!(
+            player, chooser,
+            "CR 616.1 + CR 101.4: APNAP of the gaining seat"
+        );
+        let index = candidates
+            .iter()
+            .position(|candidate| candidate.source_id == source)
+            .expect("candidate present");
+        runner
+            .act(GameAction::ChooseReplacement { index })
+            .expect("answer gain order");
+    }
+    for _ in 0..16 {
+        if matches!(
+            runner.state().phase,
+            Phase::EndCombat | Phase::PostCombatMain
+        ) {
+            break;
+        }
+        runner.act(GameAction::PassPriority).expect("finish combat");
+    }
+    // P0: Angel first (2 + 1) x 2 = 6. P1: Rhox first 2 x 2 + 1 = 5.
+    assert_eq!(runner.life(P0), 26, "P0's own answer, gained once");
+    assert_eq!(runner.life(P1), 25, "P1's own answer, gained once");
+}

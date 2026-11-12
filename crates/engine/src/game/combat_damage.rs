@@ -1852,11 +1852,7 @@ fn complete_combat_phase_c_remnant(
                 accums.combat_damage_to_players,
                 &accums.source_incarnations,
             );
-            record.remaining = accums
-                .lifelink_by_source
-                .into_iter()
-                .map(|(_source_id, controller, amount)| PendingLifelinkGain { controller, amount })
-                .collect();
+            record.remaining = lifelink_gains_in_apnap_order(state, accums.lifelink_by_source);
             RemnantOutcome::Complete
         }
         PhaseCRunOutcome::PausedOnLoss { index } => RemnantOutcome::Repaused {
@@ -1868,6 +1864,33 @@ fn complete_combat_phase_c_remnant(
             },
         },
     }
+}
+
+/// CR 101.4: a player's position in APNAP order (active player first, then
+/// each other living player in turn order); players outside it sort last.
+fn apnap_rank(state: &GameState, player: PlayerId) -> usize {
+    super::players::apnap_order(state)
+        .iter()
+        .position(|seat| *seat == player)
+        .unwrap_or(usize::MAX)
+}
+
+/// CR 702.15e + CR 616.1 + CR 101.4: each lifelink source's gain is its own
+/// event, and when two players must each order replacements on their own gain
+/// those choices are made in APNAP order of the GAINING player (the source's
+/// controller) — independent of whose creature was damaged, which is why the
+/// damage entries are never reordered for this. The sort is stable, so one
+/// seat's gains keep their first-seen order.
+fn lifelink_gains_in_apnap_order(
+    state: &GameState,
+    lifelink_by_source: Vec<(ObjectId, PlayerId, u32)>,
+) -> VecDeque<PendingLifelinkGain> {
+    let mut gains = lifelink_by_source;
+    gains.sort_by_key(|(_, controller, _)| apnap_rank(state, *controller));
+    gains
+        .into_iter()
+        .map(|(_source_id, controller, amount)| PendingLifelinkGain { controller, amount })
+        .collect()
 }
 
 /// CR 616.1 + CR 101.4 + CR 510.2: combat damage is dealt simultaneously, so
@@ -1886,7 +1909,6 @@ fn order_batch_by_affected_seat(
     entries: &mut Vec<PendingCombatDamageEntry>,
     proposed_events: &mut VecDeque<ProposedEvent>,
 ) {
-    let seats = super::players::apnap_order(state);
     let rank = |event: &ProposedEvent| -> usize {
         let ProposedEvent::Damage { target, .. } = event else {
             return usize::MAX;
@@ -1895,9 +1917,7 @@ fn order_batch_by_affected_seat(
             TargetRef::Player(player) => Some(*player),
             TargetRef::Object(id) => state.objects.get(id).map(|obj| obj.controller),
         };
-        affected
-            .and_then(|player| seats.iter().position(|seat| *seat == player))
-            .unwrap_or(usize::MAX)
+        affected.map_or(usize::MAX, |player| apnap_rank(state, player))
     };
     let mut paired: Vec<(PendingCombatDamageEntry, ProposedEvent)> = std::mem::take(entries)
         .into_iter()
@@ -2207,11 +2227,7 @@ fn apply_combat_damage_survivors(
     // prevention riders, and the CR 732.2a ring guard — lives in the drain, in
     // the order it has always been emitted, so a CR 616.1 pause can suspend it
     // without reordering it.
-    record.remaining = accums
-        .lifelink_by_source
-        .into_iter()
-        .map(|(_source_id, controller, amount)| PendingLifelinkGain { controller, amount })
-        .collect();
+    record.remaining = lifelink_gains_in_apnap_order(state, accums.lifelink_by_source);
     record.prevention_tally = prevention_tally;
     drain_combat_lifelink(state, record)
 }
