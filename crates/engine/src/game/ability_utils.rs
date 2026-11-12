@@ -8981,6 +8981,10 @@ fn effect_slot_denotes_damage_any_target(effect: &Effect, slot: AbilityTargetSlo
 /// planeswalker or battle", and that narrowing lives in
 /// [`effect_slot_denotes_damage_any_target`]. A caller that evaluated the bare `Any`
 /// predicate would admit an enchantment-only snapshot the spell could never have announced.
+/// A `Fight` is the other multi-slot shape whose slots do NOT share a filter (CR 601.2c:
+/// an appropriate object for each target the spell requires), and it is read from
+/// [`fight_declared_slot_filters`] — the cast path's own order authority — rather than
+/// from the single-filter extraction.
 /// Returns `None` where the node declares no stack-time filter.
 pub(crate) fn declared_slot_announcement_filter(
     node: &ResolvedAbility,
@@ -8988,6 +8992,31 @@ pub(crate) fn declared_slot_announcement_filter(
 ) -> Option<TargetFilter> {
     if node.target_choice_timing != TargetChoiceTiming::Stack {
         return None;
+    }
+    // CR 701.14a + CR 601.2c: a two-fighter Fight declares TWO slots with two
+    // DIFFERENT filters — "target creature you control fights target creature you
+    // don't control" (Bushwhack) names the subject (the creature that fights) first
+    // and the target (the creature fought) second — so recovering one filter for the
+    // whole effect judges the friendly slot against "you don't control" and refuses
+    // an announcement the spell really made. `fight_declared_slot_filters` is the
+    // cast path's own authority for which filters occupy which slots:
+    // `collect_target_slots_inner`'s Fight arm pushes its filters in this exact
+    // order, and `occurrence_binds_prior` already indexes the same iterator by
+    // declared position. A one-slot fight ("~ fights …", enchanted/equipped
+    // creature) yields its single `target` at position 0, unchanged.
+    //
+    // Positional attribution holds only while the node still holds every declared
+    // slot. A DECLINED optional slot leaves no entry (`assign_selected_slots_recursive`
+    // compacts `targets`), so a compacted vector no longer says which declared slot
+    // survived; that shape falls through to the single-filter reading below, which is
+    // exactly what this function answered before this arm existed — reproduced rather
+    // than guessed, because the alternative silence would drop the slot's check
+    // altogether.
+    if let Effect::Fight { subject, target } = &node.effect {
+        let declared: Vec<&TargetFilter> = fight_declared_slot_filters(subject, target).collect();
+        if declared.len() == node.targets.len() {
+            return declared.get(index).map(|filter| (*filter).clone());
+        }
     }
     let filter = extract_target_filter_from_effect(&node.effect)?;
     if effect_slot_denotes_damage_any_target(
@@ -16159,6 +16188,155 @@ mod tests {
         );
         assert!(runner.state().stack.is_empty());
         assert!(runner.state().resolution_stack.is_empty());
+    }
+
+    /// CR 601.2c + CR 701.14a: the DECLARED SLOT ORDER of a two-fighter `Fight`,
+    /// established on the printed card rather than assumed from Oracle word order.
+    ///
+    /// Bushwhack's fight mode is "Target creature you control fights target creature
+    /// you don't control." The declaration order `collect_target_slots_inner`'s
+    /// `Fight` arm pushes — and the order `fight_declared_slot_filters` yields — is
+    /// SUBJECT first ("the creature that fights", `Effect::Fight::subject`), TARGET
+    /// second ("the creature fought", `Effect::Fight::target`). The legal-target
+    /// sets are the witness: the controller's creature can fill only slot 0 and the
+    /// opponent's only slot 1, so a per-slot filter recovery that swaps the two
+    /// filters is observable rather than notional.
+    #[test]
+    fn bushwhack_fight_mode_declares_the_subject_slot_before_the_target_slot() {
+        const BUSHWHACK: &str = "Choose one —\n\
+            • Search your library for a basic land card, reveal it, put it into your hand, then shuffle.\n\
+            • Target creature you control fights target creature you don't control.";
+        let parsed = crate::parser::parse_oracle_text(
+            BUSHWHACK,
+            "Bushwhack",
+            &[],
+            &["Sorcery".to_string()],
+            &[],
+        );
+        assert!(
+            parsed
+                .modal
+                .as_ref()
+                .is_some_and(|modal| modal.mode_count == 2),
+            "reach-guard: Bushwhack is a two-mode \"Choose one\" spell, got {:?}",
+            parsed.modal
+        );
+        let fight_mode = parsed
+            .abilities
+            .get(1)
+            .expect("reach-guard: the second mode is the fight clause");
+        let Effect::Fight { subject, target } = &*fight_mode.effect else {
+            panic!(
+                "reach-guard: Bushwhack's second mode must parse as a Fight, got {:#?}",
+                fight_mode.effect
+            );
+        };
+        assert_eq!(
+            *subject,
+            TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
+            "the fighting creature is the you-control creature"
+        );
+        assert_eq!(
+            *target,
+            TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::Opponent)),
+            "the creature fought is the creature you don't control"
+        );
+
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let own = scenario.add_creature(P0, "Own fighter", 2, 2).id();
+        let theirs = scenario.add_creature(P1, "Opposing fighter", 1, 3).id();
+        let runner = scenario.build();
+
+        // The spell itself is on the stack; nothing in this declaration reads it.
+        let ability = build_resolved_from_def(fight_mode, ObjectId(9999), PlayerId(0));
+        let slots = build_target_slots(runner.state(), &ability)
+            .expect("Bushwhack's fight mode must build its announced slots");
+        assert_eq!(
+            slots.len(),
+            2,
+            "CR 601.2c: both fighters are declared targets, got {slots:?}"
+        );
+        assert_eq!(
+            slots[0].legal_targets,
+            vec![TargetRef::Object(own)],
+            "slot 0 is the SUBJECT: only the creature you control may fill it"
+        );
+        assert_eq!(
+            slots[1].legal_targets,
+            vec![TargetRef::Object(theirs)],
+            "slot 1 is the TARGET: only the creature you don't control may fill it"
+        );
+    }
+
+    /// CR 601.2c + CR 701.14a: the per-slot announcement recovery
+    /// ([`declared_slot_announcement_filter`]) hands each `Fight` slot its OWN
+    /// filter, and reproduces the single-filter reading only where a declared slot is
+    /// no longer positionally attributable.
+    #[test]
+    fn fight_slot_announcement_filters_follow_the_declared_order() {
+        let you_control =
+            TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You));
+        let you_dont_control =
+            TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::Opponent));
+        let source = ObjectId(1);
+        let own = ObjectId(2);
+        let theirs = ObjectId(3);
+
+        let two_slot = ResolvedAbility::new(
+            Effect::Fight {
+                subject: you_control.clone(),
+                target: you_dont_control.clone(),
+            },
+            vec![TargetRef::Object(own), TargetRef::Object(theirs)],
+            source,
+            PlayerId(0),
+        );
+        assert_eq!(
+            declared_slot_announcement_filter(&two_slot, 0),
+            Some(you_control.clone()),
+            "slot 0 is the SUBJECT: the creature that fights"
+        );
+        assert_eq!(
+            declared_slot_announcement_filter(&two_slot, 1),
+            Some(you_dont_control.clone()),
+            "slot 1 is the TARGET: the creature fought"
+        );
+
+        // "~ fights target creature you don't control": the context-ref fighter
+        // declares nothing, so the fought creature is the only slot.
+        let one_slot = ResolvedAbility::new(
+            Effect::Fight {
+                subject: TargetFilter::SelfRef,
+                target: you_dont_control.clone(),
+            },
+            vec![TargetRef::Object(theirs)],
+            source,
+            PlayerId(0),
+        );
+        assert_eq!(
+            declared_slot_announcement_filter(&one_slot, 0),
+            Some(you_dont_control.clone()),
+            "a one-slot fight keeps its single `target` at position 0"
+        );
+
+        // A DECLINED optional slot leaves no entry, so which declared slot survived is
+        // no longer recoverable from the position. The recovery reproduces the
+        // pre-existing single-filter answer instead of guessing a role.
+        let compacted = ResolvedAbility::new(
+            Effect::Fight {
+                subject: you_control,
+                target: you_dont_control.clone(),
+            },
+            vec![TargetRef::Object(theirs)],
+            source,
+            PlayerId(0),
+        );
+        assert_eq!(
+            declared_slot_announcement_filter(&compacted, 0),
+            Some(you_dont_control),
+            "a compacted declaration keeps the single-filter reading"
+        );
     }
 
     use crate::types::ability::{

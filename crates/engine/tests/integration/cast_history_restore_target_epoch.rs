@@ -1495,3 +1495,257 @@ fn a_distribution_park_is_latched_and_records_its_announced_target() {
         refused.err()
     );
 }
+
+/// Printed **Bushwhack** is `{G}` Sorcery — "Choose one — / • Search your library
+/// for a basic land card, reveal it, put it into your hand, then shuffle. / •
+/// Target creature you control fights target creature you don't control."
+/// (MTGJSON AtomicCards, oracle text verified).
+const BUSHWHACK: &str = "Choose one —\n\
+    • Search your library for a basic land card, reveal it, put it into your hand, then shuffle.\n\
+    • Target creature you control fights target creature you don't control.";
+
+/// The two-fighter park: `own` is the SUBJECT slot's legal object, `theirs` the
+/// TARGET slot's, and the untapped Forest pays the `{G}`, so the cast parks on the
+/// ordinary manual payment prompt with both fighters announced and latched.
+///
+/// The `Manual` request has to be stamped on the `TargetSelection` prompt's own
+/// pending cast: `handle_select_modes` rebuilds the pending cast and copies
+/// `base_cost`, `chosen_modes`, `origin_zone` and the rest WITHOUT `payment_mode`,
+/// so the mode choice resets an interactive cast to `Auto` and the auto-payer would
+/// settle `{G}` from the Forest before any save could be taken. That propagation
+/// gap is a separate defect; this fixture only needs the ordinary manual prompt the
+/// cast requested, so it restates the mode on the carrier that reaches the payment
+/// boundary.
+struct BushwhackPark {
+    runner: GameRunner,
+    spell: ObjectId,
+    own: ObjectId,
+    theirs: ObjectId,
+    forest: ObjectId,
+}
+
+fn bushwhack_announced_mid_payment() -> BushwhackPark {
+    let mut sc = GameScenario::new();
+    sc.at_phase(Phase::PreCombatMain);
+    let spell = sc
+        .add_spell_to_hand_from_oracle(P0, "Bushwhack", false, BUSHWHACK)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Green],
+            generic: 0,
+        })
+        .id();
+    // 2/4 against 3/3: each survives the other's damage, so both damage marks stay
+    // readable after resolution. The spares keep each slot from auto-selecting the
+    // only legal object, so the caster really announces both fighters.
+    let own = sc.add_creature(P0, "Own fighter", 3, 3).id();
+    let theirs = sc.add_creature(P1, "Opposing fighter", 2, 4).id();
+    sc.add_creature(P0, "Own spare", 1, 1);
+    sc.add_creature(P1, "Opposing spare", 1, 1);
+    let forest = sc.add_land_from_oracle(P0, "Forest", "{T}: Add {G}.").id();
+    let mut runner = sc.build();
+
+    let card_id = runner.state().objects[&spell].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: spell,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Manual,
+        })
+        .expect("the cast is announced");
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::ModeChoice { .. }),
+        "reach guard: Bushwhack is a \"Choose one\" spell, got {:?}",
+        runner.state().waiting_for
+    );
+    runner
+        .act(GameAction::SelectModes { indices: vec![1] })
+        .expect("the fight mode is chosen");
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::TargetSelection { .. }
+        ),
+        "reach guard: the fight mode asks for its two fighters, got {:?}",
+        runner.state().waiting_for
+    );
+    // Restate the requested interaction on the prompt's own pending cast; see the
+    // struct doc for why the mode choice lost it.
+    let WaitingFor::TargetSelection { pending_cast, .. } = &mut runner.state_mut().waiting_for
+    else {
+        unreachable!("matched above")
+    };
+    pending_cast.payment_mode = CastPaymentMode::Manual;
+    // CR 601.2c: positions are the declared slots — subject first, target second.
+    runner
+        .act(GameAction::SelectTargets {
+            targets: vec![TargetRef::Object(own), TargetRef::Object(theirs)],
+        })
+        .expect("both announced fighters are legal for their own slots");
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::ManaPayment { .. }),
+        "reach guard: the cast parks on the manual mana payment, got {:?}",
+        runner.state().waiting_for
+    );
+    BushwhackPark {
+        runner,
+        spell,
+        own,
+        theirs,
+        forest,
+    }
+}
+
+/// CR 601.2c: an appropriate object for EACH target the spell requires. Bushwhack's
+/// two declared slots impose DIFFERENT filters — "creature you control" for the
+/// subject, "creature you don't control" for the target — so a save whose recorded
+/// facts satisfy those filters slot by slot is an announcement the spell really
+/// made: it must be admitted, and the resumed cast must actually fight.
+///
+/// This is the witness for the per-slot recovery in
+/// `ability_utils::declared_slot_announcement_filter`. Recovering one filter for the
+/// whole effect (the `target` field's "you don't control") refuses the honest
+/// friendly fact in slot 0 and this test fails at the restore boundary.
+#[test]
+fn a_bushwhack_park_keeps_each_fighters_own_filter_through_restore() {
+    let BushwhackPark {
+        runner,
+        spell,
+        own,
+        theirs,
+        forest,
+    } = bushwhack_announced_mid_payment();
+
+    // Reach guard: the engine-written latch records both fighters, subject first.
+    let parked = runner
+        .state()
+        .pending_cast
+        .as_deref()
+        .expect("reach guard: the ManaPayment prompt owns the cast");
+    let latched = parked
+        .committed_target_facts
+        .as_deref()
+        .expect("reach guard: the parked cast carries its announced-target latch");
+    let latched_ids: Vec<ObjectId> = latched
+        .iter()
+        .filter_map(|fact| match fact {
+            ActivationTargetFact::Object { id, .. } => Some(*id),
+            ActivationTargetFact::Player(_) => None,
+        })
+        .collect();
+    assert_eq!(
+        latched_ids,
+        vec![own, theirs],
+        "CR 601.2c: the latch records the declared slots in order — subject, then target"
+    );
+
+    let restored_state = admitted(persisted_json(runner.state())).map_err(|error| {
+        format!(
+            "a Bushwhack park whose facts satisfy their own slots' filters must be admitted: \
+             {error:?}"
+        )
+    });
+    let restored_state =
+        restored_state.expect("reach: the honest two-fighter announcement is admitted");
+
+    // The resumed save pays the locked {G} and the fight resolves from the restored
+    // state, not from the pre-save runner.
+    let mut resumed = GameRunner::from_state(restored_state);
+    assert!(
+        matches!(resumed.state().waiting_for, WaitingFor::ManaPayment { .. }),
+        "reach guard: the restored state still owes the manual mana payment, got {:?}",
+        resumed.state().waiting_for
+    );
+    tap_land_for_mana(&mut resumed, forest);
+    resumed
+        .act(GameAction::PassPriority)
+        .expect("the restored save pays its locked cost");
+    assert!(
+        resumed.state().stack.iter().any(|entry| entry.id == spell),
+        "reach guard: the resumed save put Bushwhack on the stack"
+    );
+    resumed.advance_until_stack_empty();
+    assert!(
+        resumed.state().stack.is_empty(),
+        "reach guard: the resumed Bushwhack resolved"
+    );
+    // CR 701.14a: each fighter deals damage equal to its power to the other.
+    assert_eq!(
+        resumed.state().objects[&theirs].damage_marked,
+        3,
+        "the fought creature takes the subject's 3 power"
+    );
+    assert_eq!(
+        resumed.state().objects[&own].damage_marked,
+        2,
+        "the fighting creature takes the 2 power of the creature it fought"
+    );
+}
+
+/// CR 601.2c: the twin of the witness above with the two announced fighters SWAPPED
+/// between the declared slots (and the latch swapped with them, so the save is
+/// internally consistent). Slot 0 then records the opponent's creature, which only
+/// slot 1's "creature you don't control" filter admits — an announcement Bushwhack
+/// can never make, and it must be refused.
+///
+/// The refusal must name the SUBJECT slot's object: that is the per-slot recovery
+/// deciding. Recovering one filter for the whole effect judges slot 0 with "you
+/// don't control" (so the opponent's fact passes there) and refuses slot 1's
+/// friendly fact instead — the save is still refused, but with the wrong reason and
+/// the wrong target, and this test fails on the targeted match.
+#[test]
+fn a_bushwhack_park_with_its_two_fighters_swapped_is_refused() {
+    let BushwhackPark {
+        runner,
+        spell,
+        own: _,
+        theirs,
+        forest: _,
+    } = bushwhack_announced_mid_payment();
+
+    let mut state = runner.state().clone();
+    {
+        let parked = state
+            .pending_cast
+            .as_deref_mut()
+            .expect("reach-guard: the ManaPayment prompt owns the cast");
+        assert_eq!(
+            parked.ability.targets.len(),
+            2,
+            "reach-guard: the declaration really holds both fighters"
+        );
+        parked.ability.targets.swap(0, 1);
+        if parked.ability.target_pins.len() >= 2 {
+            parked.ability.target_pins.swap(0, 1);
+        }
+        let latched = parked
+            .committed_target_facts
+            .as_deref_mut()
+            .expect("reach-guard: the engine-written park carries its announced-target latch");
+        latched.swap(0, 1);
+    }
+
+    match PersistedGameState::capture(state).into_game_state() {
+        Err(PersistedRestoreError::ContradictoryAnnouncedTargetFacts {
+            spell_object_id,
+            reason:
+                AnnouncedTargetFactConflict::SnapshotContradictsDeclaredFilter {
+                    target: TargetRef::Object(refused),
+                },
+        }) => {
+            assert_eq!(
+                spell_object_id, spell,
+                "the refusal names the cast it is about"
+            );
+            assert_eq!(
+                refused, theirs,
+                "CR 601.2c: slot 0 is the SUBJECT — \"creature you control\" is the filter \
+                 the opponent's fighter fails, not slot 1's"
+            );
+        }
+        other => panic!(
+            "CR 601.2c: a save that hands the subject slot a creature you don't control must be \
+             refused, got {other:?}"
+        ),
+    }
+}
