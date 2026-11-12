@@ -12,6 +12,7 @@ use engine::game::engine::EngineError;
 use engine::game::game_object::AttachTarget;
 use engine::game::keywords::has_keyword;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
+use engine::types::ability::{FilterProp, StaticDefinition, TargetFilter};
 use engine::types::actions::GameAction;
 use engine::types::game_state::{CastPaymentMode, WaitingFor};
 use engine::types::keywords::Keyword;
@@ -39,6 +40,20 @@ const COMPOUND_AURA: &str = "Enchant creature\nEnchanted creature gets +1/+1 and
 const ENORMOUS_ENERGY_BLADE: &str = "Equipped creature gets +4/+0.\nWhenever this Equipment becomes attached to a creature, tap that creature.\nEquip {0}";
 
 const GRAFTED_WARGEAR: &str = "Equipped creature gets +3/+2.\nWhenever Grafted Wargear becomes unattached from a permanent, sacrifice that permanent.\nEquip {0}";
+
+/// Whether `def` is the opponent-scoped targeting restriction on "enchanted
+/// creature" (`CantBeTargeted { who: Opponents }` affecting `EnchantedBy`).
+fn is_enchanted_creature_opponent_restriction(def: &StaticDefinition) -> bool {
+    matches!(
+        def.mode,
+        StaticMode::CantBeTargeted {
+            who: ProhibitionScope::Opponents
+        }
+    ) && matches!(
+        &def.affected,
+        Some(TargetFilter::Typed(typed)) if typed.properties.contains(&FilterProp::EnchantedBy)
+    )
+}
 
 fn saproling_count(runner: &GameRunner, player: PlayerId) -> usize {
     let state = runner.state();
@@ -130,6 +145,16 @@ fn shielding_plax_restricts_targeting_of_enchanted_creature() {
         "Shielding Plax must not grant Hexproof keyword (governed by CantBeTargeted static)"
     );
 
+    // The restriction is the Aura's typed static: opponent-scoped, affecting the
+    // enchanted creature (and not a keyword grant).
+    assert!(
+        runner.state().objects[&plax]
+            .static_definitions
+            .iter_unchecked()
+            .any(is_enchanted_creature_opponent_restriction),
+        "Shielding Plax must carry CantBeTargeted {{ Opponents }} affecting the enchanted creature"
+    );
+
     // Shielding Plax itself is NOT the creature and does not have Hexproof on itself
     assert!(
         !has_keyword(&runner.state().objects[&plax], &Keyword::Hexproof),
@@ -143,6 +168,14 @@ fn compound_aura_grants_pt_and_cant_be_targeted_to_enchanted_creature() {
     scenario.at_phase(Phase::PreCombatMain);
 
     let bear = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
+    let sibling_1 = scenario.add_creature(P0, "Sibling Bear 1", 2, 2).id();
+    let sibling_2 = scenario.add_creature(P0, "Sibling Bear 2", 2, 2).id();
+
+    let probe = scenario
+        .add_spell_to_hand(P1, "Targeting Probe", false)
+        .with_mana_cost(ManaCost::generic(0))
+        .from_oracle_text("Targeting Probe deals 1 damage to target creature.")
+        .id();
 
     let aura = scenario
         .add_spell_to_hand(P0, "Compound Shield", false)
@@ -172,6 +205,45 @@ fn compound_aura_grants_pt_and_cant_be_targeted_to_enchanted_creature() {
         !has_keyword(bear_obj, &Keyword::Hexproof),
         "Compound Aura must not grant Hexproof keyword (governed by CantBeTargeted static)"
     );
+
+    // The parsed/cast compound fixture must also restrict targeting at runtime:
+    // the opponent cannot select the enchanted host but can select either
+    // unprotected sibling.
+    runner.state_mut().active_player = P1;
+    runner.state_mut().priority_player = P1;
+    runner.state_mut().waiting_for = WaitingFor::Priority { player: P1 };
+    runner
+        .act(GameAction::CastSpell {
+            object_id: probe,
+            card_id: runner.state().objects[&probe].card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("opponent can begin casting the probe");
+    let WaitingFor::TargetSelection { target_slots, .. } = runner.state().waiting_for.clone()
+    else {
+        panic!("expected production target selection");
+    };
+    let legal = &target_slots[0].legal_targets;
+    assert!(
+        !legal.contains(&TargetRef::Object(bear)),
+        "the enchanted host must be excluded for the opponent"
+    );
+    assert!(legal.contains(&TargetRef::Object(sibling_1)));
+    assert!(legal.contains(&TargetRef::Object(sibling_2)));
+    assert!(
+        runner
+            .act(GameAction::ChooseTarget {
+                target: Some(TargetRef::Object(bear)),
+            })
+            .is_err(),
+        "selecting the enchanted host must be rejected"
+    );
+    runner
+        .act(GameAction::ChooseTarget {
+            target: Some(TargetRef::Object(sibling_1)),
+        })
+        .expect("a legal unprotected sibling is selectable");
 }
 
 #[test]

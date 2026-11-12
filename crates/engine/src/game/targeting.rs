@@ -3839,7 +3839,7 @@ fn can_target_off_battlefield(
 /// grafted onto it (`StaticDefinition::source_controller`). The one read of `obj`'s own targeting
 /// prohibition for both the permanent check ([`can_target_with_source_name`])
 /// and the off-battlefield check ([`can_target_off_battlefield`]).
-fn own_cant_be_targeted_prohibits(
+pub fn own_cant_be_targeted_prohibits(
     obj: &crate::game::game_object::GameObject,
     source_controller: PlayerId,
     state: &GameState,

@@ -772,6 +772,89 @@ mod tests {
         }
     }
 
+    /// Aerie Mystics-style untargeted shroud on a creature carrying a granted
+    /// "can't be the target of spells or abilities your opponents control"
+    /// (Vines of Vastwood) restriction from `granting_controller`, against the
+    /// opponent's Doom Blade. Returns the activation verdict.
+    fn vines_restricted_shroud_activation_verdict(granting_controller: PlayerId) -> PolicyVerdict {
+        use engine::types::ability::{ResolvedAbility, TargetRef};
+        use engine::types::game_state::{StackEntry, StackEntryKind};
+        use engine::types::statics::ProhibitionScope;
+
+        let mut state = GameState::new_two_player(42);
+        let id = ai_object_with_activated(
+            &mut state,
+            grant_effect(Some(TargetFilter::SelfRef), None, Keyword::Shroud),
+        );
+        let mut restriction = StaticDefinition::new(StaticMode::CantBeTargeted {
+            who: ProhibitionScope::Opponents,
+        });
+        restriction.source_controller = Some(granting_controller);
+        state
+            .objects
+            .get_mut(&id)
+            .unwrap()
+            .static_definitions
+            .push(restriction);
+
+        let opp = PlayerId(1);
+        let spell_id = create_object(
+            &mut state,
+            CardId(99),
+            opp,
+            "Doom Blade".to_string(),
+            Zone::Stack,
+        );
+        let ability = ResolvedAbility::new(
+            Effect::Destroy {
+                target: TargetFilter::Any,
+                cant_regenerate: false,
+            },
+            vec![TargetRef::Object(id)],
+            spell_id,
+            opp,
+        );
+        state.stack.push_back(StackEntry {
+            id: spell_id,
+            source_id: spell_id,
+            controller: opp,
+            kind: StackEntryKind::Spell {
+                card_id: CardId(99),
+                ability: Some(Box::new(ability)),
+                casting_variant: Default::default(),
+                actual_mana_spent: 0,
+            },
+        });
+        activate_verdict(&state, id)
+    }
+
+    // CR 109.5 + CR 702.18a: Vines of Vastwood cast by the threat's controller
+    // anchors "your opponents" to that player, so it does not stop that
+    // player's Doom Blade; untargeted shroud still does (CR 608.2b).
+    #[test]
+    fn scoped_restriction_not_blocking_threat_controller_leaves_shroud_useful() {
+        match vines_restricted_shroud_activation_verdict(PlayerId(1)) {
+            PolicyVerdict::Score { reason, .. } => {
+                assert_eq!(reason.kind, "reactive_self_protection_exact_payoff");
+            }
+            PolicyVerdict::Reject { reason } => {
+                panic!("shroud is useful against an unrestricted threat: {reason:?}")
+            }
+        }
+    }
+
+    // Control: the restriction anchored to the AI itself names the threat's
+    // controller as an opponent, so the recipient is already protected.
+    #[test]
+    fn scoped_restriction_blocking_threat_controller_is_already_protected() {
+        match vines_restricted_shroud_activation_verdict(AI) {
+            PolicyVerdict::Reject { reason } => {
+                assert_eq!(reason.kind, "reactive_self_protection_no_payoff");
+            }
+            PolicyVerdict::Score { .. } => panic!("already protected; activation is redundant"),
+        }
+    }
+
     #[test]
     fn destruction_of_another_creature_does_not_justify_self_indestructible() {
         use engine::types::ability::{ResolvedAbility, TargetRef};

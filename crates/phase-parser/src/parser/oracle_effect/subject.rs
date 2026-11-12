@@ -7722,16 +7722,6 @@ fn strip_leading_conjunction(segment: &str) -> &str {
     segment
 }
 
-// CR 613.2 layer 6 + CR 509.1b: Combat / untap restriction modes granted
-// to a target need `AddStaticMode` so the layer system propagates them
-// onto the granted creature's `static_definitions`.
-// CR 119.7 + CR 119.8 + CR 104.2b + CR 104.3b: Player-scoped life and
-// game-state restriction modes (Everybody Lives!, Skullcrack, Teferi's
-// Protection-style life locks scoped at the spell layer) must also carry
-// `AddStaticMode` so the transient continuous effect system propagates
-// them through to runtime queries — without this, the resolver creates a
-// TCE with empty modifications and `player_has_cant_lose` /
-// `player_has_cant_gain_life` never see it.
 /// CR 702.18a + CR 109.5 + CR 611.2: the modification a resolving effect grants
 /// for "<subject> can't be the target of spells or abilities [your opponents
 /// control]".
@@ -7763,6 +7753,16 @@ pub(crate) fn cant_be_targeted_effect_grant(
     }
 }
 
+// CR 613.2 layer 6 + CR 509.1b: Combat / untap restriction modes granted
+// to a target need `AddStaticMode` so the layer system propagates them
+// onto the granted creature's `static_definitions`.
+// CR 119.7 + CR 119.8 + CR 104.2b + CR 104.3b: Player-scoped life and
+// game-state restriction modes (Everybody Lives!, Skullcrack, Teferi's
+// Protection-style life locks scoped at the spell layer) must also carry
+// `AddStaticMode` so the transient continuous effect system propagates
+// them through to runtime queries — without this, the resolver creates a
+// TCE with empty modifications and `player_has_cant_lose` /
+// `player_has_cant_gain_life` never see it.
 pub(crate) fn static_mode_needs_grant_propagation(mode: &StaticMode) -> bool {
     // CR 305.1 + CR 611.1: Player-scoped land-play prohibition (Pardic Miner,
     // Turf Wound, Solfatara, Moonhold: "Target player can't play lands this

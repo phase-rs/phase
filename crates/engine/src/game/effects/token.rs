@@ -5460,13 +5460,14 @@ mod tests {
     use crate::game::engine::apply_as_current;
     use crate::game::printed_cards::intrinsic_copiable_values;
     use crate::game::zones::create_object;
-    use crate::types::ability::TriggerDefinition;
+    use crate::types::ability::{StaticCondition, TriggerDefinition};
     use crate::types::actions::GameAction;
     use crate::types::card_type::CardType;
     use crate::types::game_state::WaitingFor;
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::mana::ManaType;
     use crate::types::player::PlayerId;
+    use crate::types::proposed_event::TokenCharacteristics;
     use crate::types::triggers::TriggerMode;
     use crate::types::zones::Zone;
     use std::sync::Arc;
@@ -8863,8 +8864,6 @@ mod tests {
         statics: Vec<StaticDefinition>,
         host: TokenHostRequest,
     ) -> ProposedEvent {
-        use crate::types::proposed_event::TokenCharacteristics;
-
         let spec = TokenSpec {
             characteristics: TokenCharacteristics {
                 display_name: "Probe Curse".to_string(),
@@ -8984,8 +8983,6 @@ mod tests {
     /// other-object grant stays in the layer path and is not materialized.
     #[test]
     fn intrinsic_enchant_extraction_is_limited_to_unconditional_self_grants() {
-        use crate::types::ability::StaticCondition;
-
         let unconditional = enchant_grant_static(TargetFilter::Player);
         let conditional = enchant_grant_static(TargetFilter::Player)
             .condition(StaticCondition::IsPresent { filter: None });

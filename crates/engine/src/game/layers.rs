@@ -59,7 +59,7 @@ use crate::types::keywords::Keyword;
 use crate::types::layers::{ActiveContinuousEffect, Layer};
 use crate::types::phase::Phase;
 use crate::types::player::PlayerId;
-use crate::types::statics::StaticMode;
+use crate::types::statics::{ProhibitionScope, StaticMode};
 use crate::types::zones::Zone;
 
 #[derive(Debug, Clone)]
@@ -10815,7 +10815,6 @@ fn static_mode_uses_chosen_color(mode: &crate::types::statics::StaticMode) -> bo
 ///
 /// Mirrors `static_mode_uses_chosen_color`.
 fn static_mode_needs_source_controller_anchor(mode: &crate::types::statics::StaticMode) -> bool {
-    use crate::types::statics::{ProhibitionScope, StaticMode};
     match mode {
         StaticMode::MustBeBlockedByAll {
             blockers: Some(filter),

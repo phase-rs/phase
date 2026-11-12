@@ -22,7 +22,6 @@ use engine::game::combat::get_valid_block_targets_for_player;
 use engine::game::combat_damage::participates_in_pending_combat_damage_substep;
 use engine::game::effects::effect::generic_effect_application_filter;
 use engine::game::filter::{matches_target_filter, FilterContext};
-use engine::game::functioning_abilities::active_static_definitions;
 use engine::game::keywords::{object_has_effective_keyword_kind, source_matches_protection_target};
 use engine::game::targeting::find_legal_targets;
 use engine::types::ability::TargetRef;
@@ -437,6 +436,7 @@ fn any_stack_harmful_answerable_by_grants(
                     state.objects.get(&entry.source_id),
                     lethal,
                     &declared_targets,
+                    entry.controller,
                 )
             })
         })
@@ -458,13 +458,16 @@ fn harmful_effect_answerable_by_grants(
     source: Option<&engine::game::game_object::GameObject>,
     lethal: Option<bool>,
     declared_targets: &[TargetRef],
+    threat_controller: PlayerId,
 ) -> bool {
     if !is_harmful(effect) {
         return false;
     }
     grants
         .iter()
-        .filter(|grant| !grant_already_effective(state, protected.id, grant))
+        .filter(|grant| {
+            !grant_already_effective(state, protected.id, grant, Some(threat_controller))
+        })
         .filter(|grant| !matches!(grant, DefensiveGrant::PreventDamage) || lethal != Some(false))
         .any(|grant| {
             grant_answers_harmful_effect(grant, effect, protected, source, declared_targets)
@@ -764,7 +767,12 @@ fn stack_payoff_for_opportunity(
                         continue;
                     };
                     if !opportunity.recipients.contains(recipient_id)
-                        || grant_already_effective(state, *recipient_id, &opportunity.grant)
+                        || grant_already_effective(
+                            state,
+                            *recipient_id,
+                            &opportunity.grant,
+                            Some(entry.controller),
+                        )
                     {
                         continue;
                     }
@@ -788,8 +796,12 @@ fn stack_payoff_for_opportunity(
                         entry.controller,
                     );
                     for recipient_id in &opportunity.recipients {
-                        if grant_already_effective(state, *recipient_id, &opportunity.grant)
-                            || !matches_target_filter(state, *recipient_id, filter, &ctx)
+                        if grant_already_effective(
+                            state,
+                            *recipient_id,
+                            &opportunity.grant,
+                            Some(entry.controller),
+                        ) || !matches_target_filter(state, *recipient_id, filter, &ctx)
                         {
                             continue;
                         }
@@ -1009,10 +1021,20 @@ fn grant_answers_mass_effect(
     }
 }
 
+/// Whether `recipient_id` already has `grant`'s protection against the threat.
+///
+/// `threat_controller` is the controller of the stack object (or other source)
+/// that threatens the recipient. A scoped `StaticMode::CantBeTargeted` (Vines
+/// of Vastwood: "your opponents" anchored to the granting controller, CR 109.5)
+/// protects only against the controllers it actually names, so it counts as
+/// already-effective only when the engine's targeting authority says it
+/// prohibits `threat_controller`. With no known threat controller the check
+/// fails open (not protected). Shroud and hexproof keywords are unchanged.
 fn grant_already_effective(
     state: &GameState,
     recipient_id: ObjectId,
     grant: &DefensiveGrant,
+    threat_controller: Option<PlayerId>,
 ) -> bool {
     let Some(object) = state.objects.get(&recipient_id) else {
         return false;
@@ -1021,8 +1043,7 @@ fn grant_already_effective(
         DefensiveGrant::CantBeTargeted => {
             object.has_keyword(&Keyword::Shroud)
                 || object.has_keyword(&Keyword::Hexproof)
-                || active_static_definitions(state, object)
-                    .any(|def| matches!(&def.mode, StaticMode::CantBeTargeted { .. }))
+                || restriction_blocks_threat(state, object, threat_controller)
         }
         DefensiveGrant::HexproofFrom(filter) => {
             object.has_keyword(&Keyword::Shroud)
@@ -1030,8 +1051,7 @@ fn grant_already_effective(
                 || object
                     .keywords
                     .contains(&Keyword::HexproofFrom(filter.clone()))
-                || active_static_definitions(state, object)
-                    .any(|def| matches!(&def.mode, StaticMode::CantBeTargeted { .. }))
+                || restriction_blocks_threat(state, object, threat_controller)
         }
         DefensiveGrant::Protection(protection) => object.keywords.iter().any(|keyword| {
             matches!(
@@ -1043,6 +1063,19 @@ fn grant_already_effective(
         DefensiveGrant::Indestructible => object.has_keyword(&Keyword::Indestructible),
         DefensiveGrant::PreventDamage => false,
     }
+}
+
+/// CR 702.18a + CR 109.5: whether a `CantBeTargeted` restriction on `object`
+/// prohibits targeting by `threat_controller`, decided by the engine's targeting
+/// authority. Fails open when the threat's controller is unknown.
+fn restriction_blocks_threat(
+    state: &GameState,
+    object: &engine::game::game_object::GameObject,
+    threat_controller: Option<PlayerId>,
+) -> bool {
+    threat_controller.is_some_and(|controller| {
+        engine::game::targeting::own_cant_be_targeted_prohibits(object, controller, state)
+    })
 }
 
 fn combat_pair_ids(
@@ -1080,7 +1113,7 @@ fn combat_payoff_for_opportunity(
                 return Some(false);
             };
             for recipient_id in &opportunity.recipients {
-                if grant_already_effective(state, *recipient_id, &opportunity.grant) {
+                if grant_already_effective(state, *recipient_id, &opportunity.grant, None) {
                     continue;
                 }
                 let Some(attacker) = combat
@@ -1113,7 +1146,7 @@ fn combat_payoff_for_opportunity(
         Phase::DeclareBlockers => {
             let mut saw_indestructible_pair = false;
             for recipient_id in &opportunity.recipients {
-                if grant_already_effective(state, *recipient_id, &opportunity.grant) {
+                if grant_already_effective(state, *recipient_id, &opportunity.grant, None) {
                     continue;
                 }
                 let paired_ids = combat_pair_ids(combat, *recipient_id);
@@ -1158,7 +1191,7 @@ fn combat_payoff_for_opportunity(
         Phase::CombatDamage if !combat.regular_damage_done => {
             let mut ambiguous = false;
             for recipient_id in &opportunity.recipients {
-                if grant_already_effective(state, *recipient_id, &opportunity.grant) {
+                if grant_already_effective(state, *recipient_id, &opportunity.grant, None) {
                     continue;
                 }
                 let paired_ids: Vec<_> = combat_pair_ids(combat, *recipient_id)
@@ -1762,12 +1795,14 @@ mod tests {
         assert!(grant_already_effective(
             &state,
             recipient,
-            &DefensiveGrant::HexproofFrom(HexproofFilter::Color(ManaColor::Red))
+            &DefensiveGrant::HexproofFrom(HexproofFilter::Color(ManaColor::Red)),
+            None
         ));
         assert!(grant_already_effective(
             &state,
             recipient,
-            &DefensiveGrant::Protection(ProtectionTarget::Color(ManaColor::Red))
+            &DefensiveGrant::Protection(ProtectionTarget::Color(ManaColor::Red)),
+            None
         ));
     }
 

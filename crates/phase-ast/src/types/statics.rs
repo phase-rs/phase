@@ -3855,11 +3855,6 @@ impl FromStr for StaticMode {
             "CantBeTargeted" => StaticMode::CantBeTargeted {
                 who: ProhibitionScope::AllPlayers,
             },
-            s if s.starts_with("CantBeTargeted(") && s.ends_with(')') => {
-                let inner = &s["CantBeTargeted(".len()..s.len() - 1];
-                let who = ProhibitionScope::from_str(inner).unwrap_or(ProhibitionScope::AllPlayers);
-                StaticMode::CantBeTargeted { who }
-            }
             "CantBeCast" => StaticMode::CantBeCast {
                 who: ProhibitionScope::Controller,
             },
@@ -4317,6 +4312,16 @@ impl FromStr for StaticMode {
             // Parameterized
             other => {
                 if let Some(inner) = other
+                    .strip_prefix("CantBeTargeted(")
+                    .and_then(|s| s.strip_suffix(')'))
+                {
+                    // An unknown scope is preserved as `Other` rather than
+                    // widened to the strongest (`AllPlayers`) rule.
+                    if let Ok(who) = ProhibitionScope::from_str(inner) {
+                        return Ok(StaticMode::CantBeTargeted { who });
+                    }
+                    return Ok(StaticMode::Other(other.to_string()));
+                } else if let Some(inner) = other
                     .strip_prefix("CantDraw(")
                     .and_then(|s| s.strip_suffix(')'))
                 {
@@ -5159,6 +5164,31 @@ mod tests {
             let s = mode.to_string();
             assert_eq!(StaticMode::from_str(&s).unwrap(), mode);
         }
+    }
+
+    #[test]
+    fn cant_be_targeted_scope_string_round_trips_and_preserves_unknown() {
+        for who in [
+            ProhibitionScope::Opponents,
+            ProhibitionScope::AllPlayers,
+            ProhibitionScope::Controller,
+            ProhibitionScope::EnchantedCreatureController,
+        ] {
+            let mode = StaticMode::CantBeTargeted { who };
+            assert_eq!(StaticMode::from_str(&mode.to_string()).unwrap(), mode);
+        }
+        // Bare form stays the explicit AllPlayers rule.
+        assert_eq!(
+            StaticMode::from_str("CantBeTargeted").unwrap(),
+            StaticMode::CantBeTargeted {
+                who: ProhibitionScope::AllPlayers
+            }
+        );
+        // An unknown scope must not be widened to AllPlayers.
+        assert_eq!(
+            StaticMode::from_str("CantBeTargeted(bogus_scope)").unwrap(),
+            StaticMode::Other("CantBeTargeted(bogus_scope)".to_string())
+        );
     }
 
     #[test]
