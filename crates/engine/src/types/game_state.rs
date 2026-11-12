@@ -16871,6 +16871,11 @@ impl PersistedGameState {
             &mut state,
         )
         .map_err(PersistedRestoreError::InvalidPerPlayerChoice)?;
+        // CR 702.16p: an older save's slot-keyed start snapshots move to their
+        // occurrence keys before anything can flush layers. Otherwise a
+        // flush's refresh would take a fresh snapshot under the new key, and
+        // the migration would then keep the fresh one.
+        crate::game::effects::attach::migrate_legacy_protection_start_snapshots(&mut state);
         state
             .format_config
             .reject_unimplemented_range_of_influence()

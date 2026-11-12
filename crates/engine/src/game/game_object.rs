@@ -827,8 +827,8 @@ pub struct GameObject {
     )]
     pub protection_start_snapshots: HashMap<ProtectionStartKey, ProtectionStartSnapshot>,
     /// CR 702.16p: snapshots an older save stored under slot keys. Read, never
-    /// written; the persisted restore boundary (`finalize_persisted_restore`)
-    /// migrates each one whose host is still present to
+    /// written; preparing a persisted restore
+    /// (`PersistedGameState::prepare_for_restore`) migrates each one whose host is still present to
     /// [`Self::protection_start_snapshots`] and empties this map. The older
     /// writer held entries only on battlefield sources and cleared them on
     /// zone exit, so the migration's battlefield scan reaches every entry.
@@ -856,11 +856,13 @@ pub struct GameObject {
     /// carries a rider. Retained abilities (layer 1,
     /// `RetainAllOtherAbilitiesFromSource`) record a rider-less entry.
     /// Not serialized: every layer flush rebuilds it. A decode starts with
-    /// layers dirty (`GameState::layers_dirty` defaults to `Full`), and every
-    /// production restore finalizes through
+    /// layers dirty (`GameState::layers_dirty` defaults to `Full`). Every
+    /// persisted restore finalizes through
     /// `PreparedPersistedGameState::finish_after_rehydration` →
     /// `finalize_persisted_restore` → `finalize_rules_state` → `flush_layers`
     /// before the state is installed, so no reader sees the decoded empty list.
+    /// The cast-undo restore instead marks layers full, and the next flush
+    /// rebuilds it.
     #[serde(skip)]
     pub protection_provenance: Vec<ProtectionProvenance>,
     /// CR 702.95b-d: Soulbond pair relationship. Pairing is symmetric:
@@ -3856,6 +3858,10 @@ impl GameObject {
     }
 
     /// CR 613.1f: remove every live keyword and the provenance that described it.
+    /// `protection_start_grants` is kept: an effect that removes abilities does
+    /// not stop a protection grant from applying, so its CR 702.16p start
+    /// snapshot must survive. Only the per-pass reset
+    /// (`reset_keywords_to_base`) clears it.
     pub(crate) fn clear_keywords(&mut self) {
         self.keywords.clear();
         self.protection_provenance.clear();

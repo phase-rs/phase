@@ -1395,8 +1395,8 @@ fn host_reentering_starts_a_new_snapshot() {
 /// started. After a persisted restore (immediate and deferred), Blessing holds
 /// the same snapshot: Pacifism stays legal and the later-white Equipment stays
 /// blocked, which a snapshot re-taken at restore would get wrong. A save written
-/// with the older slot key restores the same way: the restore boundary
-/// migrates its entry before its layer flush.
+/// with the older slot key restores the same way: preparing the restore
+/// migrates its entry before any layer flush.
 #[test]
 fn persisted_restore_keeps_the_start_snapshot_identity() {
     let mut s = scenario();

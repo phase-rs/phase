@@ -2410,8 +2410,9 @@ pub(crate) fn refresh_protection_start_attachment_snapshots(state: &mut GameStat
 /// key at a slot layer 6 filled with a granted static cannot be mapped to its
 /// grant occurrence: it migrates to a key no grant claims, the refresh prunes
 /// it, and that grant takes a new snapshot (no printed card grants a ridered
-/// static). Entries whose host is gone are dropped. Run once at the persisted
-/// restore boundary, before its layer flush.
+/// static). Entries whose host is gone are dropped. Run once when a persisted
+/// state is prepared for restore (`PersistedGameState::prepare_for_restore`),
+/// before anything can flush layers.
 pub(crate) fn migrate_legacy_protection_start_snapshots(state: &mut GameState) {
     use crate::game::game_object::ProtectionStartKey;
     use crate::types::layers::ProtectionGrantOccurrence;
