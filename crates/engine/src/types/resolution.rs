@@ -4303,7 +4303,10 @@ impl ResolutionStack {
 /// and parked frames, and preserves unavailable announced bindings through coin
 /// outcomes and detached continuations (CR 601.2c + CR 608.2b); coin frames and
 /// unresolved coin abilities from earlier versions are refused.
-pub const RESOLUTION_STATE_WIRE_VERSION: u64 = 11;
+/// Version 12 carries the CR 611.2e entrant-abilities profile on a parked
+/// ChangeZone (`PendingChangeZoneIteration.entrant_abilities`), omitted when
+/// `Retained`; earlier versions decode it as `Retained`, which is what they meant.
+pub const RESOLUTION_STATE_WIRE_VERSION: u64 = 12;
 
 /// Historical full-state resolution wire version accepted only for migration.
 ///
@@ -4344,6 +4347,11 @@ const LEGACY_UNSCOPED_RANDOM_RESULT_RESOLUTION_STATE_WIRE_VERSION: u64 = 9;
 /// illegal-announcement absence provenance (#10300's random-result trigger-scope
 /// version).
 const LEGACY_UNBOUND_COIN_BRANCH_RESOLUTION_STATE_WIRE_VERSION: u64 = 10;
+
+/// Last wire version whose parked ChangeZone carrier could not carry the
+/// entrant-abilities profile. No migration is needed: its frames decode as
+/// `EntrantAbilities::Retained`, the only profile that writer could mean.
+const LEGACY_UNPROFILED_ENTRANT_RESOLUTION_STATE_WIRE_VERSION: u64 = 11;
 
 /// Stable refusal: old coin saves lack the independently announced bindings;
 /// neither today's board nor the old flat target vector can reconstruct them.
@@ -5339,10 +5347,11 @@ impl ResolutionStateWire {
             | LEGACY_UNINHERITED_FLIP_BRANCH_RESOLUTION_STATE_WIRE_VERSION
             | LEGACY_UNSCOPED_RANDOM_RESULT_RESOLUTION_STATE_WIRE_VERSION
             | LEGACY_UNBOUND_COIN_BRANCH_RESOLUTION_STATE_WIRE_VERSION
+            | LEGACY_UNPROFILED_ENTRANT_RESOLUTION_STATE_WIRE_VERSION
             | RESOLUTION_STATE_WIRE_VERSION => GameStateDecodeMode::ResolutionWireV4,
             _ => {
                 return Err(format!(
-                    "unsupported resolution_state_version {version}; expected 1, 2, {LEGACY_RESULT_OWNERSHIP_RESOLUTION_STATE_WIRE_VERSION}, {LEGACY_DEALERLESS_RESOLUTION_STATE_WIRE_VERSION}, 5, {LEGACY_UNRESOLVED_CHANGE_ZONE_MEMBER_RESOLUTION_STATE_WIRE_VERSION}, {LEGACY_COIN_FLIP_KIND_RESOLUTION_STATE_WIRE_VERSION}, {LEGACY_UNINHERITED_FLIP_BRANCH_RESOLUTION_STATE_WIRE_VERSION}, {LEGACY_UNSCOPED_RANDOM_RESULT_RESOLUTION_STATE_WIRE_VERSION}, {LEGACY_UNBOUND_COIN_BRANCH_RESOLUTION_STATE_WIRE_VERSION}, or {RESOLUTION_STATE_WIRE_VERSION}"
+                    "unsupported resolution_state_version {version}; expected 1, 2, {LEGACY_RESULT_OWNERSHIP_RESOLUTION_STATE_WIRE_VERSION}, {LEGACY_DEALERLESS_RESOLUTION_STATE_WIRE_VERSION}, 5, {LEGACY_UNRESOLVED_CHANGE_ZONE_MEMBER_RESOLUTION_STATE_WIRE_VERSION}, {LEGACY_COIN_FLIP_KIND_RESOLUTION_STATE_WIRE_VERSION}, {LEGACY_UNINHERITED_FLIP_BRANCH_RESOLUTION_STATE_WIRE_VERSION}, {LEGACY_UNSCOPED_RANDOM_RESULT_RESOLUTION_STATE_WIRE_VERSION}, {LEGACY_UNBOUND_COIN_BRANCH_RESOLUTION_STATE_WIRE_VERSION}, {LEGACY_UNPROFILED_ENTRANT_RESOLUTION_STATE_WIRE_VERSION}, or {RESOLUTION_STATE_WIRE_VERSION}"
                 ));
             }
         };
@@ -8397,7 +8406,7 @@ mod tests {
     #[test]
     fn resolution_wire_keeps_all_legacy_readers_available() {
         let state = GameState::new_two_player(57);
-        for version in 1..=LEGACY_UNBOUND_COIN_BRANCH_RESOLUTION_STATE_WIRE_VERSION {
+        for version in 1..=LEGACY_UNPROFILED_ENTRANT_RESOLUTION_STATE_WIRE_VERSION {
             let mut value = if version == LEGACY_RESOLUTION_STATE_WIRE_VERSION {
                 serde_json::to_value(&state).unwrap()
             } else {
@@ -8413,11 +8422,12 @@ mod tests {
     }
 
     // Real cards: wire/persistence test, not a card-behavior test. Persistence/wire test: pins the
-    // resolution wire writer at v11 and every legacy reader version constant, and that an idle v1
+    // resolution wire writer at v12 and every legacy reader version constant, and that an idle v1
     // save still loads. It persists no card state.
     #[test]
-    fn resolution_wire_contract_pins_v11_and_the_legacy_readers() {
-        assert_eq!(RESOLUTION_STATE_WIRE_VERSION, 11);
+    fn resolution_wire_contract_pins_v12_and_the_legacy_readers() {
+        assert_eq!(RESOLUTION_STATE_WIRE_VERSION, 12);
+        assert_eq!(LEGACY_UNPROFILED_ENTRANT_RESOLUTION_STATE_WIRE_VERSION, 11);
         assert_eq!(LEGACY_UNBOUND_COIN_BRANCH_RESOLUTION_STATE_WIRE_VERSION, 10);
         assert_eq!(
             LEGACY_UNSCOPED_RANDOM_RESULT_RESOLUTION_STATE_WIRE_VERSION,
@@ -8438,7 +8448,7 @@ mod tests {
         assert_eq!(LEGACY_RESOLUTION_STATE_WIRE_VERSION, 1);
         // The newest legacy reader sits directly below the writer.
         assert_eq!(
-            LEGACY_UNBOUND_COIN_BRANCH_RESOLUTION_STATE_WIRE_VERSION + 1,
+            LEGACY_UNPROFILED_ENTRANT_RESOLUTION_STATE_WIRE_VERSION + 1,
             RESOLUTION_STATE_WIRE_VERSION
         );
         let mut v1 = serde_json::to_value(GameState::new_two_player(57)).unwrap();

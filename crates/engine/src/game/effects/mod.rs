@@ -5584,8 +5584,9 @@ enum LaterInstructionQuery {
     AppliesWithEntry,
     /// CR 608.2c + CR 611.2e: is the instruction one that starts after an entry (not
     /// `WithEntry`) and may act on an object the completing instruction moved? Read without the
-    /// completing instruction in hand, so every moved-object referent form counts, a
-    /// self-reference included (the conservative answer).
+    /// completing instruction in hand, so every referent `moved_objects_referent` classifies
+    /// counts, a self-reference included (the conservative answer). A trigger return's
+    /// `TriggeringSource` referent is not read; no printed card puts a later instruction on it.
     MayActOnEntrantAfterEntry,
 }
 
