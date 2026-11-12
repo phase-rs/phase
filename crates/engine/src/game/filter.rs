@@ -8371,6 +8371,28 @@ fn zone_change_filter_answer_with_epoch(
             );
             kleene_and([properties, Some(axes)])
         }
+        // CR 405.1 + CR 115.9: a stack predicate asks what STACK ENTRY the
+        // announcement chose, and a record projected from an announcement cannot
+        // name that entry. CR 405.1: "When a spell is cast, the physical card is
+        // put on the stack"; "When an ability is activated or triggers, it goes
+        // on top of the stack without any card associated with it" — so a spell
+        // and an activated or triggered ability alike sit in `Zone::Stack`, and
+        // `LKISnapshot` captures no stack-entry kind, controller or tag. A
+        // captured `Zone::Stack` therefore states "a stack object" and nothing
+        // finer.
+        //
+        // The definite `false` the record walk answers here is the same defect a
+        // zeroed combat role was: it reports a contradiction the announcement
+        // never recorded. An honest Counterspell ("Counter target spell.")
+        // announced at a real spell during mana payment carries a fact whose
+        // captured zone IS the stack, and the restore guard refused that save.
+        // The captured zone can still rule the predicate OUT — a target announced
+        // in any other zone was never a stack object, and that IS something the
+        // announcement recorded — so only that definite negative survives.
+        TargetFilter::StackSpell | TargetFilter::StackAbility { .. } => match epoch.snapshot_zone {
+            Some(zone) if zone != Zone::Stack => Some(false),
+            _ => None,
+        },
         _ => Some(zone_change_filter_inner_with_epoch(
             state,
             record,
@@ -25100,6 +25122,83 @@ mod tests {
             ),
             Some(false),
             "an unrecorded combat leaf must not mask a recorded NONCREATURE contradiction"
+        );
+    }
+
+    /// CR 405.1 + CR 115.9: an announcement can name a STACK object — a
+    /// Counterspell announced at a spell is the ordinary case — so a recorded
+    /// announcement must answer a stack predicate from what it captured, never
+    /// from a default.
+    ///
+    /// The captured zone is the announcement's whole evidence here. CR 405.1:
+    /// "When a spell is cast, the physical card is put on the stack"; "When an
+    /// ability is activated or triggers, it goes on top of the stack without any
+    /// card associated with it" — a spell and an ability share the zone, and an
+    /// `LKISnapshot` captures no stack-entry kind, controller or tag. A captured
+    /// `Zone::Stack` therefore leaves `StackSpell` / `StackAbility` UNRECORDED
+    /// (`None`), while any other announced zone rules them OUT definitely — that
+    /// target was never a stack object, and the announcement did record that.
+    ///
+    /// Revert-probe: the pre-fix record walk answered both leaves `Some(false)`
+    /// for every zone, which refuses an honest Counterspell save taken during
+    /// mana payment. Answering them `Some(true)` on a captured stack zone would
+    /// be the opposite error — it reports an ability as a spell.
+    #[test]
+    fn recorded_announcement_answers_a_stack_predicate_as_unrecorded() {
+        let mut state = setup();
+        let source = add_creature(&mut state, PlayerId(0), "Counterspell");
+        let target = add_creature(&mut state, PlayerId(1), "Bears");
+        let ctx = FilterContext::from_source(&state, source);
+        let lki = epoch_snapshot(&[], false);
+        let announcement = |filter: &TargetFilter, zone: Zone| {
+            super::matches_target_filter_on_recorded_announcement(
+                &state,
+                target,
+                &lki,
+                filter,
+                &ctx,
+                Some(zone),
+                Some(false),
+            )
+        };
+        let ability = || TargetFilter::StackAbility {
+            controller: None,
+            tag: None,
+            kind: None,
+        };
+
+        for filter in [
+            TargetFilter::StackSpell,
+            ability(),
+            // "Counter target spell or ability" — the class shape.
+            TargetFilter::Or {
+                filters: vec![TargetFilter::StackSpell, ability()],
+            },
+        ] {
+            assert_eq!(
+                announcement(&filter, Zone::Stack),
+                None,
+                "{filter:?} announced on the stack is unrecorded, not false: the record does \
+                 not say whether the stack object was a spell or an ability"
+            );
+            // A target announced anywhere else was never a stack object, and
+            // that IS something the announcement recorded.
+            assert_eq!(
+                announcement(&filter, Zone::Battlefield),
+                Some(false),
+                "{filter:?} announced on the battlefield is a DEFINITE contradiction — the \
+                 captured zone says the target was never a stack object"
+            );
+        }
+        assert_eq!(
+            announcement(
+                &TargetFilter::Not {
+                    filter: Box::new(TargetFilter::StackSpell),
+                },
+                Zone::Stack,
+            ),
+            None,
+            "negation keeps the unknown — a missing recorded fact never becomes a match"
         );
     }
 

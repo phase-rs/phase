@@ -19849,9 +19849,19 @@ impl GameState {
     /// `FinalizeSpell`) that carry their latch beside a rebuilt cast. A carrier with no
     /// cast to compare against, and a latch that is absent altogether, are the other
     /// guards' questions.
+    ///
+    /// Each fact is bound to the slot that produced it POSITIONALLY, not by identity
+    /// (the pairing walk in `check` below). CR 601.2c lets one object fill two slots —
+    /// "if the spell uses the word 'target' in multiple places, the same object or player
+    /// can be chosen once for each instance of the word 'target'" — so a repeated
+    /// target's second fact judged against the first slot's requirement leaves the second
+    /// slot unchecked altogether, in both directions: a deleted fact for the repeated
+    /// target is not "omitted" when membership alone answers, and a rewritten snapshot
+    /// that fails only its own slot's filter is not "contradictory" when the first slot
+    /// admits it.
     fn reject_contradictory_announced_target_facts(&self) -> Result<(), PersistedRestoreError> {
-        /// CR 601.2c: the latch must name exactly the targets the cast's chain declares —
-        /// in the identity sense only. The characteristics and zone a fact also carries
+        /// CR 601.2c: the latch must name exactly the targets the cast's chain declares,
+        /// one fact per declared slot. The characteristics and zone a fact also carries
         /// describe the announcement, which is gone; the id list is what the chain still
         /// states.
         fn check(
@@ -19873,32 +19883,59 @@ impl GameState {
             // characteristics are never read.
             let declared_entries =
                 crate::game::ability_utils::declared_target_entries_in_chain(&pending.ability);
-            let declared: Vec<TargetRef> = declared_entries
-                .iter()
-                .map(|entry| entry.target.clone())
-                .collect();
-            let latched: Vec<TargetRef> = latched_facts
-                .iter()
-                .map(ActivationTargetFact::target_ref)
-                .collect();
-            if let Some(target) = latched.iter().find(|target| !declared.contains(target)) {
-                return Err(PersistedRestoreError::ContradictoryAnnouncedTargetFacts {
-                    spell_object_id: pending.object_id,
-                    reason: AnnouncedTargetFactConflict::UndeclaredTarget {
-                        target: target.clone(),
-                    },
-                });
+            // CR 601.2c: pair each recorded fact with the DECLARED SLOT it came from, by
+            // position — never by first-match on the fact's object id.
+            //
+            // `casting::latch_committed_target_facts` writes the latch by projecting
+            // `declared_targets_in_chain` through `casting::capture_target_facts`, which
+            // visits the declared slots in numbering order and drops only a target it cannot
+            // snapshot (CR 704.5d, an id with no object row). The n-th fact is therefore the
+            // n-th SURVIVING slot, and this walk is the same projection read from the other
+            // side: a fact may only pair with a slot at or after the previous fact's slot,
+            // and the earliest such slot is the one that produced it.
+            //
+            // Identity alone cannot answer this. CR 601.2c: "if the spell uses the word
+            // 'target' in multiple places, the same object or player can be chosen once for
+            // each instance of the word 'target' (as long as it fits the targeting
+            // criteria)", so one object may legally fill two slots with two different
+            // requirements. Kolaghan's Command's "Destroy target artifact" and "Kolaghan's
+            // Command deals 2 damage to any target" can both be announced at the same artifact
+            // creature; looking the second fact up by identity would judge it against the
+            // FIRST slot's artifact requirement and never check the damage slot at all. Each
+            // paired slot also supplies its OWN announcement pin
+            // (`ResolvedAbility::target_pin_at`), which is what makes a repeated target's two
+            // occurrences distinguishable at all.
+            let mut fact_of_slot: Vec<Option<usize>> = vec![None; declared_entries.len()];
+            let mut next_slot = 0usize;
+            for (fact_index, fact) in latched_facts.iter().enumerate() {
+                let target = fact.target_ref();
+                let slot = declared_entries[next_slot..]
+                    .iter()
+                    .position(|entry| entry.target == target)
+                    .map(|offset| next_slot + offset);
+                let Some(slot) = slot else {
+                    return Err(PersistedRestoreError::ContradictoryAnnouncedTargetFacts {
+                        spell_object_id: pending.object_id,
+                        reason: AnnouncedTargetFactConflict::UndeclaredTarget { target },
+                    });
+                };
+                fact_of_slot[slot] = Some(fact_index);
+                next_slot = slot + 1;
             }
             // CR 601.2c + CR 704.5d: a declared target the save can no longer carry is one
             // the honest capture would have dropped, so it owes no fact; one it still holds
             // would have produced a fact, and its absence from the latch is a deletion.
-            let omitted = declared.iter().find(|target| {
-                !latched.contains(target)
-                    && match target {
-                        TargetRef::Object(id) => state.objects.contains_key(id),
-                        TargetRef::Player(_) => true,
-                    }
-            });
+            let omitted = declared_entries
+                .iter()
+                .enumerate()
+                .find_map(|(slot, entry)| {
+                    (fact_of_slot[slot].is_none()
+                        && match &entry.target {
+                            TargetRef::Object(id) => state.objects.contains_key(id),
+                            TargetRef::Player(_) => true,
+                        })
+                    .then(|| entry.target.clone())
+                });
             if let Some(target) = omitted {
                 return Err(PersistedRestoreError::ContradictoryAnnouncedTargetFacts {
                     spell_object_id: pending.object_id,
@@ -19926,16 +19963,22 @@ impl GameState {
             // Sun-Crowned at five devotion, then a white permanent sacrificed for mana).
             // Refusing that drift would reject an honest save, which is the opposite of the
             // error this guard exists to catch.
-            for fact in latched_facts {
-                let ActivationTargetFact::Object {
-                    id, zone, token, ..
-                } = fact
+            for (slot, entry) in declared_entries.iter().enumerate() {
+                // CR 601.2c: the fact THIS slot produced, from the pairing above. A slot whose
+                // target the capture dropped has no fact to judge, and a first-match on
+                // identity is exactly what would hand a repeated target's second fact to the
+                // first slot's requirement.
+                let Some(fact) = fact_of_slot[slot].map(|fact_index| &latched_facts[fact_index])
                 else {
                     continue;
                 };
-                let Some(entry) = declared_entries
-                    .iter()
-                    .find(|entry| matches!(&entry.target, TargetRef::Object(declared_id) if declared_id == id))
+                let ActivationTargetFact::Object {
+                    id,
+                    lki,
+                    zone,
+                    token,
+                    ..
+                } = fact
                 else {
                     continue;
                 };
@@ -19956,12 +19999,6 @@ impl GameState {
                 // admitted, and a save that restates it as anything else was not this
                 // announcement.
                 if let Some(filter) = entry.filter.as_ref() {
-                    let ActivationTargetFact::Object {
-                        id: fact_id, lki, ..
-                    } = fact
-                    else {
-                        unreachable!("filtered to the object fact above");
-                    };
                     // CR 601.2c: the announcing cast is the filter's source authority — the
                     // spell itself, controlled by its controller. Nothing else is bound: this
                     // asks only what the recorded snapshot looks like.
@@ -19995,7 +20032,7 @@ impl GameState {
                     // missing recorded fact is not a failed predicate.
                     if crate::game::filter::matches_target_filter_on_recorded_announcement(
                         state,
-                        *fact_id,
+                        *id,
                         lki,
                         filter,
                         &context,
@@ -20007,7 +20044,7 @@ impl GameState {
                             spell_object_id: pending.object_id,
                             reason:
                                 AnnouncedTargetFactConflict::SnapshotContradictsDeclaredFilter {
-                                    target: TargetRef::Object(*fact_id),
+                                    target: TargetRef::Object(*id),
                                 },
                         });
                     }

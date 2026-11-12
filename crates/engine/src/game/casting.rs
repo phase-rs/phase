@@ -32219,6 +32219,13 @@ pub(crate) fn capture_target_facts(
 /// mutated value. That is the reading the cost-axis predicates are defined over
 /// (CR 601.2f evaluates them before the total cost is paid); the in-place
 /// alternative would make the record depend on how the caster chose to pay.
+///
+/// CR 601.2c: the ORDER of this list is load-bearing. Each fact is the target of
+/// one declared slot, in `declared_targets_in_chain`'s numbering order, and
+/// `GameState::reject_contradictory_announced_target_facts` reads the latch back
+/// against that same walk to give each fact its own slot's requirement and pin.
+/// CR 601.2c lets one object fill two slots, so the list is not a set: a repeated
+/// target must keep one entry per occurrence, in declaration order.
 pub(crate) fn latch_committed_target_facts(
     state: &GameState,
     ability: &ResolvedAbility,
