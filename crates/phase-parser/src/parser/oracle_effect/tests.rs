@@ -98948,3 +98948,44 @@ fn exact_count_before_other_target_declares_exactly_two_targets() {
         }
     }
 }
+
+/// CR 701.24a + CR 608.2c: after an each-player search, "then shuffles their
+/// library" shuffles the library of the player the search iterates on
+/// (`ScopedPlayer`, no scope of its own), not a parent target no instruction
+/// announced. Mojave Desert's printed planeswalk trigger, parsed through the
+/// full Oracle pipeline; a sibling sentence with a single searcher keeps its
+/// `Controller` shuffle.
+#[test]
+fn each_player_search_then_shuffle_anchors_the_scoped_players_library() {
+    let parsed = parse_oracle_text(
+        "Whenever you planeswalk here, each player searches their library for up to two basic land or Desert cards and puts them onto the battlefield tapped, then shuffles their library. If a Desert entered the battlefield under a player's control this way, they create a 1/1 black Snake creature token with deathtouch.",
+        "Mojave Desert",
+        &[],
+        &["Plane".into()],
+        &[],
+    );
+    let trigger = parsed.triggers.first().expect("the planeswalk trigger");
+    let mut node = trigger.execute.as_deref().expect("the trigger's chain");
+    let mut shuffle = None;
+    loop {
+        if matches!(node.effect.as_ref(), Effect::Shuffle { .. }) {
+            shuffle = Some(node);
+            break;
+        }
+        match node.sub_ability.as_deref() {
+            Some(next) => node = next,
+            None => break,
+        }
+    }
+    let shuffle = shuffle.expect("reach guard: the chain contains the shuffle");
+    assert_eq!(
+        shuffle.effect.as_ref(),
+        &Effect::Shuffle {
+            target: TargetFilter::ScopedPlayer
+        }
+    );
+    assert_eq!(
+        shuffle.player_scope, None,
+        "the shuffle runs inside the search's own iteration"
+    );
+}

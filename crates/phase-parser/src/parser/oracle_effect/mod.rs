@@ -44673,6 +44673,39 @@ pub(crate) fn finalize_effect_chain(def: &mut AbilityDefinition) {
     fold_speed_floor_sentences(def);
     rewrite_choose_tracked_set_exclusion(def);
     fold_additional_combat_attacker_restriction(def);
+    normalize_each_player_search_shuffle(def);
+}
+
+/// CR 701.24a + CR 608.2c: "each player searches their library for ..., then
+/// shuffles their library". The clause after the search runs inside the
+/// search's all-players iteration, so "their library" is the library of the
+/// player the iteration is on: `ScopedPlayer`, with no scope of its own. A bare
+/// `ParentTarget` names no announced player there, and the chain driver skips a
+/// node that reads a missing parent target, so the shuffle would never happen
+/// (Mojave Desert's planeswalk trigger).
+fn normalize_each_player_search_shuffle(def: &mut AbilityDefinition) {
+    fn walk(node: &mut AbilityDefinition, inside_each_player_search: bool) {
+        if inside_each_player_search
+            && node.player_scope == Some(PlayerFilter::All)
+            && matches!(
+                node.effect.as_ref(),
+                Effect::Shuffle {
+                    target: TargetFilter::ParentTarget
+                }
+            )
+        {
+            *node.effect = Effect::Shuffle {
+                target: TargetFilter::ScopedPlayer,
+            };
+            node.player_scope = None;
+        }
+        let starts_iteration = matches!(node.effect.as_ref(), Effect::SearchLibrary { .. })
+            && node.player_scope == Some(PlayerFilter::All);
+        if let Some(sub) = node.sub_ability.as_deref_mut() {
+            walk(sub, inside_each_player_search || starts_iteration);
+        }
+    }
+    walk(def, false);
 }
 
 fn apply_owner_library_reveal_anchor_from_text(def: &mut AbilityDefinition, text: &str) {
