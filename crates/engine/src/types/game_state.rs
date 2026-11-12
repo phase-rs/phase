@@ -19927,7 +19927,10 @@ impl GameState {
             // Refusing that drift would reject an honest save, which is the opposite of the
             // error this guard exists to catch.
             for fact in latched_facts {
-                let ActivationTargetFact::Object { id, zone, .. } = fact else {
+                let ActivationTargetFact::Object {
+                    id, zone, token, ..
+                } = fact
+                else {
                     continue;
                 };
                 let Some(entry) = declared_entries
@@ -19978,8 +19981,19 @@ impl GameState {
                         declared_slot_view: None,
                         granting_object: None,
                     };
-                    if !crate::game::filter::matches_target_filter_on_lki_snapshot(
-                        state, *fact_id, lki, filter, &context,
+                    // CR 109.2a + CR 115.9: judge the filter against the RECORDED
+                    // ANNOUNCEMENT — the zone it was announced in and the token bit it then
+                    // held. Evaluating through the projection that omits both would refuse an
+                    // untouched save whose filter names a zone ("target creature card from a
+                    // graveyard") or reads a token leaf.
+                    if !crate::game::filter::matches_target_filter_on_recorded_announcement(
+                        state,
+                        *fact_id,
+                        lki,
+                        filter,
+                        &context,
+                        zone.zone(),
+                        token.bit(),
                     ) {
                         return Err(PersistedRestoreError::ContradictoryAnnouncedTargetFacts {
                             spell_object_id: pending.object_id,

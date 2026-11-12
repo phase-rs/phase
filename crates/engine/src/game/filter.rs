@@ -6228,6 +6228,37 @@ pub fn matches_target_filter_on_damage_record_source(
 /// This reuses the zone-change snapshot evaluator because both paths answer the
 /// same question: did the object have the requested characteristics at the last
 /// moment it existed in the relevant public zone?
+/// CR 109.2a + CR 115.9: evaluate a target filter against a RECORDED ANNOUNCEMENT — the
+/// snapshot plus the zone and token bit that announcement itself captured.
+///
+/// [`matches_target_filter_on_lki_snapshot`] projects neither of those, so a filter naming
+/// a zone ("target creature card from a graveyard") or reading a token leaf is judged
+/// against silence and refuses an honest record. The announcement that produced the fact
+/// stated both, so they are the projection a restore boundary must use.
+pub fn matches_target_filter_on_recorded_announcement(
+    state: &GameState,
+    object_id: ObjectId,
+    lki: &LKISnapshot,
+    filter: &TargetFilter,
+    ctx: &FilterContext<'_>,
+    announced_zone: Option<Zone>,
+    captured_token: Option<bool>,
+) -> bool {
+    matches_target_filter_on_lki_snapshot_with_incarnation(
+        state,
+        object_id,
+        lki,
+        filter,
+        ctx,
+        LkiProjection {
+            entered_incarnation: None,
+            captured_incarnation: None,
+            snapshot_zone: announced_zone,
+            captured_token,
+        },
+    )
+}
+
 pub fn matches_target_filter_on_lki_snapshot(
     state: &GameState,
     object_id: ObjectId,
