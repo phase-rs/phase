@@ -47079,6 +47079,25 @@ fn owner_anchor_does_not_bind_a_draw_continuation() {
         },
         "the owner anchor must not reach Draw's unresolvable Owner reference"
     );
+
+    // Full parser chain: the carried subject is injected at the shared seam,
+    // which must apply the same guard, not only the anchor applier.
+    let def = parse_effect_chain(
+        "This creature's owner shuffles it into their library, then draws a card.",
+        AbilityKind::Activated,
+    );
+    let mut node = Some(&def);
+    while let Some(def) = node {
+        if let Effect::Draw { target, .. } = &*def.effect {
+            assert_eq!(
+                *target,
+                TargetFilter::Controller,
+                "the carried owner subject must not reach Draw"
+            );
+            return;
+        }
+        node = def.sub_ability.as_deref();
+    }
 }
 
 /// CR 109.5 + CR 608.2c: a subjectless conjugated continuation can inherit a

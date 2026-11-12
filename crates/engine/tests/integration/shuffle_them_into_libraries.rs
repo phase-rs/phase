@@ -547,3 +547,53 @@ fn drowner_destroyed_in_response_still_shuffles_both_owners() {
         "the target's owner shuffles: {events:?}"
     );
 }
+
+/// CR 701.24c + CR 400.3: a quantified typed filter ("each nonland permanent you
+/// control") can contain objects with different owners. Every affected owner's
+/// library is shuffled exactly once, not just the first parent-target owner.
+#[test]
+fn quantified_typed_owner_move_shuffles_each_owner_once() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(
+            P0,
+            "Quantified Owner Shuffle",
+            false,
+            "Shuffle each nonland permanent you control into its owner's library.",
+        )
+        .id();
+    let p0_relic = scenario.add_artifact_from_oracle(P0, "P0 Relic", "").id();
+    let p1_relic = scenario
+        .add_artifact_from_oracle(P0, "P1-Owned Relic", "")
+        .id();
+    let mut runner = scenario.build();
+    runner.state_mut().objects.get_mut(&p1_relic).unwrap().owner = P1;
+    let outcome = runner.cast(spell).resolve();
+    let events = outcome.events();
+
+    assert_eq!(outcome.state().objects[&p0_relic].zone, Zone::Library);
+    assert_eq!(outcome.state().objects[&p1_relic].zone, Zone::Library);
+    assert!(
+        outcome.state().players[P0.0 as usize]
+            .library
+            .contains(&p0_relic),
+        "P0-owned permanent goes to P0's library"
+    );
+    assert!(
+        outcome.state().players[P1.0 as usize]
+            .library
+            .contains(&p1_relic),
+        "P1-owned permanent goes to P1's library"
+    );
+    assert_eq!(
+        shuffles_for(events, P0),
+        1,
+        "P0's library shuffles once: {events:?}"
+    );
+    assert_eq!(
+        shuffles_for(events, P1),
+        1,
+        "P1's library shuffles once: {events:?}"
+    );
+}

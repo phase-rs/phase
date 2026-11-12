@@ -33896,6 +33896,13 @@ fn inject_subject_target(effect: &mut Effect, subject: &SubjectPhraseAst, origin
     let Some(subject_filter) = subject.target.clone().or_else(|| subject.affected.clone()) else {
         return;
     };
+    // CR 109.5 + CR 608.2c: the source-owner anchor is resolvable only by the
+    // reveal path (live-or-LKI). Do not inject it into Draw/other recipients
+    // whose shared resolver has no Owner arm and would fall back to the
+    // activator.
+    if subject_filter == TargetFilter::Owner && !matches!(effect, Effect::RevealUntil { .. }) {
+        return;
+    }
     // CR 115.1 + CR 701.21a (R1 honest gap): a Sacrifice/ChangeZone whose
     // subject is a bare, unproven `ParentTarget` anaphor (no
     // `inherits_parent` proof — My Forces Are Innumerable's collective

@@ -10661,9 +10661,28 @@ pub(super) fn parse_shuffle_ast(
     }) {
         let (target, _) = parse_target(&target_phrase);
         if !matches!(target, TargetFilter::Any) {
-            return Some(ShuffleImperativeAst::ChangeZoneToLibrary {
-                target,
-                owner_library,
+            // CR 701.24c + CR 400.6: a leading "each"/"all" quantifier names a
+            // mass population, not one target object. Route it through the
+            // ChangeZoneAll lowering so every eligible object moves and the
+            // tracked prospective-owner terminal settles each owner's library.
+            let all = preceded(
+                tag::<_, _, OracleError<'_>>("shuffle "),
+                alt((tag("all "), tag("each "))),
+            )
+            .parse(lower)
+            .is_ok();
+            return Some(if all {
+                ShuffleImperativeAst::TargetedChangeZoneToLibrary {
+                    target,
+                    origin: None,
+                    all: true,
+                    multi_target: None,
+                }
+            } else {
+                ShuffleImperativeAst::ChangeZoneToLibrary {
+                    target,
+                    owner_library,
+                }
             });
         }
     }
@@ -11230,7 +11249,8 @@ fn lower_target_referenced_search_library(
 /// more than one owner. A bare parent-target anaphor, an untargeted any-filter,
 /// or a compound that explicitly includes the source/parent target spans owners;
 /// a pure `Or` of typed single-object alternatives (Cathartic Parting's
-/// "artifact or enchantment") is still one object with one owner.
+/// "artifact or enchantment an opponent controls") is still one object with one
+/// owner.
 fn owner_move_spans_owners(filter: &TargetFilter) -> bool {
     match filter {
         TargetFilter::ParentTarget | TargetFilter::Any | TargetFilter::And { .. } => true,
@@ -11297,21 +11317,12 @@ pub(super) fn with_shuffle_sub_ability(mut effect: Effect) -> ParsedEffectClause
             }
         ))
     );
-    // CR 701.24a + CR 701.24c: the terminal Shuffle covers the move's owner
-    // population for a source self-move, a typed declared-player population, or
-    // a mass move. The plural-owner subject ("the owners of those cards") uses
-    // its own delivery-only lowering instead, because one terminal owner lookup
-    // cannot cover multiple owners.
-    // CR 701.24a + CR 400.3: a single-target owner move ("The owner of target
-    // permanent shuffles it …") has one exact owner; the terminal
-    // `ParentTargetOwner` shuffle covers that owner, so the member delivery must
-    // not shuffle a second time. Ambiguous `ParentTarget`/`SelfRef` shapes keep
-    // their existing routing (source self-moves are handled above).
     // CR 701.24c + CR 400.3: a typed single-object owner move has one exact
     // owner (Chaos Warp/Oblation); the terminal ParentTargetOwner shuffle covers
-    // it. Every other owner-routed move — parent-target cards, compound
-    // "source and target", multiple selected cards — can span owners, so it uses
-    // the tracked-owner population terminal below.
+    // it. Parent-target cards, compound "source and target", and quantified
+    // wildcard filters can span owners; they use the tracked-owner population
+    // terminal. Quantified "each/all" moves are lowered to ChangeZoneAll above
+    // and use that class's tracked-owner path.
     let scoped_owner_move = matches!(
         &effect,
         Effect::ChangeZone {
@@ -11320,9 +11331,6 @@ pub(super) fn with_shuffle_sub_ability(mut effect: Effect) -> ParsedEffectClause
             ..
         } if owner_move_spans_owners(target)
     );
-    // Everything else with one object (Typed, attached, prevention recipient,
-    // specific object) has one exact owner; its terminal owner shuffle covers
-    // that owner and the delivery is suppressed.
     let specific_owner_move = matches!(
         &effect,
         Effect::ChangeZone {
