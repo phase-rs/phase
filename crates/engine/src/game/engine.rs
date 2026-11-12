@@ -12396,6 +12396,19 @@ fn private_look_outlives_action_boundary(state: &GameState) -> bool {
 /// `retire_reordered_library_reveals`): an owner-ordered placement must still
 /// find the pile it revealed when the owner's answer arrives (CR 701.20d).
 fn transient_reveal_outlives_action_boundary(state: &GameState) -> bool {
+    // CR 701.20a: a reveal published while an instruction is resolving belongs
+    // to that resolution. It stays revealed through every prompt that
+    // resolution opens — a replacement choice, a named choice, or any other
+    // intervening step — until the instruction that owns it continues. A
+    // prompt-variant allowlist cannot express that invariant: each new prompt
+    // variant silently dropped the membership, and a later CR 701.20d reorder
+    // ("put the revealed cards on the bottom of your library in any order")
+    // then had nothing to retire. The live resolution carrier is the authority
+    // for "this reveal is still owned"; the arms below cover the prompts whose
+    // publishing resolution has no carrier installed.
+    if state.resolving_stack_entry.is_some() {
+        return true;
+    }
     match &state.waiting_for {
         WaitingFor::RevealChoice { .. }
         | WaitingFor::ManifestDreadChoice { .. }
