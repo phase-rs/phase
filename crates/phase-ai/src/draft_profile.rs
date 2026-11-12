@@ -1013,6 +1013,20 @@ fn is_block_restriction(mode: &StaticMode) -> bool {
     )
 }
 
+/// Whether an ability's cost includes tapping the source ({T}). An ability
+/// that requires tapping cannot be used to grant evasion to the source
+/// itself while also attacking: CR 508.1a requires attackers to be untapped,
+/// and CR 508.1f taps chosen attackers. Minamo Sightbender's "{X}, {T}: Target
+/// creature can't be blocked" can grant evasion to another creature but not to
+/// itself if it wants to attack.
+fn ability_has_tap_cost(ability: &AbilityDefinition) -> bool {
+    fn cost_has_tap(cost: &AbilityCost) -> bool {
+        matches!(cost, AbilityCost::Tap)
+            || matches!(cost, AbilityCost::Composite { costs } if costs.iter().any(cost_has_tap))
+    }
+    ability.cost.as_ref().is_some_and(cost_has_tap)
+}
+
 /// Whether a continuous modification makes the affected creature evasive:
 /// an evasion keyword, or a CR 509.1b blocker restriction.
 fn is_evasion_modification(modification: &ContinuousModification) -> bool {
@@ -1112,9 +1126,43 @@ fn is_evasive(face: &CardFace, reading: RoleReading) -> bool {
         || (reading == RoleReading::Full
             && (face.static_abilities.iter().any(|s| {
                 static_makes_evasive(s) && evasion_recipients(s.affected.as_ref()).source
-            }) || collect_face_effects(face)
-                .into_iter()
-                .any(|e| effect_makes_evasive(e, EvasionRecipient::Source))))
+            }) || face_grants_self_evasion(face)))
+}
+
+/// Whether any ability on the face grants evasion to the source itself,
+/// accounting for activation costs. An activated ability with a tap cost
+/// ({T}) cannot grant evasion to the source if the source also wants to
+/// attack: CR 508.1a requires attackers to be untapped, and CR 508.1f taps
+/// chosen attackers. Triggered abilities and abilities without tap costs
+/// (e.g., Higure's "{2}: Target Ninja can't be blocked") are fine.
+fn face_grants_self_evasion(face: &CardFace) -> bool {
+    // Check activated abilities
+    for ability in &face.abilities {
+        if ability.kind == AbilityKind::Activated {
+            // If the ability has a tap cost, it can't be used for self-evasion
+            // while also attacking.
+            if ability_has_tap_cost(ability) {
+                continue;
+            }
+            // Check if this ability's effects grant evasion to the source
+            for effect in collect_chain_effects(ability) {
+                if effect_makes_evasive(effect, EvasionRecipient::Source) {
+                    return true;
+                }
+            }
+        }
+    }
+    // Check triggered abilities (no activation cost to worry about)
+    for trigger in &face.triggers {
+        if let Some(execute) = &trigger.execute {
+            for effect in collect_chain_effects(execute) {
+                if effect_makes_evasive(effect, EvasionRecipient::Source) {
+                    return true;
+                }
+            }
+        }
+    }
+    false
 }
 
 /// Who an effect makes evasive (CR 509.1b).
@@ -4078,6 +4126,57 @@ mod tests {
             0.65,
             "the same face under BOK earns the enabler award"
         );
+    }
+
+    #[test]
+    fn minamo_sightbender_tap_cost_prevents_self_evasion_but_allows_enabler() {
+        let p = DraftProfile::kamigawa_block();
+        let blue = vec!["U".to_string()];
+        // Minamo Sightbender (BOK): "{X}, {T}: Target creature with power X or
+        // less can't be blocked this turn." The tap cost means it can't use the
+        // ability on itself and also attack (CR 508.1a + 508.1f).
+        let minamo = oracle_face(serde_json::json!({
+            "name": "Minamo Sightbender",
+            "manaCost": "{2}{U}",
+            "manaValue": 3.0,
+            "colors": ["U"],
+            "type": "Creature — Human Wizard",
+            "types": ["Creature"],
+            "subtypes": ["Human", "Wizard"],
+            "power": "1",
+            "toughness": "3",
+            "text": "{X}, {T}: Target creature with power X or less can't be blocked this turn.",
+        }));
+        // Should NOT be its own evasion (tap cost prevents attacking after activation)
+        assert!(!is_evasive(&minamo, RoleReading::Full));
+        assert!(!classify(&minamo).contains(&CardClass::EvasiveThreat));
+        // Should still be a Ninjutsu enabler for other creatures
+        assert!(grants_evasion(&minamo, RoleReading::Full));
+        assert!(classify(&minamo).contains(&CardClass::NinjutsuEnabler));
+        // But the enabler bonus has a mana value cap (2 for ninjutsu enabler)
+        let scored = first_pick(p, &card("Minamo Sightbender", "BOK", &blue, &minamo));
+        // Minamo's mana value is 3, which equals NINJUTSU_ENABLER_MAX_MANA_VALUE (3)
+        // so it SHOULD get the NinjutsuEnabler class bonus.
+        assert_eq!(scored.class_bonus, 0.65);
+
+        // Positive control: Higure, the Still Wind has no tap cost, so it CAN be
+        // its own evasion.
+        let higure = oracle_face(serde_json::json!({
+            "name": "Higure, the Still Wind",
+            "manaCost": "{2}{U}{U}",
+            "manaValue": 4.0,
+            "colors": ["U"],
+            "type": "Legendary Creature — Human Ninja",
+            "types": ["Creature"],
+            "subtypes": ["Human", "Ninja"],
+            "power": "2",
+            "toughness": "2",
+            "text": "Ninjutsu {1}{U} ({1}{U}, Return an unblocked attacker you control to hand: Put this card onto the battlefield from your hand tapped and attacking.)\n{2}: Target Ninja creature can't be blocked this turn.",
+        }));
+        assert!(is_evasive(&higure, RoleReading::Full));
+        assert!(classify(&higure).contains(&CardClass::EvasiveThreat));
+        assert!(grants_evasion(&higure, RoleReading::Full));
+        assert!(classify(&higure).contains(&CardClass::NinjutsuEnabler));
     }
 
     #[test]
