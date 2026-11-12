@@ -4824,11 +4824,16 @@ pub(crate) fn append_and_collect_logical_zone_trigger_segment_for(
 /// logical zone-change owner's battlefield-entry occurrences.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum EntryOccurrenceCollector {
-    /// No later instruction of this resolution can apply an effect with the entry: the owner
-    /// checks the entry at the instruction's completion.
+    /// No later instruction of this resolution can apply an effect with the entry, or one that
+    /// starts after the entry may act on a moved object (CR 608.2c: "Put a flying counter on
+    /// it.", "It gains haste until end of turn."): the owner checks the entry at the
+    /// instruction's completion. In the second case the "is/has" effect does not exist yet
+    /// (known gap: an observer keyed on that effect alone misses the entry).
     Owner,
     /// A later instruction may still apply an "is/has" effect simultaneously with the entry
-    /// (CR 611.2e): the post-action collector of this action checks the entry, after that effect
+    /// (CR 611.2e) and no instruction that starts after the entry may act on a moved object
+    /// (CR 608.2c), so the whole resolution's changes to the entrant are the ones that apply with
+    /// the entry: the post-action collector of this action checks the entry, after that effect
     /// exists unless the instruction applying it pauses first (known gap: a multi-host
     /// ReturnAsAura host choice, CR 303.4f).
     AfterSimultaneousEntryEffects,
@@ -4863,8 +4868,9 @@ impl EntryOccurrenceCollector {
 }
 
 /// CR 603.10 + CR 611.2e: does the logical owner itself check `event`'s ordinary triggers?
-/// Only battlefield entries are handed off; departures keep their CR 603.10a look-back with
-/// the owner.
+/// Only moves to the battlefield are handed off. A move to the battlefield from a graveyard is
+/// handed off whole, its CR 603.10a leaves-the-graveyard half included; departures to any other
+/// zone keep their CR 603.10a look-back with the owner.
 fn owner_collects_occurrence(collector: EntryOccurrenceCollector, event: &GameEvent) -> bool {
     match collector {
         EntryOccurrenceCollector::Owner => true,
@@ -4906,7 +4912,9 @@ pub(crate) fn complete_logical_zone_trigger_collection(
 /// A handed-off entry therefore carries no witness in `deferred_triggers`, so the post-action
 /// collector of this action is its sole collector and checks it once (CR 603.2c), after the
 /// resolution's simultaneous "is/has" effects exist when no instruction pauses before applying
-/// one (a multi-host ReturnAsAura host choice is a known gap).
+/// one (a multi-host ReturnAsAura host choice is a known gap). It is chosen only when no
+/// instruction that starts after the entry acts on a moved object, so that collector reads no
+/// change CR 608.2c makes after the entry (`effects::entry_occurrence_collector`).
 pub(crate) fn complete_logical_zone_trigger_collection_for(
     state: &mut GameState,
     group: &mut LogicalZoneChangeGroup,

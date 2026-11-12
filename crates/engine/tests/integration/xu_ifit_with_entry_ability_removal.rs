@@ -16,7 +16,14 @@
 //! R9), including a `ChangeZone` resumed after a CR 616.1 replacement-ordering pause that
 //! precedes the entry (R4p); a pause after an entry has been delivered keeps the entry with its
 //! owner, and a rider that pauses before it applies (a ReturnAsAura host choice among two or
-//! more candidates) lets the post-action collector check the entry first (known gaps).
+//! more candidates) lets the post-action collector check the entry first (known gaps). The
+//! hand-off is made only when no later instruction that starts after the entry acts on a moved
+//! object (CR 608.2c): Call a Surprise Witness's "Put a flying counter on it." comes after the
+//! entry, so the owner checks the entry before it and Watcher of the Spheres does not trigger
+//! (R8c). Such an entry is then also checked before the "is/has" effect exists (known gap). R8c
+//! keeps Soul Warden on the board: when no observer matches at the owner's check, the owner
+//! queues no collection witness and the post-action collector checks the entry again after the
+//! counter (an older gap, outside this hand-off).
 //!
 //! Consequence (b) — CR 113.6h + CR 614.12 + CR 611.2e: an ability of the entrant that modifies
 //! how it enters functions as it enters, checked as the permanent would exist on the battlefield,
@@ -37,6 +44,8 @@
 //!   Dreadnought's ETB triggers) and keeps Haste and Trample in R5.
 //! - Dropping handed-off entries instead of handing them on fails R4d and R8.
 //! - Reverting only the `resolve_all` call site to the `Owner` delegate leaves R9 at P0 +1.
+//! - Dropping the moved-object check from `effects::entry_occurrence_collector` makes Watcher of
+//!   the Spheres trigger in R8c (Watcher 3/3).
 //! - Reverting the resumed completion in `drain_pending_change_zone_iteration` to the `Owner`
 //!   delegates puts the Dreadnought's ETB beside Soul Warden's trigger in R4p.
 //! - Claiming handed-off entries in the consumed-before-priority ledger loses Soul Warden's
@@ -63,7 +72,7 @@ use engine::types::counter::CounterType;
 use engine::types::events::GameEvent;
 use engine::types::game_state::{ReplacementChoiceKind, WaitingFor};
 use engine::types::identifiers::ObjectId;
-use engine::types::keywords::Keyword;
+use engine::types::keywords::{Keyword, KeywordKind};
 use engine::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::proposed_event::{EntrantAbilities, EtbTapState};
@@ -537,6 +546,122 @@ fn rise_from_the_grave_entry_is_checked_once_by_a_batched_observer() {
         runner.state().waiting_for
     );
     assert!(runner.state().stack.is_empty(), "stack must be empty");
+}
+
+/// Call a Surprise Witness {1}{W} Sorcery — verbatim.
+const CALL_A_SURPRISE_WITNESS: &str = "Return target creature card with mana value 3 or less from your graveyard to the battlefield. Put a flying counter on it. It's a Spirit in addition to its other types.";
+/// Watcher of the Spheres {W}{U} Creature — Bird Wizard 2/2 — verbatim.
+const WATCHER_OF_THE_SPHERES: &str = "Flying\nCreature spells with flying you cast cost {1} less to cast.\nWhenever another creature you control with flying enters, this creature gets +1/+1 until end of turn.";
+/// Suntail Hawk {W} Creature — Bird 1/1 — verbatim.
+const SUNTAIL_HAWK: &str = "Flying";
+
+/// A board with Watcher of the Spheres and Soul Warden for P0, `returned` in P0's graveyard, and
+/// Call a Surprise Witness in P0's hand. Soul Warden ("another creature") matches the entrant at
+/// the owner's check, so that check leaves a collection witness for the entry.
+fn surprise_witness_board(
+    add_returned: impl FnOnce(&mut GameScenario) -> ObjectId,
+) -> (GameRunner, ObjectId, ObjectId, ObjectId) {
+    let mut scenario = main_phase();
+    let watcher = scenario
+        .add_creature_from_oracle(P0, "Watcher of the Spheres", 2, 2, WATCHER_OF_THE_SPHERES)
+        .with_subtypes(vec!["Bird", "Wizard"])
+        .id();
+    scenario.add_creature_from_oracle(P0, "Soul Warden", 1, 1, SOUL_WARDEN);
+    let returned = add_returned(&mut scenario);
+    let witness = scenario
+        .add_spell_to_hand_from_oracle(
+            P0,
+            "Call a Surprise Witness",
+            false,
+            CALL_A_SURPRISE_WITNESS,
+        )
+        .id();
+    (scenario.build(), watcher, returned, witness)
+}
+
+/// R8c — CR 608.2c + CR 603.10 + CR 611.2e: Call a Surprise Witness puts its flying counter on
+/// the returned Grizzly Bears after the entry; only "It's a Spirit" applies with the entry. The
+/// entry is checked immediately after it, before the counter: Soul Warden ("another creature")
+/// gives P0 +1, and Watcher of the Spheres ("another creature you control with flying") does
+/// not trigger (Watcher stays 2/2).
+#[test]
+fn call_a_surprise_witness_counter_comes_after_watcher_checks_the_entry() {
+    let (mut runner, watcher, bears, witness) = surprise_witness_board(|scenario| {
+        scenario
+            .add_creature_to_graveyard(P0, "Grizzly Bears", 2, 2)
+            .with_subtypes(vec!["Bear"])
+            .with_mana_cost(ManaCost::Cost {
+                generic: 1,
+                shards: vec![ManaCostShard::Green],
+            })
+            .id()
+    });
+    assert_eq!(trigger_count(&runner, watcher), 1, "parsed Watcher trigger");
+
+    let outcome = runner.cast(witness).target_object(bears).resolve();
+
+    // Reach: the Bears entered, got the flying counter (so it has flying now), and is a Spirit;
+    // Soul Warden saw the entry.
+    assert_eq!(outcome.life_delta(P0), 1, "Soul Warden saw the entry");
+    assert_eq!(runner.state().objects[&bears].zone, Zone::Battlefield);
+    assert_eq!(
+        runner.state().objects[&bears]
+            .counters
+            .get(&CounterType::Keyword(KeywordKind::Flying))
+            .copied(),
+        Some(1),
+        "flying counter"
+    );
+    assert!(has_keyword(&runner, bears, &Keyword::Flying));
+    assert!(subtypes(&runner, bears).iter().any(|t| t == "Spirit"));
+
+    // The entry was checked without the later counter: Watcher did not trigger.
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+        "waiting_for: {:?}",
+        runner.state().waiting_for
+    );
+    assert!(runner.state().stack.is_empty(), "stack must be empty");
+    assert_eq!(
+        runner.state().objects[&watcher].power,
+        Some(2),
+        "Watcher of the Spheres must not trigger"
+    );
+}
+
+/// R8c positive control — CR 603.10: a creature card with printed flying (Suntail Hawk)
+/// returned by the same spell has flying as it enters, so Watcher of the Spheres triggers
+/// (Watcher 3/3) beside Soul Warden (P0 +1).
+#[test]
+fn call_a_surprise_witness_printed_flier_triggers_watcher() {
+    let (mut runner, watcher, hawk, witness) = surprise_witness_board(|scenario| {
+        scenario
+            .add_creature_to_graveyard(P0, "Suntail Hawk", 1, 1)
+            .with_subtypes(vec!["Bird"])
+            .with_mana_cost(ManaCost::Cost {
+                generic: 0,
+                shards: vec![ManaCostShard::White],
+            })
+            .from_oracle_text_with_keywords(&["Flying"], SUNTAIL_HAWK)
+            .id()
+    });
+
+    let outcome = runner.cast(witness).target_object(hawk).resolve();
+
+    assert_eq!(outcome.life_delta(P0), 1, "Soul Warden saw the entry");
+    assert_eq!(runner.state().objects[&hawk].zone, Zone::Battlefield);
+    assert!(subtypes(&runner, hawk).iter().any(|t| t == "Spirit"));
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+        "waiting_for: {:?}",
+        runner.state().waiting_for
+    );
+    assert!(runner.state().stack.is_empty(), "stack must be empty");
+    assert_eq!(
+        runner.state().objects[&watcher].power,
+        Some(3),
+        "Watcher of the Spheres saw the flier enter"
+    );
 }
 
 // ---------------------------------------------------------------------------

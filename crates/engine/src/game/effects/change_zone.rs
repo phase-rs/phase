@@ -921,7 +921,7 @@ pub fn resolve(
     // CR 611.2e + CR 614.12: derived once here, at the instruction's resolver entry, and
     // carried by every route this instruction delivers through (single picks, the
     // `EffectZoneChoice` round-trip, the iteration ctx and its pauses).
-    let entrant_abilities = crate::game::effects::entrant_abilities_with_entry(state, ability);
+    let entrant_abilities = crate::game::effects::entrant_abilities_with_entry(ability);
     let library_placement = member_library_placement(dest_zone, None, library_shuffle);
 
     let completed_result = |count| {
@@ -1704,10 +1704,10 @@ pub fn resolve(
     // drain, which owns the trailing `EffectResolved`.)
     state.last_effect_count = Some(moved_count);
 
-    // CR 603.10 + CR 611.2e: when a later "is/has" instruction of this resolution may still apply
-    // with this entry, its triggers are checked once that effect exists; otherwise the owner checks them now.
-    let collector =
-        crate::game::effects::entry_occurrence_collector(state, ability.sub_ability.as_deref());
+    // CR 603.10 + CR 611.2e + CR 608.2c: when a later "is/has" instruction of this resolution may
+    // still apply with this entry and no later instruction acts on a moved object after the entry,
+    // its triggers are checked once that effect exists; otherwise the owner checks them now.
+    let collector = crate::game::effects::entry_occurrence_collector(state, Some(ability));
     crate::game::triggers::complete_logical_zone_trigger_collection_for(
         state,
         &mut logical_zone_change_group,
@@ -2949,7 +2949,7 @@ pub fn resolve_all(
     };
     // CR 611.2e + CR 614.12: derived once at the instruction's resolver entry and carried by
     // every member's move and its pauses.
-    let entrant_abilities = crate::game::effects::entrant_abilities_with_entry(state, ability);
+    let entrant_abilities = crate::game::effects::entrant_abilities_with_entry(ability);
 
     // Collect matching object IDs from the origin zone.
     // Explicit filter-controller override (e.g., "creature that player controls")
@@ -3352,10 +3352,10 @@ pub fn resolve_all(
     // then draw that many cards."
     state.last_effect_count = Some(moved_count);
 
-    // CR 603.10 + CR 611.2e: when a later "is/has" instruction of this resolution may still apply
-    // with this entry, its triggers are checked once that effect exists; otherwise the owner checks them now.
-    let collector =
-        crate::game::effects::entry_occurrence_collector(state, ability.sub_ability.as_deref());
+    // CR 603.10 + CR 611.2e + CR 608.2c: when a later "is/has" instruction of this resolution may
+    // still apply with this entry and no later instruction acts on a moved object after the entry,
+    // its triggers are checked once that effect exists; otherwise the owner checks them now.
+    let collector = crate::game::effects::entry_occurrence_collector(state, Some(ability));
     crate::game::triggers::complete_logical_zone_trigger_collection_for(
         state,
         &mut logical_zone_change_group,

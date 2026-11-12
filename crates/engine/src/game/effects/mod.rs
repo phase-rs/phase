@@ -2577,7 +2577,9 @@ fn drain_pending_change_zone_iteration(state: &mut GameState, events: &mut Vec<G
         } = pending;
         // CR 603.10 + CR 603.6a + CR 611.2e: a parked later "is/has" instruction of this
         // resolution may still apply with the resumed entries, so they are checked once that
-        // effect exists. CR 603.2c: the hand-off goes to the collector of the action that
+        // effect exists — unless a parked instruction that starts after the entry may act on a
+        // moved object (CR 608.2c); the instruction is not in hand here, so that is read
+        // conservatively. CR 603.2c: the hand-off goes to the collector of the action that
         // completes this owner. A resume with members still to deliver may pause again, so it
         // keeps its entries, as does an owner holding an entry delivered by an earlier action.
         let collector = if remaining.is_empty() {
@@ -5573,12 +5575,37 @@ fn onset_applies_with_entry(onset: ContinuousEffectOnset) -> bool {
     }
 }
 
-/// CR 611.2e: does any node of this resolved chain (its `sub_ability` / `else_ability`
-/// subtree) carry an instruction stamped to apply with the entry?
-fn resolved_chain_may_apply_with_entry(root: &ResolvedAbility) -> bool {
+/// A question asked of every instruction a resolution has yet to follow, in its resolved and in
+/// its template (`AbilityDefinition`) form.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LaterInstructionQuery {
+    /// CR 611.2e: is the instruction stamped to apply its continuous effect simultaneously with
+    /// an entry (`ContinuousEffectOnset::WithEntry`)?
+    AppliesWithEntry,
+    /// CR 608.2c + CR 611.2e: is the instruction one that starts after an entry (not
+    /// `WithEntry`) and may act on an object the completing instruction moved? Read without the
+    /// completing instruction in hand, so every moved-object referent form counts, a
+    /// self-reference included (the conservative answer).
+    MayActOnEntrantAfterEntry,
+}
+
+impl LaterInstructionQuery {
+    fn matches(self, onset: ContinuousEffectOnset, effect: &Effect) -> bool {
+        match self {
+            Self::AppliesWithEntry => onset_applies_with_entry(onset),
+            Self::MayActOnEntrantAfterEntry => {
+                !onset_applies_with_entry(onset) && effect_may_name_moved_objects(effect, true)
+            }
+        }
+    }
+}
+
+/// Does any node of this resolved chain (its `sub_ability` / `else_ability` subtree) match
+/// `query`?
+fn resolved_chain_matches(root: &ResolvedAbility, query: LaterInstructionQuery) -> bool {
     let mut stack = vec![root];
     while let Some(node) = stack.pop() {
-        if onset_applies_with_entry(node.entry_onset) {
+        if query.matches(node.entry_onset, &node.effect) {
             return true;
         }
         stack.extend(node.child_links().map(|(_, child)| child));
@@ -5586,12 +5613,12 @@ fn resolved_chain_may_apply_with_entry(root: &ResolvedAbility) -> bool {
     false
 }
 
-/// CR 611.2e: the `AbilityDefinition` form of [`resolved_chain_may_apply_with_entry`], for
-/// frame-held templates that have not been resolved yet.
-fn definition_chain_may_apply_with_entry(root: &AbilityDefinition) -> bool {
+/// The `AbilityDefinition` form of [`resolved_chain_matches`], for frame-held templates that
+/// have not been resolved yet.
+fn definition_chain_matches(root: &AbilityDefinition, query: LaterInstructionQuery) -> bool {
     let mut stack = vec![root];
     while let Some(node) = stack.pop() {
-        if onset_applies_with_entry(node.entry_onset) {
+        if query.matches(node.entry_onset, &node.effect) {
             return true;
         }
         stack.extend(node.sub_ability.as_deref());
@@ -5600,42 +5627,44 @@ fn definition_chain_may_apply_with_entry(root: &AbilityDefinition) -> bool {
     false
 }
 
-/// CR 611.2e: the chain a paused library-search delivery resumes into, if any.
-fn library_search_resume_may_apply_with_entry(
+/// The chain a paused library-search delivery resumes into, if any.
+fn library_search_resume_matches(
     resume: &crate::types::game_state::LibrarySearchDeliveryResume,
+    query: LaterInstructionQuery,
 ) -> bool {
     use crate::types::game_state::LibrarySearchDeliveryResume;
     match resume {
         LibrarySearchDeliveryResume::Standard { .. } => false,
         LibrarySearchDeliveryResume::Scoped { after_scope, .. } => after_scope
             .as_deref()
-            .is_some_and(resolved_chain_may_apply_with_entry),
+            .is_some_and(|chain| resolved_chain_matches(chain, query)),
     }
 }
 
-/// CR 611.2e: the chain a batch delivery's completion resumes into, if any. Exhaustive so a
-/// new completion that carries a chain forces a decision here.
-fn batch_completion_may_apply_with_entry(
+/// The chain a batch delivery's completion resumes into, if any. Exhaustive so a new
+/// completion that carries a chain forces a decision here.
+fn batch_completion_matches(
     completion: &crate::types::game_state::BatchCompletion,
+    query: LaterInstructionQuery,
 ) -> bool {
     use crate::types::game_state::BatchCompletion;
     match completion {
         BatchCompletion::CastFromZoneExileDeliveryComplete { ability, .. }
         | BatchCompletion::ForEachCategoryExileComplete { ability, .. } => {
-            resolved_chain_may_apply_with_entry(ability)
+            resolved_chain_matches(ability, query)
         }
         BatchCompletion::LibrarySearchDeliverySettled { resume }
         | BatchCompletion::SearchPartitionPrimaryDelivered { resume, .. } => {
-            library_search_resume_may_apply_with_entry(resume)
+            library_search_resume_matches(resume, query)
         }
         // CR 608.2c: a settled contest round resumes into the contest ability and, once
         // decided, the winner's instruction.
         BatchCompletion::TopCardContestRoundComplete { ability, .. } => {
-            resolved_chain_may_apply_with_entry(ability)
+            resolved_chain_matches(ability, query)
                 || matches!(
                     &ability.effect,
                     Effect::ExileTopCardContest { winner_effect }
-                        if definition_chain_may_apply_with_entry(winner_effect)
+                        if definition_chain_matches(winner_effect, query)
                 )
         }
         BatchCompletion::RecordInstructionZoneResult { .. }
@@ -5676,91 +5705,83 @@ fn batch_completion_may_apply_with_entry(
     }
 }
 
-/// CR 611.2e: does a frame-held later instruction of this resolution (an outer continuation, a
-/// paused iteration's remainder, or any other parked chain) carry an instruction stamped to
-/// apply with the entry? Exhaustive over `ResolutionFrame` so a new frame kind forces a decision.
-fn frame_may_apply_with_entry(frame: &ResolutionFrame) -> bool {
+/// Does a frame-held later instruction of this resolution (an outer continuation, a paused
+/// iteration's remainder, or any other parked chain) match `query`? Exhaustive over
+/// `ResolutionFrame` so a new frame kind forces a decision.
+fn frame_matches(frame: &ResolutionFrame, query: LaterInstructionQuery) -> bool {
     use crate::types::ability::PostReplacementContinuation;
     match frame {
         ResolutionFrame::AbilityContinuation(frame) => {
             let pending = &frame.pending;
-            resolved_chain_may_apply_with_entry(&pending.chain)
+            resolved_chain_matches(&pending.chain, query)
                 || pending
                     .attachment_choice
                     .as_ref()
-                    .is_some_and(|choice| resolved_chain_may_apply_with_entry(&choice.operation))
+                    .is_some_and(|choice| resolved_chain_matches(&choice.operation, query))
                 || pending
                     .attachment_remainder
                     .as_ref()
-                    .is_some_and(|remainder| {
-                        resolved_chain_may_apply_with_entry(&remainder.producer)
-                    })
+                    .is_some_and(|remainder| resolved_chain_matches(&remainder.producer, query))
                 || pending
                     .player_scope_tail
                     .as_ref()
-                    .is_some_and(|scope| resolved_chain_may_apply_with_entry(&scope.after_scope))
+                    .is_some_and(|scope| resolved_chain_matches(&scope.after_scope, query))
         }
-        ResolutionFrame::RepeatFor(pending) => {
-            resolved_chain_may_apply_with_entry(&pending.ability)
-        }
-        ResolutionFrame::RepeatUntil(pending) => {
-            resolved_chain_may_apply_with_entry(&pending.ability)
-        }
+        ResolutionFrame::RepeatFor(pending) => resolved_chain_matches(&pending.ability, query),
+        ResolutionFrame::RepeatUntil(pending) => resolved_chain_matches(&pending.ability, query),
         ResolutionFrame::RepeatedOptionalPayment(frame) => {
             frame.pending.as_deref().is_some_and(|pending| {
-                resolved_chain_may_apply_with_entry(&pending.payment_unit)
-                    || resolved_chain_may_apply_with_entry(&pending.reflexive)
+                resolved_chain_matches(&pending.payment_unit, query)
+                    || resolved_chain_matches(&pending.reflexive, query)
             })
         }
         ResolutionFrame::BatchDelivery(batch) => batch
             .completion
             .as_ref()
-            .is_some_and(batch_completion_may_apply_with_entry),
+            .is_some_and(|completion| batch_completion_matches(completion, query)),
         ResolutionFrame::ChooseOneOf(pending) => {
             pending
                 .branches
                 .iter()
-                .any(definition_chain_may_apply_with_entry)
+                .any(|branch| definition_chain_matches(branch, query))
                 || pending
                     .continuation
                     .as_deref()
-                    .is_some_and(resolved_chain_may_apply_with_entry)
+                    .is_some_and(|chain| resolved_chain_matches(chain, query))
         }
         ResolutionFrame::VoteBallot(pending) => {
-            definition_chain_may_apply_with_entry(&pending.ability_template)
+            definition_chain_matches(&pending.ability_template, query)
         }
         ResolutionFrame::PerPlayerZoneChoice(pending) => {
-            resolved_chain_may_apply_with_entry(&pending.ability)
+            resolved_chain_matches(&pending.ability, query)
         }
         ResolutionFrame::PerCategoryZoneChoice(frame) => {
-            resolved_chain_may_apply_with_entry(&frame.pending.ability)
+            resolved_chain_matches(&frame.pending.ability, query)
         }
-        ResolutionFrame::OptionalEffect(frame) => {
-            resolved_chain_may_apply_with_entry(&frame.ability)
-        }
+        ResolutionFrame::OptionalEffect(frame) => resolved_chain_matches(&frame.ability, query),
         ResolutionFrame::CoinFlip(pending) => {
             pending
                 .win_effect
                 .as_deref()
-                .is_some_and(resolved_chain_may_apply_with_entry)
+                .is_some_and(|chain| resolved_chain_matches(chain, query))
                 || pending
                     .lose_effect
                     .as_deref()
-                    .is_some_and(resolved_chain_may_apply_with_entry)
+                    .is_some_and(|chain| resolved_chain_matches(chain, query))
         }
         ResolutionFrame::DieRoll(pending) => pending
             .results_table
             .iter()
-            .any(|branch| definition_chain_may_apply_with_entry(&branch.effect)),
+            .any(|branch| definition_chain_matches(&branch.effect, query)),
         ResolutionFrame::PostReplacement(stack) => {
             stack
                 .drains()
                 .any(|drain| match drain.ready_continuation() {
                     Some(PostReplacementContinuation::Template(definition)) => {
-                        definition_chain_may_apply_with_entry(definition)
+                        definition_chain_matches(definition, query)
                     }
                     Some(PostReplacementContinuation::Resolved(resolved)) => {
-                        resolved_chain_may_apply_with_entry(resolved)
+                        resolved_chain_matches(resolved, query)
                     }
                     None => false,
                 })
@@ -5838,29 +5859,137 @@ pub(crate) fn resolution_may_still_apply_with_entry(
     state: &GameState,
     continuation: Option<&ResolvedAbility>,
 ) -> bool {
-    continuation.is_some_and(resolved_chain_may_apply_with_entry)
-        || state
-            .resolution_stack
-            .iter()
-            .any(frame_may_apply_with_entry)
+    continuation
+        .is_some_and(|chain| resolved_chain_matches(chain, LaterInstructionQuery::AppliesWithEntry))
+        || held_later_instruction_matches(state, LaterInstructionQuery::AppliesWithEntry)
+}
+
+/// Does a frame-held later instruction of this resolution, or the chain a parked library-search
+/// delivery resumes into, match `query`?
+fn held_later_instruction_matches(state: &GameState, query: LaterInstructionQuery) -> bool {
+    state
+        .resolution_stack
+        .iter()
+        .any(|frame| frame_matches(frame, query))
         || state
             .pending_library_search_delivery
             .as_ref()
-            .is_some_and(library_search_resume_may_apply_with_entry)
+            .is_some_and(|resume| library_search_resume_matches(resume, query))
 }
 
-/// CR 603.10 + CR 603.6a + CR 611.2e: an entry is checked "immediately after" it with the
-/// resolution's simultaneous "is/has" effects applied, so while one may still be applied the
-/// owner hands its entries to the post-action collector.
+/// CR 603.10 + CR 603.6a + CR 611.2e + CR 608.2c: which collector checks the enter triggers of
+/// the entries a completing ChangeZone / ChangeZoneAll `instruction` delivered (`None` at a
+/// resume, where the instruction is no longer in hand).
+///
+/// An entry is checked "immediately after" it with the resolution's simultaneous "is/has"
+/// effects applied, so while one may still be applied the owner hands its entries to the
+/// post-action collector. That collector reads the entrant after the whole resolution, so the
+/// hand-off is made only when no later instruction that starts after the entry acts on a moved
+/// object ("Put a flying counter on it.", "It gains haste until end of turn."): CR 608.2c
+/// places such a change after the entry, and CR 603.10 checks the entry before it. Otherwise the
+/// owner checks the entries at the instruction's completion, before the "is/has" effect exists
+/// (known gap: an observer keyed on that effect alone misses such an entry, as at the base).
+///
+/// `instruction`'s own continuation is read through its moved-object referents
+/// ([`continuation_acts_on_moved_objects_after_entry`]). A frame-held later instruction cannot
+/// be tied to the moved objects without the instruction, so it is read conservatively
+/// ([`LaterInstructionQuery::MayActOnEntrantAfterEntry`]).
 pub(crate) fn entry_occurrence_collector(
     state: &GameState,
-    continuation: Option<&ResolvedAbility>,
+    instruction: Option<&ResolvedAbility>,
 ) -> crate::game::triggers::EntryOccurrenceCollector {
-    if resolution_may_still_apply_with_entry(state, continuation) {
-        crate::game::triggers::EntryOccurrenceCollector::AfterSimultaneousEntryEffects
+    use crate::game::triggers::EntryOccurrenceCollector;
+    let continuation = instruction.and_then(|instruction| instruction.sub_ability.as_deref());
+    if resolution_may_still_apply_with_entry(state, continuation)
+        && !instruction.is_some_and(continuation_acts_on_moved_objects_after_entry)
+        && !held_later_instruction_matches(state, LaterInstructionQuery::MayActOnEntrantAfterEntry)
+    {
+        EntryOccurrenceCollector::AfterSimultaneousEntryEffects
     } else {
-        crate::game::triggers::EntryOccurrenceCollector::Owner
+        EntryOccurrenceCollector::Owner
     }
+}
+
+/// CR 608.2c: which of the objects a ChangeZone instruction moves a referent filter, read in
+/// that instruction's continuation, names.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MovedObjectsReferent {
+    /// Every moved object: an "it"/"them" anaphor (`ParentTarget`), or a self-reference when
+    /// the instruction returns its own source.
+    All,
+    /// One of the instruction's target slots (`ParentTargetSlot`), which may name only some of
+    /// the moved objects.
+    Slot,
+    /// Something other than the moved objects.
+    Other,
+}
+
+/// CR 608.2c: classify `filter` against the objects the instruction moves. Under a self-return
+/// (`self_return`) a self-reference names the returned object; otherwise it names the resolving
+/// source.
+fn moved_objects_referent(filter: &TargetFilter, self_return: bool) -> MovedObjectsReferent {
+    match filter {
+        TargetFilter::ParentTarget => MovedObjectsReferent::All,
+        TargetFilter::ParentTargetSlot { .. } => MovedObjectsReferent::Slot,
+        TargetFilter::SelfRef if self_return => MovedObjectsReferent::All,
+        _ => MovedObjectsReferent::Other,
+    }
+}
+
+/// CR 608.2c: does the instruction return its own source ("return it to the battlefield")?
+fn is_self_return(instruction: &ResolvedAbility) -> bool {
+    matches!(
+        &instruction.effect,
+        Effect::ChangeZone {
+            target: TargetFilter::SelfRef,
+            ..
+        }
+    )
+}
+
+/// CR 608.2c: the nodes of `instruction`'s own `sub_ability` chain (its continuation; an
+/// `else_ability` branch is never reached from it) whose anaphors can name the objects it moves.
+/// The walk stops at a node that binds its own referent ([`can_inherit_parent_targets`], the
+/// chain resolver's propagation authority via [`should_propagate_parent_targets`]): it and every
+/// later anaphor name something else.
+fn moved_objects_continuation(
+    instruction: &ResolvedAbility,
+) -> impl Iterator<Item = &ResolvedAbility> {
+    std::iter::successors(instruction.sub_ability.as_deref(), |node| {
+        node.sub_ability.as_deref()
+    })
+    .take_while(|node| can_inherit_parent_targets(node))
+}
+
+/// CR 608.2c: may a referent slot of `effect` name an object the instruction moves? A
+/// `GenericEffect` is read per static through its application filter
+/// (`generic_effect_application_filter`); every other effect through its parent-referent slots
+/// (`effect_parent_ref_slots`, which include `target_filter()`).
+fn effect_may_name_moved_objects(effect: &Effect, self_return: bool) -> bool {
+    let names = |filter: &TargetFilter| {
+        moved_objects_referent(filter, self_return) != MovedObjectsReferent::Other
+    };
+    match effect {
+        Effect::GenericEffect {
+            static_abilities,
+            target,
+            ..
+        } => static_abilities.iter().any(|static_def| {
+            effect::generic_effect_application_filter(target.as_ref(), static_def.affected.as_ref())
+                .is_some_and(names)
+        }),
+        _ => effect_parent_ref_slots(effect).into_iter().any(names),
+    }
+}
+
+/// CR 608.2c + CR 611.2e: does a node of `instruction`'s continuation that starts after the
+/// entry (any node not stamped `WithEntry`) act on an object `instruction` moves? A conditional
+/// or optional node counts: it may follow.
+fn continuation_acts_on_moved_objects_after_entry(instruction: &ResolvedAbility) -> bool {
+    let self_return = is_self_return(instruction);
+    moved_objects_continuation(instruction)
+        .filter(|node| !onset_applies_with_entry(node.entry_onset))
+        .any(|node| effect_may_name_moved_objects(&node.effect, self_return))
 }
 
 /// CR 611.2e + CR 613.1f + CR 614.12: does an "is/has" instruction of this resolution remove all
@@ -5868,34 +5997,16 @@ pub(crate) fn entry_occurrence_collector(
 /// simultaneously with the entry? (Xu-Ifit and Bronzehide Lion rulings.) Derived once at the
 /// instruction's resolver entry; never re-derived at a resume.
 ///
-/// Walks the instruction's own `sub_ability` chain (its continuation; an `else_ability` branch is
-/// never reached from it). The walk stops at a node that binds its own referent (CR 608.2c:
-/// [`can_inherit_parent_targets`], the chain resolver's propagation authority via
-/// [`should_propagate_parent_targets`]) and at a conditional or optional node, whose execution is
-/// not guaranteed when the instruction resolves. A `WhenFollowed` node ("becomes", "gains",
-/// "loses") starts after the entry and is skipped (CR 611.2e).
+/// Walks [`moved_objects_continuation`]. The walk also stops at a conditional or optional
+/// `WithEntry` node, whose execution is not guaranteed when the instruction resolves. A
+/// `WhenFollowed` node ("becomes", "gains", "loses") starts after the entry and is skipped
+/// (CR 611.2e).
 pub(crate) fn entrant_abilities_with_entry(
-    state: &GameState,
     instruction: &ResolvedAbility,
 ) -> crate::types::proposed_event::EntrantAbilities {
     use crate::types::proposed_event::EntrantAbilities;
-    // CR 608.2c: in a self-return ("return it to the battlefield"), the rider's self-reference
-    // names the returned object; otherwise it names the resolving source.
-    let self_return = matches!(
-        &instruction.effect,
-        Effect::ChangeZone {
-            target: TargetFilter::SelfRef,
-            ..
-        }
-    );
-    let mut next = instruction.sub_ability.as_deref();
-    while let Some(node) = next {
-        // CR 608.2c: the node binds its own referent, so it and every later anaphor name
-        // something other than the moved objects.
-        if !can_inherit_parent_targets(node) {
-            break;
-        }
-        next = node.sub_ability.as_deref();
+    let self_return = is_self_return(instruction);
+    for node in moved_objects_continuation(instruction) {
         // CR 611.2e: a `WhenFollowed` instruction applies only after the entry.
         if !onset_applies_with_entry(node.entry_onset) {
             continue;
@@ -5904,23 +6015,18 @@ pub(crate) fn entrant_abilities_with_entry(
         if node.condition.is_some() || node.optional {
             break;
         }
-        if node_removes_moved_objects_abilities(state, instruction, node, self_return) {
+        if node_removes_moved_objects_abilities(node, self_return) {
             return EntrantAbilities::RemovedWithEntry;
         }
     }
     EntrantAbilities::Retained
 }
 
-/// CR 613.1f + CR 608.2c: does this `WithEntry` node remove all abilities of the objects
-/// `instruction` moves? A `GenericEffect` static counts when it is unconditional, carries
+/// CR 613.1f + CR 608.2c: does this `WithEntry` node remove all abilities of the objects the
+/// instruction moves? A `GenericEffect` static counts when it is unconditional, carries
 /// `RemoveAllAbilities`, and its application filter (`generic_effect_application_filter`, CR
-/// 608.2c) names the moved objects; a `ReturnAsAura` counts only under a self-return.
-fn node_removes_moved_objects_abilities(
-    state: &GameState,
-    instruction: &ResolvedAbility,
-    node: &ResolvedAbility,
-    self_return: bool,
-) -> bool {
+/// 608.2c) names every moved object; a `ReturnAsAura` counts only under a self-return.
+fn node_removes_moved_objects_abilities(node: &ResolvedAbility, self_return: bool) -> bool {
     let removes_all = |modifications: &[ContinuousModification]| {
         modifications
             .iter()
@@ -5934,34 +6040,15 @@ fn node_removes_moved_objects_abilities(
         } => static_abilities.iter().any(|static_def| {
             static_def.condition.is_none()
                 && removes_all(&static_def.modifications)
-                && match effect::generic_effect_application_filter(
+                // CR 608.2c: a target slot may name only some of the moved objects, so it
+                // keeps `Retained`.
+                && effect::generic_effect_application_filter(
                     target.as_ref(),
                     static_def.affected.as_ref(),
-                ) {
-                    Some(TargetFilter::ParentTarget) => true,
-                    // CR 608.2c: a slot names the moved object only when the instruction moves
-                    // exactly that one object; a slot naming a subset keeps `Retained`.
-                    Some(TargetFilter::ParentTargetSlot { index }) => {
-                        let mut moved =
-                            instruction
-                                .targets
-                                .iter()
-                                .filter_map(|target| match target {
-                                    TargetRef::Object(id) => Some(*id),
-                                    TargetRef::Player(_) => None,
-                                });
-                        match (moved.next(), moved.next()) {
-                            (Some(id), None) => {
-                                crate::game::targeting::resolve_live_parent_slot_from_root(
-                                    state, node, *index,
-                                ) == Some(TargetRef::Object(id))
-                            }
-                            _ => false,
-                        }
-                    }
-                    Some(TargetFilter::SelfRef) => self_return,
-                    _ => false,
-                }
+                )
+                .is_some_and(|filter| {
+                    moved_objects_referent(filter, self_return) == MovedObjectsReferent::All
+                })
         }),
         // CR 613.1f: Bronzehide Lion / Harold and Bob — "It's an Aura enchantment ...
         // and it loses all other abilities" returns the dying source itself.
@@ -67532,7 +67619,9 @@ mod entrant_abilities_tests {
     //! CR 611.2e + CR 613.1f + CR 614.12: the derivation of the entrant-abilities carrier from a
     //! ChangeZone instruction's own continuation (`entrant_abilities_with_entry`).
     use super::*;
-    use crate::types::keywords::Keyword;
+    use crate::game::triggers::EntryOccurrenceCollector;
+    use crate::types::counter::CounterType;
+    use crate::types::keywords::{Keyword, KeywordKind};
     use crate::types::proposed_event::EntrantAbilities;
     use crate::types::zones::EtbTapState;
 
@@ -67626,7 +67715,7 @@ mod entrant_abilities_tests {
     }
 
     fn derive(instruction: &ResolvedAbility) -> EntrantAbilities {
-        entrant_abilities_with_entry(&GameState::new_two_player(20), instruction)
+        entrant_abilities_with_entry(instruction)
     }
 
     /// Xu-Ifit, Osteoharmonist: "It's a Skeleton in addition to its other types and has no
@@ -67784,5 +67873,235 @@ mod entrant_abilities_tests {
             )),
         );
         assert_eq!(derive(&instruction), EntrantAbilities::Retained);
+    }
+
+    /// CR 608.2c: a `WithEntry` removal through a target slot may name only some of the moved
+    /// objects, so it keeps `Retained`. No printed card exhibits this shape; the nearest is
+    /// Xu-Ifit, Osteoharmonist, whose rider is `ParentTarget`.
+    #[test]
+    fn slot_removal_is_retained() {
+        let instruction = chained(
+            targeted_return(),
+            with_entry(generic(
+                TargetFilter::ParentTargetSlot { index: 0 },
+                skeleton_with_no_abilities(),
+            )),
+        );
+        assert_eq!(derive(&instruction), EntrantAbilities::Retained);
+    }
+
+    // CR 603.10 + CR 611.2e + CR 608.2c: `entry_occurrence_collector` hands the instruction's
+    // entries to the post-action collector only while a `WithEntry` instruction may still apply
+    // and no instruction that starts after the entry acts on a moved object.
+
+    fn collector_in(state: &GameState, instruction: &ResolvedAbility) -> EntryOccurrenceCollector {
+        entry_occurrence_collector(state, Some(instruction))
+    }
+
+    fn collector(instruction: &ResolvedAbility) -> EntryOccurrenceCollector {
+        collector_in(&GameState::new_two_player(20), instruction)
+    }
+
+    fn flying_counter_on_it() -> Effect {
+        Effect::PutCounter {
+            counter_type: CounterType::Keyword(KeywordKind::Flying),
+            count: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::ParentTarget,
+        }
+    }
+
+    fn gains_haste(affected: TargetFilter) -> Effect {
+        generic(
+            affected,
+            vec![ContinuousModification::AddKeyword {
+                keyword: Keyword::Haste,
+            }],
+        )
+    }
+
+    fn spirit(affected: TargetFilter) -> Effect {
+        generic(
+            affected,
+            vec![ContinuousModification::AddSubtype {
+                subtype: "Spirit".to_string(),
+            }],
+        )
+    }
+
+    /// Chain `nodes` in order through `sub_ability`.
+    fn sequence(mut nodes: Vec<ResolvedAbility>) -> ResolvedAbility {
+        let mut chain = nodes.pop().expect("at least one node");
+        while let Some(parent) = nodes.pop() {
+            chain = chained(parent, chain);
+        }
+        chain
+    }
+
+    /// Xu-Ifit, Osteoharmonist: the instruction's only later node is its `WithEntry` rider, so
+    /// the entry is handed off.
+    #[test]
+    fn rider_only_continuation_hands_off() {
+        let instruction = chained(
+            targeted_return(),
+            with_entry(generic(
+                TargetFilter::ParentTarget,
+                skeleton_with_no_abilities(),
+            )),
+        );
+        assert_eq!(
+            collector(&instruction),
+            EntryOccurrenceCollector::AfterSimultaneousEntryEffects
+        );
+    }
+
+    /// No `WithEntry` instruction follows (Zombify): the owner checks the entry.
+    #[test]
+    fn no_with_entry_rider_keeps_the_owner() {
+        assert_eq!(
+            collector(&targeted_return()),
+            EntryOccurrenceCollector::Owner
+        );
+    }
+
+    /// Call a Surprise Witness: "Return target creature card with mana value 3 or less from your
+    /// graveyard to the battlefield. Put a flying counter on it. It's a Spirit in addition to its
+    /// other types." The counter is placed after the entry (CR 608.2c), so the owner checks it.
+    #[test]
+    fn counter_on_the_moved_object_keeps_the_owner() {
+        let instruction = sequence(vec![
+            targeted_return(),
+            node(flying_counter_on_it()),
+            with_entry(spirit(TargetFilter::ParentTarget)),
+        ]);
+        assert_eq!(collector(&instruction), EntryOccurrenceCollector::Owner);
+    }
+
+    /// Admiral Brass, Unsinkable: "... It has base power and toughness 4/4. It gains haste until
+    /// end of turn." A `WhenFollowed` grant to the moved object after the `WithEntry` rider.
+    #[test]
+    fn grant_to_the_moved_object_after_the_rider_keeps_the_owner() {
+        let instruction = sequence(vec![
+            targeted_return(),
+            with_entry(spirit(TargetFilter::ParentTarget)),
+            node(gains_haste(TargetFilter::ParentTarget)),
+        ]);
+        assert_eq!(collector(&instruction), EntryOccurrenceCollector::Owner);
+    }
+
+    /// Princess Yue: "... return this card to the battlefield tapped under your control. She's a
+    /// land named Moon. She gains ..." Under a self-return a self-reference names the moved
+    /// object.
+    #[test]
+    fn self_reference_grant_under_self_return_keeps_the_owner() {
+        let instruction = sequence(vec![
+            self_return(),
+            with_entry(spirit(TargetFilter::SelfRef)),
+            node(gains_haste(TargetFilter::SelfRef)),
+        ]);
+        assert_eq!(collector(&instruction), EntryOccurrenceCollector::Owner);
+    }
+
+    /// Storm of Souls: "... Each of them is a 1/1 Spirit with flying in addition to its other
+    /// types. Exile Storm of Souls." The exile names the resolving spell, not the moved objects
+    /// (CR 608.2c), so the entries are still handed off.
+    #[test]
+    fn self_reference_under_a_return_of_other_objects_hands_off() {
+        let exile_self = node(Effect::ChangeZone {
+            library_shuffle: Default::default(),
+            origin: None,
+            destination: Zone::Exile,
+            target: TargetFilter::SelfRef,
+            owner_library: false,
+            enter_transformed: false,
+            enters_under: None,
+            enter_tapped: EtbTapState::Unspecified,
+            enters_attacking: false,
+            up_to: false,
+            enter_with_counters: vec![],
+            conditional_enter_with_counters: vec![],
+            face_down_profile: None,
+            enters_modified_if: None,
+        });
+        let instruction = sequence(vec![
+            targeted_return(),
+            with_entry(spirit(TargetFilter::ParentTarget)),
+            exile_self,
+        ]);
+        assert_eq!(
+            collector(&instruction),
+            EntryOccurrenceCollector::AfterSimultaneousEntryEffects
+        );
+    }
+
+    /// CR 608.2c: a target slot may name a moved object, so a `WhenFollowed` node through one
+    /// keeps the owner (the conservative answer). No printed card exhibits this shape; the
+    /// nearest is Admiral Brass, Unsinkable, whose grant is `ParentTarget`.
+    #[test]
+    fn slot_grant_after_the_rider_keeps_the_owner() {
+        let instruction = sequence(vec![
+            targeted_return(),
+            with_entry(spirit(TargetFilter::ParentTarget)),
+            node(gains_haste(TargetFilter::ParentTargetSlot { index: 0 })),
+        ]);
+        assert_eq!(collector(&instruction), EntryOccurrenceCollector::Owner);
+    }
+
+    /// CR 608.2c: a node that binds its own target ends the moved objects' anaphor scope, so a
+    /// later "it" names that node's target and the entry is still handed off.
+    #[test]
+    fn grant_after_a_node_with_its_own_target_hands_off() {
+        let mut own_target = node(gains_haste(TargetFilter::Typed(TypedFilter::creature())));
+        own_target.targets = vec![TargetRef::Object(ObjectId(8))];
+        let instruction = sequence(vec![
+            targeted_return(),
+            with_entry(spirit(TargetFilter::ParentTarget)),
+            own_target,
+            node(gains_haste(TargetFilter::ParentTarget)),
+        ]);
+        assert_eq!(
+            collector(&instruction),
+            EntryOccurrenceCollector::AfterSimultaneousEntryEffects
+        );
+    }
+
+    /// A resume (`instruction: None`) reads a parked continuation conservatively: a parked
+    /// `WhenFollowed` node that may name a moved object keeps the owner, while a parked rider
+    /// alone hands off (the R4p route). A resolver site reads the same parked frames.
+    #[test]
+    fn parked_instructions_are_read_conservatively() {
+        let parked = |chain: ResolvedAbility| {
+            let mut state = GameState::new_two_player(20);
+            let pending = PendingContinuation::new(Box::new(chain), &state);
+            state
+                .resolution_stack
+                .push_inner(ResolutionFrame::AbilityContinuation(
+                    AbilityContinuationFrame {
+                        pending,
+                        choose_zone_trigger_context: None,
+                    },
+                ));
+            state
+        };
+        let rider = || with_entry(spirit(TargetFilter::ParentTarget));
+        assert_eq!(
+            entry_occurrence_collector(&parked(rider()), None),
+            EntryOccurrenceCollector::AfterSimultaneousEntryEffects
+        );
+        for later in [
+            node(flying_counter_on_it()),
+            node(gains_haste(TargetFilter::SelfRef)),
+        ] {
+            assert_eq!(
+                entry_occurrence_collector(&parked(chained(rider(), later)), None),
+                EntryOccurrenceCollector::Owner
+            );
+        }
+        assert_eq!(
+            collector_in(
+                &parked(node(flying_counter_on_it())),
+                &chained(targeted_return(), rider())
+            ),
+            EntryOccurrenceCollector::Owner
+        );
     }
 }
