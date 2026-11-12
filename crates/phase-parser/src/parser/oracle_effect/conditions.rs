@@ -316,9 +316,9 @@ pub(crate) fn strip_leading_general_conditional(
     (routed.map(|(condition, _)| condition), body)
 }
 
-/// Which recognizer family produced the gate a leading general conditional
-/// stripped, for a caller that must apply a family-specific binding guard to the
-/// clause it gates.
+/// Which recognizer family produced the gate a leading general conditional or a
+/// trailing "if" rider stripped, for a caller that must apply a family-specific
+/// binding guard to the clause it gates.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum LeadingConditionRoute {
     /// Any recognizer this route's binding guard does not cover (sibling
@@ -12015,8 +12015,11 @@ mod tests {
     /// would skip it with the child. Full parsing with an independent "Draw a
     /// card." after the clause: the head owns the only target, its child is a
     /// condition-free, target-less continuation step, and the draw follows as
-    /// an independent instruction; the suffix is one `Condition` gap and no node
-    /// carries a gate. Both clauses are synthetic: a compound head with a
+    /// an independent instruction; no node carries a gate, and the suffix is an
+    /// explicit gap of the form each row names (the compound splitter keeps it
+    /// in an unimplemented child for the compound; the swallow detector reports
+    /// a `Condition` gap for the `TargetOnly` head). Both clauses are synthetic:
+    /// a compound head with a
     /// targetless child (nearest printed analogue: Skulking Killer's "target
     /// creature an opponent controls gets -2/-2 until end of turn"), and a
     /// `TargetOnly` head whose child acts (nearest printed analogue: Chandra's
@@ -12655,13 +12658,13 @@ mod tests {
         );
     }
 
-    /// CR 608.2c: on a false gate the engine runs the gated root's direct sub
-    /// only when it is an independent instruction without a condition, and it
-    /// runs no tail through an else branch's absence. Two assembled shapes that
-    /// fail that are explicit gaps: a ", and" tail, which lowers as a
-    /// continuation step of the gated root, and an "Otherwise," branch, which
-    /// the root carries as its else (declined conservatively). The positive
-    /// twin, an independent next sentence, binds. Synthetic texts; nearest
+    /// CR 608.2c: the assembled-chain check keeps the gate only when the root
+    /// has no else branch and its direct sub, if any, is an independent
+    /// instruction without a condition (the sub a false gate runs). Two
+    /// assembled shapes outside that are explicit gaps: a ", and" tail, which
+    /// lowers as a continuation step of the gated root, and an "Otherwise,"
+    /// branch, which the root carries as its else. The positive twin, an
+    /// independent next sentence, binds. Synthetic texts; nearest
     /// printed card: Unified Will.
     #[test]
     fn target_controller_suffix_with_an_unrunnable_next_instruction_is_an_explicit_gap() {
