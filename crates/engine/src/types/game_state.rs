@@ -876,6 +876,27 @@ impl std::fmt::Debug for TriggerSourceContext {
 }
 
 impl TriggerSourceContext {
+    /// CR 400.7 + CR 608.2h: a source context that names no object (id 0,
+    /// incarnation 0) and records only `counters`, the last-known counters a
+    /// departed source's pending ability reads. Loop normalization substitutes it
+    /// for the real context so two positions compare on what the read would
+    /// answer, never on which incarnation answers it.
+    pub(crate) fn counters_only_projection(counters: HashMap<CounterType, u32>) -> Self {
+        let mut blank = GameObject::new(
+            ObjectId(0),
+            CardId(0),
+            PlayerId(0),
+            String::new(),
+            Zone::Battlefield,
+        );
+        blank.counters = counters;
+        blank
+            .snapshot_for_zone_change(ObjectId(0), Some(Zone::Battlefield), Zone::Battlefield)
+            .trigger_source_context()
+            .cloned()
+            .expect("zone-change source snapshot always owns its trigger source context")
+    }
+
     /// Returns the exact definition reference for an entry captured with this
     /// source. No caller may infer provenance from definition payload bytes.
     pub fn definition_ref(&self, entry: &TriggerEntry) -> TriggerDefinitionRef {
@@ -35388,8 +35409,20 @@ impl GameState {
     /// times can compare equal on everything a mandatory action could change.
     pub(crate) fn normalize_for_loop(&self) -> GameState {
         let mut clone = self.clone();
-        // CR 608.2h: collected before the trigger identities below are cleared.
-        let departed_sources = clone.departed_trigger_source_refs();
+        // CR 608.2h + CR 400.7: a pending ability that reads its departed source's
+        // counters keeps the counter map it would read, as an identity-free
+        // projection (`TriggerSourceContext::counters_only_projection`) resolved
+        // from `self` BEFORE the identities below are cleared. Idempotent: the
+        // projection names no object, so it resolves to itself on a second pass.
+        let carry_source_counters =
+            |source: &TriggerSourceContext| self.departed_source_counters_projection(source);
+        let clear_identity = |ability: &mut ResolvedAbility| {
+            if crate::game::ability_scan::ability_reads_sibling_mutable(ability) {
+                ability.clear_trigger_identity_carrying_source(&carry_source_counters);
+            } else {
+                ability.clear_trigger_identity_recursive();
+            }
+        };
         // apply() resets these at the start of every player action, so a position compares as
         // the next action starts from it.
         clone.clear_player_action_transients();
@@ -35649,14 +35682,14 @@ impl GameState {
         };
         for entry in clone.stack.iter_mut() {
             if let Some(ability) = entry.ability_mut() {
-                ability.clear_trigger_identity_recursive();
+                clear_identity(ability);
                 ability.normalize_cast_occurrence_for_loop_recursive();
                 ability.rename_epic_effect_handles_recursive(&rename_stack_epic_handle);
             }
         }
         if let Some(entry) = clone.resolving_stack_entry.as_mut() {
             if let Some(ability) = entry.ability_mut() {
-                ability.clear_trigger_identity_recursive();
+                clear_identity(ability);
                 ability.normalize_cast_occurrence_for_loop_recursive();
                 ability.rename_epic_effect_handles_recursive(&rename_stack_epic_handle);
             }
@@ -35668,7 +35701,7 @@ impl GameState {
         // `game::triggers`.
         let normalize_pending_trigger = |pending: &mut crate::game::triggers::PendingTrigger| {
             pending.timestamp = 0;
-            pending.ability.clear_trigger_identity_recursive();
+            clear_identity(&mut pending.ability);
         };
         if let Some(pt) = clone.pending_trigger.as_mut() {
             normalize_pending_trigger(pt);
@@ -35715,7 +35748,7 @@ impl GameState {
         // keeps apart; entries are append-only and immutable, so two samples
         // of one game hold equal entries at every common position anyway.
 
-        clone.retain_carrier_referenced_lki_with(departed_sources);
+        clone.retain_carrier_referenced_lki();
         // CR 104.4b + CR 608.2h: last-known copiable values no ability can still
         // read as its own copy source are history, not position — pruned against
         // the set captured above, before the identities were erased.
@@ -35758,67 +35791,28 @@ impl GameState {
         }
     }
 
-    /// CR 400.7 + CR 608.2h: the incarnations of departed triggered sources that a
-    /// stack or pending trigger ability still reads through its `TriggerSourceContext`
-    /// (`quantity::source_counters_lki_for_context` reads the exit snapshot of exactly
-    /// that incarnation). A source still live at its observed incarnation reads the
-    /// object itself, so it names no snapshot.
-    pub(crate) fn departed_trigger_source_refs(&self) -> HashSet<ObjectIncarnationRef> {
-        let mut refs = HashSet::new();
-        let mut record = |ability: &ResolvedAbility| {
-            ability.for_each_trigger_source(&mut |source| {
-                if matches!(source.source_read(self), TriggerSourceRead::Latched(_)) {
-                    refs.insert(source.identity.reference);
-                }
-            });
-        };
-        for entry in self.stack.iter().chain(self.resolving_stack_entry.iter()) {
-            if let Some(ability) = entry.ability() {
-                record(ability);
+    /// CR 400.7 + CR 608.2h: the identity-free stand-in for the departed triggered
+    /// source `source` names, for loop normalization. A source gone from its
+    /// observed incarnation answers a counter read from its exit snapshot
+    /// (`quantity::latched_source_counters`), so the stand-in carries exactly that
+    /// counter map and no object id or incarnation; a source still live at its
+    /// observed incarnation reads the object itself, which loop equality already
+    /// compares, so it needs no stand-in.
+    fn departed_source_counters_projection(
+        &self,
+        source: &TriggerSourceContext,
+    ) -> Option<TriggerSourceContext> {
+        match source.source_read(self) {
+            TriggerSourceRead::ExactLive(_) => None,
+            TriggerSourceRead::Latched(context) => {
+                Some(TriggerSourceContext::counters_only_projection(
+                    crate::game::quantity::latched_source_counters(self, context).clone(),
+                ))
             }
         }
-        let ordering = self
-            .pending_trigger_order
-            .iter()
-            .flat_map(|order| order.groups.iter())
-            .flat_map(|group| group.triggers.iter())
-            .map(|context| &context.pending);
-        for pending in self
-            .pending_trigger
-            .as_deref()
-            .into_iter()
-            .chain(
-                self.deferred_triggers
-                    .iter()
-                    .map(|deferred| &deferred.pending),
-            )
-            .chain(ordering)
-        {
-            record(&pending.ability);
-        }
-        if let Some(resume) = self.pending_triggered_mana_resume.as_deref() {
-            record(&resume.current.pending.ability);
-            for context in resume.accepted_tail.iter() {
-                record(&context.pending.ability);
-            }
-            for batch in resume.collected_batches.iter() {
-                for context in batch.contexts.iter() {
-                    record(&context.pending.ability);
-                }
-            }
-        }
-        refs
     }
 
     pub(crate) fn retain_carrier_referenced_lki(&mut self) {
-        let departed_sources = self.departed_trigger_source_refs();
-        self.retain_carrier_referenced_lki_with(departed_sources);
-    }
-
-    fn retain_carrier_referenced_lki_with(
-        &mut self,
-        departed_sources: HashSet<ObjectIncarnationRef>,
-    ) {
         // CR 104.4b + CR 732.2a: incarnation-versioned LKI is historical support
         // state, not independently loop-material state. Retain only snapshots
         // reachable from trigger-event carriers that can still resume or resolve
@@ -35828,7 +35822,7 @@ impl GameState {
         // WaitingFor copies are intentionally not a separate authority: every
         // trigger-event-bearing prompt has one of those pending/continuation
         // carriers, and loop samples are taken at the post-pipeline Priority frame.
-        let mut referenced_lki = departed_sources;
+        let mut referenced_lki: HashSet<ObjectIncarnationRef> = HashSet::new();
         let mut record_event = |event: &GameEvent| {
             if let GameEvent::ZoneChanged {
                 object_id, record, ..
@@ -48900,14 +48894,27 @@ mod tests {
         assert!(!read(&state.normalize_for_loop()));
     }
 
-    /// CR 400.7 + CR 608.2h + CR 104.4b: a pending trigger whose source has left the battlefield
-    /// reads that incarnation's exit snapshot; normalization must keep that row.
-    #[test]
-    fn normalize_for_loop_keeps_the_exit_snapshot_a_pending_departed_source_trigger_reads() {
-        use crate::game::filter::exit_lki_for_incarnation;
+    /// A state whose pending trigger belongs to a source that has since left the
+    /// battlefield carrying `counters` +1/+1 counters. The trigger's effect reads
+    /// the source's counters when `reads_counters`; otherwise it reads nothing.
+    fn pending_departed_source_state(
+        spacer_objects: u64,
+        counters: u32,
+        reads_counters: bool,
+    ) -> GameState {
         use crate::game::zones::move_to_zone;
-        use crate::types::counter::{parse_counter_type, CounterType};
+        use crate::types::ability::{ObjectScope, QuantityExpr, QuantityRef, TargetFilter};
+        use crate::types::counter::CounterType;
         let mut state = GameState::new_two_player(7);
+        for n in 0..spacer_objects {
+            create_object(
+                &mut state,
+                CardId(900 + n),
+                PlayerId(0),
+                "Spacer".to_string(),
+                Zone::Battlefield,
+            );
+        }
         let runner = create_object(
             &mut state,
             CardId(720),
@@ -48915,17 +48922,30 @@ mod tests {
             "Runner".to_string(),
             Zone::Battlefield,
         );
-        {
-            let object = state.objects.get_mut(&runner).unwrap();
-            object.counters.insert(CounterType::Plus1Plus1, 1);
-            object.counters.insert(parse_counter_type("oil"), 1);
-        }
+        state
+            .objects
+            .get_mut(&runner)
+            .unwrap()
+            .counters
+            .insert(CounterType::Plus1Plus1, counters);
         let context = crate::game::triggers::trigger_source_context_for_latch(
             &state,
             &state.objects[&runner],
         );
-        let departed = context.identity.reference;
-        let mut ability = ResolvedAbility::new(Effect::NoOp, Vec::new(), runner, PlayerId(0));
+        let effect = if reads_counters {
+            Effect::GainLife {
+                amount: QuantityExpr::Ref {
+                    qty: QuantityRef::CountersOn {
+                        scope: ObjectScope::Source,
+                        counter_type: Some(CounterType::Plus1Plus1),
+                    },
+                },
+                player: TargetFilter::Controller,
+            }
+        } else {
+            Effect::NoOp
+        };
+        let mut ability = ResolvedAbility::new(effect, Vec::new(), runner, PlayerId(0));
         ability.trigger_source = Some(context);
         state.pending_trigger = Some(Box::new(crate::game::triggers::PendingTrigger {
             source_id: runner,
@@ -48945,19 +48965,82 @@ mod tests {
             provenance: None,
         }));
         move_to_zone(&mut state, runner, Zone::Exile, &mut Vec::new());
-        let kinds = |state: &GameState, incarnation: u64| {
-            exit_lki_for_incarnation(state, runner, incarnation).map(|lki| lki.counters.len())
-        };
-        assert_eq!(
-            kinds(&state, departed.incarnation),
-            Some(2),
-            "reach guard: the departure recorded both counter kinds"
-        );
-        assert_eq!(state.departed_trigger_source_refs().len(), 1);
+        state
+    }
+
+    fn pending_trigger_ability(state: &GameState) -> &ResolvedAbility {
+        &state.pending_trigger.as_deref().unwrap().ability
+    }
+
+    /// CR 400.7 + CR 608.2h + CR 104.4b: a pending trigger whose source has left the battlefield
+    /// and whose effect reads the source's counters carries the counters that read would answer —
+    /// resolved from the exit snapshot, as an identity-free value.
+    #[test]
+    fn normalize_for_loop_carries_the_counters_a_pending_departed_source_trigger_reads() {
+        use crate::types::counter::CounterType;
+        let state = pending_departed_source_state(0, 2, true);
         let normalized = state.normalize_for_loop();
-        let rows = &normalized.lki_by_incarnation[&runner];
-        assert_eq!(rows.len(), 1, "the pending trigger's exit row is retained");
-        assert_eq!(rows.values().next().unwrap().counters.len(), 2);
+        let projection = pending_trigger_ability(&normalized)
+            .trigger_source
+            .as_ref()
+            .expect("a counter-reading ability of a departed source keeps its read");
+        assert_eq!(
+            projection.lki.counters,
+            HashMap::from([(CounterType::Plus1Plus1, 2)])
+        );
+        assert_eq!(
+            projection.identity.reference,
+            ObjectIncarnationRef::of(ObjectId(0), 0),
+            "the carried read names no object"
+        );
+        assert!(
+            normalized.lki_by_incarnation.is_empty(),
+            "no raw-incarnation exit row is needed once the read is carried"
+        );
+    }
+
+    /// An ability that never reads its source's counters contributes nothing.
+    #[test]
+    fn normalize_for_loop_drops_a_departed_source_no_pending_ability_reads_counters_of() {
+        let state = pending_departed_source_state(0, 2, false);
+        let normalized = state.normalize_for_loop();
+        assert!(pending_trigger_ability(&normalized)
+            .trigger_source
+            .is_none());
+        assert!(normalized.lki_by_incarnation.is_empty());
+    }
+
+    /// CR 104.4b: normalizing a normalized position changes nothing, including the
+    /// carried read of a departed source.
+    #[test]
+    fn normalize_for_loop_is_idempotent_with_a_pending_counter_reading_departed_source() {
+        for reads_counters in [true, false] {
+            let once = pending_departed_source_state(0, 2, reads_counters).normalize_for_loop();
+            let twice = once.normalize_for_loop();
+            assert!(once == twice, "reads_counters = {reads_counters}");
+            assert_eq!(
+                pending_trigger_ability(&once),
+                pending_trigger_ability(&twice)
+            );
+        }
+    }
+
+    /// CR 104.4b: two positions whose pending reads answer the same counters compare equal
+    /// though the departed sources are different objects (different ids and incarnations);
+    /// positions whose reads answer different counters do not.
+    #[test]
+    fn normalize_for_loop_compares_pending_departed_source_reads_by_the_counters_they_answer() {
+        let first = pending_departed_source_state(0, 2, true).normalize_for_loop();
+        let relocated = pending_departed_source_state(3, 2, true).normalize_for_loop();
+        let heavier = pending_departed_source_state(0, 3, true).normalize_for_loop();
+        assert_eq!(
+            pending_trigger_ability(&first),
+            pending_trigger_ability(&relocated)
+        );
+        assert_ne!(
+            pending_trigger_ability(&first),
+            pending_trigger_ability(&heavier)
+        );
     }
 
     fn announced_departure(

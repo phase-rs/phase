@@ -167,16 +167,26 @@ fn source_counters_lki_for_context(
             object.snapshot_public_characteristics().counters
         }
         crate::types::game_state::TriggerSourceRead::Latched(context) => {
-            crate::game::filter::exit_lki_for_incarnation(
-                state,
-                context.identity.reference.object_id,
-                context.identity.reference.incarnation,
-            )
-            .unwrap_or(&context.lki)
-            .counters
-            .clone()
+            latched_source_counters(state, context).clone()
         }
     })
+}
+
+/// CR 608.2h + CR 400.7: the counters a departed triggered source is read as
+/// having — the exit snapshot of its exact incarnation, else the trigger-time
+/// snapshot latched in `context`. The single authority behind
+/// [`source_counters_lki_for_context`] and loop normalization's carried read.
+pub(crate) fn latched_source_counters<'a>(
+    state: &'a GameState,
+    context: &'a crate::types::game_state::TriggerSourceContext,
+) -> &'a HashMap<CounterType, u32> {
+    &crate::game::filter::exit_lki_for_incarnation(
+        state,
+        context.identity.reference.object_id,
+        context.identity.reference.incarnation,
+    )
+    .unwrap_or(&context.lki)
+    .counters
 }
 
 /// Digital-only Alchemy: the intensity of the resolving ability's source, read
