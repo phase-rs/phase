@@ -1255,7 +1255,9 @@ enum BatchDeliveryResult {
 #[derive(Clone, Copy)]
 enum BatchDeliveryParking {
     NewChild,
-    ReparkActive,
+    /// Re-park the batch's own owner frame, addressed by its logical group
+    /// identity (child frames may sit above it).
+    ReparkOwner,
 }
 
 /// CR 603.10a batch entry: move many objects to one destination through the
@@ -1333,11 +1335,12 @@ pub(crate) fn move_objects_simultaneously_then(
             deferred_events: Vec::new(),
             pre_entry_battlefield,
         });
-        BatchDeliveryParking::ReparkActive
+        BatchDeliveryParking::ReparkOwner
     } else {
         BatchDeliveryParking::NewChild
     };
-    let owns_pre_entry_snapshot = matches!(parking, BatchDeliveryParking::ReparkActive);
+    let owns_pre_entry_snapshot = matches!(parking, BatchDeliveryParking::ReparkOwner);
+    let owner_group = logical_zone_change_group.logical_group_id;
     match deliver_batch(state, reqs, logical_zone_change_group, parking, events) {
         BatchDeliveryResult::Done(mut logical_zone_change_group) => {
             if owns_pre_entry_snapshot {
@@ -1373,7 +1376,15 @@ pub(crate) fn move_objects_simultaneously_then(
             // paused object was the last member and the undelivered tail is empty.
             // Attach the completion to that same owner so its drain can run it
             // once, after logical settlement.
-            let pending = ensure_batch_record(state, destination.unwrap_or(Zone::Graveyard));
+            let pending = if owns_pre_entry_snapshot {
+                // The re-parked owner may have child frames above it, so it is
+                // addressed by its group identity, not by stack position.
+                state
+                    .batch_delivery_for_group_mut(owner_group)
+                    .expect("paused snapshot-owning batch retains its owner frame")
+            } else {
+                ensure_batch_record(state, destination.unwrap_or(Zone::Graveyard))
+            };
             pending.completion = completion;
             pending.attempted = ids;
             pending.zone_change_record_start = zone_change_record_start;
@@ -1581,9 +1592,9 @@ fn stash_batch_tail(
     // CR 614.12: a re-parked batch keeps the snapshot captured before its first
     // member entered.
     let pre_entry_battlefield = match parking {
-        BatchDeliveryParking::ReparkActive => state
-            .active_batch_delivery()
-            .and_then(|active| active.pre_entry_battlefield.clone()),
+        BatchDeliveryParking::ReparkOwner => state
+            .batch_delivery_for_group(logical_zone_change_group.logical_group_id)
+            .and_then(|owner| owner.pre_entry_battlefield.clone()),
         BatchDeliveryParking::NewChild => None,
     };
     let pending = PendingBatchDeliveries {
@@ -1608,9 +1619,9 @@ fn stash_batch_tail(
     };
     match parking {
         BatchDeliveryParking::NewChild => state.push_batch_delivery(pending),
-        BatchDeliveryParking::ReparkActive => state
-            .replace_active_batch_delivery(pending)
-            .expect("re-paused batch delivery must own the active frame"),
+        BatchDeliveryParking::ReparkOwner => state
+            .replace_batch_delivery_for_group(pending)
+            .expect("re-paused batch delivery must retain its owner frame"),
     }
 }
 
@@ -1714,6 +1725,7 @@ pub(crate) fn drain_pending_batch_deliveries(state: &mut GameState, events: &mut
             pre_entry_battlefield: _,
         } = pending;
         deferred_events.append(events);
+        let owner_group = logical_zone_change_group.logical_group_id;
         let attempted = if attempted.is_empty() {
             remaining.clone()
         } else {
@@ -1773,7 +1785,7 @@ pub(crate) fn drain_pending_batch_deliveries(state: &mut GameState, events: &mut
             state,
             reqs,
             logical_zone_change_group,
-            BatchDeliveryParking::ReparkActive,
+            BatchDeliveryParking::ReparkOwner,
             events,
         ) {
             BatchDeliveryResult::Done(mut logical_zone_change_group) => {
@@ -1839,7 +1851,9 @@ pub(crate) fn drain_pending_batch_deliveries(state: &mut GameState, events: &mut
                 // `deliver_batch` already re-parked the exact same owner,
                 // including a pause on its final member. Re-attach only the
                 // completion and external output; never replace that owner.
-                let reparking = ensure_batch_record(state, destination);
+                let reparking = state
+                    .batch_delivery_for_group_mut(owner_group)
+                    .expect("re-parked batch retains its owner frame");
                 reparking.completion = completion;
                 reparking.attempted = attempted;
                 reparking.zone_change_record_start = zone_change_record_start;

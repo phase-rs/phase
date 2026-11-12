@@ -721,6 +721,212 @@ fn acolyte_ignores_co_entrant_counters_across_a_paused_dig_batch() {
     }
 }
 
+const MYCOLOTH: &str = "Devour 2 (As this creature enters, you may sacrifice any number of creatures. It enters with twice that many +1/+1 counters on it.)\nAt the beginning of your upkeep, create a 1/1 green Saproling creature token for each +1/+1 counter on this creature.";
+
+struct DigRun {
+    runner: GameRunner,
+    /// Every pool a Devour prompt offered, in order.
+    devour_offers: Vec<Vec<ObjectId>>,
+    paused: bool,
+}
+
+/// Cast Genesis Ultimatum with `order` (graveyard cards moved to the top of P0's
+/// library, in that order) and keep every one of them, in that order. A Devour
+/// prompt sacrifices `devour_sacrifice`; a Clone copy prompt copies `copy_target`.
+fn run_genesis_dig(
+    mut runner: GameRunner,
+    spell: ObjectId,
+    order: &[ObjectId],
+    devour_sacrifice: &[ObjectId],
+    copy_target: Option<ObjectId>,
+) -> DigRun {
+    for id in order.iter().copied().rev() {
+        let state = runner.state_mut();
+        let player = state.players.iter_mut().find(|p| p.id == P0).unwrap();
+        player.graveyard.retain(|&o| o != id);
+        player.library.push_front(id);
+        state.objects.get_mut(&id).unwrap().zone = Zone::Library;
+    }
+    let card_id = runner.state().objects[&spell].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: spell,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("free cast must be accepted");
+    let mut devour_offers = Vec::new();
+    let mut paused = false;
+    for _ in 0..64 {
+        match runner.state().waiting_for.clone() {
+            WaitingFor::DigChoice { .. } => {
+                runner
+                    .act(GameAction::SelectCards {
+                        cards: order.to_vec(),
+                    })
+                    .expect("keeping every permanent must be accepted");
+            }
+            WaitingFor::ReplacementChoice { .. } => {
+                paused = true;
+                runner
+                    .act(GameAction::ChooseReplacement { index: 0 })
+                    .expect("accepting Clone's copy replacement");
+            }
+            WaitingFor::CopyTargetChoice { valid_targets, .. } => {
+                paused = true;
+                let target = copy_target.expect("a copy target was declared");
+                assert!(valid_targets.contains(&target));
+                runner
+                    .act(GameAction::ChooseTarget {
+                        target: Some(TargetRef::Object(target)),
+                    })
+                    .expect("choosing Clone's copy target");
+            }
+            WaitingFor::EffectZoneChoice { cards, .. } => {
+                devour_offers.push(cards.clone());
+                runner
+                    .act(GameAction::SelectCards {
+                        cards: devour_sacrifice.to_vec(),
+                    })
+                    .expect("devour choice must be accepted");
+            }
+            WaitingFor::Priority { .. } if runner.state().stack.is_empty() => break,
+            WaitingFor::Priority { .. } => {
+                runner.act(GameAction::PassPriority).expect("pass priority");
+            }
+            other => panic!("unexpected prompt: {other:?}"),
+        }
+    }
+    DigRun {
+        runner,
+        devour_offers,
+        paused,
+    }
+}
+
+/// CR 614.13a + CR 702.82a: Mycoloth's Devour cannot choose another object
+/// entering at the same time. Iron Apprentice, delivered by the same Genesis
+/// Ultimatum Dig before Mycoloth, is therefore not offered; the Bear that was
+/// already on the battlefield is. The paused variant puts a Clone between them
+/// so the batch is parked and resumed before Mycoloth's choice.
+#[test]
+fn dig_batch_devour_excludes_co_entrants_across_a_pause() {
+    for (with_clone, apprentice_first) in [(false, true), (false, false), (true, true)] {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let bear = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
+        let mut b = scenario.add_creature_to_graveyard(P0, "Iron Apprentice", 1, 1);
+        b.from_oracle_text(IRON_APPRENTICE);
+        let apprentice = b.id();
+        let mut b = scenario.add_creature_to_graveyard(P0, "Mycoloth", 4, 4);
+        b.from_oracle_text_with_keywords(&["Devour"], MYCOLOTH);
+        let mycoloth = b.id();
+        let mut b = scenario.add_creature_to_graveyard(P0, "Clone", 0, 0);
+        b.from_oracle_text(CLONE);
+        let clone = b.id();
+        let spell = scenario
+            .add_spell_to_hand_from_oracle(P0, "Genesis Ultimatum", false, GENESIS_ULTIMATUM)
+            .with_mana_cost(ManaCost::default())
+            .id();
+        let runner = scenario.build();
+        let mut order = if apprentice_first {
+            vec![apprentice, mycoloth]
+        } else {
+            vec![mycoloth, apprentice]
+        };
+        if with_clone {
+            order.insert(1, clone);
+        }
+        let label = format!("with_clone={with_clone} apprentice_first={apprentice_first}");
+        let run = run_genesis_dig(runner, spell, &order, &[bear], Some(bear));
+        assert_eq!(run.paused, with_clone, "{label}");
+        assert_eq!(run.devour_offers.len(), 1, "one Devour prompt ({label})");
+        let offered = &run.devour_offers[0];
+        assert!(offered.contains(&bear), "the Bear is devourable ({label})");
+        assert!(
+            !offered.contains(&apprentice),
+            "a co-entering Iron Apprentice is not devourable ({label})"
+        );
+        assert!(!offered.contains(&clone), "{label}");
+        assert!(!offered.contains(&mycoloth), "{label}");
+        let state = run.runner.state();
+        assert_eq!(
+            state.objects[&apprentice].zone,
+            Zone::Battlefield,
+            "{label}"
+        );
+        assert_eq!(state.objects[&bear].zone, Zone::Graveyard, "{label}");
+        assert_eq!(
+            counters(&run.runner, mycoloth, &CounterType::Plus1Plus1),
+            2,
+            "Devour 2 over one sacrificed creature ({label})"
+        );
+        assert!(
+            state.active_pre_entry_battlefield_snapshot().is_none()
+                && state.active_batch_delivery().is_none()
+                && state.resolution_stack.is_empty(),
+            "no snapshot outlives the batch ({label})"
+        );
+    }
+}
+
+/// CR 707.5 + CR 614.12: a Clone entering in the same Dig batch as Iron
+/// Apprentice that copies an Ascendant Acolyte acquires the Acolyte's
+/// population replacement only after its copy choice. That replacement still
+/// counts the battlefield as it was before the entry: the pre-existing Acolyte's
+/// counter (1) plus the Ally's (2), never Iron Apprentice's entering counter.
+#[test]
+fn copy_acquired_population_replacement_excludes_co_entrants() {
+    for apprentice_first in [true, false] {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let existing = scenario
+            .add_creature_from_oracle(P0, "Ascendant Acolyte", 1, 1, ASCENDANT_ACOLYTE)
+            .id();
+        scenario.with_counter(existing, CounterType::Plus1Plus1, 1);
+        let ally = scenario.add_creature(P0, "Ally", 2, 2).id();
+        scenario.with_counter(ally, CounterType::Plus1Plus1, 2);
+        let mut b = scenario.add_creature_to_graveyard(P0, "Iron Apprentice", 1, 1);
+        b.from_oracle_text(IRON_APPRENTICE);
+        let apprentice = b.id();
+        let mut b = scenario.add_creature_to_graveyard(P0, "Clone", 0, 0);
+        b.from_oracle_text(CLONE);
+        let clone = b.id();
+        let spell = scenario
+            .add_spell_to_hand_from_oracle(P0, "Genesis Ultimatum", false, GENESIS_ULTIMATUM)
+            .with_mana_cost(ManaCost::default())
+            .id();
+        let runner = scenario.build();
+        let order = if apprentice_first {
+            [apprentice, clone]
+        } else {
+            [clone, apprentice]
+        };
+        let label = format!("apprentice_first={apprentice_first}");
+        let run = run_genesis_dig(runner, spell, &order, &[], Some(existing));
+        assert!(run.paused, "{label}");
+        let state = run.runner.state();
+        assert_eq!(state.objects[&clone].zone, Zone::Battlefield, "{label}");
+        assert_eq!(state.objects[&clone].name, "Ascendant Acolyte", "{label}");
+        assert_eq!(
+            counters(&run.runner, apprentice, &CounterType::Plus1Plus1),
+            1,
+            "{label}"
+        );
+        assert_eq!(
+            counters(&run.runner, clone, &CounterType::Plus1Plus1),
+            3,
+            "the copied Acolyte counts the pre-existing 1 + 2 counters only ({label})"
+        );
+        assert!(
+            state.active_pre_entry_battlefield_snapshot().is_none()
+                && state.resolution_stack.is_empty(),
+            "{label}"
+        );
+    }
+}
+
 /// The object-count class of the same read: a co-entrant is not "another
 /// creature you control" for an as-enters count.
 #[test]

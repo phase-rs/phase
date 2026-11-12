@@ -30627,13 +30627,12 @@ impl GameState {
         self.resolution_stack.take_active_change_zone()
     }
 
-    /// Returns the Devour eligibility snapshot owned by the active ChangeZone
-    /// frame. A post-replacement drain raised by that same zone change may be
-    /// its exact active child; no other buried frame is consulted.
+    /// The Devour eligibility pool: a thin view over the single frame-owned
+    /// pre-entry authority, [`Self::active_pre_entry_battlefield_snapshot`]
+    /// (CR 614.13a: a devourer cannot choose any object entering at the same
+    /// time, whether the entry is a ChangeZone loop or a batch delivery).
     pub fn active_devour_eligible_snapshot(&self) -> Option<&HashSet<ObjectId>> {
-        self.resolution_stack
-            .active_change_zone_or_post_replacement_child()
-            .and_then(|frame| frame.devour_eligible_snapshot.as_ref())
+        self.active_pre_entry_battlefield_snapshot()
     }
 
     /// CR 614.12 + CR 614.1c: the battlefield as it stood before the active
@@ -30641,11 +30640,14 @@ impl GameState {
     /// Devour sacrifice pool or population-counting as-enters replacement).
     /// The same frame-owned snapshot as [`Self::active_devour_eligible_snapshot`].
     pub fn active_pre_entry_battlefield_snapshot(&self) -> Option<&HashSet<ObjectId>> {
-        self.active_devour_eligible_snapshot().or_else(|| {
-            self.resolution_stack
-                .active_batch_delivery_or_post_replacement_child()
-                .and_then(|batch| batch.pre_entry_battlefield.as_ref())
-        })
+        self.resolution_stack
+            .active_change_zone_or_post_replacement_child()
+            .and_then(|frame| frame.devour_eligible_snapshot.as_ref())
+            .or_else(|| {
+                self.resolution_stack
+                    .active_batch_delivery_or_post_replacement_child()
+                    .and_then(|batch| batch.pre_entry_battlefield.as_ref())
+            })
     }
 
     /// Begins a Devour co-entry in a frame that remains authoritative even
@@ -30774,6 +30776,32 @@ impl GameState {
     /// Park a complete BatchDelivery owner as the active inner frame.
     pub fn push_batch_delivery(&mut self, pending: PendingBatchDeliveries) {
         self.resolution_stack.push_batch_delivery(pending);
+    }
+
+    /// The BatchDelivery owner of one logical group, addressed by identity.
+    pub fn batch_delivery_for_group(
+        &self,
+        group: LogicalZoneChangeGroupId,
+    ) -> Option<&PendingBatchDeliveries> {
+        self.resolution_stack.batch_delivery_for_group(group)
+    }
+
+    /// Mutable form of [`Self::batch_delivery_for_group`].
+    pub fn batch_delivery_for_group_mut(
+        &mut self,
+        group: LogicalZoneChangeGroupId,
+    ) -> Option<&mut PendingBatchDeliveries> {
+        self.resolution_stack.batch_delivery_for_group_mut(group)
+    }
+
+    /// Re-park a batch's owner in place by its logical group identity, leaving
+    /// any child frames above it untouched.
+    pub fn replace_batch_delivery_for_group(
+        &mut self,
+        pending: PendingBatchDeliveries,
+    ) -> Result<(), ResolutionStackError> {
+        self.resolution_stack
+            .replace_batch_delivery_for_group(pending)
     }
 
     /// Re-park the active BatchDelivery owner after another replacement pause.
