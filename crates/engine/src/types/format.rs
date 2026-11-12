@@ -4144,6 +4144,16 @@ impl FormatConfig {
                     .to_string(),
             );
         }
+        self.validate_restored_for_player_count(player_count)
+    }
+
+    /// The seat-count and topology half of [`Self::validate_for_player_count`],
+    /// for an ENGINE-ISSUED snapshot being restored (a hosted game's saved
+    /// state). It keeps a valid `DraftSession` origin that a draft-match
+    /// initializer stamped, which new-game ingress refuses: restoring is not a
+    /// payload granting itself the draft session's deck-size authority, and the
+    /// decoder still holds the origin to Limited's `Minimum` shape.
+    pub fn validate_restored_for_player_count(&self, player_count: u8) -> Result<(), String> {
         // CR 100.1a / CR 100.1b / CR 800.1: a two-player game begins with two
         // players and a multiplayer game with more than two; the exact seat
         // count a format admits is the engine registry's, not the
