@@ -2952,6 +2952,13 @@ fn two_player_replacement_chooser_concession_keeps_game_over() {
 /// object, with a live replacement ready to ask for that new object. It is still
 /// never offered: the staged population froze the old incarnation, so the guard
 /// preempts the slot instead of consulting the replacement.
+///
+/// Since the live scheduler (CR 616.1 + CR 101.4) every member is consulted in
+/// the sweep before any prompt: the later bear had no replacement then, so it
+/// is already approved for its OLD incarnation when the first choice is asked.
+/// The property is unchanged: the new object is never offered the replacement,
+/// and the approved slot is retired at delivery as gone, leaving the returned
+/// object untouched.
 #[test]
 fn later_member_returned_as_a_new_incarnation_is_never_offered() {
     let mut scenario = GameScenario::new();
@@ -2969,6 +2976,18 @@ fn later_member_returned_as_a_new_incarnation_is_never_offered() {
         runner.state().waiting_for,
         WaitingFor::ReplacementChoice { .. }
     ));
+    let staged = runner
+        .state()
+        .active_batch_delivery()
+        .and_then(|pending| pending.staged.as_ref())
+        .expect("the staged owner is parked at the choice");
+    assert!(
+        staged.members.iter().any(|member| {
+            member.identity.object_id == later
+                && member.state == engine::types::game_state::StagedBatchMemberState::Approved
+        }),
+        "premise: the sweep approved the later member's old incarnation before the pause"
+    );
 
     // The later member leaves and returns as a new incarnation, carrying a live
     // replacement that WOULD prompt if it were consulted as itself.
@@ -3167,8 +3186,14 @@ fn approved_outer_destroy_finishes_before_the_next_member_parks() {
 
 /// CR 400.7: a staged member that changed zone while an earlier
 /// chooser was answering is refused before any replacement is offered for it.
-/// The pause here is a real replacement choice with the second member still
-/// unconsulted, not the commander graveyard SBA that runs after delivery.
+/// The pause here is a real replacement choice, not the commander graveyard SBA
+/// that runs after delivery.
+///
+/// Since the live scheduler (CR 616.1 + CR 101.4) every member is consulted in
+/// the sweep before any prompt: the later bear needs no choice, so it is
+/// already approved (not unconsulted) when the first member's choice is asked.
+/// The property is unchanged: once it has left, it is retired at delivery as
+/// gone, never destroyed from its new zone, and no delivery is attempted.
 #[test]
 fn staged_member_that_left_during_a_pause_is_not_consulted() {
     let mut scenario = GameScenario::new();
@@ -3201,9 +3226,10 @@ fn staged_member_that_left_during_a_pause_is_not_consulted() {
     assert!(
         staged.members.iter().any(|member| {
             member.identity.object_id == later
-                && member.state == engine::types::game_state::StagedBatchMemberState::Unconsulted
+                && member.state == engine::types::game_state::StagedBatchMemberState::Approved
+                && member.held_decision.is_none()
         }),
-        "the later member must still be unconsulted when the pause happens"
+        "the sweep approved the later member, which needs no choice, before the pause"
     );
 
     // Stand-in for another effect moving the not-yet-consulted member while the
