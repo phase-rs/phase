@@ -849,7 +849,7 @@ mod tests {
                 .iter()
                 .map(String::as_str)
                 .collect::<HashSet<_>>(),
-            HashSet::from(["Serra Angel", "Air Elemental"]),
+            HashSet::from(["Alabaster Unicorn", "Wind Drake"]),
         );
         assert_eq!(deck.main_deck.len(), 2);
         assert_eq!(
