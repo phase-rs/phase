@@ -2917,6 +2917,11 @@ impl Default for DamageRecord {
 pub struct CounterAddedRecord {
     pub actor: PlayerId,
     pub object_id: ObjectId,
+    /// CR 400.7: the recipient's incarnation when the counters were put on it. A zone
+    /// change reuses the storage `ObjectId` but is a new object, so current-object
+    /// readers (`FilterProp::CountersPutOnThisTurn`) must match this too.
+    #[serde(default)]
+    pub incarnation: u64,
     pub counter_type: CounterType,
     pub count: u32,
     pub name: String,
@@ -2941,6 +2946,7 @@ impl Clone for CounterAddedRecord {
         let Self {
             actor,
             object_id,
+            incarnation,
             counter_type,
             count,
             name,
@@ -2959,6 +2965,7 @@ impl Clone for CounterAddedRecord {
         Self {
             actor: *actor,
             object_id: *object_id,
+            incarnation: *incarnation,
             counter_type: counter_type.clone(),
             count: *count,
             name: name.clone(),

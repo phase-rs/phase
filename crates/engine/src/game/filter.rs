@@ -10982,11 +10982,18 @@ fn matches_filter_prop(
             count,
         } => {
             let controller = source.controller.unwrap_or(PlayerId(0));
+            // CR 400.7: a zone change makes a new object with no memory of the old one,
+            // so only records stamped with this object's CURRENT incarnation count.
+            let Some(current_incarnation) = state.objects.get(&object_id).map(|o| o.incarnation)
+            else {
+                return false;
+            };
             let total: u32 = state
                 .counter_added_this_turn
                 .iter()
                 .filter(|record| {
                     record.object_id == object_id
+                        && record.incarnation == current_incarnation
                         && counters.matches(&record.counter_type)
                         && filter_count_scope_actor_matches(actor, controller, record.actor)
                 })
