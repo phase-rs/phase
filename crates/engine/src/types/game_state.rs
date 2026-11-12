@@ -7928,10 +7928,9 @@ pub struct StagedBatchMember {
     /// held while another member's decision is asked.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub held_decision: Option<Box<HeldReplacementDecision>>,
-    /// CR 616.1: this member's own move depends on another member's
-    /// outstanding decision (it is that decision's subject, or the source of a
-    /// candidate that moves its own source, such as an Umbra's armor), so it
-    /// is not consulted until that decision resolves.
+    /// CR 616.1: this member's own object is the subject of another member's
+    /// outstanding decision (CR 702.89a: an Umbra's armor destroying this
+    /// Aura), so it is not consulted until that decision resolves.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub blocked: bool,
 }

@@ -254,7 +254,7 @@ fn dig_rest_pile_library_redirect_pauses_before_tracked_set_publish() {
     // CR 101.4c: the staged rest pile consulted both rest cards before any
     // prompt; P0 orders its two held placements and makes the first announced
     // one first. The second rest card is parked behind that choice as a held
-    // decision (it was an unconsulted `remaining` entry before the scheduler).
+    // decision.
     assert!(matches!(
         paused.waiting_for,
         WaitingFor::ReplacementDecisionOrder { player: P0, .. }
@@ -956,7 +956,7 @@ fn dig_deferred_reveal_rest_pile_repauses_and_completes_once() {
     // CR 101.4c: the staged rest pile consulted both rest cards before any
     // prompt; P0 orders its two held placements and makes the first announced
     // one first. The second rest placement is parked behind that redirect as a
-    // held decision (an unconsulted `remaining` entry before the scheduler).
+    // held decision.
     assert!(matches!(
         rest_pause.waiting_for,
         WaitingFor::ReplacementDecisionOrder { player: P0, .. }
@@ -12471,8 +12471,7 @@ fn put_on_top_batch_redirects_and_preserves_chosen_order_without_redirects() {
 
     // CR 101.4c: the staged top placement consults both cards before any
     // prompt, so P0 holds both placements and first chooses which to make (the
-    // first announced). The other card is the parked suffix as a held decision
-    // (an unconsulted `remaining` entry before the scheduler).
+    // first announced). The other card is the parked suffix as a held decision.
     assert!(
         matches!(
             redirected.state().waiting_for,
@@ -12681,8 +12680,7 @@ fn discover_bottom_batch_pauses_before_its_hit_and_continuation_complete() {
         .expect("declined discover starts the replacement-aware miss batch");
     // CR 101.4c: the staged miss batch consults both misses before any prompt,
     // so P0 holds both placements and first chooses which to make (the first
-    // announced). The other miss is the parked suffix as a held decision (an
-    // unconsulted `remaining` entry before the scheduler).
+    // announced). The other miss is the parked suffix as a held decision.
     assert!(matches!(
         paused.waiting_for,
         WaitingFor::ReplacementDecisionOrder { player: P0, .. }
