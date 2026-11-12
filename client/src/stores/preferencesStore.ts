@@ -384,7 +384,9 @@ interface PreferencesState {
   phaseStops: PhaseStop[];
   priorityPassingMode: PriorityPassingMode;
   /** Glow the turn-status pill and pass button (stronger once unanswered) when
-   *  a meaningful priority window opens after you were waiting on someone else. */
+   *  a meaningful priority window opens after you were waiting on someone else,
+   *  and pulse the pill's border while the decision is yours (the border stays,
+   *  static, when this is off). */
   priorityAlertVisual: boolean;
   /** Play a short cue when a meaningful priority window opens. */
   priorityAlertSound: boolean;

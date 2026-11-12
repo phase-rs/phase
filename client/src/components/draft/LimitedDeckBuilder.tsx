@@ -16,6 +16,7 @@ import {
 import { menuButtonClass } from "../menu/buttonStyles";
 import { PopoverMenu } from "../menu/PopoverMenu";
 import { CommanderPanel } from "../deck-builder/CommanderPanel";
+import { ExportDeckControl } from "../deck-builder/ExportDeckControl";
 import { getCardImageSrcSetProps } from "../card/cardImageSrcSet.ts";
 import type { GameFormat } from "../../adapter/types";
 import type { DeckEntry } from "../../services/deckParser";
@@ -24,6 +25,7 @@ import {
   evaluateDeckCompatibility,
   type DeckCompatibilityResult,
 } from "../../services/deckCompatibility";
+import { draftSubmissionToParsedDeck } from "../../services/draftDeckAutosave";
 import type {
   DraftCardInstance,
   DraftPlayerView,
@@ -55,6 +57,7 @@ import {
 import {
   countProjectedNames,
   projectDeckNames,
+  projectWorkspacePartition,
 } from "./workspace/workspaceProjection";
 
 // Shared enter/exit for cards moving between the pool and the deck.
@@ -1134,6 +1137,15 @@ function WorkspaceDeckBuilder({
     deckEntries: commanderDeckEntries,
     draftSetCodes,
   });
+  // The saved-deck form that submit and the library autosave produce:
+  // commanders leave `main` for the `[Commander]` section.
+  const exportableDeck = useMemo(
+    () => draftSubmissionToParsedDeck(
+      projectWorkspacePartition(workspace, pool),
+      commandersRequired > 0 ? commanders : [],
+    ),
+    [workspace, pool, commandersRequired, commanders],
+  );
   const compatibility = useCommanderDraftCompatibility({
     enforceCompatibility: designationRequired,
     selectedFormat: deckFormat,
@@ -1346,13 +1358,25 @@ function WorkspaceDeckBuilder({
       )}
     </PopoverMenu>
   ) : null;
+  const exportControl = (
+    <ExportDeckControl
+      deck={exportableDeck}
+      triggerClassName={(disabled) => menuButtonClass({
+        tone: "neutral",
+        size: "xs",
+        disabled,
+        className: responsiveLayout === "desktop" ? undefined : "min-h-11",
+      })}
+    />
+  );
   const desktopDeckControls = responsiveLayout === "desktop" ? (
-    <div data-desktop-deck-controls className="ml-auto grid min-w-0 grid-cols-[auto_auto_minmax(0,1fr)] items-center gap-1">
+    <div data-desktop-deck-controls className="ml-auto grid min-w-0 grid-cols-[auto_auto_auto_minmax(0,1fr)] items-center gap-1">
       {landControls}
       {deckStatsControl}
+      {exportControl}
       {suggestDeckControl}
     </div>
-  ) : landControls;
+  ) : <>{landControls}{exportControl}</>;
 
   const compactLandControls = landPicker(
     (phoneLayout || tabletLayout) ? t("limitedDeck.addLands") : t("limitedDeck.lands"),
@@ -1391,7 +1415,7 @@ function WorkspaceDeckBuilder({
       interactionLocked={interactionLocked}
       dragController={dragController}
       deckControls={desktopDeckControls}
-      compactDeckControls={compactLandControls}
+      compactDeckControls={<>{compactLandControls}{exportControl}</>}
       responsiveLayout={responsiveLayout}
       responsiveContext="builder"
       onWorkspaceChange={onWorkspaceChange}

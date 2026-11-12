@@ -87,6 +87,7 @@
     "sandboxTools": "Sandbox-Werkzeuge",
     "sandboxToolsTitle": "Sandbox-Werkzeuge — beliebigen Spielzustand einrichten (`)",
     "openSandboxTools": "Sandbox-Werkzeuge öffnen",
+    "clickMode": "Klickmodus",
     "clickModeButton": "Klickmodus-Schaltfläche",
     "shown": "Sichtbar",
     "hidden": "Ausgeblendet",
@@ -256,6 +257,10 @@
         "title": "Erweitertes Debug-Panel",
         "body": "Das erweiterte Debug-Panel öffnen. Die meisten Spieler sollten zuerst mit den Wiederherstellungswerkzeugen beginnen."
       },
+      "toggleClickMode": {
+        "title": "Klickmodus umschalten",
+        "body": "In Spielen mit Sandbox-Werkzeugen den Klickmodus ein- oder ausschalten. Solange er aktiv ist, öffnet ein Klick auf eine Karte ihr Debug-Menü (Zonen, S/W, Marken, Schlüsselwörter), statt sie zu spielen."
+      },
       "reportOrExportState": {
         "title": "Zustand melden oder exportieren",
         "body": "Wenn sich eine Karte fehlerhaft verhält, exportiere den aktuellen Spielzustand, damit die exakte Brettposition reproduziert werden kann."
@@ -298,16 +303,13 @@
     "skip": "Zum Überspringen tippen",
     "continue": "Zum Fortfahren tippen",
     "you": "Du",
-    "youPlayFirst": "Du beginnst",
-    "playerPlaysFirst": "{{name}} beginnt",
+    "youWonRoll": "Du hast den Wurf gewonnen",
+    "playerWonRoll": "{{name}} hat den Wurf gewonnen",
     "heads": "Kopf",
     "tails": "Zahl",
     "coinFlip": "Münzwurf",
     "wonCoinFlip": "{{name}} hat den Münzwurf gewonnen",
     "lostCoinFlip": "{{name}} hat den Münzwurf verloren",
-    "turnOrder": "Zugreihenfolge",
-    "turnOrderItem": "Zug {{turn}}: {{name}}",
-    "youTakeTurn": "Du bist in Zug {{turn}} dran",
     "ignoredDie": "Ignoriert"
   },
   "chrome": {

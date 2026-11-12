@@ -87,6 +87,7 @@
     "sandboxTools": "Narzędzia piaskownicy",
     "sandboxToolsTitle": "Narzędzia piaskownicy — skonfiguruj dowolny stan pola bitwy (`)",
     "openSandboxTools": "Otwórz narzędzia piaskownicy",
+    "clickMode": "Tryb kliknięcia",
     "clickModeButton": "Przycisk trybu kliknięcia",
     "shown": "Widoczny",
     "hidden": "Ukryty",
@@ -256,6 +257,10 @@
         "title": "Zaawansowany panel debugowania",
         "body": "Otwórz zaawansowany panel debugowania. Większość graczy powinna najpierw zacząć od Narzędzi naprawczych."
       },
+      "toggleClickMode": {
+        "title": "Przełącz tryb kliknięcia",
+        "body": "W grach z narzędziami piaskownicy włącza lub wyłącza tryb kliknięcia. Gdy jest włączony, kliknięcie karty otwiera jej menu debugowania (strefy, S/W, znaczniki, słowa kluczowe) zamiast jej zagrania."
+      },
       "reportOrExportState": {
         "title": "Zgłoś lub wyeksportuj stan",
         "body": "Jeśli karta zachowuje się nieprawidłowo, wyeksportuj bieżący stan gry, aby można było odtworzyć dokładną pozycję na polu bitwy."
@@ -298,16 +303,13 @@
     "skip": "Dotknij, aby pominąć",
     "continue": "Dotknij, aby kontynuować",
     "you": "Ty",
-    "youPlayFirst": "Zaczynasz",
-    "playerPlaysFirst": "{{name}} zaczyna",
+    "youWonRoll": "Wygrywasz rzut",
+    "playerWonRoll": "{{name}} wygrywa rzut",
     "heads": "Orzeł",
     "tails": "Reszka",
     "coinFlip": "Rzut monetą",
     "wonCoinFlip": "{{name}} wygrywa rzut monetą",
     "lostCoinFlip": "{{name}} przegrywa rzut monetą",
-    "turnOrder": "Kolejność tur",
-    "turnOrderItem": "Tura {{turn}}: {{name}}",
-    "youTakeTurn": "Rozgrywasz turę {{turn}}",
     "ignoredDie": "Zignorowany"
   },
   "chrome": {

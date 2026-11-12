@@ -439,6 +439,7 @@ mod omo_queen_of_vesuva;
 mod onakke_oathkeeper;
 mod one_ring_burden_upkeep_lethal;
 mod one_sided_fight_illegal_damage_source;
+mod opening_play_draw_view;
 mod opponent_gains_control_from_you_trigger;
 mod opposition_agent_final;
 mod optional_chain_link_prompt_description;
