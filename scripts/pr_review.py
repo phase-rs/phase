@@ -81,7 +81,7 @@ NON_MATERIAL_EVENT_TYPES = frozenset({"observation", "quality_entry", "tracker_r
 # is in the contributor's court" — see the pr-review-loop SKILL.md guard doc.
 MEMBER_AUTHOR_ASSOCIATIONS = frozenset({"OWNER", "MEMBER", "COLLABORATOR"})
 # Local events that mean "this head is blocked". Single authority for both the
-# routing decision and the requested-changes expiry anchor — two copies would drift.
+# newest-event routing decision and the first-block lookup — two copies would drift.
 LOCAL_BLOCK_EVENT_TYPES = {"review_blocked", "changes_requested", "blocked"}
 LOCAL_BLOCK_OUTCOMES = {"changes_requested", "reviewed_request_changes", "blocked"}
 TERMINAL_STATES = SUCCESS_STATES | BLOCK_STATES | {"closed"}
@@ -117,8 +117,15 @@ PR_ATTRIBUTED_EVENTS = {
 }
 # Closed vocabulary enforced at record time (see command_record). New events must
 # use one of these event types; legacy events already in the log are read via
-# canonical_from_text without validation.
-ALLOWED_EVENT_TYPES = PR_ATTRIBUTED_EVENTS | {"observation", "quality_entry", "tracker_row"}
+# canonical_from_text without validation. The retired inactivity-expiry events stay
+# PR-attributed so their historical signals still count, but are never recorded again,
+# not even with --force.
+RETIRED_EXPIRY_EVENTS = frozenset({"requested_changes_warning", "stale_changes_closed"})
+ALLOWED_EVENT_TYPES = (PR_ATTRIBUTED_EVENTS - RETIRED_EXPIRY_EVENTS) | {
+    "observation",
+    "quality_entry",
+    "tracker_row",
+}
 # Closed vocabulary for the optional `outcome` field, derived from the high-confidence
 # states canonical_from_text recognizes. Enforced (lowercased) at record time.
 ALLOWED_OUTCOMES = {
@@ -143,8 +150,6 @@ ALLOWED_OUTCOMES = {
     "accepted",
     "queued",
     "pruned",
-    "requested_changes_warning",
-    "stale_changes_closed",
 }
 # Defect signals subtract from the contributor score and are the ONLY signals
 # that feed windowed recurrence / scrutiny elevation.
@@ -255,17 +260,14 @@ PROOF_SKIP_PHRASES = (
     "see ci status checks",
 )
 AI_AGENT_COAUTHOR_LOGINS = {"cursoragent"}
+# Marker on warnings the retired inactivity expiry posted; read only, never posted.
 REQUESTED_CHANGES_EXPIRY_MARKER = "<!-- pr-review-requested-changes-expiry -->"
-DEFAULT_REQUESTED_CHANGES_WARNING_AFTER_DAYS = 7
-DEFAULT_REQUESTED_CHANGES_CLOSE_AFTER_WARNING_DAYS = 7
 # Sweep-priority order for scan output buckets (lower sorts first).
 CANDIDATE_ACTION_ORDER = {
-    "close_stale_changes_for_handler": 0,
     "dequeue_stale_for_handler": 0,
     "update_branch_for_handler": 1,
     "recheck_ci_hold_for_handler": 2,
     "approve_ready_for_handler": 2,
-    "warn_stale_changes_for_handler": 3,
     "review": 3,
     "hold": 4,
     "hold_ci": 4,
@@ -379,20 +381,6 @@ class Policy:
     def architecture_accepted_issue_label(self) -> str | None:
         value = self.raw.get("admission", {}).get("accepted_issue_label")
         return str(value) if value else None
-
-    @property
-    def requested_changes_warning_after_days(self) -> int:
-        return self._positive_int(
-            self.raw.get("requested_changes", {}).get("warning_after_days"),
-            DEFAULT_REQUESTED_CHANGES_WARNING_AFTER_DAYS,
-        )
-
-    @property
-    def requested_changes_close_after_warning_days(self) -> int:
-        return self._positive_int(
-            self.raw.get("requested_changes", {}).get("close_after_warning_days"),
-            DEFAULT_REQUESTED_CHANGES_CLOSE_AFTER_WARNING_DAYS,
-        )
 
     @staticmethod
     def _positive_int(value: Any, default: int) -> int:
@@ -771,12 +759,11 @@ def is_block_event(event: dict[str, Any] | None) -> bool:
 def first_block_events_by_pr_head(
     events: list[dict[str, Any]],
 ) -> dict[tuple[int, str], dict[str, Any]]:
-    """Earliest blocking event per (pr, head) — the requested-changes expiry anchor.
+    """Earliest blocking event per (pr, head).
 
-    Deliberately the earliest, never the latest: every sweep re-records a `blocked`
-    event for a PR that is still blocked, and `event_id` hashes the timestamp, so
-    each pass appends a distinct row. Anchoring the expiry clock on the newest event
-    would let the loop reset its own timer, and `warning_due` could never fire.
+    Routing reads only the newest event on a head, so a later non-blocking event
+    would otherwise erase a block the head still carries; this records that the
+    head was blocked at all.
     """
     first: dict[tuple[int, str], dict[str, Any]] = {}
     for event in events:  # append-only log; file order is chronological
@@ -808,13 +795,6 @@ def timestamp_after(candidate: str | None, baseline: str | None) -> bool:
     candidate_dt = parse_event_datetime(candidate)
     baseline_dt = parse_event_datetime(baseline)
     return candidate_dt is not None and baseline_dt is not None and candidate_dt > baseline_dt
-
-
-def age_in_days(value: str | None) -> float | None:
-    timestamp = parse_event_datetime(value)
-    if timestamp is None:
-        return None
-    return (datetime.now(UTC) - timestamp).total_seconds() / (24 * 60 * 60)
 
 
 def filtered_events_by_days(events: list[dict[str, Any]], days: int | None) -> list[dict[str, Any]]:
@@ -2491,21 +2471,6 @@ def gittensor_summary(
 # ─── Advisory recommendation (ordered precedence ladder) ─────────────────────
 
 
-def requested_changes_policy(packet: dict[str, Any]) -> dict[str, Any]:
-    configured = (packet.get("policy") or {}).get("requested_changes") or {}
-    return {
-        "warning_after_days": configured.get(
-            "warning_after_days", DEFAULT_REQUESTED_CHANGES_WARNING_AFTER_DAYS
-        ),
-        "close_after_warning_days": configured.get(
-            "close_after_warning_days", DEFAULT_REQUESTED_CHANGES_CLOSE_AFTER_WARNING_DAYS
-        ),
-        "warning_marker": configured.get(
-            "warning_marker", REQUESTED_CHANGES_EXPIRY_MARKER
-        ),
-    }
-
-
 def comment_login(comment: dict[str, Any]) -> str | None:
     author = comment.get("author")
     if isinstance(author, dict):
@@ -2633,118 +2598,31 @@ def review_freshness(
     }
 
 
-def latest_requested_changes_review_timestamp(packet: dict[str, Any]) -> str | None:
-    head = (packet.get("pr") or {}).get("headRefOid")
-    reviews = [
-        review
-        for review in (packet.get("pr") or {}).get("reviews", [])
-        if review.get("state") == "CHANGES_REQUESTED"
-        and (not review.get("commit") or not head or review.get("commit") == head)
-        and review.get("submittedAt")
-    ]
-    if not reviews:
-        return None
-    reviews.sort(key=lambda review: activity_timestamp(review, "submittedAt", "updatedAt", "lastEditedAt") or "")
-    return activity_timestamp(reviews[-1], "submittedAt", "updatedAt", "lastEditedAt")
+def latest_requested_changes_warning_timestamp(packet: dict[str, Any]) -> str | None:
+    """When the retired inactivity expiry last warned this PR, read from history.
 
-
-def latest_requested_changes_warning(packet: dict[str, Any]) -> dict[str, Any] | None:
+    No warning is posted any more, but an author who answered an old one is still
+    owed a review: a logged warning on this head, or the acting maintainer's GitHub
+    comment carrying the marker.
+    """
     local_event = packet.get("local_current_event") or {}
-    candidates = []
+    timestamps = []
     if local_event.get("event_type") == "requested_changes_warning" or local_event.get(
         "outcome"
     ) == "requested_changes_warning":
-        candidates.append(
-            {
-                "source": "event_log",
-                "timestamp": local_event.get("timestamp"),
-            }
-        )
-    marker = requested_changes_policy(packet)["warning_marker"]
+        timestamps.append(local_event.get("timestamp"))
     acting_login = packet.get("acting_login")
     for comment in (packet.get("pr") or {}).get("comments", []):
         marker_present = comment.get("requested_changes_expiry_marker") or (
-            marker in comment_text(comment)
+            REQUESTED_CHANGES_EXPIRY_MARKER in comment_text(comment)
         )
         if not marker_present:
             continue
         author_login = comment_login(comment)
         if acting_login and author_login and author_login != acting_login:
             continue
-        candidates.append(
-            {
-                "source": "github_comment",
-                "timestamp": comment.get("createdAt"),
-            }
-        )
-    candidates = [candidate for candidate in candidates if candidate.get("timestamp")]
-    if not candidates:
-        return None
-    candidates.sort(key=lambda candidate: candidate["timestamp"])
-    return candidates[-1]
-
-
-def requested_changes_expiry_state(
-    packet: dict[str, Any], local_block: bool, author_followup_after_local_event: bool
-) -> dict[str, Any]:
-    pr = packet.get("pr") or {}
-    policy = requested_changes_policy(packet)
-    head = pr.get("headRefOid")
-    review_decision = pr.get("reviewDecision")
-    latest_commit = packet.get("latest_maintainer_review_commit")
-    current_head_changes_requested = review_decision == "CHANGES_REQUESTED" and (
-        latest_commit is None or latest_commit == head
-    )
-    # "Has this head ever been blocked?" is a property of the log's history, not of its
-    # last row. `local_block` only inspects the newest event, so once we post the stale
-    # warning that warning becomes the newest event and erases the block — `active` would
-    # drop to False and the warning could never mature into a close. Consult the first
-    # block recorded for this head instead.
-    first_block_event = packet.get("local_first_block_event")
-    head_ever_blocked = local_block or bool(first_block_event)
-    active = head_ever_blocked or current_head_changes_requested
-    warning = latest_requested_changes_warning(packet)
-    warning_timestamp = (warning or {}).get("timestamp")
-    author_followup_after_warning = author_activity_after(pr, warning_timestamp)
-    # Anchor the expiry clock on the blocker itself, never on our observation of it.
-    # GitHub is authoritative, so a formal CHANGES_REQUESTED on the current head wins
-    # (a newer one correctly restarts the window). Only when no formal review exists
-    # do we fall back to the local log — and then to the FIRST block recorded for this
-    # head, because the sweep re-records `blocked` every pass and the newest event
-    # would pin blocker_age at ~0 forever, silently disabling warn/close entirely.
-    blocker_timestamp = None
-    if current_head_changes_requested:
-        blocker_timestamp = latest_requested_changes_review_timestamp(packet)
-    if blocker_timestamp is None and head_ever_blocked:
-        anchor = first_block_event or (packet.get("local_current_event") if local_block else None)
-        blocker_timestamp = (anchor or {}).get("timestamp")
-    blocker_age = age_in_days(blocker_timestamp)
-    warning_age = age_in_days(warning_timestamp)
-    warning_due = (
-        active
-        and warning is None
-        and blocker_age is not None
-        and blocker_age >= policy["warning_after_days"]
-    )
-    close_due = (
-        active
-        and warning is not None
-        and not author_followup_after_warning
-        and not author_followup_after_local_event
-        and warning_age is not None
-        and warning_age >= policy["close_after_warning_days"]
-    )
-    return {
-        "active": active,
-        "blocker_timestamp": blocker_timestamp,
-        "warning": warning,
-        "warning_due": warning_due,
-        "close_due": close_due,
-        "author_followup_after_warning": author_followup_after_warning,
-        "warning_after_days": policy["warning_after_days"],
-        "close_after_warning_days": policy["close_after_warning_days"],
-        "warning_marker": policy["warning_marker"],
-    }
+        timestamps.append(comment.get("createdAt"))
+    return max((timestamp for timestamp in timestamps if timestamp), default=None)
 
 
 def recommend_from_packet(packet: dict[str, Any]) -> dict[str, Any]:
@@ -2803,8 +2681,18 @@ def recommend_from_packet(packet: dict[str, Any]) -> dict[str, Any]:
     conflicts_with_base = (
         pr.get("mergeStateStatus") == "DIRTY" or pr.get("mergeable") == "CONFLICTING"
     )
-    requested_changes_expiry = requested_changes_expiry_state(
-        packet, local_block, author_followup_after_local_event
+    # `local_block` reads only the newest event; the first block recorded for this
+    # head keeps a later non-blocking event from erasing it.
+    current_head_blocked = (
+        local_block
+        or bool(packet.get("local_first_block_event"))
+        or (
+            review_decision == "CHANGES_REQUESTED"
+            and (latest_commit is None or latest_commit == head)
+        )
+    )
+    author_followup_after_warning = author_activity_after(
+        pr, latest_requested_changes_warning_timestamp(packet)
     )
 
     if pr.get("state") == "MERGED":
@@ -2885,21 +2773,12 @@ def recommend_from_packet(packet: dict[str, Any]) -> dict[str, Any]:
     elif local_block and comment_history_incomplete:
         action = "review"
         reason = "author_activity_history_incomplete"
-    elif requested_changes_expiry["author_followup_after_warning"] and conflicts_with_base:
+    elif author_followup_after_warning and conflicts_with_base:
         action = "update_branch_for_handler"
         reason = "conflicting_after_author_followup"
-    elif (
-        requested_changes_expiry["author_followup_after_warning"]
-        and author_followup_after_maintainer_activity
-    ):
+    elif author_followup_after_warning and author_followup_after_maintainer_activity:
         action = "review"
-        reason = "author_followup_after_requested_changes_warning"
-    elif requested_changes_expiry["close_due"]:
-        action = "close_stale_changes_for_handler"
-        reason = "requested_changes_expired"
-    elif requested_changes_expiry["warning_due"]:
-        action = "warn_stale_changes_for_handler"
-        reason = "requested_changes_warning_due"
+        reason = "author_followup_after_maintainer_activity"
     elif head_changed_since_local_event and conflicts_with_base:
         action = "update_branch_for_handler"
         reason = "conflicting_after_head_change"
@@ -2935,7 +2814,7 @@ def recommend_from_packet(packet: dict[str, Any]) -> dict[str, Any]:
     elif review_decision == "APPROVED" and conflicts_with_base:
         action = "update_branch_for_handler"
         reason = "approved_conflicting"
-    elif requested_changes_expiry["active"]:
+    elif current_head_blocked:
         action = "blocked"
         reason = "changes_requested_current_head"
     elif conflicts_with_base:
@@ -3079,8 +2958,6 @@ def recommend_from_packet(packet: dict[str, Any]) -> dict[str, Any]:
                 "is not validation; their content and SHA must match the current head."
             )
             recommendation["decline_evidence"] = artifacts
-    if action in {"warn_stale_changes_for_handler", "close_stale_changes_for_handler"}:
-        recommendation["requested_changes_expiry"] = requested_changes_expiry
     if action == "defer" and reason == "frontend_policy":
         label = packet.get("policy", {}).get("labels", {}).get("frontend_deferred")
         if label:
@@ -3233,11 +3110,6 @@ def make_packet(
             "architecture_scope": {
                 "mode": policy.architecture_scope_mode,
                 "span_threshold": policy.architecture_scope_span_threshold,
-            },
-            "requested_changes": {
-                "warning_after_days": policy.requested_changes_warning_after_days,
-                "close_after_warning_days": policy.requested_changes_close_after_warning_days,
-                "warning_marker": REQUESTED_CHANGES_EXPIRY_MARKER,
             },
         },
         "author_policy": author_policy,
@@ -3950,11 +3822,9 @@ def candidate_sort_key(candidate: dict[str, Any]) -> tuple[Any, ...]:
     if action == "review":
         return (order, created, "", pr_number)
     if action in {
-        "close_stale_changes_for_handler",
         "dequeue_stale_for_handler",
         "update_branch_for_handler",
         "approve_ready_for_handler",
-        "warn_stale_changes_for_handler",
     }:
         return (order, updated, created, pr_number)
     return (order, "", "", pr_number)
@@ -4581,7 +4451,7 @@ def event_skeleton(pr_number: int, compact_pr: dict[str, Any]) -> dict[str, Any]
     # Timestamp is prefilled because event_id hashes it: an agent that fills the
     # skeleton and pipes it to `record --event-json -` gets idempotent retries.
     return {
-        "event_type": "<FILL: review|changes_requested|blocked|decline|approved_enqueued|deferred|held|requested_changes_warning|stale_changes_closed|review_correction>",
+        "event_type": "<FILL: review|changes_requested|blocked|decline|approved_enqueued|deferred|held|review_correction>",
         "pr": pr_number,
         "head_sha": compact_pr.get("headRefOid"),
         "author": compact_pr.get("author_login"),
@@ -4735,7 +4605,18 @@ def command_record(args: argparse.Namespace) -> int:
     normalized = normalize_event(event)
     existing_events = all_events(args.state_dir)
     error = event_validation_error(normalized, existing_events)
-    if error is not None and not args.force:
+    # A retired inactivity-expiry name is refused even with --force, in the type, the outcome or the legacy
+    # `action` the history reader also maps, whatever its case or `-`/`_`/space spelling. A field that is not a
+    # string never names one, so a malformed field keeps its ordinary refusal instead of raising here.
+    retired = [
+        key
+        for key in ("event_type", "outcome", "action")
+        if isinstance(normalized.get(key), str)
+        and re.sub(r"[-_\s]+", "_", normalized[key].strip().lower()) in RETIRED_EXPIRY_EVENTS
+    ]
+    if retired:
+        error = f"{retired[0]} {normalized[retired[0]]!r} is a retired inactivity-expiry event, never recorded"
+    if error is not None and (retired or not args.force):
         print(
             json_dumps(
                 {
