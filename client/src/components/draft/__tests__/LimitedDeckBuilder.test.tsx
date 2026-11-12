@@ -4126,6 +4126,60 @@ describe("Limited companion support", () => {
       await waitFor(() => expect(onSubmitDeck).toHaveBeenCalledWith([]));
     });
 
+    // The accepted designation can be restored from the host's authoritative
+    // view after the editor has mounted (a rejoin completes its handshake late).
+    it("adopts an accepted companion that arrives after the editor mounted", async () => {
+      engineIsCardCompanion.mockImplementation(async (name) => name === "Lurrus of the Dream-Den");
+      compatibilityHarness.evaluate.mockResolvedValue(compatibleResult());
+      const onSubmitDeck = vi.fn();
+
+      const { rerender } = render(workspaceBuilder(lurrusWorkspace("sideboard"), { onSubmitDeck }));
+      await waitFor(() => expect(screen.getByText("Companion")).toBeInTheDocument());
+      expect(screen.queryByText("Companion requirement met")).not.toBeInTheDocument();
+
+      rerender(workspaceBuilder(lurrusWorkspace("sideboard"), {
+        onSubmitDeck,
+        initialCompanion: "Lurrus of the Dream-Den",
+      }));
+      await waitFor(() => expect(screen.getByText("Companion requirement met")).toBeInTheDocument());
+      fireEvent.click(screen.getByRole("button", { name: /submit deck/i }));
+      await waitFor(() => {
+        expect(onSubmitDeck).toHaveBeenLastCalledWith([], "Lurrus of the Dream-Den");
+      });
+    });
+
+    it("never overwrites an unsaved local companion edit with a late restore", async () => {
+      engineIsCardCompanion.mockImplementation(async (name) => name === "Lurrus of the Dream-Den");
+      compatibilityHarness.evaluate.mockResolvedValue(compatibleResult());
+      const onSubmitDeck = vi.fn();
+
+      const { rerender } = render(workspaceBuilder(lurrusWorkspace("sideboard"), { onSubmitDeck }));
+      await waitFor(() => expect(screen.getByText("Companion")).toBeInTheDocument());
+      // The player designates, then explicitly removes, before the rejoin
+      // restore lands: the empty choice is an unsaved local edit.
+      fireEvent.click(
+        within(screen.getByText("Companion").closest("section")!)
+          .getByRole("button", { name: "Lurrus of the Dream-Den" }),
+      );
+      await waitFor(() => expect(screen.getByText("Companion requirement met")).toBeInTheDocument());
+      fireEvent.click(
+        within(screen.getByText("Companion").closest("section")!)
+          .getByRole("button", { name: "Remove companion" }),
+      );
+      await waitFor(() => {
+        expect(screen.queryByText("Companion requirement met")).not.toBeInTheDocument();
+      });
+
+      // The host's previously accepted designation arrives late.
+      rerender(workspaceBuilder(lurrusWorkspace("sideboard"), {
+        onSubmitDeck,
+        initialCompanion: "Lurrus of the Dream-Den",
+      }));
+      await waitFor(() => expect(screen.getByRole("button", { name: /submit deck/i })).toBeEnabled());
+      fireEvent.click(screen.getByRole("button", { name: /submit deck/i }));
+      await waitFor(() => expect(onSubmitDeck).toHaveBeenLastCalledWith([]));
+    });
+
     it("resubmits an unchanged companion, and only the remove control clears it", async () => {
       engineIsCardCompanion.mockImplementation(async (name) => name === "Lurrus of the Dream-Den");
       compatibilityHarness.evaluate.mockResolvedValue(compatibleResult());

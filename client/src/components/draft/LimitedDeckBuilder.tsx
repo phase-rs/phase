@@ -433,6 +433,24 @@ function useLimitedCompanion({
   onCompanionSelect?: (cardName: string) => void;
 }) {
   const [selectedCompanion, setCompanion] = useState<string | null>(initialCompanion);
+  // The accepted designation can arrive AFTER mount (a rejoin restores it from
+  // the host's authoritative view once the handshake completes). Adopt it unless
+  // the player has already edited the designation this session: an unsaved local
+  // choice is never clobbered by a late restore. Once the host's accepted value
+  // equals the local one, that edit is saved and later restores apply again.
+  const selectedCompanionRef = useRef(selectedCompanion);
+  selectedCompanionRef.current = selectedCompanion;
+  const companionEditedLocally = useRef(false);
+  const lastInitialCompanion = useRef(initialCompanion);
+  useEffect(() => {
+    if (lastInitialCompanion.current === initialCompanion) return;
+    lastInitialCompanion.current = initialCompanion;
+    if (!companionEditedLocally.current) {
+      setCompanion(initialCompanion);
+    } else if (selectedCompanionRef.current === initialCompanion) {
+      companionEditedLocally.current = false;
+    }
+  }, [initialCompanion]);
   const [companionCandidates, setCompanionCandidates] = useState<string[] | null>(null);
   const [eligibilityFailed, setEligibilityFailed] = useState(false);
 
@@ -506,11 +524,13 @@ function useLimitedCompanion({
   const companion = companionBacked === false ? null : selectedCompanion;
 
   const handleSetCompanion = useCallback((cardName: string) => {
+    companionEditedLocally.current = true;
     setCompanion(cardName);
     onCompanionSelect?.(cardName);
   }, [onCompanionSelect]);
 
   const handleRemoveCompanion = useCallback(() => {
+    companionEditedLocally.current = true;
     setCompanion(null);
   }, []);
 

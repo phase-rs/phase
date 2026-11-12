@@ -3708,6 +3708,15 @@ function installEventView(view: DraftPlayerView): void {
       standings: view.standings ?? [],
       currentRound: view.current_round ?? 0,
       pairings: view.pairings ?? [],
+      // CR 702.139a: the host-accepted designation is authoritative, so a
+      // reload or rejoin that lost the local record (or whose replayed command
+      // is already acknowledged and cleared) restores it from the view. Only a
+      // PRESENT value is applied: an absent field never erases a designation,
+      // which `recordAcceptedSubmission` clears when an accepted resubmit
+      // drops the companion.
+      ...(typeof view.submitted_companion === "string"
+        ? { submittedCompanion: view.submitted_companion }
+        : {}),
     },
   });
 }

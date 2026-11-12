@@ -875,6 +875,12 @@ export interface DraftPlayerViewFields {
   /** Engine-owned selection interaction, independent of the current count. */
   pick_selection_mode: "Direct" | "Ordered";
   pool: DraftCardInstance[];
+  /**
+   * CR 702.139a: the companion the viewer's host-ACCEPTED deck submission
+   * designated. Engine-published on the viewer's own view only; absent when
+   * nothing is accepted or the accepted deck designated none.
+   */
+  submitted_companion?: string;
   draft_effects: DraftCardInstance[];
   /** Engine-owned grouping, ordering, and duplicate counts for the pool. */
   pool_groups: DraftPoolGroups;

@@ -2139,6 +2139,58 @@ describe("multiplayerDraftStore", () => {
       });
     });
 
+    // CR 702.139a: after a full reload the acknowledged submission is no longer
+    // pending, so the guest has nothing to replay and the store starts empty. The
+    // host's authoritative view carries the accepted designation, and installing
+    // it restores the store.
+    describe("a reload after acknowledgement restores the accepted companion from the host view", () => {
+      it("restores it for a rejoining guest with nothing left to replay", async () => {
+        await useMultiplayerDraftStore.getState().joinDraft({
+          kind: "new",
+          roomCode: "ABCDE",
+          displayName: "Alice",
+        });
+        capturedGuestEventHandler!({ type: "reconnecting", attempt: 1 } as never);
+        const rejoinView = {
+          ...mockView("Deckbuilding"),
+          pool: [card("spell", "Spell")],
+          submitted_companion: "Lurrus of the Dream-Den",
+        };
+        expect(useMultiplayerDraftStore.getState().submittedCompanion).toBeNull();
+        capturedGuestEventHandler!({ type: "reconnected", seatIndex: 1 });
+        capturedGuestEventHandler!({ type: "viewUpdated", view: rejoinView });
+        expect(useMultiplayerDraftStore.getState().submittedCompanion).toBe("Lurrus of the Dream-Den");
+
+        // A later broadcast that omits the field never erases the designation.
+        capturedGuestEventHandler!({
+          type: "viewUpdated",
+          view: { ...mockView("Deckbuilding"), pool: [card("spell", "Spell")] },
+        });
+        expect(useMultiplayerDraftStore.getState().submittedCompanion).toBe("Lurrus of the Dream-Den");
+      });
+
+      it("restores it for a reloaded host from its own seat's view", async () => {
+        await useMultiplayerDraftStore.getState().hostDraft({
+          poolInput: { type: "Set", data: { set_pool_json: "{}" } },
+          kind: "Premier",
+          podSize: 8,
+          hostDisplayName: "Host",
+          tournamentFormat: "Swiss",
+          podPolicy: "Competitive",
+        });
+        expect(useMultiplayerDraftStore.getState().submittedCompanion).toBeNull();
+        capturedHostEventHandler!({
+          type: "viewUpdated",
+          view: {
+            ...mockView("Deckbuilding"),
+            pool: [card("spell", "Spell")],
+            submitted_companion: "Lurrus of the Dream-Den",
+          },
+        });
+        expect(useMultiplayerDraftStore.getState().submittedCompanion).toBe("Lurrus of the Dream-Den");
+      });
+    });
+
     describe("draft deck autosave", () => {
       beforeEach(async () => {
         installFifoWebLocks();
