@@ -1285,7 +1285,7 @@ fn a_refused_wrong_seat_forfeit_preserves_both_cipher_responses() {
         assert!(
             engine::game::cipher::encoded_cards_on_creature(runner.state(), hosts[0]).is_empty()
         );
-        // CR 702.99c: both candidate hosts remain on the battlefield.
+        // Both candidate hosts remain on the battlefield in this fixture.
         assert!(hosts
             .iter()
             .all(|host| runner.state().objects[host].zone == Zone::Battlefield));
