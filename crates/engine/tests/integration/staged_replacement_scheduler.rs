@@ -458,8 +458,18 @@ fn a_held_decisions_chooser_concedes_and_its_owner_decides() {
         .expect("P2 concedes while P0's choice is open");
     assert!(runner.state().players[2].is_eliminated);
     assert_eq!(runner.state().objects[&bear].controller, P0);
-    assert_eq!(asked_choice(&runner), (P0, c));
+    // The Bear's decision is consulted again and is now P0's too, so P0 holds
+    // two simultaneous decisions and orders them (CR 101.4c).
+    assert_eq!(
+        runner.state().waiting_for,
+        WaitingFor::ReplacementDecisionOrder {
+            player: P0,
+            objects: vec![c, bear],
+        }
+    );
     round_trip(&mut runner);
+    select_decision(&mut runner, c);
+    assert_eq!(asked_choice(&runner), (P0, c));
     choose_source(&mut runner, c_hyena);
     // The destroyed Hyena Umbra is P0's card and P1 controls Dauthi
     // Voidwalker, so its move is P0's choice too: P0 holds two decisions.
@@ -1111,4 +1121,113 @@ fn a_commander_owner_concedes_at_the_command_zone_choice_and_the_batch_settles()
     assert_eq!(zone(&runner, bears), Zone::Graveyard);
     assert_eq!(zone(&runner, judgment), Zone::Graveyard);
     let _ = progenitus;
+}
+
+const THALIA_HERETIC_CATHAR: &str =
+    "First strike\nCreatures and nonbasic lands your opponents control enter tapped.";
+
+/// CR 101.4c + CR 616.1f: Open the Vaults returns two of P0's Ornithopters.
+/// Root Maze ("Artifacts and lands enter tapped"), Archelos ("As long as
+/// Archelos is untapped, other permanents enter untapped") and P1's Thalia,
+/// Heretic Cathar ("Creatures and nonbasic lands your opponents control enter
+/// tapped") all apply to each entry, so P0 holds two decisions. After P0
+/// applies one replacement to the first Ornithopter, its entry still needs an
+/// order between the remaining two: that new choice is held, and P0 again
+/// chooses which decision to make next.
+#[test]
+fn a_further_choice_on_the_same_entry_is_ordered_with_the_others() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let maze = scenario
+        .add_enchantment_from_oracle(P0, "Root Maze", ROOT_MAZE)
+        .id();
+    scenario.add_creature_from_oracle(P1, "Archelos, Lagoon Mystic", 2, 4, ARCHELOS);
+    scenario
+        .add_creature_from_oracle(P1, "Thalia, Heretic Cathar", 3, 2, THALIA_HERETIC_CATHAR)
+        .as_legendary();
+    let thopter = |scenario: &mut GameScenario| {
+        scenario
+            .add_creature_to_graveyard(P0, "Ornithopter", 0, 2)
+            .as_artifact_creature()
+            .from_oracle_text("Flying")
+            .id()
+    };
+    let first = thopter(&mut scenario);
+    let second = thopter(&mut scenario);
+    let vaults = zero_cost_spell(&mut scenario, "Open the Vaults", OPEN_THE_VAULTS);
+    let mut runner = scenario.build();
+
+    cast_until_decision(&mut runner, vaults);
+    assert_eq!(
+        runner.state().waiting_for,
+        WaitingFor::ReplacementDecisionOrder {
+            player: P0,
+            objects: vec![first, second],
+        }
+    );
+    select_decision(&mut runner, first);
+    assert_eq!(asked_choice(&runner), (P0, first));
+    choose_source(&mut runner, maze);
+    assert_eq!(
+        runner.state().waiting_for,
+        WaitingFor::ReplacementDecisionOrder {
+            player: P0,
+            objects: vec![first, second],
+        },
+        "the first entry's further choice is ordered with the second's"
+    );
+    round_trip(&mut runner);
+    answer_all(&mut runner);
+    finish(&mut runner);
+    assert_eq!(zone(&runner, first), Zone::Battlefield);
+    assert_eq!(zone(&runner, second), Zone::Battlefield);
+}
+
+/// CR 101.4 + CR 800.4a: Wrath of God in a three-player game. P1's creature
+/// wears Hyena Umbra and Spider Umbra, so P1 chooses its armor. P0's Runeclaw
+/// Bear is controlled by P2 through Control Magic, and P1's Dauthi Voidwalker
+/// and Rest in Peace both apply to its move, so P2 holds that choice; P1 is
+/// asked first. P2 concedes: Control Magic leaves the game, the Bear returns to
+/// P0, and its choice becomes P0's. P0 is earlier in APNAP order than P1, so
+/// P0's choice is asked before P1's.
+#[test]
+fn a_departure_that_hands_a_choice_to_an_earlier_seat_restarts_apnap() {
+    let p2 = PlayerId(2);
+    let mut scenario = GameScenario::new_n_player(3, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.add_creature_from_oracle(P1, "Dauthi Voidwalker", 3, 2, DAUTHI_VOIDWALKER);
+    scenario.add_enchantment_from_oracle(P1, "Rest in Peace", REST_IN_PEACE);
+    let c = scenario.add_creature(P1, "Grizzly Bears", 2, 2).id();
+    let c_hyena = umbra(&mut scenario, P1, "Hyena Umbra", HYENA_UMBRA);
+    let c_spider = umbra(&mut scenario, P1, "Spider Umbra", SPIDER_UMBRA);
+    let bear = scenario.add_creature(P0, "Runeclaw Bear", 2, 2).id();
+    let magic = umbra(&mut scenario, p2, "Control Magic", CONTROL_MAGIC);
+    let wrath = zero_cost_spell(&mut scenario, "Wrath of God", WRATH_OF_GOD);
+    let mut runner = scenario.build();
+    attach(&mut runner, c_hyena, c);
+    attach(&mut runner, c_spider, c);
+    attach(&mut runner, magic, bear);
+    engine::game::layers::flush_layers(runner.state_mut());
+
+    cast_until_decision(&mut runner, wrath);
+    assert_eq!(asked_choice(&runner), (P1, c), "P0 has no choice yet");
+    runner
+        .act(GameAction::Concede { player_id: p2 })
+        .expect("P2 concedes while P1's choice is open");
+    assert_eq!(runner.state().objects[&bear].controller, P0);
+    assert_eq!(
+        asked_choice(&runner),
+        (P0, bear),
+        "P0's choice now comes first"
+    );
+    round_trip(&mut runner);
+    runner
+        .act(GameAction::ChooseReplacement { index: 0 })
+        .expect("P0 answers");
+    assert_eq!(asked_choice(&runner), (P1, c));
+    choose_source(&mut runner, c_hyena);
+    answer_all(&mut runner);
+    finish(&mut runner);
+    assert_eq!(zone(&runner, bear), Zone::Exile);
+    assert_eq!(zone(&runner, c), Zone::Battlefield);
 }

@@ -4700,12 +4700,12 @@ pub(crate) fn reconcile_staged_batch_after_departure(
 fn settle_held_decisions_after_departure(
     state: &mut GameState,
     owner: &mut PendingBatchDeliveries,
-) {
+) -> HeldDepartureSettlement {
     let Some(staged) = owner.staged.as_ref() else {
-        return;
+        return HeldDepartureSettlement::Unchanged;
     };
     if staged.stage != BatchDeliveryStage::Approving {
-        return;
+        return HeldDepartureSettlement::Unchanged;
     }
     let held: Vec<usize> = staged
         .members
@@ -4715,8 +4715,9 @@ fn settle_held_decisions_after_departure(
         .map(|(index, _)| index)
         .collect();
     if held.is_empty() {
-        return;
+        return HeldDepartureSettlement::Unchanged;
     }
+    let mut settlement = HeldDepartureSettlement::Unchanged;
     let published = state.pending_replacement.take();
     for index in held {
         let staged = owner.staged.as_ref().expect("staged");
@@ -4732,6 +4733,7 @@ fn settle_held_decisions_after_departure(
         if stands {
             continue;
         }
+        settlement = HeldDepartureSettlement::Reconsulting;
         let member = &mut owner.staged.as_mut().expect("staged").members[index];
         member.held_decision = None;
         if member.state == StagedBatchMemberState::Abandoned {
@@ -4749,13 +4751,26 @@ fn settle_held_decisions_after_departure(
         }
     }
     state.pending_replacement = published;
+    settlement
 }
 
-/// CR 101.4 + CR 800.4a: when a departure leaves a held decision with a chooser
-/// earlier in APNAP order than the published one's, the published decision is
-/// held again and the scheduler asks in order. Only a decision whose drain is
-/// not on the stack can be held here.
-fn demote_published_after_departure(state: &mut GameState, owner: &mut PendingBatchDeliveries) {
+/// Whether a departure dropped any held decision for a new consultation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HeldDepartureSettlement {
+    Unchanged,
+    Reconsulting,
+}
+
+/// CR 101.4 + CR 800.4a: after a departure, the published decision is held
+/// again and the scheduler asks in order when a held decision's chooser is now
+/// earlier in APNAP order, or when a held decision is consulted again (its new
+/// chooser may be). Only a decision whose drain is not on the stack can be
+/// held here.
+fn demote_published_after_departure(
+    state: &mut GameState,
+    owner: &mut PendingBatchDeliveries,
+    settlement: HeldDepartureSettlement,
+) {
     let Some(index) = staged_asking_index(owner) else {
         return;
     };
@@ -4789,7 +4804,7 @@ fn demote_published_after_departure(state: &mut GameState, owner: &mut PendingBa
                 .is_some_and(|decision| rank(decision.chooser) < rank(published_chooser))
         })
     });
-    if !earlier_held {
+    if !earlier_held && settlement == HeldDepartureSettlement::Unchanged {
         return;
     }
     let kind = if owner.paused_current.is_some() {
@@ -4811,8 +4826,8 @@ fn reconcile_staged_owner(
     group_id: LogicalZoneChangeGroupId,
     events: &mut Vec<GameEvent>,
 ) -> bool {
-    settle_held_decisions_after_departure(state, owner);
-    demote_published_after_departure(state, owner);
+    let settlement = settle_held_decisions_after_departure(state, owner);
+    demote_published_after_departure(state, owner, settlement);
     sync_staged_requests(owner);
     let prompt_group = match &state.waiting_for {
         WaitingFor::DigRestSplitChoice {
