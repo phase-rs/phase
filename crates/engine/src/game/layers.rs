@@ -9607,7 +9607,7 @@ fn transient_duration_condition(tce: &TransientContinuousEffect) -> Option<&Stat
 /// `ability_scan`'s exhaustive matches rather than through this authority.
 ///
 /// A gate-blind consumer is a tracked pre-existing gap, not an exemption:
-/// `casting::apply_static_activated_ability_cost_reduction` applies a
+/// `casting::collect_static_activated_ability_cost_modifiers` applies a
 /// transient effect without consulting either gate, so a lapsed condition
 /// still reduces a cost. Routing it through here changes behavior and needs
 /// its own CR analysis and tests, so it is out of scope here.
