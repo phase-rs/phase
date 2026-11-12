@@ -621,6 +621,26 @@ pub fn handle_choose_play_draw(
     restart_between_games_with_starting_player(state, chooser, starting_player, events)
 }
 
+/// CR 103.1: the chooser decides which candidate takes the first turn. The
+/// chooser is latched as `next_game_chooser` first: if this game is a draw,
+/// the same player chooses again (CR 103.1). Game one runs in place; there is
+/// no between-games rebuild.
+pub fn handle_choose_starting_player(
+    state: &mut GameState,
+    chooser: PlayerId,
+    candidates: &[PlayerId],
+    chosen: PlayerId,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, String> {
+    if !candidates.contains(&chosen) {
+        return Err("Chosen player is not a candidate to take the first turn".to_string());
+    }
+    state.next_game_chooser = Some(chooser);
+    let start = super::engine::start_game_with_starting_player(state, chosen);
+    events.extend(start.events);
+    Ok(start.waiting_for)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

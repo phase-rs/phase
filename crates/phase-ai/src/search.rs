@@ -2389,8 +2389,8 @@ pub fn fallback_action(
             .map(|slot| GameAction::ChoosePermanentTypeSlot { slot: *slot }),
 
         // Choose play/draw and sideboard: between-games defaults.
-        WaitingFor::BetweenGamesChoosePlayDraw { .. } => {
-            Some(GameAction::ChoosePlayDraw { play_first: true })
+        WaitingFor::BetweenGamesChoosePlayDraw { .. } | WaitingFor::ChooseStartingPlayer { .. } => {
+            first_turn_election(&state.waiting_for)
         }
         WaitingFor::BetweenGamesSideboard { player, .. } => {
             // Submit the current deck unchanged (no sideboarding).
@@ -2884,6 +2884,19 @@ pub fn fallback_action(
     };
 
     gate(action)
+}
+
+/// CR 103.1: the AI chooser elects to take the first turn.
+fn first_turn_election(waiting_for: &WaitingFor) -> Option<GameAction> {
+    match waiting_for {
+        WaitingFor::BetweenGamesChoosePlayDraw { .. } => {
+            Some(GameAction::ChoosePlayDraw { play_first: true })
+        }
+        WaitingFor::ChooseStartingPlayer { player, .. } => {
+            Some(GameAction::ChooseStartingPlayer { player: *player })
+        }
+        _ => None,
+    }
 }
 
 /// Score all candidate actions without selecting one.
@@ -4575,11 +4588,8 @@ pub(crate) fn deterministic_choice(
         return Some(action);
     }
 
-    if matches!(
-        state.waiting_for,
-        WaitingFor::BetweenGamesChoosePlayDraw { .. }
-    ) {
-        return Some(GameAction::ChoosePlayDraw { play_first: true });
+    if let Some(action) = first_turn_election(&state.waiting_for) {
+        return Some(action);
     }
 
     if matches!(state.waiting_for, WaitingFor::BetweenGamesSideboard { .. }) {
@@ -6661,6 +6671,40 @@ mod tests {
                 "fallback answer with {lands} lands open"
             );
         }
+    }
+
+    /// CR 103.1: the rollout driver and the deadlock-safe fallback both elect
+    /// the chooser to take the first turn, for the game-one starting-player
+    /// prompt and for the between-games play/draw prompt. The chooser is P1 so
+    /// a hard-coded seat cannot pass.
+    #[test]
+    fn first_turn_election_answers_both_choosers() {
+        let config = create_config(AiDifficulty::VeryHard, Platform::Native);
+        let mut state = GameState::new_two_player(42);
+        state.waiting_for = WaitingFor::ChooseStartingPlayer {
+            player: P1,
+            candidates: vec![P0, P1],
+        };
+        let expected = GameAction::ChooseStartingPlayer { player: P1 };
+        assert!(
+            test_contract(&state).contains_action(&state, &expected),
+            "the engine must issue the chooser's own seat as a candidate"
+        );
+        assert_eq!(
+            deterministic_choice(&state, P1, &config, &[], None),
+            Some(expected.clone())
+        );
+        assert_eq!(fallback_action_default(&state), Some(expected));
+
+        state.waiting_for = WaitingFor::BetweenGamesChoosePlayDraw {
+            player: P1,
+            game_number: 2,
+            score: Default::default(),
+        };
+        assert_eq!(
+            deterministic_choice(&state, P1, &config, &[], None),
+            Some(GameAction::ChoosePlayDraw { play_first: true })
+        );
     }
 
     /// T8 — the combat production wiring at `deterministic_choice`'s combat
