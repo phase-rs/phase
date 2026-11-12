@@ -1508,14 +1508,11 @@ const BUSHWHACK: &str = "Choose one —\n\
 /// TARGET slot's, and the untapped Forest pays the `{G}`, so the cast parks on the
 /// ordinary manual payment prompt with both fighters announced and latched.
 ///
-/// The `Manual` request has to be stamped on the `TargetSelection` prompt's own
-/// pending cast: `handle_select_modes` rebuilds the pending cast and copies
-/// `base_cost`, `chosen_modes`, `origin_zone` and the rest WITHOUT `payment_mode`,
-/// so the mode choice resets an interactive cast to `Auto` and the auto-payer would
-/// settle `{G}` from the Forest before any save could be taken. That propagation
-/// gap is a separate defect; this fixture only needs the ordinary manual prompt the
-/// cast requested, so it restates the mode on the carrier that reaches the payment
-/// boundary.
+/// CR 601.2h: the `Manual` request the cast announces survives `handle_select_modes`
+/// — the rebuilt pending cast carries `payment_mode` across the mode choice, the
+/// same way it carries `base_cost` and `chosen_modes` — so the fixture needs no
+/// restatement: the cast parks on the manual prompt it asked for, before the
+/// auto-payer can settle `{G}` from the Forest.
 struct BushwhackPark {
     runner: GameRunner,
     spell: ObjectId,
@@ -1569,13 +1566,6 @@ fn bushwhack_announced_mid_payment() -> BushwhackPark {
         "reach guard: the fight mode asks for its two fighters, got {:?}",
         runner.state().waiting_for
     );
-    // Restate the requested interaction on the prompt's own pending cast; see the
-    // struct doc for why the mode choice lost it.
-    let WaitingFor::TargetSelection { pending_cast, .. } = &mut runner.state_mut().waiting_for
-    else {
-        unreachable!("matched above")
-    };
-    pending_cast.payment_mode = CastPaymentMode::Manual;
     // CR 601.2c: positions are the declared slots — subject first, target second.
     runner
         .act(GameAction::SelectTargets {

@@ -294,6 +294,12 @@ pub(crate) fn handle_select_modes(
         pending_sel.casting_variant = pending.casting_variant;
         pending_sel.casting_permission_index = pending.casting_permission_index;
         pending_sel.origin_zone = pending.origin_zone;
+        // CR 601.2h: the payment step the caster elected when announcing must
+        // survive the slot walk — `CastPaymentMode::Manual` parks at
+        // `WaitingFor::ManaPayment` after the targets are declared, exactly as it
+        // does for a non-modal cast (and as the deferred-X path above keeps it).
+        // Dropping it here silently re-runs the payment as `Auto`.
+        pending_sel.payment_mode = pending.payment_mode;
         pending_sel.additional_cost_flow = pending.additional_cost_flow;
         pending_sel.deferred_target_selection = pending.deferred_target_selection;
         pending_sel.chosen_modes = sorted_indices.clone();
