@@ -2575,17 +2575,33 @@ fn resolve_each_target_power_damage(
                     crate::game::replacement::drain_damage_rider(state, events);
                 }
                 // CR 608.2c + CR 616.1: a rider that left its prompt standing holds the
-                // remaining sources behind its answer; the survivors chosen so far are
-                // applied first, as at an order choice.
+                // rest of the batch behind its answer: the survivors already replaced
+                // (applied without re-running replacement), then the remaining sources,
+                // each in its own frame, so neither a survivor's lifelink choice nor a
+                // later source's order prompt can replace the standing one.
                 if replacement::damage_batch_has_paused_rider(state) {
-                    let remaining: Vec<(ObjectId, TargetRef, u32)> = batch
+                    let mut nodes: Vec<ResolvedAbility> = survivors
                         .iter()
-                        .skip(idx + 1)
-                        .map(|(src, _, amt)| (*src, recipient.clone(), *amt))
+                        .filter_map(|(ctx, event)| build_post_replacement_damage_node(ctx, event))
+                        .map(|node| keep_chain_identity(state, node, ability))
                         .collect();
-                    if !remaining.is_empty() {
-                        apply_batch_survivors_before_replacement_pause(state, &survivors, events);
-                        park_recipients_behind_paused_rider(state, ability, remaining, boundary)?;
+                    // Only the sources Phase A let through: a gated source was already
+                    // prevented (CR 702.16e) and is not dealt again.
+                    for &(later, _) in entries.iter().filter(|(later, _)| *later > idx) {
+                        let (src, _, amt) = &batch[later];
+                        let node = keep_chain_identity(
+                            state,
+                            build_remaining_damage_node(
+                                *src,
+                                ability.controller,
+                                recipient.clone(),
+                                *amt,
+                            ),
+                            ability,
+                        );
+                        nodes.push(node);
+                    }
+                    if park_portions_behind_paused_rider(state, ability, nodes, boundary)? {
                         return Ok(());
                     }
                 }
@@ -3879,8 +3895,9 @@ fn resolve_each_source_deals_damage_portions(
                 }
                 // CR 608.2c + CR 616.1: a rider that left its prompt standing holds the
                 // rest of the batch behind its answer: the Phase-B-complete portions,
-                // then the raw ones, each in its own frame.
-                if replacement::damage_batch_has_paused_rider(state) && i + 1 < entries.len() {
+                // then the raw ones, each in its own frame. With none left, Phase C
+                // has nothing that could raise a prompt over it.
+                if replacement::damage_batch_has_paused_rider(state) {
                     let mut nodes: Vec<ResolvedAbility> = replaced
                         .iter()
                         .filter_map(|(ctx, event)| build_post_replacement_damage_node(ctx, event))
@@ -3894,8 +3911,9 @@ fn resolve_each_source_deals_damage_portions(
                         );
                         nodes.push(node);
                     }
-                    park_portions_behind_paused_rider(state, ability, nodes, boundary)?;
-                    return Ok(());
+                    if park_portions_behind_paused_rider(state, ability, nodes, boundary)? {
+                        return Ok(());
+                    }
                 }
             }
             ReplacementResult::NeedsChoice(player) => {

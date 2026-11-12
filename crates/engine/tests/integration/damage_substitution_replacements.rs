@@ -47,6 +47,7 @@ const SHAKE: &str =
     "Shake the Foundations deals 1 damage to each creature without flying.\nDraw a card.";
 const PYROCLASM: &str = "Pyroclasm deals 2 damage to each creature.";
 const FLAME_RIFT: &str = "Flame Rift deals 4 damage to each player.";
+const RAKDOS_CHARM: &str = "Choose one —\n• Exile target player's graveyard.\n• Destroy target artifact.\n• Each creature deals 1 damage to its controller.";
 const FLAME_SLASH: &str = "Flame Slash deals 4 damage to target creature.";
 const HYMN: &str = "Kicker {W} (You may pay an additional {W} as you cast this spell.)\nHurloon Battle Hymn deals 4 damage to target creature or planeswalker. If this spell was kicked, you gain 4 life.";
 const AARDVARK_SLOTH: &str =
@@ -1064,6 +1065,68 @@ fn a_riders_prompt_holds_the_next_players_order_prompt() {
     assert_eq!(player(&runner, p2).graveyard.len(), 5);
     assert_eq!(life(&runner, P0), 23);
     assert_eq!(life_gains(&events), 1);
+    assert_at_rest(&runner);
+}
+
+/// Rakdos Charm: "Each creature deals 1 damage to its controller." P0's Rhox Faithmender
+/// (lifelink) deals 1 to P0, and that gain meets Rhox Faithmender and Leyline of Hope (CR 616.1).
+/// P1's Bear, the batch's last source, deals 1 to P1, whose Nefarious Lich asks which of 3
+/// graveyard cards to exile. Neither answer replaces the other (CR 608.2c): P1 exiles one card,
+/// and P0 loses 1 and gains 3 or 4, in the order P0 chose.
+#[test]
+fn a_last_sources_rider_prompt_survives_an_earlier_lifelink_choice() {
+    let mut scenario = scenario();
+    let rhox =
+        super::unpreventable_damage_prevention_effects::faithmender_and_leyline(&mut scenario);
+    nefarious_lich(&mut scenario, 3);
+    let bear = scenario.add_creature(P1, "Bear", 2, 2).id();
+    let charm = sorcery(&mut scenario, "Rakdos Charm", RAKDOS_CHARM);
+    let mut runner = scenario.build();
+    let graveyard: Vec<ObjectId> = player(&runner, P1).graveyard.iter().copied().collect();
+    let action = cast_action(&runner, charm);
+    let mut events = runner.act(action).expect("cast Rakdos Charm").events;
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::ModeChoice { .. }),
+        "got {:?}",
+        runner.state().waiting_for
+    );
+    answer(
+        &mut runner,
+        GameAction::SelectModes { indices: vec![2] },
+        &mut events,
+    );
+
+    let (mut exiles, mut orders) = (0, 0);
+    for _ in 0..6 {
+        match runner.state().waiting_for.clone() {
+            WaitingFor::EffectZoneChoice { .. } => {
+                assert_eq!(zone_prompt(&runner), (1, 3));
+                exiles += 1;
+                take_offered(&mut runner, &mut events);
+            }
+            WaitingFor::ReplacementChoice { .. } => {
+                orders += 1;
+                answer(
+                    &mut runner,
+                    GameAction::ChooseReplacement { index: 0 },
+                    &mut events,
+                );
+            }
+            _ => break,
+        }
+    }
+
+    assert_eq!((exiles, orders), (1, 1));
+    let exiled = graveyard
+        .iter()
+        .filter(|card| zone(&runner, **card) == Zone::Exile)
+        .count();
+    assert_eq!(exiled, 1);
+    assert_eq!(life(&runner, P1), 20);
+    let p0 = life(&runner, P0);
+    assert!([22, 23].contains(&p0), "got {p0}");
+    assert_eq!(damage(&runner, rhox), 0);
+    assert_eq!(damage(&runner, bear), 0);
     assert_at_rest(&runner);
 }
 
