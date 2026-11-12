@@ -3785,8 +3785,8 @@ fn payer_producer_facts_match(
     same_producer_facts_in_pip_order(&left, &right)
 }
 
-/// CR 118.3a + CR 732.2a: does every (unit shape, producer fact) pair occur on one side
-/// exactly as many times as on the other?
+/// CR 118.3a + CR 732.2a: does each unit's producer fact match the other list at the same
+/// canonical pip?
 ///
 /// MULTIPLICITY IS PAYMENT-VISIBLE. **Marut** — `{8}` Artifact Creature — Construct, 7/7,
 /// "Trample / When this creature enters, if mana from a Treasure was spent to cast it, create
