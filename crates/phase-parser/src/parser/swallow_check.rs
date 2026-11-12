@@ -16449,13 +16449,18 @@ this spell's mana cost.\nDestroy target attacking creature without flying.",
     /// Each silent row is the positive for the reported rows beside it.
     #[test]
     fn combat_relation_detectors_carry_their_shapes_over_one_for_one() {
+        // The relation restricts a population, so it sits on a typed filter.
         let evidence = |direction, scope| {
-            let prop = serde_json::to_string(&FilterProp::CombatRelation {
-                relation: CombatRelation::BlockPairing { direction, scope },
-                subject: CombatRelationSubject::Source,
-            })
-            .expect("a FilterProp serializes");
-            UnitEvidence::from_json_for_test(&format!("[{prop}]"))
+            let filter = serde_json::to_string(&crate::types::ability::TargetFilter::Typed(
+                crate::types::ability::TypedFilter::creature().properties(vec![
+                    FilterProp::CombatRelation {
+                        relation: CombatRelation::BlockPairing { direction, scope },
+                        subject: CombatRelationSubject::Source,
+                    },
+                ]),
+            ))
+            .expect("a TargetFilter serializes");
+            UnitEvidence::from_json_for_test(&format!("[{filter}]"))
         };
         let this_turn = Some(CombatHistoryScope::ThisTurn);
         let this_combat = Some(CombatHistoryScope::ThisCombat);
