@@ -490,6 +490,14 @@ fn restore_sparse_cast_fields(
             .ok_or_else(|| EngineError::InvalidAction("Missing cast undo rules object".into()))?
             .restore_undecoded_rules(rules);
     }
+    // CR 702.16p: an inverse recorded by an older save names a permanent's
+    // start snapshots by their slot keys. This decode is the second place a
+    // serialized object enters the game (the first is
+    // `PersistedGameState::prepare_for_restore`), so it runs the same
+    // migration before the restored objects are installed and layers flush.
+    // Otherwise the refresh would take a fresh snapshot for an effect that
+    // started long before the canceled cast.
+    crate::game::effects::attach::migrate_legacy_protection_start_snapshots(&mut restored);
     state.restore_cast_fields(restored, &changed);
     state.layers_dirty.mark_full();
     Ok(())

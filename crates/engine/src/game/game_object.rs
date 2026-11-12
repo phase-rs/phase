@@ -828,8 +828,10 @@ pub struct GameObject {
     pub protection_start_snapshots: HashMap<ProtectionStartKey, ProtectionStartSnapshot>,
     /// CR 702.16p: snapshots an older save stored under slot keys. Read, never
     /// written; preparing a persisted restore
-    /// (`PersistedGameState::prepare_for_restore`) migrates each one whose host is still present to
-    /// [`Self::protection_start_snapshots`] and empties this map. The older
+    /// (`PersistedGameState::prepare_for_restore`) and decoding a canceled
+    /// cast's recorded inverse (`restore_sparse_cast_fields`) migrate each one
+    /// whose host is still present to [`Self::protection_start_snapshots`]
+    /// and empty this map. The older
     /// writer held entries only on battlefield sources and cleared them on
     /// zone exit, so the migration's battlefield scan reaches every entry.
     #[serde(
