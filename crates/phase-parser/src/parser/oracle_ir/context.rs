@@ -416,7 +416,10 @@ pub enum ResolvedChainRoot {
     /// Set by a top-level entry point whose chain is its ability's resolved
     /// root with its printed targets (a triggered ability's body, an activated
     /// ability's effect, the spell line of a card whose only non-keyword line
-    /// it is and whose spell is not rewritten at cast).
+    /// it is and whose spell is not rewritten at cast). The activated-ability
+    /// proof assumes the cast never nests an activated first ability under
+    /// another node; `synthesize_gift` wraps a gift card's first ability of any
+    /// kind, and no printed gift card has an activated ability.
     Proven,
 }
 

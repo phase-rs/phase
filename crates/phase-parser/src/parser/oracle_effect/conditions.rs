@@ -4868,10 +4868,10 @@ pub(super) fn strip_routed_suffix_conditional(
     // controller gates its own instruction as it resolves (Skulking Killer,
     // Unified Will) — never an intervening-if (CR 603.4).
     //
-    // Once the shared grammar recognizes the text, an unbound referent must
-    // return the original clause here: falling through would reach the generic
-    // `parse_inner_condition` route below and re-home the same condition with
-    // an unbound `ParentTargetController`.
+    // Once the shared grammar recognizes the text, an unbound referent returns
+    // the original clause here, so the recognizers below, which have no way to
+    // bind the referent, never see it. (The grammar is deliberately not
+    // reachable from `parse_inner_condition`.)
     if let Some((referent, condition)) =
         parse_target_controller_control_condition_parts(condition_core)
     {
@@ -4888,8 +4888,8 @@ pub(super) fn strip_routed_suffix_conditional(
     {
         // The grammar is only a prefix here (a trailing " and " / " or "
         // connector), so the generic route parses the whole conjunction. When
-        // the referent cannot bind, fail closed before that route can re-home
-        // the left operand with an unbound `ParentTargetController`.
+        // the referent cannot bind, fail closed before that route sees the
+        // text: it cannot bind the referent either.
         if !target_controller_referent_binds(referent, effect_prefix, ctx, position) {
             return (None, text.to_string());
         }
@@ -5006,12 +5006,13 @@ fn enumeration_returns_early(effect: &Effect) -> bool {
 /// cardinality shape or a resolution-timed child role.
 ///
 /// The walk follows `sub_ability`, `else_ability` and `mode_abilities`. That is
-/// a superset of what production announces (it never announces an else branch),
-/// so an extra branch can only cause a harmless over-decline. A coin-flip branch
-/// definition nested inside an effect is not walked: those branches come from
-/// later sentences, not from a clause prefix. The head's own `repeat_for`,
-/// `player_scope` and `target_chooser` are not fields of the parsed clause; the
-/// caller declines them from the printed text (`head_stamps_clause_scope`).
+/// a superset of what production announces (slot collection never visits an
+/// else branch), so an extra branch can only cause a harmless over-decline. A
+/// coin-flip branch definition nested inside an effect is not walked: those
+/// branches come from later sentences, not from a clause prefix. The head's own
+/// `repeat_for`, `player_scope` and `target_chooser` are not fields of the
+/// parsed clause; the caller declines them from the printed text
+/// (`head_stamps_clause_scope`).
 /// Declined on the head and on every descendant: `multi_target` (every
 /// per-opponent fanout and every `EachDealsDamageEqualToPower` carries it),
 /// `distribute`, `optional_targeting`; on descendants also `repeat_for`,
