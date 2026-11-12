@@ -452,6 +452,27 @@ fn advance_reanimation(runner: &mut GameRunner) {
     panic!("reanimation did not reach its next choice");
 }
 
+/// CR 101.4c + CR 616.1: the staged population's sweep consults both
+/// devourers' entries before any prompt, so P0 holds both Censor/Devour
+/// ordering decisions and first chooses which to make. `announced` is the
+/// population's announcement order; making them in that order keeps the
+/// original sequence.
+fn order_entry_decisions(runner: &mut GameRunner, announced: [ObjectId; 2]) {
+    assert_eq!(
+        runner.state().waiting_for,
+        WaitingFor::ReplacementDecisionOrder {
+            player: P0,
+            objects: announced.to_vec(),
+        },
+        "P0 holds one entry-ordering decision per devourer"
+    );
+    runner
+        .act(GameAction::SelectCards {
+            cards: vec![announced[0]],
+        })
+        .expect("P0 makes the first announced devourer's decision first");
+}
+
 fn apply_censor_first(runner: &mut GameRunner) {
     let WaitingFor::ReplacementChoice {
         player, candidates, ..
@@ -523,6 +544,7 @@ fn twilights_call_two_devourers_under_censor_each_order_then_devour() {
     let f1 = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
     let f2 = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
     let mut runner = cast_reanimation(scenario, "Twilight's Call", TWILIGHTS_CALL);
+    order_entry_decisions(&mut runner, [b, a]);
     apply_censor_first(&mut runner);
     apply_censor_first(&mut runner);
     assert_eq!(devour_pool(&runner, P0), vec![f1, f2]);
@@ -634,6 +656,7 @@ fn rise_two_devourers_under_censor() {
     let f1 = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
     let f2 = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
     let mut runner = cast_reanimation(scenario, "Rise of the Dark Realms", RISE_OF_THE_DARK_REALMS);
+    order_entry_decisions(&mut runner, [b, a]);
     apply_censor_first(&mut runner);
     apply_censor_first(&mut runner);
     assert_eq!(devour_pool(&runner, P0), vec![f1, f2]);

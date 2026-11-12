@@ -175,8 +175,29 @@ fn surveil_rest_pile_under_two_redirects_runs_keep_on_top_cleanup_once() {
     // CR 616.1: each unkept card surfaces an ordering prompt between the two
     // applicable redirects. Answer each (index 0); bounded to fail loudly on a
     // regression that loops or re-prompts indefinitely instead of hanging.
+    // CR 101.4c: the staged rest pile consults both unkept cards before any
+    // prompt, so their owner holds both decisions and first chooses which to
+    // make (here in announcement order).
     let mut prompts_answered = 0;
+    let mut decision_orders = 0;
     for _ in 0..10 {
+        if let WaitingFor::ReplacementDecisionOrder { player, objects } =
+            runner.state().waiting_for.clone()
+        {
+            assert_eq!(player, P1, "the unkept cards' owner orders its decisions");
+            let mut held = objects.clone();
+            held.sort();
+            let mut rest = vec![rest0, rest1];
+            rest.sort();
+            assert_eq!(held, rest, "one held decision per unkept card");
+            runner
+                .act(GameAction::SelectCards {
+                    cards: vec![objects[0]],
+                })
+                .expect("make the first announced card's decision first");
+            decision_orders += 1;
+            continue;
+        }
         if !matches!(
             runner.state().waiting_for,
             WaitingFor::ReplacementChoice { .. }
@@ -197,6 +218,14 @@ fn surveil_rest_pile_under_two_redirects_runs_keep_on_top_cleanup_once() {
     assert!(
         prompts_answered >= 1,
         "two simultaneously-applicable redirects must surface a CR 616.1 ordering prompt"
+    );
+    assert_eq!(
+        prompts_answered, 2,
+        "each unkept card's CR 616.1 ordering prompt is asked"
+    );
+    assert_eq!(
+        decision_orders, 1,
+        "the owner orders its two held decisions once"
     );
     // No unkept card may strand; both honored the redirect to exile.
     for &id in &[rest0, rest1] {

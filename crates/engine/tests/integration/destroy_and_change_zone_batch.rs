@@ -1197,15 +1197,22 @@ fn d8_staged_destroy_pause_round_trips_and_resumes() {
         ),
         "premise: the staged destruction parks on the first member's replacement"
     );
+    // CR 616.1 + CR 101.4: the member being asked is the staged batch's
+    // `asking` identity (the sweep cursor is past every member, since the plain
+    // bear needed no choice and was approved in the sweep).
     assert!(
         commit.state().resolution_stack.iter().any(|frame| matches!(
             frame,
             engine::types::resolution::ResolutionFrame::BatchDelivery(batch)
                 if batch.staged.as_ref().is_some_and(|staged| {
-                    matches!(
-                        staged.members[staged.cursor].operation,
-                        engine::types::game_state::StagedMemberOperation::Destroy(_)
-                    )
+                    staged.asking.is_some_and(|asking| asking.object_id == shielded)
+                        && staged.members.iter().any(|member| {
+                            Some(member.identity) == staged.asking
+                                && matches!(
+                                    member.operation,
+                                    engine::types::game_state::StagedMemberOperation::Destroy(_)
+                                )
+                        })
                 })
         )),
         "the parked owner is the staged Destroy operation"
@@ -2997,8 +3004,12 @@ const HYENA_UMBRA: &str = "Enchant creature\nEnchanted creature gets +1/+1 and h
 
 /// CR 616.1 + CR 800.4a + CR 701.8a: a Destroy member whose outer consultation
 /// paused and was then approved (its chooser left with both Umbras, so nothing
-/// replaces the destruction) still owns the approval cursor: its inner
+/// replaces the destruction) is still the asking member: its inner
 /// Battlefield-to-Graveyard consultation runs before the next member is asked.
+/// (Before the live scheduler the asking member was the one at the approval
+/// cursor; it is now named by identity in `StagedBatchDelivery::asking`, and
+/// the sweep has already consulted the second member, which holds P2's
+/// decision until P1's is settled.)
 /// Day of Judgment says "Destroy all creatures." The first host is P2's creature
 /// under P1's Mind Control wearing two of P1's Hyena Umbras (P1 orders them);
 /// the second is P2's creature wearing two of P2's own Hyena Umbras (P2 orders
@@ -3090,9 +3101,31 @@ fn approved_outer_destroy_finishes_before_the_next_member_parks() {
         .active_batch_delivery()
         .and_then(|pending| pending.staged.as_ref())
         .expect("the staged owner is parked at the second prompt");
+    // CR 616.1 + CR 101.4: the member being asked is the staged `asking`
+    // identity; the sweep cursor is already past both members.
     assert_eq!(
-        staged.members[staged.cursor].identity.object_id, second,
-        "the parked member is the cursor member"
+        staged.asking.map(|asking| asking.object_id),
+        Some(second),
+        "the parked member is the asking member"
+    );
+    assert_eq!(
+        staged.cursor,
+        staged.members.len(),
+        "the sweep consulted every member"
+    );
+    let first_member = staged
+        .members
+        .iter()
+        .find(|member| member.identity.object_id == first)
+        .expect("the first member is in the cohort");
+    assert!(
+        first_member.held_decision.is_none()
+            && matches!(
+                first_member.state,
+                engine::types::game_state::StagedBatchMemberState::Approved
+            ),
+        "the approved first member finished its inner consultation before P2 is asked, got {:?}",
+        first_member.state
     );
     round_trip_staged(&mut runner);
 

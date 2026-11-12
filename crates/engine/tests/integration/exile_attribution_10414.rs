@@ -201,6 +201,43 @@ fn exile_count(runner: &GameRunner) -> usize {
         .count()
 }
 
+/// CR 101.4c + CR 616.1: Mudhole's staged population consults every land
+/// before any prompt appears, so P1 (each land's owner) holds both optional
+/// decisions and first chooses which to make. Pin that prompt (P1, exactly the
+/// two lands; their announcement order is the population's) and make the first
+/// announced land's decision first, which publishes its replacement choice;
+/// the remaining one is then asked without a selection.
+fn make_first_land_decision_first(runner: &mut GameRunner, lands: [ObjectId; 2]) {
+    let WaitingFor::ReplacementDecisionOrder { player, objects } =
+        runner.state().waiting_for.clone()
+    else {
+        panic!(
+            "expected P1's held land decisions, got {:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert_eq!(player, P1);
+    let mut held = objects.clone();
+    held.sort();
+    let mut expected = lands.to_vec();
+    expected.sort();
+    assert_eq!(held, expected, "P1 holds one optional decision per land");
+    runner
+        .act(GameAction::SelectCards {
+            cards: vec![objects[0]],
+        })
+        .expect("P1 makes the first announced land's decision first");
+    assert_eq!(
+        runner
+            .state()
+            .pending_replacement
+            .as_ref()
+            .and_then(|pending| pending.proposed.affected_object_id()),
+        Some(objects[0]),
+        "the selected land's choice is published"
+    );
+}
+
 /// Pass priority, order triggers and decline optional instructions until the
 /// stack is empty and a priority window is open. Any target prompt still open
 /// at this point is one these rows answer up front, so it is declined.
@@ -964,6 +1001,7 @@ fn aethersnatch_mudhole_replacement_pause() -> (GameRunner, [ObjectId; 2], Objec
             .act(GameAction::PassPriority)
             .expect("resolve the stolen Mudhole");
     }
+    make_first_land_decision_first(&mut runner, lands);
     let roles = subject_exile_roles(&runner);
     assert_eq!(roles.controller, P2);
     assert_eq!(roles.performed_by, P1);
@@ -1001,9 +1039,14 @@ fn mudhole_replacement_pause_resume_records_the_subject() {
     let (mut runner, [land_a, land_b], relic, mudhole) = mudhole_replacement_fixture(false);
 
     let outcome = runner.cast(mudhole).target_player(P1).resolve();
+    assert!(matches!(
+        outcome.final_waiting_for(),
+        WaitingFor::ReplacementDecisionOrder { player: P1, .. }
+    ));
+    make_first_land_decision_first(&mut runner, [land_a, land_b]);
 
     // The affected card's owner answers the first optional replacement.
-    match outcome.final_waiting_for() {
+    match &runner.state().waiting_for {
         WaitingFor::ReplacementChoice { player, kind, .. } => {
             assert_eq!(
                 *player, P1,
@@ -1055,6 +1098,7 @@ fn mudhole_replacement_pause_resume_records_the_subject() {
 fn mudhole_typed_continuation_completes_after_replacement_pauses() {
     let (mut runner, lands, relic, mudhole) = mudhole_replacement_fixture(true);
     runner.cast(mudhole).target_player(P1).resolve();
+    make_first_land_decision_first(&mut runner, lands);
     for _ in lands {
         assert!(matches!(
             runner.state().waiting_for,
@@ -1088,6 +1132,7 @@ fn mudhole_typed_continuation_completes_after_replacement_pauses() {
 fn paused_subject_exile_restore_preserves_actor_before_public_resume() {
     let (mut runner, lands, _, mudhole) = mudhole_replacement_fixture(true);
     runner.cast(mudhole).target_player(P1).resolve();
+    make_first_land_decision_first(&mut runner, lands);
     assert!(matches!(
         runner.state().waiting_for,
         WaitingFor::ReplacementChoice { player: P1, .. }
@@ -1434,8 +1479,9 @@ fn deployed_v11_subject_exile_restore_refuses_contradictory_recorded_continuatio
 
 #[test]
 fn subject_exile_restore_keeps_explicit_actor_and_current_missing_actor_is_strict() {
-    let (mut runner, _, _, mudhole) = mudhole_replacement_fixture(true);
+    let (mut runner, lands, _, mudhole) = mudhole_replacement_fixture(true);
     runner.cast(mudhole).target_player(P1).resolve();
+    make_first_land_decision_first(&mut runner, lands);
     let (transferred, _, _, _) = aethersnatch_mudhole_replacement_pause();
     for (runner, controller) in [(runner, P0), (transferred, P2)] {
         for version in [11, 12] {
@@ -1469,6 +1515,7 @@ fn subject_exile_restore_keeps_explicit_actor_and_current_missing_actor_is_stric
 fn mudhole_subject_departure_preserves_the_surviving_family_continuation() {
     let (mut runner, lands, relic, mudhole) = mudhole_replacement_fixture(true);
     runner.cast(mudhole).target_player(P1).resolve();
+    make_first_land_decision_first(&mut runner, lands);
     assert!(matches!(
         runner.state().waiting_for,
         WaitingFor::ReplacementChoice {
@@ -1521,6 +1568,7 @@ fn mudhole_subject_departure_preserves_the_surviving_family_continuation() {
 fn resolving_mudhole_finishes_after_its_owner_leaves() {
     let (mut runner, lands, relic, mudhole) = mudhole_replacement_fixture(true);
     runner.cast(mudhole).target_player(P1).resolve();
+    make_first_land_decision_first(&mut runner, lands);
     assert!(matches!(
         runner.state().waiting_for,
         WaitingFor::ReplacementChoice { player: P1, .. }

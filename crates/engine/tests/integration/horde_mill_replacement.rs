@@ -231,9 +231,22 @@ fn horde_redirect_basic_mill_pause_propagates_as_deferred() {
         Err(ReplacementDeferred::ReplacementChoice),
         "a per-card CR 616.1 pause must surface as Deferred, not settle as Ok"
     );
+    // CR 101.4c + CR 616.1: the staged mill batch consults all three cards
+    // before any prompt, so the Horde holds one ordering decision per card and
+    // the parked prompt is its choice of which to make first.
+    let WaitingFor::ReplacementDecisionOrder { player, objects } = state.waiting_for.clone() else {
+        panic!(
+            "the per-card ordering prompt must be parked in waiting_for, got {:?}",
+            state.waiting_for
+        );
+    };
+    assert_eq!(player, HORDE);
+    assert_eq!(objects.len(), 3, "one held decision per milled card");
     assert!(
-        matches!(state.waiting_for, WaitingFor::ReplacementChoice { .. }),
-        "the per-card ordering prompt must be parked in waiting_for"
+        objects
+            .iter()
+            .all(|id| state.players[HORDE.0 as usize].library.contains(id)),
+        "every held decision is about a card still in the Horde's library"
     );
     assert!(
         state.active_batch_delivery().is_some(),
@@ -258,6 +271,21 @@ fn horde_redirect_basic_mill_pause_propagates_as_deferred() {
     assert!(
         events.is_empty(),
         "a parked batch emits no delivery events, got {events:?}"
+    );
+
+    // The parked prompt is answerable: making the first card's decision first
+    // publishes that card's CR 616.1 ordering choice.
+    engine::game::engine::apply_as_current(
+        &mut state,
+        GameAction::SelectCards {
+            cards: vec![objects[0]],
+        },
+    )
+    .expect("the Horde makes the first card's decision first");
+    assert!(
+        matches!(state.waiting_for, WaitingFor::ReplacementChoice { .. }),
+        "the first card's ordering choice is published, got {:?}",
+        state.waiting_for
     );
 }
 

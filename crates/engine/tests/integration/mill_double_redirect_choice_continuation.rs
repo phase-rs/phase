@@ -120,8 +120,30 @@ fn mill_under_two_graveyard_redirects_delivers_every_card_through_ordering_choic
     // CR 616.1: each milled card surfaces an ordering prompt between the two
     // applicable redirects. Answer each (index 0); bounded so a regression that
     // loops or re-prompts indefinitely fails loudly instead of hanging.
+    // CR 101.4c: the staged mill batch consults every milled card before any
+    // prompt, so the milled cards' owner holds one decision per card and,
+    // while two or more remain, first chooses which to make (here in
+    // announcement order).
     let mut prompts_answered = 0;
-    for _ in 0..10 {
+    let mut decision_orders = 0;
+    for _ in 0..20 {
+        if let WaitingFor::ReplacementDecisionOrder { player, objects } =
+            runner.state().waiting_for.clone()
+        {
+            assert_eq!(player, P1, "the milled cards' owner orders its decisions");
+            assert!(objects.iter().all(|id| milled.contains(id)));
+            assert!(matches!(
+                runner.state().resolution_stack.last(),
+                Some(ResolutionFrame::BatchDelivery(_))
+            ));
+            runner
+                .act(GameAction::SelectCards {
+                    cards: vec![objects[0]],
+                })
+                .expect("make the first announced card's decision first");
+            decision_orders += 1;
+            continue;
+        }
         if !matches!(
             runner.state().waiting_for,
             WaitingFor::ReplacementChoice { .. }
@@ -151,6 +173,22 @@ fn mill_under_two_graveyard_redirects_delivers_every_card_through_ordering_choic
     assert!(
         prompts_answered >= 1,
         "the two simultaneously-applicable redirects must surface a CR 616.1 ordering prompt"
+    );
+    assert_eq!(
+        prompts_answered,
+        milled.len(),
+        "every milled card's CR 616.1 ordering prompt is asked"
+    );
+    assert_eq!(
+        decision_orders, 2,
+        "the owner orders three, then two held decisions; the last is asked directly"
+    );
+    assert!(
+        !matches!(
+            state.waiting_for,
+            WaitingFor::ReplacementDecisionOrder { .. }
+        ),
+        "no held decision is left unasked"
     );
     // The discriminating assertions: NO milled card may strand in the library;
     // every one of them was redirected to exile.
