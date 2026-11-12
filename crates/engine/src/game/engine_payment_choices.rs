@@ -2310,10 +2310,11 @@ pub(crate) fn awaits_payment_continuation(state: &GameState) -> bool {
 /// CR 605.3a + CR 702.24a: a mana ability can be activated while "a rule or
 /// effect asks for a mana payment". The continuation of a repeated draw payment
 /// asks for none: its only answer is to continue, so the mana actions an
-/// unless-payment prompt otherwise admits are refused there. (A mana ability
-/// that pauses on a replacement choice would also take the slot the owed
-/// cursor is parked in.)
-fn refuse_mana_at_payment_continuation(state: &GameState) -> Result<(), EngineError> {
+/// unless-payment prompt otherwise admits are refused there, at the tap
+/// preflight and in each handler, and the legal-action lists offer none
+/// (`ai_support::mana_action_player`). (A mana ability that pauses on a
+/// replacement choice would also take the slot the owed cursor is parked in.)
+pub(crate) fn refuse_mana_at_payment_continuation(state: &GameState) -> Result<(), EngineError> {
     if awaits_payment_continuation(state) {
         return Err(EngineError::InvalidAction(
             "CR 702.24a: a repeated payment already begun only continues".to_string(),

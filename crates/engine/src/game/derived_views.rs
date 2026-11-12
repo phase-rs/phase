@@ -2230,6 +2230,11 @@ pub fn derive_filtered_views(
 ) -> DerivedViews {
     let mut views = derive_views(filtered_state, viewer);
     views.unique_authorized_submitter = unique_authorized_submitter(authoritative_state);
+    // CR 702.24a: whether the prompt continues a payment already begun is read
+    // from the payment's parked owner, which the viewer projection drops.
+    if let Some(draw) = views.unless_draw_cost.as_mut() {
+        draw.stage = unless_draw_payment_stage(authoritative_state);
+    }
     views.scry_prompt_id = viewer.and_then(|viewer| {
         crate::game::interaction::scry_prompt_id_for_viewer(authoritative_state, viewer)
     });
@@ -2371,16 +2376,21 @@ fn unless_draw_cost(state: &GameState) -> Option<UnlessDrawCostView> {
     };
     let resolved =
         crate::game::quantity::resolve_quantity_with_targets(state, count, pending_effect);
-    let stage = if crate::game::engine_payment_choices::awaits_payment_continuation(state) {
-        UnlessDrawPaymentStage::Continuing
-    } else {
-        UnlessDrawPaymentStage::Offered
-    };
     Some(UnlessDrawCostView {
         cards: u32::try_from(resolved).unwrap_or(0),
         instructions: repeat.unwrap_or(1),
-        stage,
+        stage: unless_draw_payment_stage(state),
     })
+}
+
+/// CR 702.24a: the stage of the open draw unless-payment prompt, read from the
+/// rules state that holds the payment's parked owner.
+fn unless_draw_payment_stage(state: &GameState) -> UnlessDrawPaymentStage {
+    if crate::game::engine_payment_choices::awaits_payment_continuation(state) {
+        UnlessDrawPaymentStage::Continuing
+    } else {
+        UnlessDrawPaymentStage::Offered
+    }
 }
 
 fn shared_piles(state: &GameState) -> Option<SharedPilesView> {

@@ -2869,9 +2869,9 @@ fn a_concession_that_removes_a_listed_creature_drops_the_checkpoint() {
 
 /// CR 800.4a + CR 118.3: the same departure when the lent creature was the only
 /// one listed. Re-materialized on the departed board, the cost can no longer be
-/// paid in full, and it fails whole, as a staged cost that fails does on main:
-/// nothing of the payment is committed, no prompt remains, and the save
-/// restores.
+/// paid in full, and it fails whole, as the next answer's replay would find it
+/// on main: nothing of the payment is committed, no prompt remains, and the
+/// save restores.
 #[test]
 fn a_concession_that_removes_the_only_listed_creature_fails_the_payment_whole() {
     let (mut runner, _, _) = lent_creature_tap_prompt(false, false);

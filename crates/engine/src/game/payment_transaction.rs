@@ -962,7 +962,7 @@ fn resettle_parked_replacement_after_departure(
 /// from the checkpoint: the payment keeps its descriptor and transcript and
 /// re-materializes on the departed base, where the cost authority derives the
 /// prompt and its eligible objects afresh and a cost that can no longer be
-/// paid fails whole, as a staged cost that fails does on main.
+/// paid fails whole, as the next answer's replay would find it on main.
 fn departure_can_change_parked_prompt(shadow: &GameState) -> bool {
     !matches!(
         shadow.waiting_for,

@@ -15,6 +15,7 @@
 
 use std::sync::Arc;
 
+use engine::game::derived_views::{UnlessDrawCostView, UnlessDrawPaymentStage};
 use engine::game::ledger::resolve_and_apply_cards_drawn;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::types::ability::{
@@ -2250,6 +2251,43 @@ fn assert_continuation_boundary(runner: &mut GameRunner, owed: u32, context: &st
         vec![GameAction::PayUnlessCost { pay: true }],
         "{context}: continuing is the only answer"
     );
+    let (flat, _, by_object) = engine::ai_support::legal_actions_full(runner.state());
+    let mana_actions: Vec<&GameAction> = flat
+        .iter()
+        .chain(by_object.values().flatten())
+        .filter(|action| {
+            matches!(
+                action,
+                GameAction::TapLandForMana { .. }
+                    | GameAction::UntapLandForMana { .. }
+                    | GameAction::ActivateManaSource { .. }
+                    | GameAction::ActivateAbility { .. }
+            )
+        })
+        .collect();
+    assert!(
+        mana_actions.is_empty(),
+        "{context}: no mana action is offered: {mana_actions:?}"
+    );
+    // The payer's client and an opponent's are both told the payment only
+    // continues, through the same viewer projection the transports use.
+    for viewer in [P0, P1] {
+        let filtered = engine::game::visibility::filter_state_for_viewer(runner.state(), viewer);
+        let views = engine::game::derived_views::derive_filtered_views(
+            runner.state(),
+            &filtered,
+            Some(viewer),
+        );
+        assert_eq!(
+            views.unless_draw_cost,
+            Some(UnlessDrawCostView {
+                cards: 1,
+                instructions: owed,
+                stage: UnlessDrawPaymentStage::Continuing,
+            }),
+            "{context}: viewer {viewer:?} sees a continuation"
+        );
+    }
     let before = runner.state().clone();
     let refused = runner.act(GameAction::PayUnlessCost { pay: false });
     assert!(
@@ -2285,6 +2323,17 @@ fn a_payment_past_a_work_slice_continues_at_a_boundary_without_priority() {
     });
     advance_through_upkeep(&mut runner);
     assert_draw_cost_prompt(&runner, AGE as usize, 1);
+    let filtered = engine::game::visibility::filter_state_for_viewer(runner.state(), P0);
+    assert_eq!(
+        engine::game::derived_views::derive_filtered_views(runner.state(), &filtered, Some(P0))
+            .unless_draw_cost,
+        Some(UnlessDrawCostView {
+            cards: 1,
+            instructions: AGE,
+            stage: UnlessDrawPaymentStage::Offered,
+        }),
+        "the fresh choice can be declined"
+    );
     let before = ZoneSizes::of(&runner, P0);
     let mut resolutions = 0;
     for slice in 1..=2 {
@@ -2538,6 +2587,52 @@ fn a_payment_across_a_work_slice_boundary_queues_each_draw_trigger_once() {
         queued_triggers_from(&runner, crawler),
         AGE as usize,
         "one trigger per draw of the whole payment"
+    );
+    assert_eq!(zone_of(&runner, vortex), Zone::Battlefield);
+}
+
+/// CR 603.2c: a work-slice boundary reached after a resumed replacement answer
+/// queues each draw's trigger exactly once. The first draw is replaced by
+/// Stinkweed Imp's Dredge (accepted, so the Imp leaves the graveyard and no
+/// later draw is replaced); the resumed payment then draws one work slice of
+/// cards to its boundary and the rest after the payer continues.
+#[test]
+fn a_boundary_after_a_resumed_dredge_answer_queues_each_draw_trigger_once() {
+    const AGE: u32 = WORK_SLICE + 3;
+    let names = library_names(AGE as usize + 50);
+    let library: Vec<&str> = names.iter().map(String::as_str).collect();
+    let (mut runner, vortex, crawler) = vortex_board(AGE - 1, &library, |scenario| {
+        let crawler = scenario
+            .add_creature(P0, "Psychosis Crawler", 1, 1)
+            .from_oracle_text(PSYCHOSIS_CRAWLER_ORACLE)
+            .id();
+        keep_psychosis_crawler_alive(scenario);
+        scenario
+            .add_creature_to_graveyard(P0, "Stinkweed Imp", 1, 2)
+            .from_oracle_text(STINKWEED_IMP_ORACLE);
+        crawler
+    });
+    advance_through_upkeep(&mut runner);
+    runner
+        .act(GameAction::PayUnlessCost { pay: true })
+        .expect("the payment is legal");
+    assert_replacement_choice(&runner, "the first draw offers Dredge");
+    runner
+        .act(GameAction::ChooseReplacement { index: 0 })
+        .expect("accepting Dredge resumes the payment");
+    assert_continuation_boundary(&mut runner, 2, "after the resumed slice");
+    assert_eq!(
+        queued_triggers_from(&runner, crawler),
+        WORK_SLICE as usize,
+        "one trigger per draw of the resumed slice"
+    );
+    runner
+        .act(GameAction::PayUnlessCost { pay: true })
+        .expect("the payment continues");
+    assert_eq!(
+        queued_triggers_from(&runner, crawler),
+        (AGE - 1) as usize,
+        "one trigger per card drawn; the Dredge drew none"
     );
     assert_eq!(zone_of(&runner, vortex), Zone::Battlefield);
 }
