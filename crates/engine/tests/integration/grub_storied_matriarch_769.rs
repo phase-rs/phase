@@ -133,6 +133,8 @@ const ELESH_NORN: &str = "Elesh Norn, Grand Cenobite";
 const CULT: &str = "Cult of the Waxing Moon";
 const ENGINEERED_PLAGUE: &str = "Engineered Plague";
 const ARCANE_ARTISAN: &str = "Arcane Artisan";
+const TOVOLAR: &str = "Tovolar, Dire Overlord";
+const MIDNIGHT_SCOURGE: &str = "Tovolar, the Midnight Scourge";
 
 const AUNTIE_ORACLE: &str = "Menace\nWhenever Grub attacks, you may blight 1. If you do, create a tapped and attacking token that's a copy of the blighted creature, except it has \"At the beginning of the end step, sacrifice this token.\"\nAt the beginning of your first main phase, you may pay {B}. If you do, transform Grub.";
 const NEXUS_ORACLE: &str = "At the beginning of combat on your turn, draw a card. Then you may exile an artifact or creature card from your hand. If you do, create a token that's a copy of the exiled card, except it's a 3/3 Golem artifact creature in addition to its other types.";
@@ -193,6 +195,8 @@ const CULT_ORACLE: &str = "Whenever a permanent you control transforms into a no
 const ENGINEERED_PLAGUE_ORACLE: &str =
     "As this enchantment enters, choose a creature type.\nAll creatures of the chosen type get -1/-1.";
 const ARCANE_ARTISAN_ORACLE: &str = "{2}{U}, {T}: Target player draws a card, then exiles a card from their hand. If a creature card is exiled this way, that player creates a token that's a copy of that card.\nWhen this creature leaves the battlefield, exile all tokens created with it at the beginning of the next end step.";
+const TOVOLAR_ORACLE: &str = "Whenever a Wolf or Werewolf you control deals combat damage to a player, draw a card.\nAt the beginning of your upkeep, if you control three or more Wolves and/or Werewolves, it becomes night. Then transform any number of Human Werewolves you control.\nDaybound";
+const MIDNIGHT_SCOURGE_ORACLE: &str = "Whenever a Wolf or Werewolf you control deals combat damage to a player, draw a card.\n{X}{R}{G}: Target Wolf or Werewolf you control gets +X/+0 and gains trample until end of turn.\nNightbound";
 const INTO_THE_NIGHT_ORACLE: &str =
     "It becomes night. Discard any number of cards, then draw that many cards plus one.";
 const CELESTUS_ORACLE: &str = "If it's neither day nor night, it becomes day as The Celestus enters.\n{T}: Add one mana of any color.\n{3}, {T}: If it's night, it becomes day. Otherwise, it becomes night. Activate only as a sorcery.\nWhenever day becomes night or night becomes day, you gain 1 life. You may draw a card. If you do, discard a card.";
@@ -5210,6 +5214,115 @@ fn cult_of_the_waxing_moon_trigger_on_arcane_artisans_copy_when_its_controller_s
     assert_eq!(wolves_created(&events), 1, "Cult creates one Wolf");
     assert_eq!(runner.state().objects[&bears].zone, Zone::Exile);
     assert_eq!(runner.state().objects[&artisan].zone, Zone::Battlefield);
+}
+
+/// A Feldon of the Third Path board for Cult of the Waxing Moon at night: P0 has Feldon, able to
+/// activate, Cult of the Waxing Moon, a Tovolar, Dire Overlord // Tovolar, the Midnight Scourge
+/// card on the battlefield as Tovolar, the Midnight Scourge, and a second Tovolar card, the only
+/// creature card in the graveyard. Returns Feldon, Cult and the Tovolar on the battlefield.
+fn feldon_tovolar_cult_board() -> (GameRunner, ObjectId, ObjectId, ObjectId) {
+    let (mut runner, (feldon, cult, tovolar)) = board(Phase::PreCombatMain, |scenario, db| {
+        for (name, oracle) in [
+            (FELDON, FELDON_ORACLE),
+            (CULT, CULT_ORACLE),
+            (TOVOLAR, TOVOLAR_ORACLE),
+            (MIDNIGHT_SCOURGE, MIDNIGHT_SCOURGE_ORACLE),
+        ] {
+            assert_oracle(db, name, oracle);
+        }
+        scenario.add_real_card(P0, TOVOLAR, Zone::Graveyard, db);
+        (
+            scenario.add_real_card(P0, FELDON, Zone::Battlefield, db),
+            scenario.add_real_card(P0, CULT, Zone::Battlefield, db),
+            scenario.add_real_card(P0, TOVOLAR, Zone::Battlefield, db),
+        )
+    });
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&feldon)
+        .expect("Feldon exists")
+        .summoning_sick = false;
+    engine::game::transform::transform_permanent(runner.state_mut(), tovolar, &mut Vec::new())
+        .expect("Tovolar must transform");
+    runner.state_mut().day_night = Some(DayNight::Night);
+    settle(&mut runner);
+    assert_eq!(
+        runner.state().objects[&tovolar].name,
+        MIDNIGHT_SCOURGE,
+        "reach guard: the staged Tovolar is back face up"
+    );
+    assert_settled(&runner);
+    (runner, feldon, cult, tovolar)
+}
+
+/// CR 704.5j: "If two or more legendary permanents with the same name are controlled by the same
+/// player, that player chooses one of them, and the rest are put into their owners' graveyards."
+/// At night, Feldon of the Third Path ("{2}{R}, {T}: Create a token that's a copy of target
+/// creature card in your graveyard, except it's an artifact in addition to its other types. It
+/// gains haste. Sacrifice it at the beginning of the next end step.") copies a Tovolar, Dire
+/// Overlord // Tovolar, the Midnight Scourge card while P0 controls Tovolar, the Midnight Scourge.
+/// The token enters as Tovolar, Dire Overlord (CR 707.8a) and turns into Tovolar, the Midnight
+/// Scourge (CR 702.145c), so Cult of the Waxing Moon ("Whenever a permanent you control
+/// transforms into a non-Human creature, create a 2/2 green Wolf creature token.") triggers
+/// (CR 603.10). The state-based check that follows asks P0 which Tovolar to keep, and Cult's
+/// trigger waits until that choice is made (CR 704.3). P0 keeps the original; Cult creates one
+/// Wolf.
+#[test]
+fn cult_of_the_waxing_moon_trigger_waits_behind_the_legend_rule_choice() {
+    let (mut runner, feldon, cult, tovolar) = feldon_tovolar_cult_board();
+    let (mut events, token) = feldon_makes_a_token(&mut runner, feldon);
+    assert_eq!(
+        entry_record_names(&events, token),
+        vec![TOVOLAR.to_string()],
+        "reach guard: the token entered as Tovolar, Dire Overlord"
+    );
+    assert_eq!(
+        transformed_events(&events, token),
+        1,
+        "reach guard: CR 702.145c: the token transformed"
+    );
+
+    match &runner.state().waiting_for {
+        WaitingFor::ChooseLegend {
+            player,
+            legend_name,
+            candidates,
+        } => {
+            assert_eq!(*player, P0);
+            assert_eq!(legend_name, MIDNIGHT_SCOURGE);
+            assert_eq!(sorted(candidates.clone()), sorted(vec![tovolar, token]));
+        }
+        other => panic!("CR 704.5j: P0 chooses a Tovolar to keep; got {other:?}"),
+    }
+    assert!(
+        runner.state().stack.is_empty(),
+        "CR 704.3: no trigger is put on the stack before the choice; stack: {:?}",
+        runner.state().stack
+    );
+    assert_eq!(wolves_created(&events), 0);
+
+    events.extend(
+        runner
+            .act(GameAction::ChooseLegend { keep: tovolar })
+            .expect("keeping the original Tovolar must succeed")
+            .events,
+    );
+    let stack = &runner.state().stack;
+    assert_eq!(stack.len(), 1, "stack: {stack:?}");
+    assert_eq!(
+        stack[0].source_id, cult,
+        "CR 603.10: Cult's trigger goes on the stack"
+    );
+    assert!(!runner.state().battlefield.contains(&token));
+
+    events.extend(pass_until_settled(&mut runner));
+    assert_eq!(wolves_created(&events), 1, "Cult creates one Wolf");
+    let kept = &runner.state().objects[&tovolar];
+    assert_eq!(
+        (kept.zone, kept.name.as_str()),
+        (Zone::Battlefield, MIDNIGHT_SCOURGE)
+    );
 }
 
 /// Cackling Counterpart ("Create a token that's a copy of target creature you control.") copies

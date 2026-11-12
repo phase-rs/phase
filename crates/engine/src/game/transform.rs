@@ -1095,8 +1095,9 @@ mod tests {
     /// Printed shapes: (a) Kessig Prowler // Sinuous Predator; (j) a token copy of Mirror
     /// Room // Fractured Realm made by Cackling Counterpart; (n) Cackling Counterpart copying a
     /// Kessig Prowler that Mirrorweave made a copy of the Room; (h) a card manifested by Soul
-    /// Summons; (k) Gemrazer mutated onto Kessig Prowler; (o) the CR 701.27d shape, a stored
-    /// face whose types are Sorcery.
+    /// Summons; (k) Gemrazer mutated onto Kessig Prowler; (o) Startled Awake // Persistent
+    /// Nightmare on the battlefield as Persistent Nightmare, whose other face, the sorcery
+    /// Startled Awake, is never a transform destination (CR 701.27d).
     ///
     /// Revert-failing: the layout-only check admitted (j) and (h). (a), (n) and (k) are the
     /// positive rows; (o) shows the CR 701.27d conjunct is kept.
