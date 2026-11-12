@@ -304,16 +304,13 @@
     "ignoredDie": "無視",
     "continue": "タップして続行",
     "you": "あなた",
-    "youPlayFirst": "あなたが先攻",
-    "playerPlaysFirst": "{{name}}が先攻",
+    "youWonRoll": "あなたがダイスロールに勝利",
+    "playerWonRoll": "{{name}}がダイスロールに勝利",
     "heads": "表",
     "tails": "裏",
     "coinFlip": "コインフリップ",
     "wonCoinFlip": "{{name}}がコインフリップに勝利",
-    "lostCoinFlip": "{{name}}がコインフリップに敗北",
-    "turnOrder": "ターン順",
-    "turnOrderItem": "{{turn}}ターン目: {{name}}",
-    "youTakeTurn": "あなたの{{turn}}ターン目"
+    "lostCoinFlip": "{{name}}がコインフリップに敗北"
   },
   "chrome": {
     "back": "戻る",

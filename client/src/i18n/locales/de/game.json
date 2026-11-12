@@ -1206,7 +1206,10 @@
       "subtitleKeepWithBottom": "Behalte diese Hand (du legst {{count}} unter die Bibliothek) oder nimm einen weiteren Mulligan für frische 7.",
       "subtitleKeepFree": "Behalte diese Hand (Gratis-Mulligan — keine Karten unter die Bibliothek) oder nimm einen weiteren Mulligan für frische 7.",
       "subtitleOpeningFree": "Behalte diese Hand oder nimm einen Gratis-Mulligan (keine Karten unter die Bibliothek).",
-      "subtitleOpeningOne": "Behalte diese Hand oder nimm einen Mulligan für frische 7 (du legst beim Behalten 1 unter die Bibliothek)."
+      "subtitleOpeningOne": "Behalte diese Hand oder nimm einen Mulligan für frische 7 (du legst beim Behalten 1 unter die Bibliothek).",
+      "onThePlay": "Du spielst zuerst",
+      "onTheDraw": "Du ziehst zuerst",
+      "takeTurn": "Du bist in Zug {{turn}} dran"
     },
     "companion": {
       "eyebrow": "Vorspiel",
