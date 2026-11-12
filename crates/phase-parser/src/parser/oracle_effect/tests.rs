@@ -80686,6 +80686,28 @@ fn compound_choice_object_and_player_keeps_resolution_before_printed_target_foll
     }
 }
 
+/// SHAPE: a bare choice repeated once per opponent keeps the timing it had before
+/// the producer existed (`Stack`): no printed card repeats one, and the
+/// resolution-time prompt's resume through the repeat loop is not exercised. The
+/// reach guard pins the repeat; the control is the same choice not repeated.
+/// Synthetic Oracle; no printed card repeats a bare choice per opponent.
+#[test]
+fn bare_choose_repeated_per_opponent_keeps_base_timing() {
+    let text = "For each opponent, choose a creature you control.";
+    let def = parse_effect_chain(text, AbilityKind::Spell);
+    assert!(
+        matches!(def.effect.as_ref(), Effect::TargetOnly { .. }) && def.repeat_for.is_some(),
+        "{text}: reach guard for the repeated bare choice: {def:#?}"
+    );
+    assert_eq!(
+        def.target_choice_timing,
+        TargetChoiceTiming::Stack,
+        "{text}"
+    );
+    let control = parse_effect_chain("Choose a creature you control.", AbilityKind::Spell);
+    assert_eq!(control.target_choice_timing, TargetChoiceTiming::Resolution);
+}
+
 /// SHAPE: the controller's object-and-player choice keeps Resolution under the same
 /// chain shape (the matched control of
 /// `compound_choice_inherited_non_controller_subject_object_and_player_keeps_base_resolution_timing`).
@@ -80766,6 +80788,24 @@ fn bare_choose_beside_a_cast_time_choice_keeps_base_timing() {
         (TargetChoiceTiming::Stack, TargetChoiceTiming::Stack),
         "Tunnel of Love: both choices keep their base timing"
     );
+
+    // Another player's choice whose clause prints "target" only for that player
+    // ("Target opponent chooses ...") is a cast-time pick too, and holds the chain
+    // in either order. Synthetic Oracle; the nearest printed card is Sakashima's
+    // Will, mode 1 ("Target opponent chooses a creature they control. You gain
+    // control of it.").
+    for text in [
+        "Choose a creature you control. Target opponent chooses a creature they control.",
+        "Choose a creature you control, then target opponent chooses a creature you control.",
+        "Target opponent chooses a creature you control, then you choose a creature you control.",
+    ] {
+        let def = parse_effect_chain(text, AbilityKind::Spell);
+        assert_eq!(
+            target_only_chain_timings(&def),
+            vec![TargetChoiceTiming::Stack, TargetChoiceTiming::Stack],
+            "{text}: both choices keep their base timing: {def:#?}"
+        );
+    }
 
     let control = "Choose a creature you control. It gains indestructible until end of turn. Choose a creature you control. It gains flying until end of turn.";
     let def = parse_effect_chain(control, AbilityKind::Spell);

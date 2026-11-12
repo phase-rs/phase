@@ -29418,10 +29418,18 @@ fn withhold_resolution_timing_from_choices_feeding_printed_targets(clauses: &mut
 /// `withhold_resolution_timing_from_choices_feeding_printed_targets`, whose
 /// withheld choices are kept at cast for their own reason and do not hold the rest
 /// of the chain back.
-fn withhold_resolution_timing_beside_a_cast_time_choice(clauses: &mut [ClauseIr]) {
+fn withhold_resolution_timing_beside_a_cast_time_choice(
+    clauses: &mut [ClauseIr],
+    ctx: &ParseContext,
+) {
     let holds_cast_time_choice = clauses.iter().any(|clause| {
-        lower::PrintedTargetWord::from_clauses(std::slice::from_ref(clause))
+        // A clause that prints "target" announces that target at cast, which is
+        // not a choice made out of order, unless the word is only another
+        // player's target subject ("Target opponent chooses a creature you
+        // control"): that player's bare choice is a cast-time pick too.
+        (lower::PrintedTargetWord::from_clauses(std::slice::from_ref(clause))
             == lower::PrintedTargetWord::Absent
+            || clause_names_another_player(clause, ctx))
             && (cast_time_bare_choice(
                 &clause.parsed.effect,
                 clause.declared_target_choice_timing.unwrap_or_default(),
@@ -29449,6 +29457,35 @@ fn withhold_resolution_timing_beside_a_cast_time_choice(clauses: &mut [ClauseIr]
                 def.target_choice_timing = TargetChoiceTiming::Stack;
             }
             node = def.sub_ability.as_deref_mut();
+        }
+    }
+}
+
+/// CR 608.2d: whether the clause's own leading subject is a player other than the
+/// controller or the source ("Target opponent chooses ...", "An opponent
+/// chooses ..."). Probes a throwaway context because subject parsing may record
+/// target state on it.
+fn clause_names_another_player(clause: &ClauseIr, ctx: &ParseContext) -> bool {
+    clause.source.fragment().is_some_and(|fragment| {
+        subject::parse_leading_subject_application(
+            strip_leading_sequence_connector(fragment).trim(),
+            &mut ctx.clone_throwaway(),
+        )
+        .is_some_and(|application| non_controller_subject_chooser(&application.affected).is_some())
+    })
+}
+
+/// A bare choice repeated once per player or object ("For each opponent, choose a
+/// creature you control.") keeps the timing it had before the bare-choice
+/// producer existed: no printed card repeats one, and the resolution-time
+/// prompt's resume through the repeat loop is not exercised.
+fn withhold_resolution_timing_from_repeated_choices(clauses: &mut [ClauseIr]) {
+    for clause in clauses
+        .iter_mut()
+        .filter(|clause| clause.repeat_for.is_some())
+    {
+        if matches!(clause.parsed.effect, Effect::TargetOnly { .. }) {
+            clause.declared_target_choice_timing = None;
         }
     }
 }
@@ -51690,7 +51727,8 @@ fn parse_effect_chain_ir_body(
     // CR 601.2c: before the anaphor binder reads the clauses' timing, so a
     // withheld choice is bound exactly as it was before the bare-choice producer
     // existed.
-    withhold_resolution_timing_beside_a_cast_time_choice(builder.clauses_mut());
+    withhold_resolution_timing_from_repeated_choices(builder.clauses_mut());
+    withhold_resolution_timing_beside_a_cast_time_choice(builder.clauses_mut(), ctx);
     withhold_resolution_timing_from_choices_feeding_printed_targets(builder.clauses_mut());
     // CR 608.2c: after player tagging, so a producer's player group is final and
     // the object-group stamp cannot suppress it.
