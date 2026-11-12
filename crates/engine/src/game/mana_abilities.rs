@@ -3934,11 +3934,16 @@ fn finish_mana_ability_cost_payment(
             .copied()
             .filter(|&id| matches_target_filter(state, id, card_filter, &ctx))
             .collect();
+        // CR 400.2: hand size is public but which cards are eligible is not,
+        // so the prompt's existence must not depend on eligibility — any
+        // non-empty hand gets the prompt (with only the empty selection legal
+        // when nothing matches). Only an empty hand skips it.
         // The synchronous auto-resolver (`AutoResolved`) has no prompt to
         // surface — its caller restores its own `waiting_for` — so it takes
         // the always-legal CR 107.1c choice of zero cards rather than
         // parking a selection nobody would answer.
-        if !eligible.is_empty() && !resolves_automatically {
+        let hand_is_empty = state.players[pending.player.0 as usize].hand.is_empty();
+        if !hand_is_empty && !resolves_automatically {
             let resume = WaitingFor::RevealChoice {
                 player: pending.player,
                 cards: eligible,

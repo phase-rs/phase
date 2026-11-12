@@ -2585,21 +2585,24 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
         }
     }
 
-    // CR 701.20a + CR 400.2: a `RevealChoice` offered before anything is
-    // revealed ("reveal any number of artifact cards in your hand", "you may
-    // reveal a land card") lists exactly the matching cards of the chooser's
-    // HIDDEN hand. Its membership and count are private to the chooser; only a
-    // viewer who already knows every listed card (a post-reveal choice over an
-    // already-revealed hand) keeps the list.
-    if let WaitingFor::RevealChoice { player, cards, .. } = &mut filtered.waiting_for {
-        let candidates_hidden = viewer.is_none_or(|v| {
-            !viewer_has_private_access_to_player(state, v, *player)
-                && cards
-                    .iter()
-                    .any(|&id| !is_visible_revealed_card(state, v, id))
-        });
+    // CR 701.20a + CR 400.2: a `RevealChoice` lists the matching cards of the
+    // chooser's HIDDEN hand, so its membership and count are private to the
+    // chooser. For any viewer without private access to that hand the payload
+    // (candidate list and the pending mana-ability carrier) is cleared
+    // unconditionally — never conditioned on which eligible cards happen to be
+    // visible — so the projection's shape cannot encode private eligibility.
+    if let WaitingFor::RevealChoice {
+        player,
+        cards,
+        pending_mana_ability,
+        ..
+    } = &mut filtered.waiting_for
+    {
+        let candidates_hidden =
+            viewer.is_none_or(|v| !viewer_has_private_access_to_player(state, v, *player));
         if candidates_hidden {
             cards.clear();
+            *pending_mana_ability = None;
         }
     }
 
@@ -7357,21 +7360,6 @@ mod tests {
                     max: 1,
                     accumulated: 0,
                     source_id: paid,
-                    pending_mana_ability: Some(mana_ability()),
-                }),
-            ),
-            (
-                // CR 605.3b: the Metalworker reveal selection carries the paused activation.
-                "RevealChoice pending mana ability",
-                "/waiting_for/".to_string(),
-                5,
-                prompt(WaitingFor::RevealChoice {
-                    player: owner,
-                    cards: Vec::new(),
-                    filter: crate::types::ability::TargetFilter::Any,
-                    optional: false,
-                    decline_runs_continuation: false,
-                    cardinality: crate::types::ability::ObjectSelectionCardinality::AnyNumber,
                     pending_mana_ability: Some(mana_ability()),
                 }),
             ),
@@ -16152,19 +16140,21 @@ mod tests {
             reveal_candidates(&filter_state_for_unseated_viewer(&state).waiting_for).is_empty()
         );
 
-        // Partial: one candidate already public does not unlock the membership of the other.
-        state.revealed_cards.insert(a);
-        assert!(
-            reveal_candidates(&filter_state_for_viewer(&state, PlayerId(1)).waiting_for).is_empty()
-        );
-        assert!(
-            reveal_candidates(&filter_state_for_unseated_viewer(&state).waiting_for).is_empty()
-        );
-
-        // Fully revealed (a post-reveal choice over a revealed hand): the list is public.
-        state.revealed_cards.insert(b);
+        // CR 400.2: the projection never conditions on which candidates are
+        // already public — partially or fully revealed, a viewer without access
+        // to the chooser's hand still receives no candidate list.
+        for revealed in [a, b] {
+            state.revealed_cards.insert(revealed);
+            assert!(
+                reveal_candidates(&filter_state_for_viewer(&state, PlayerId(1)).waiting_for)
+                    .is_empty()
+            );
+            assert!(
+                reveal_candidates(&filter_state_for_unseated_viewer(&state).waiting_for).is_empty()
+            );
+        }
         assert_eq!(
-            reveal_candidates(&filter_state_for_viewer(&state, PlayerId(1)).waiting_for),
+            reveal_candidates(&filter_state_for_viewer(&state, PlayerId(0)).waiting_for),
             vec![a, b]
         );
     }

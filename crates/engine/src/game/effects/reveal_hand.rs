@@ -140,8 +140,13 @@ pub fn resolve(
     // revealed this way"). Revealing is the hand owner's action, so the hand
     // owner chooses.
     if cardinality == ObjectSelectionCardinality::AnyNumber {
+        // CR 400.2: hand size is public, eligibility is not — so the prompt
+        // exists for every non-empty hand, even when no card matches (the
+        // empty selection is then the only legal answer). Only an empty hand
+        // skips it.
+        let hand_is_empty = full_hand.is_empty();
         let eligible = matching_hand_cards(state, ability, full_hand, &card_filter);
-        if eligible.is_empty() {
+        if hand_is_empty {
             // CR 107.1c: zero is the only possible choice; publish the empty
             // revealed set so a "for each card revealed this way" reader sees
             // this resolution's population rather than a stale one.

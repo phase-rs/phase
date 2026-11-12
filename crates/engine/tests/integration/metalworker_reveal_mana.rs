@@ -177,20 +177,175 @@ fn metalworker_revealing_zero_cards_completes_with_no_mana() {
     assert_activation_completed(&runner, metalworker);
 }
 
+/// CR 400.2 + CR 107.1c: hand size is public but eligibility is not, so a
+/// non-empty hand with nothing eligible still gets the prompt; its only legal
+/// answer is the empty selection, which adds no mana.
 #[test]
-fn metalworker_with_no_artifacts_in_hand_completes_without_a_prompt() {
-    let (mut runner, metalworker, _, _) = metalworker_board(0);
+fn metalworker_with_no_artifacts_in_non_empty_hand_prompts_and_only_empty_is_legal() {
+    let (mut runner, metalworker, _, non_artifact) = metalworker_board(0);
+    activate(&mut runner, metalworker);
+
+    match &runner.state().waiting_for {
+        WaitingFor::RevealChoice {
+            player,
+            cards,
+            cardinality,
+            pending_mana_ability,
+            ..
+        } => {
+            assert_eq!(*player, P0);
+            assert_eq!(*cardinality, ObjectSelectionCardinality::AnyNumber);
+            assert!(cards.is_empty(), "nothing is eligible");
+            assert!(pending_mana_ability.is_some());
+        }
+        other => panic!("expected a RevealChoice even with nothing eligible, got {other:?}"),
+    }
+    assert!(
+        runner
+            .act(GameAction::SelectCards {
+                cards: vec![non_artifact],
+            })
+            .is_err(),
+        "an ineligible card cannot be revealed"
+    );
+    let issued = legal_actions(runner.state());
+    assert!(
+        issued.contains(&GameAction::SelectCards { cards: vec![] }),
+        "the empty selection is issued, got {issued:?}"
+    );
+    let outcome = runner
+        .act(GameAction::SelectCards { cards: vec![] })
+        .expect("the empty selection is legal");
+
+    assert_eq!(colorless(&runner), 0);
+    assert!(revealed_ids(&outcome.events).is_empty());
+    assert_activation_completed(&runner, metalworker);
+}
+
+/// CR 400.2: only an empty hand (public) skips the prompt.
+#[test]
+fn metalworker_with_an_empty_hand_completes_without_a_prompt() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let metalworker = scenario
+        .add_creature_from_oracle(P0, "Metalworker", 1, 2, METALWORKER_ORACLE)
+        .as_artifact()
+        .id();
+    let mut runner = scenario.build();
     let outcome = runner
         .act(GameAction::ActivateAbility {
             source_id: metalworker,
             ability_index: 0,
             payment_mode: CastPaymentMode::Auto,
         })
-        .expect("activation is legal with no artifacts in hand");
+        .expect("activation is legal with an empty hand");
 
     assert_eq!(colorless(&runner), 0);
     assert!(revealed_ids(&outcome.events).is_empty());
     assert_activation_completed(&runner, metalworker);
+}
+
+/// A board whose two hand cards are identical in every public respect; only
+/// the first's eligibility (artifact vs. creature) differs.
+fn two_card_hand_board(first_is_artifact: bool) -> (GameRunner, ObjectId) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let metalworker = scenario
+        .add_creature_from_oracle(P0, "Metalworker", 1, 2, METALWORKER_ORACLE)
+        .as_artifact()
+        .id();
+    let mut first = scenario.add_creature_to_hand(P0, "Hidden A", 1, 1);
+    if first_is_artifact {
+        first.as_artifact();
+    }
+    scenario.add_creature_to_hand(P0, "Hidden B", 2, 2);
+    (scenario.build(), metalworker)
+}
+
+/// CR 400.2 + CR 701.20a: the pre-reveal prompt's projection to an opponent
+/// and to a spectator is byte-identical whether or not an unrevealed hand card
+/// is eligible, while the owner still sees the full options.
+#[test]
+fn metalworker_pre_reveal_projection_is_independent_of_hidden_eligibility() {
+    use engine::game::visibility::{filter_state_for_unseated_viewer, filter_state_for_viewer};
+    use engine::types::player::PlayerId;
+
+    let (mut eligible, mw_a) = two_card_hand_board(true);
+    let (mut ineligible, mw_b) = two_card_hand_board(false);
+    activate(&mut eligible, mw_a);
+    activate(&mut ineligible, mw_b);
+
+    // The owner sees the real candidate list in the eligible world only.
+    for (runner, expected_len) in [(&eligible, 1usize), (&ineligible, 0usize)] {
+        match &filter_state_for_viewer(runner.state(), P0).waiting_for {
+            WaitingFor::RevealChoice {
+                cards,
+                pending_mana_ability,
+                ..
+            } => {
+                assert_eq!(cards.len(), expected_len, "owner keeps full options");
+                assert!(pending_mana_ability.is_some());
+            }
+            other => panic!("owner must see the RevealChoice, got {other:?}"),
+        }
+    }
+
+    let opponent = PlayerId(1);
+    let json = |state| serde_json::to_string(&state).expect("projection serializes");
+    assert_eq!(
+        json(filter_state_for_viewer(eligible.state(), opponent)),
+        json(filter_state_for_viewer(ineligible.state(), opponent)),
+        "opponent projection must not encode private eligibility"
+    );
+    assert_eq!(
+        json(filter_state_for_unseated_viewer(eligible.state())),
+        json(filter_state_for_unseated_viewer(ineligible.state())),
+        "spectator projection must not encode private eligibility"
+    );
+    match &filter_state_for_viewer(eligible.state(), opponent).waiting_for {
+        WaitingFor::RevealChoice {
+            cards,
+            pending_mana_ability,
+            ..
+        } => {
+            assert!(cards.is_empty());
+            assert!(pending_mana_ability.is_none());
+        }
+        other => panic!("opponent still sees that a reveal is pending, got {other:?}"),
+    }
+}
+
+/// CR 400.2: the stack-resolution producer follows the same rule — a
+/// non-empty hand with no white card still prompts, and only empty is legal.
+#[test]
+fn scent_of_jasmine_with_nothing_eligible_in_non_empty_hand_prompts_for_empty() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let scent = scenario
+        .add_spell_to_hand_from_oracle(P0, "Scent of Jasmine", true, SCENT_OF_JASMINE_ORACLE)
+        .id();
+    let green = scenario
+        .add_creature_to_hand(P0, "Green", 1, 1)
+        .with_color(vec![ManaColor::Green])
+        .id();
+    let mut runner = scenario.build();
+    let life_before = runner.state().players[P0.0 as usize].life;
+
+    let cast = runner.cast(scent).resolve();
+    match cast.final_waiting_for() {
+        WaitingFor::RevealChoice { player, cards, .. } => {
+            assert_eq!(*player, P0);
+            assert!(cards.is_empty());
+        }
+        other => panic!("expected a RevealChoice with nothing eligible, got {other:?}"),
+    }
+    assert!(runner
+        .act(GameAction::SelectCards { cards: vec![green] })
+        .is_err());
+    runner
+        .act(GameAction::SelectCards { cards: vec![] })
+        .expect("the empty selection is legal");
+    assert_eq!(runner.state().players[P0.0 as usize].life, life_before);
 }
 
 #[test]
@@ -502,13 +657,12 @@ fn metalworker_with_nothing_eligible_ignores_an_earlier_activations_reveal() {
         .unwrap()
         .tapped = false;
 
+    // CR 400.2: the hand still holds a non-artifact card, so the prompt appears
+    // and only the empty selection is legal.
+    activate(&mut runner, metalworker);
     let outcome = runner
-        .act(GameAction::ActivateAbility {
-            source_id: metalworker,
-            ability_index: 0,
-            payment_mode: CastPaymentMode::Auto,
-        })
-        .expect("activation is legal with nothing eligible");
+        .act(GameAction::SelectCards { cards: vec![] })
+        .expect("the empty selection is legal with nothing eligible");
     assert!(revealed_ids(&outcome.events).is_empty());
     assert_eq!(
         colorless(&runner),
