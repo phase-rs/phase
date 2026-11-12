@@ -646,7 +646,7 @@ mod tests {
     use super::*;
     use crate::game::deck_loading::load_deck_into_state;
     use crate::game::deck_loading::PlayerDeckPayload;
-    use crate::game::engine::{apply_as_current, start_game};
+    use crate::game::engine::{apply_as_current, start_game, start_game_winner_plays_first};
     use crate::types::ability::ControlWindow;
     use crate::types::actions::GameAction;
     use crate::types::card::CardFace;
@@ -1062,7 +1062,7 @@ mod tests {
     }
 
     #[test]
-    fn bo3_game_one_starter_is_randomized() {
+    fn bo3_game_one_chooser_is_randomized() {
         let mut saw_p0 = false;
         let mut saw_p1 = false;
 
@@ -1071,10 +1071,14 @@ mod tests {
             state.match_config.match_type = MatchType::Bo3;
             state.game_number = 1;
             let _ = start_game(&mut state);
-            if state.current_starting_player == PlayerId(0) {
+            // CR 103.1: the contest decides who chooses.
+            let WaitingFor::ChooseStartingPlayer { player, .. } = state.waiting_for else {
+                panic!("the start rests at the CR 103.1 choice");
+            };
+            if player == PlayerId(0) {
                 saw_p0 = true;
             }
-            if state.current_starting_player == PlayerId(1) {
+            if player == PlayerId(1) {
                 saw_p1 = true;
             }
             if saw_p0 && saw_p1 {
@@ -1106,7 +1110,7 @@ mod tests {
             ..Default::default()
         };
         load_deck_into_state(&mut state, &payload);
-        let _ = start_game(&mut state);
+        let _ = start_game_winner_plays_first(&mut state);
 
         state.match_phase = MatchPhase::BetweenGames;
         state.match_score = crate::types::match_config::MatchScore {
@@ -1229,7 +1233,7 @@ mod tests {
             ..Default::default()
         };
         load_deck_into_state(&mut state, &payload);
-        let _ = start_game(&mut state);
+        let _ = start_game_winner_plays_first(&mut state);
 
         // Drive to the between-games rebuild for game 2.
         state.match_phase = MatchPhase::BetweenGames;
@@ -1335,7 +1339,7 @@ mod tests {
             ..Default::default()
         };
         load_deck_into_state(&mut state, &payload);
-        let _ = start_game(&mut state);
+        let _ = start_game_winner_plays_first(&mut state);
 
         state.match_phase = MatchPhase::BetweenGames;
         state.match_score = crate::types::match_config::MatchScore {
@@ -1425,7 +1429,7 @@ mod tests {
             ..Default::default()
         };
         load_deck_into_state(&mut state, &payload);
-        let _ = start_game(&mut state);
+        let _ = start_game_winner_plays_first(&mut state);
 
         state.match_phase = MatchPhase::BetweenGames;
         state.match_score = crate::types::match_config::MatchScore {

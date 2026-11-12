@@ -18366,7 +18366,13 @@ mod issue_4548_full_create_tests {
             {
                 let session = lock_session(&app.sessions, &code).await.expect("session");
                 assert!(session.game_started);
-                assert!(session.state.turn_number >= 1);
+                assert!(
+                    matches!(
+                        session.state.waiting_for,
+                        engine::types::game_state::WaitingFor::ChooseStartingPlayer { .. }
+                    ),
+                    "the join started the game at the CR 103.1 choice"
+                );
             }
             assert!(matches!(
                 fresh_attempt(
@@ -19864,19 +19870,64 @@ mod game_submission_tests {
             .expect("send create");
 
         let mut created = None;
-        let mut started = false;
-        while created.is_none() || !started {
+        let mut started = None;
+        while created.is_none() || started.is_none() {
             match recv_server_message(socket).await {
                 ServerMessage::GameCreated {
                     game_code,
                     player_token,
                     full_key: Some(full_key),
                 } => created = Some((game_code, player_token, full_key)),
-                ServerMessage::GameStarted { .. } => started = true,
+                ServerMessage::GameStarted { state, .. } => started = Some(state.waiting_for),
                 ServerMessage::Error { message, .. } => {
                     panic!("AI game creation failed: {message}")
                 }
                 _ => {}
+            }
+        }
+        // CR 103.1: when the host won the roll it names the AI seat, and an AI
+        // chooser names itself (`first_turn_election`), so every run starts with
+        // the AI seat on the play. Read through the batch's final,
+        // decision-carrying `StateUpdate`, so no AI follow-up frame is left queued.
+        if matches!(
+            started,
+            Some(
+                engine::types::game_state::WaitingFor::ChooseStartingPlayer {
+                    player: PlayerId(0),
+                    ..
+                }
+            )
+        ) {
+            socket
+                .send(WsMessage::Text(
+                    serde_json::to_string(&ClientMessage::Action {
+                        action: GameAction::ChooseStartingPlayer {
+                            player: PlayerId(1),
+                        },
+                    })
+                    .expect("choice json")
+                    .into(),
+                ))
+                .await
+                .expect("send choice");
+            loop {
+                match recv_server_message(socket).await {
+                    ServerMessage::StateUpdate { legal_actions, .. }
+                        if !legal_actions.is_empty() =>
+                    {
+                        break
+                    }
+                    ServerMessage::ActionRejected { rejection } => {
+                        panic!("the host's choice was rejected: {rejection:?}")
+                    }
+                    ServerMessage::ActionFailed { message } => {
+                        panic!("the host's choice failed: {message}")
+                    }
+                    ServerMessage::Error { message, .. } => {
+                        panic!("the host's choice failed: {message}")
+                    }
+                    _ => {}
+                }
             }
         }
         created.expect("Full game identity")
