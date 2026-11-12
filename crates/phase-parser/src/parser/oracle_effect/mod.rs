@@ -8195,7 +8195,7 @@ fn try_parse_put_counter_choice(
     // is. That reads like a lost guard and is not one: `live_object_targets`
     // consults `target_pin_is_current`, which reads `target_incarnations` —
     // "pinned at DELAYED-TRIGGER creation", per the standing note at
-    // `ability_utils::target_filter_binds_prior_target`. (The setter's two other
+    // `types::ability::target_filter_binds_prior_target`. (The setter's two other
     // callers seed it for a ZoneChanged parent target and for a forwarded result
     // context; neither printing here is either.) A target the player announces
     // lands in the separate occurrence pins (`target_pins`) instead,
@@ -29717,15 +29717,27 @@ fn effect_reads_announced_root_slots(
     }
 }
 
+/// CR 601.2c: whether a filter reads an object chosen earlier in the chain: the
+/// engine's own definition of a filter that binds a prior target
+/// (`types::ability::target_filter_binds_prior_target`), and a same-name read of
+/// the parent target ("with the same name as that creature"), which the engine
+/// resolves from the parent's targets too.
+pub(super) fn filter_reads_earlier_object(filter: &TargetFilter) -> bool {
+    crate::types::ability::target_filter_binds_prior_target(filter)
+        || crate::types::ability::filter_contains_filter_prop(filter, &|prop| {
+            matches!(prop, FilterProp::SameNameAsParentTarget)
+        })
+}
+
 /// CR 608.2c + CR 115.10a: whether a later instruction's effect reads the chosen
 /// object as its target (which the anaphora rewrite rebinds to `ParentTarget`) or
-/// through a filter that binds a prior target.
+/// through a filter that reads an earlier object.
 fn effect_reads_chosen_object(effect: &Effect) -> bool {
     effect.target_filter() == Some(&TargetFilter::ParentTarget)
         // A printed target whose own filter reads the chosen object ("Exile target
         // creature that shares a creature type with it"): the engine enumerates
         // it against the slot declared for the earlier choice.
-        || effect_slot_filters(effect).any(crate::types::ability::target_filter_binds_prior_target)
+        || effect_slot_filters(effect).any(filter_reads_earlier_object)
 }
 
 /// The nearest object-naming node of one clause, read from its own sub chain

@@ -8738,10 +8738,11 @@ pub enum TargetFilter {
 ///   * `ObjectScope::Target` inside a quantity threshold (Puca's Mischief `Cmc`,
 ///     Spawnbroker `PtComparison`) — resolved by `quantity::object_id_for_scope`.
 ///   * `FilterProp::SharesQuality { reference: Some(ParentTarget) }` (Daring
-///     Thief) — resolved by `filter::parent_target_shared_quality_values`.
+///     Thief) — resolved by the engine's `parent_target_shared_quality_values`.
 ///   * a `ParentTargetController` controller ("another target creature that
-///     player controls", Mutiny) — resolved by `filter::parent_target_controller_player`
-///     through `ability_utils::parent_target_controller`.
+///     player controls", Mutiny) — resolved by the engine's
+///     `parent_target_controller_player` through its parent-target-controller
+///     lookup.
 ///
 /// Each reads the first entry of `ability.targets`, and none consults
 /// `target_incarnations`.

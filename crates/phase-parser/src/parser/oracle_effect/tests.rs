@@ -80847,6 +80847,7 @@ fn bare_choose_reading_a_prior_object_keeps_base_timing() {
         "Choose a creature you control, then exile target creature that shares a creature type with it.",
         "Destroy target creature. Choose a creature you control that shares a creature type with it.",
         "Choose a creature you control. Choose a creature you control that shares a color with it.",
+        "Exile target creature. Choose a creature you control with the same name as that creature.",
     ] {
         let def = parse_effect_chain(text, AbilityKind::Spell);
         let timings = target_only_chain_timings(&def);

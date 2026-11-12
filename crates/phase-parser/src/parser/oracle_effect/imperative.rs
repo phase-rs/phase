@@ -5201,7 +5201,7 @@ pub(super) fn parse_choose_ast(
                 // A filter that reads an earlier object ("that shares a creature
                 // type with it") is enumerated against the slots declared at cast,
                 // and a resolution-time choice has none to read.
-                && !crate::types::ability::target_filter_binds_prior_target(&target)
+                && !super::filter_reads_earlier_object(&target)
                 // The resolution chooser enumerates battlefield permanents only,
                 // so a card in another zone ("a creature card you control in
                 // exile") keeps its announced pick.
