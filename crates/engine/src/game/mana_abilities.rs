@@ -13,7 +13,7 @@ use crate::types::ability::{
 use crate::types::counter::{CounterMatch, CounterType};
 use crate::types::events::{ActivatedAbilityKind, BoundActivationCost, GameEvent, ManaTapState};
 use crate::types::game_state::{
-    CostResume, GameState, ManaAbilityCostCursor, ManaAbilityCostParent,
+    CastPaymentMode, CostResume, GameState, ManaAbilityCostCursor, ManaAbilityCostParent,
     ManaAbilityCostParentLifecycle, ManaAbilityCostResolutionMode, ManaAbilityResume,
     ManaAmountComposition, ManaChoice, ManaChoiceContext, ManaChoicePrompt, ManaColorChoiceResume,
     ManaTriggerFixedPointResume, PausedCounterCostRemoval, PayCostKind, PayableResource,
@@ -21,7 +21,7 @@ use crate::types::game_state::{
     WaitingFor,
 };
 use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
-use crate::types::mana::{ManaColor, ManaCost, ManaPool, ManaType, PaymentContext};
+use crate::types::mana::{ManaColor, ManaCost, ManaPipId, ManaPool, ManaType, PaymentContext};
 #[cfg(test)]
 use crate::types::phase::Phase;
 use crate::types::player::PlayerId;
@@ -553,6 +553,8 @@ pub(super) fn resolve_mana_ability_excluding(
         chosen_tappers: None,
         chosen_discards: Vec::new(),
         chosen_mana_payment: None,
+        payment_mode: CastPaymentMode::Auto,
+        pinned_pool_units: Vec::new(),
         chosen_counter_counts: Vec::new(),
         chosen_x: None,
         collected_evidence: Vec::new(),
@@ -998,6 +1000,34 @@ pub fn activate_mana_ability(
     resume: ManaAbilityResume,
     color_override: Option<ProductionOverride>,
 ) -> Result<WaitingFor, EngineError> {
+    activate_mana_ability_with_payment_mode(
+        state,
+        source_id,
+        player,
+        ability_index,
+        ability_def,
+        events,
+        resume,
+        color_override,
+        CastPaymentMode::Auto,
+    )
+}
+
+/// CR 605.3b + CR 602.2b: [`activate_mana_ability`] with the player's
+/// mana-payment preference. `CastPaymentMode::Manual` stops before the
+/// ability's mana sub-cost is paid (see `advance_mana_ability_activation`).
+#[allow(clippy::too_many_arguments)]
+pub fn activate_mana_ability_with_payment_mode(
+    state: &mut GameState,
+    source_id: ObjectId,
+    player: PlayerId,
+    ability_index: usize,
+    ability_def: &AbilityDefinition,
+    events: &mut Vec<GameEvent>,
+    resume: ManaAbilityResume,
+    color_override: Option<ProductionOverride>,
+    payment_mode: CastPaymentMode,
+) -> Result<WaitingFor, EngineError> {
     let source = state
         .objects
         .get(&source_id)
@@ -1090,6 +1120,8 @@ pub fn activate_mana_ability(
             chosen_tappers: None,
             chosen_discards: Vec::new(),
             chosen_mana_payment: None,
+            payment_mode,
+            pinned_pool_units: Vec::new(),
             chosen_counter_counts: Vec::new(),
             chosen_x: None,
             collected_evidence: Vec::new(),
@@ -2346,6 +2378,18 @@ fn announced_mana_ability_cost(
     }
 }
 
+/// CR 605.3a + CR 107.3a: the mana sub-cost `pending` pays, with an announced
+/// X concretized — the one cost the gate, the window's pins, its confirmation
+/// and its derived view all read.
+pub(crate) fn pending_mana_sub_cost(
+    state: &GameState,
+    pending: &PendingManaAbility,
+) -> Result<Option<ManaCost>, EngineError> {
+    let ability_def = mana_ability_definition(state, pending)?;
+    let activation_cost = announced_mana_ability_cost(&ability_def.cost, pending.chosen_x);
+    Ok(mana_sub_cost_of(&activation_cost).cloned())
+}
+
 fn concretize_announced_mana_x(cost: &AbilityCost, x: u32) -> AbilityCost {
     match cost {
         AbilityCost::Mana { cost } => {
@@ -2631,6 +2675,18 @@ pub(super) fn advance_mana_ability_activation(
     // 117.1d / CR 118.2).
     if pending.chosen_mana_payment.is_none() {
         if let Some(sub_cost) = mana_sub_cost_of(&activation_cost) {
+            // CR 602.2b + CR 601.2g + CR 605.3a: a manually paid mana ability gives its
+            // player the chance to activate mana abilities, and to direct which pool
+            // mana pays, before its mana sub-cost is paid (CR 601.2h). Nothing has
+            // been paid yet, so withdrawing it reverses cleanly (CR 733.1).
+            if super::casting::payment_mode_pays_mana_manually(pending.payment_mode)
+                && sub_cost.mana_value() > 0
+            {
+                return Ok(WaitingFor::ManaAbilityManaPayment {
+                    player: pending.player,
+                    pending_mana_ability: Box::new(pending),
+                });
+            }
             let activation_context = super::casting::activation_payment_context(
                 state,
                 pending.source_id,
@@ -2638,7 +2694,12 @@ pub(super) fn advance_mana_ability_activation(
             );
             let activation_ctx = activation_context.as_payment_context();
             let pool = &state.players[pending.player.0 as usize].mana_pool;
-            let plans = enumerate_hybrid_payment_plans(pool, sub_cost, &activation_ctx);
+            let plans = enumerate_hybrid_payment_plans(
+                pool,
+                sub_cost,
+                &activation_ctx,
+                &pending.pinned_pool_units,
+            );
             match plans.len() {
                 0 if {
                     // CR 605.3c: auto-tap may not pay with a source suspended beneath this one.
@@ -2675,18 +2736,7 @@ pub(super) fn advance_mana_ability_activation(
                     });
                 }
                 0 => {}
-                1 => {
-                    let mut updated = pending;
-                    updated.chosen_mana_payment = Some(plans.into_iter().next().unwrap());
-                    return advance_mana_ability_activation(state, updated, events);
-                }
-                _ => {
-                    return Ok(WaitingFor::PayManaAbilityMana {
-                        player: pending.player,
-                        options: plans,
-                        pending_mana_ability: Box::new(pending),
-                    });
-                }
+                _ => return route_pool_payment_plans(state, pending, plans, events),
             }
         }
     }
@@ -2714,6 +2764,62 @@ pub(super) fn advance_mana_ability_activation(
         events,
         cost_event_start,
     )
+}
+
+/// CR 605.3a + CR 107.4e: route a non-empty set of pool payment plans — one
+/// plan pays, several ask which hybrid assignment.
+fn route_pool_payment_plans(
+    state: &mut GameState,
+    pending: PendingManaAbility,
+    plans: Vec<Vec<ManaType>>,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    debug_assert!(!plans.is_empty());
+    match <[Vec<ManaType>; 1]>::try_from(plans) {
+        Ok([plan]) => {
+            let mut updated = pending;
+            updated.chosen_mana_payment = Some(plan);
+            advance_mana_ability_activation(state, updated, events)
+        }
+        Err(options) => Ok(WaitingFor::PayManaAbilityMana {
+            player: pending.player,
+            options,
+            pending_mana_ability: Box::new(pending),
+        }),
+    }
+}
+
+/// CR 601.2h + CR 118.3a via CR 602.2b: the player confirms a manual mana
+/// ability's payment. The CR 601.2g opportunity is over, so the mana sub-cost
+/// is paid from the pool as it stands — pinned units first — or refused
+/// (CR 601.2h: unpayable costs can't be paid); the window stays open.
+pub(crate) fn confirm_manual_mana_ability_payment(
+    state: &mut GameState,
+    pending: PendingManaAbility,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    if !super::casting::payment_mode_pays_mana_manually(pending.payment_mode) {
+        return Err(EngineError::ActionNotAllowed(
+            "Only a manual mana-ability payment is confirmed by passing".to_string(),
+        ));
+    }
+    let sub_cost = pending_mana_sub_cost(state, &pending)?.ok_or_else(|| {
+        EngineError::InvalidAction("This mana ability has no mana cost to pay".to_string())
+    })?;
+    let activation_context =
+        super::casting::activation_payment_context(state, pending.source_id, pending.ability_index);
+    let plans = enumerate_hybrid_payment_plans(
+        &state.players[pending.player.0 as usize].mana_pool,
+        &sub_cost,
+        &activation_context.as_payment_context(),
+        &pending.pinned_pool_units,
+    );
+    if plans.is_empty() {
+        return Err(EngineError::ActionNotAllowed(
+            "The mana pool does not cover this mana ability's cost".to_string(),
+        ));
+    }
+    route_pool_payment_plans(state, pending, plans, events)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -3489,6 +3595,7 @@ fn pay_mana_ability_cost_component(
                 &mut discards,
                 &mut sacrificed,
                 pending.chosen_mana_payment.as_deref(),
+                &pending.pinned_pool_units,
                 chosen_counter_count,
                 &mut cursor.cost_removed_counters,
                 pending.chosen_x,
@@ -4545,6 +4652,7 @@ fn pay_mana_ability_cost_with_choices<I, J, L>(
     chosen_discards: &mut J,
     chosen_sacrificed_battlefield: &mut L,
     chosen_hybrid_payment: Option<&[ManaType]>,
+    pinned_pool_units: &[ManaPipId],
     chosen_counter_count: Option<u32>,
     cost_removed_counters: &mut Option<u32>,
     chosen_x: Option<u32>,
@@ -4576,6 +4684,7 @@ where
                 ability_index,
                 cost,
                 chosen_hybrid_payment,
+                pinned_pool_units,
                 events,
                 excluded_sources,
                 sub_cost_demand,
@@ -5178,10 +5287,19 @@ fn enumerate_hybrid_payment_plans(
     pool: &ManaPool,
     cost: &ManaCost,
     ctx: &PaymentContext<'_>,
+    pins: &[ManaPipId],
 ) -> Vec<Vec<ManaType>> {
     let hybrid_pairs = hybrid_shard_pairs(cost);
     let mut plans = Vec::new();
-    enumerate_plans_rec(pool, cost, ctx, &hybrid_pairs, &mut Vec::new(), &mut plans);
+    enumerate_plans_rec(
+        pool,
+        cost,
+        ctx,
+        pins,
+        &hybrid_pairs,
+        &mut Vec::new(),
+        &mut plans,
+    );
     plans
 }
 
@@ -5207,23 +5325,24 @@ fn enumerate_plans_rec(
     pool: &ManaPool,
     cost: &ManaCost,
     ctx: &PaymentContext<'_>,
+    pins: &[ManaPipId],
     hybrid_pairs: &[(ManaType, ManaType)],
     chosen: &mut Vec<ManaType>,
     out: &mut Vec<Vec<ManaType>>,
 ) {
     if chosen.len() == hybrid_pairs.len() {
-        if try_pay_with_hybrid_plan(pool, cost, chosen, ctx).is_some() {
+        if try_pay_with_hybrid_plan(pool, cost, chosen, ctx, pins).is_some() {
             out.push(chosen.clone());
         }
         return;
     }
     let (a, b) = hybrid_pairs[chosen.len()];
     chosen.push(a);
-    enumerate_plans_rec(pool, cost, ctx, hybrid_pairs, chosen, out);
+    enumerate_plans_rec(pool, cost, ctx, pins, hybrid_pairs, chosen, out);
     chosen.pop();
     if a != b {
         chosen.push(b);
-        enumerate_plans_rec(pool, cost, ctx, hybrid_pairs, chosen, out);
+        enumerate_plans_rec(pool, cost, ctx, pins, hybrid_pairs, chosen, out);
         chosen.pop();
     }
 }
@@ -5237,13 +5356,14 @@ fn try_pay_with_hybrid_plan(
     cost: &ManaCost,
     plan: &[ManaType],
     ctx: &PaymentContext<'_>,
+    pins: &[ManaPipId],
 ) -> Option<()> {
     // CR 106.6: Plan publication and auto-selection must use the same
     // activation context as the authoritative real debit. Otherwise the
     // engine can offer a restricted mana unit that execution then rejects.
     // The simulated spent units are discarded; provenance is recorded only
     // at the real payment site.
-    select_cost_with_plan(pool, cost, plan, Some(ctx))
+    select_cost_with_plan(pool, cost, plan, Some(ctx), pins)
         .ok()
         .map(|_| ())
 }
@@ -5262,6 +5382,7 @@ fn select_cost_with_plan(
     cost: &ManaCost,
     plan: &[ManaType],
     ctx: Option<&PaymentContext<'_>>,
+    pins: &[ManaPipId],
 ) -> Result<Vec<crate::types::mana::ManaUnit>, mana_payment::PaymentError> {
     use crate::types::mana::ManaCostShard;
     let ManaCost::Cost { shards, generic } = cost else {
@@ -5297,8 +5418,8 @@ fn select_cost_with_plan(
         None,
         None,
         crate::types::mana::LifePaymentColors::EMPTY,
-        // CR 118.3a: mana-ability activation sub-costs are not pinnable.
-        &[],
+        // CR 118.3a: pool units the player directed in the manual window are spent first.
+        pins,
     )
     .map(|(spent, _life)| spent)
 }
@@ -5330,6 +5451,7 @@ fn pay_mana_sub_cost(
     ability_index: Option<usize>,
     cost: &ManaCost,
     hybrid_plan: Option<&[ManaType]>,
+    pins: &[ManaPipId],
     events: &mut Vec<GameEvent>,
     excluded_sources: &HashSet<ObjectId>,
     sub_cost_demand: Option<&mana_payment::ColorDemand>,
@@ -5408,6 +5530,7 @@ fn pay_mana_sub_cost(
         cost,
         hybrid_plan,
         Some(&ctx),
+        pins,
     )
     .map_err(|_| {
         EngineError::ActionNotAllowed("Mana pool cannot cover mana ability cost".to_string())
@@ -6180,6 +6303,7 @@ mod tests {
                 Some(0),
                 &sub_cost,
                 None,
+                &[],
                 &mut Vec::new(),
                 &HashSet::new(),
                 demand.as_ref(),
@@ -12595,6 +12719,8 @@ mod tests {
             chosen_tappers: None,
             chosen_discards: Vec::new(),
             chosen_mana_payment: None,
+            payment_mode: CastPaymentMode::Auto,
+            pinned_pool_units: Vec::new(),
             chosen_counter_counts: Vec::new(),
             chosen_x: None,
             collected_evidence: Vec::new(),
@@ -12699,6 +12825,8 @@ mod tests {
             chosen_tappers: None,
             chosen_discards: Vec::new(),
             chosen_mana_payment: None,
+            payment_mode: CastPaymentMode::Auto,
+            pinned_pool_units: Vec::new(),
             chosen_counter_counts: Vec::new(),
             chosen_x: None,
             collected_evidence: Vec::new(),
@@ -12912,6 +13040,8 @@ mod tests {
                 chosen_tappers: None,
                 chosen_discards: Vec::new(),
                 chosen_mana_payment: None,
+                payment_mode: CastPaymentMode::Auto,
+                pinned_pool_units: Vec::new(),
                 chosen_counter_counts: Vec::new(),
                 chosen_x: None,
                 collected_evidence: Vec::new(),
@@ -13147,6 +13277,8 @@ mod tests {
             chosen_tappers: None,
             chosen_discards: Vec::new(),
             chosen_mana_payment: None,
+            payment_mode: CastPaymentMode::Auto,
+            pinned_pool_units: Vec::new(),
             chosen_counter_counts: Vec::new(),
             chosen_x: None,
             collected_evidence: Vec::new(),
@@ -13255,6 +13387,8 @@ mod tests {
             chosen_tappers: None,
             chosen_discards: Vec::new(),
             chosen_mana_payment: None,
+            payment_mode: CastPaymentMode::Auto,
+            pinned_pool_units: Vec::new(),
             chosen_counter_counts: Vec::new(),
             chosen_x: None,
             collected_evidence: Vec::new(),
@@ -14395,6 +14529,8 @@ mod tests {
             chosen_tappers: None,
             chosen_discards: Vec::new(),
             chosen_mana_payment: None,
+            payment_mode: CastPaymentMode::Auto,
+            pinned_pool_units: Vec::new(),
             chosen_counter_counts: Vec::new(),
             chosen_x: None,
             collected_evidence: Vec::new(),
@@ -15322,6 +15458,8 @@ mod tests {
             chosen_tappers: None,
             chosen_discards: Vec::new(),
             chosen_mana_payment: None,
+            payment_mode: CastPaymentMode::Auto,
+            pinned_pool_units: Vec::new(),
             chosen_counter_counts: vec![5, 5],
             chosen_x: Some(5),
             collected_evidence: Vec::new(),
@@ -15771,6 +15909,8 @@ mod tests {
             chosen_tappers: None,
             chosen_discards: Vec::new(),
             chosen_mana_payment: None,
+            payment_mode: CastPaymentMode::Auto,
+            pinned_pool_units: Vec::new(),
             chosen_counter_counts: Vec::new(),
             chosen_x: None,
             collected_evidence: Vec::new(),
@@ -16338,6 +16478,8 @@ mod tests {
             chosen_tappers: None,
             chosen_discards: Vec::new(),
             chosen_mana_payment: None,
+            payment_mode: CastPaymentMode::Auto,
+            pinned_pool_units: Vec::new(),
             chosen_counter_counts: Vec::new(),
             chosen_x: None,
             collected_evidence: Vec::new(),
@@ -16413,6 +16555,8 @@ mod tests {
             chosen_tappers: None,
             chosen_discards: Vec::new(),
             chosen_mana_payment: None,
+            payment_mode: CastPaymentMode::Auto,
+            pinned_pool_units: Vec::new(),
             chosen_counter_counts: Vec::new(),
             chosen_x: None,
             collected_evidence: Vec::new(),
@@ -16546,6 +16690,8 @@ mod tests {
             chosen_tappers: None,
             chosen_discards: Vec::new(),
             chosen_mana_payment: None,
+            payment_mode: CastPaymentMode::Auto,
+            pinned_pool_units: Vec::new(),
             chosen_counter_counts: Vec::new(),
             chosen_x: None,
             collected_evidence: Vec::new(),
@@ -16614,6 +16760,8 @@ mod tests {
             chosen_tappers: None,
             chosen_discards: Vec::new(),
             chosen_mana_payment: None,
+            payment_mode: CastPaymentMode::Auto,
+            pinned_pool_units: Vec::new(),
             chosen_counter_counts: Vec::new(),
             chosen_x: None,
             collected_evidence: Vec::new(),
@@ -16774,6 +16922,8 @@ mod tests {
             chosen_tappers: None,
             chosen_discards: Vec::new(),
             chosen_mana_payment: None,
+            payment_mode: CastPaymentMode::Auto,
+            pinned_pool_units: Vec::new(),
             chosen_counter_counts: Vec::new(),
             chosen_x: None,
             collected_evidence: Vec::new(),
@@ -17501,6 +17651,7 @@ mod tests {
                 &mut discards,
                 &mut sacrificed,
                 None,
+                &[],
                 None,
                 &mut None,
                 chosen_x,

@@ -89,6 +89,19 @@ fn cube_activation(runner: &GameRunner, cube: ObjectId) -> GameAction {
     }
 }
 
+/// The Doubling Cube activation the engine offers now, from the per-object
+/// legal-action bucket the client renders Doubling Cube's click from.
+fn offered_cube_activation(runner: &GameRunner, cube: ObjectId) -> GameAction {
+    let (_, _, grouped) = legal_actions_full(runner.state());
+    grouped
+        .get(&cube)
+        .into_iter()
+        .flatten()
+        .find(|action| matches!(action, GameAction::ActivateAbility { source_id, .. } if *source_id == cube))
+        .cloned()
+        .expect("the engine offers Doubling Cube's mana ability")
+}
+
 fn pool_units(runner: &GameRunner) -> Vec<ManaUnit> {
     runner.state().players[0].mana_pool.units().collect()
 }
@@ -135,7 +148,7 @@ fn doubling_cube_resolves_inline_and_doubles_the_pool_left_after_its_cost() {
     }
     assert_eq!(count(&runner, ManaType::Black), 4, "reach: pool is BBBB");
 
-    let activation = cube_activation(&runner, cube);
+    let activation = offered_cube_activation(&runner, cube);
     let result = runner.act(activation).expect("Doubling Cube activates");
 
     assert!(
@@ -300,7 +313,7 @@ fn doubling_cube_activates_inside_a_spells_mana_payment() {
         "reach: Lightning Bolt's payment window: {waiting_for:?}"
     );
 
-    let activation = cube_activation(&runner, cube);
+    let activation = offered_cube_activation(&runner, cube);
     let waiting_for = runner
         .act(activation)
         .expect("CR 605.3a: a mana ability may be activated while paying")
