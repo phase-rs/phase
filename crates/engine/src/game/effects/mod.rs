@@ -5591,7 +5591,8 @@ impl LaterInstructionQuery {
         match self {
             Self::AppliesWithEntry => onset_applies_with_entry(onset),
             Self::MayActOnEntrantAfterEntry => {
-                !onset_applies_with_entry(onset) && effect_may_name_moved_objects(effect, true)
+                !onset_applies_with_entry(onset)
+                    && effect_may_name_moved_objects(effect, MovedObjectsSource::UnknownInstruction)
             }
         }
     }
@@ -5923,27 +5924,56 @@ enum MovedObjectsReferent {
     Other,
 }
 
-/// CR 608.2c: classify `filter` against the objects the instruction moves. Under a self-return
-/// (`self_return`) a self-reference names the returned object; otherwise it names the resolving
-/// source.
-fn moved_objects_referent(filter: &TargetFilter, self_return: bool) -> MovedObjectsReferent {
-    match filter {
-        TargetFilter::ParentTarget => MovedObjectsReferent::All,
-        TargetFilter::ParentTargetSlot { .. } => MovedObjectsReferent::Slot,
-        TargetFilter::SelfRef if self_return => MovedObjectsReferent::All,
-        _ => MovedObjectsReferent::Other,
+/// CR 608.2c: what the instruction moves, which decides what a self-reference in its
+/// continuation names.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MovedObjectsSource {
+    /// The instruction returns its own source ("return it to the battlefield": Bronzehide Lion,
+    /// Princess Yue), so a self-reference names the returned object.
+    OwnSource,
+    /// The instruction moves other objects, so a self-reference names the resolving source
+    /// (Storm of Souls' "Exile Storm of Souls.").
+    OtherObjects,
+    /// The instruction is not in hand (a frame-held node read at a resume), so a
+    /// self-reference is read conservatively as naming a moved object.
+    UnknownInstruction,
+}
+
+impl MovedObjectsSource {
+    /// CR 608.2c: classify a resolving `ChangeZone` instruction by its moved objects.
+    fn of(instruction: &ResolvedAbility) -> Self {
+        match &instruction.effect {
+            Effect::ChangeZone {
+                target: TargetFilter::SelfRef,
+                ..
+            } => Self::OwnSource,
+            _ => Self::OtherObjects,
+        }
+    }
+
+    fn self_reference_names_moved_object(self) -> bool {
+        match self {
+            Self::OwnSource | Self::UnknownInstruction => true,
+            Self::OtherObjects => false,
+        }
     }
 }
 
-/// CR 608.2c: does the instruction return its own source ("return it to the battlefield")?
-fn is_self_return(instruction: &ResolvedAbility) -> bool {
-    matches!(
-        &instruction.effect,
-        Effect::ChangeZone {
-            target: TargetFilter::SelfRef,
-            ..
+/// CR 608.2c: classify `filter` against the objects the instruction moves. A self-reference
+/// names a moved object only as `source` reads it ([`MovedObjectsSource`]); otherwise it names
+/// the resolving source.
+fn moved_objects_referent(
+    filter: &TargetFilter,
+    source: MovedObjectsSource,
+) -> MovedObjectsReferent {
+    match filter {
+        TargetFilter::ParentTarget => MovedObjectsReferent::All,
+        TargetFilter::ParentTargetSlot { .. } => MovedObjectsReferent::Slot,
+        TargetFilter::SelfRef if source.self_reference_names_moved_object() => {
+            MovedObjectsReferent::All
         }
-    )
+        _ => MovedObjectsReferent::Other,
+    }
 }
 
 /// CR 608.2c: the nodes of `instruction`'s own `sub_ability` chain (its continuation; an
@@ -5964,9 +5994,9 @@ fn moved_objects_continuation(
 /// `GenericEffect` is read per static through its application filter
 /// (`generic_effect_application_filter`); every other effect through its parent-referent slots
 /// (`effect_parent_ref_slots`, which include `target_filter()`).
-fn effect_may_name_moved_objects(effect: &Effect, self_return: bool) -> bool {
+fn effect_may_name_moved_objects(effect: &Effect, source: MovedObjectsSource) -> bool {
     let names = |filter: &TargetFilter| {
-        moved_objects_referent(filter, self_return) != MovedObjectsReferent::Other
+        moved_objects_referent(filter, source) != MovedObjectsReferent::Other
     };
     match effect {
         Effect::GenericEffect {
@@ -5985,10 +6015,10 @@ fn effect_may_name_moved_objects(effect: &Effect, self_return: bool) -> bool {
 /// entry (any node not stamped `WithEntry`) act on an object `instruction` moves? A conditional
 /// or optional node counts: it may follow.
 fn continuation_acts_on_moved_objects_after_entry(instruction: &ResolvedAbility) -> bool {
-    let self_return = is_self_return(instruction);
+    let source = MovedObjectsSource::of(instruction);
     moved_objects_continuation(instruction)
         .filter(|node| !onset_applies_with_entry(node.entry_onset))
-        .any(|node| effect_may_name_moved_objects(&node.effect, self_return))
+        .any(|node| effect_may_name_moved_objects(&node.effect, source))
 }
 
 /// CR 611.2e + CR 613.1f + CR 614.12: does an "is/has" instruction of this resolution remove all
@@ -6004,7 +6034,7 @@ pub(crate) fn entrant_abilities_with_entry(
     instruction: &ResolvedAbility,
 ) -> crate::types::proposed_event::EntrantAbilities {
     use crate::types::proposed_event::EntrantAbilities;
-    let self_return = is_self_return(instruction);
+    let source = MovedObjectsSource::of(instruction);
     for node in moved_objects_continuation(instruction) {
         // CR 611.2e: a `WhenFollowed` instruction applies only after the entry.
         if !onset_applies_with_entry(node.entry_onset) {
@@ -6014,7 +6044,7 @@ pub(crate) fn entrant_abilities_with_entry(
         if node.condition.is_some() || node.optional {
             break;
         }
-        if node_removes_moved_objects_abilities(node, self_return) {
+        if node_removes_moved_objects_abilities(node, source) {
             return EntrantAbilities::RemovedWithEntry;
         }
     }
@@ -6025,7 +6055,10 @@ pub(crate) fn entrant_abilities_with_entry(
 /// instruction moves? A `GenericEffect` static counts when it is unconditional, carries
 /// `RemoveAllAbilities`, and its application filter (`generic_effect_application_filter`, CR
 /// 608.2c) names every moved object; a `ReturnAsAura` counts only under a self-return.
-fn node_removes_moved_objects_abilities(node: &ResolvedAbility, self_return: bool) -> bool {
+fn node_removes_moved_objects_abilities(
+    node: &ResolvedAbility,
+    source: MovedObjectsSource,
+) -> bool {
     let removes_all = |modifications: &[ContinuousModification]| {
         modifications
             .iter()
@@ -6046,12 +6079,14 @@ fn node_removes_moved_objects_abilities(node: &ResolvedAbility, self_return: boo
                     static_def.affected.as_ref(),
                 )
                 .is_some_and(|filter| {
-                    moved_objects_referent(filter, self_return) == MovedObjectsReferent::All
+                    moved_objects_referent(filter, source) == MovedObjectsReferent::All
                 })
         }),
         // CR 613.1f: Bronzehide Lion / Harold and Bob — "It's an Aura enchantment ...
         // and it loses all other abilities" returns the dying source itself.
-        Effect::ReturnAsAura { grants, .. } => self_return && removes_all(grants),
+        Effect::ReturnAsAura { grants, .. } => {
+            source == MovedObjectsSource::OwnSource && removes_all(grants)
+        }
         // `WithEntry` kinds with no ability-removal axis (`PerpetualModification` has no removal).
         Effect::Animate { .. } | Effect::ApplyPerpetual { .. } => false,
         // Every other instruction kind: the measured `WithEntry` stamp set (documented on
