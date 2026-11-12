@@ -2,35 +2,6 @@ import { STATE_CODEC_DECODE_TIMEOUT_MS } from "../adapter/state-codec-runtime";
 import { frameType } from "./stateCodecSocket";
 
 /**
- * The uncertain interval of a reconnect: from the moment a candidate's setup
- * frame is sent until its positive bootstrap arrives.
- *
- * The server replaces a seat's sender when it handles `Reconnect` /
- * `ReconnectDraft` and never closes the predecessor, so once the frame is sent
- * neither the incumbent nor the candidate is known to own the seat. The
- * candidate is adopted on its positive bootstrap (or, for a draft, on the
- * server's `DraftActionRejected` answer); an `Error` refusal, a close, the
- * bound or an abort first retires both sockets.
- *
- * `SetupConfirmation` is the single owner of that interval for both server
- * adapters. It settles exactly once, with whichever of these happens first:
- *
- *  - `confirmed`: the candidate delivered a frame of the positive bootstrap set,
- *    or a draft candidate the server's answer (see {@link classifySetupFrame});
- *  - `refused`: the candidate delivered the server's `Error` answer to the
- *    setup (the server installed nothing, but the incumbent's standing is no
- *    longer known either, so it is treated like a close that carries a reason);
- *  - `closed`: the candidate closed;
- *  - `timeout`: the bounded wait elapsed (this also bounds a setup write whose
- *    receipt never settles);
- *  - `aborted`: the attachment was cancelled (only once {@link watchAbort} is
- *    armed, because before the frame is written an abort is delivered to the
- *    transport through the write's own signal).
- *
- * A draft `DraftActionRejected` also confirms: it is the server's answer on a
- * candidate that may already hold the seat (see {@link classifySetupFrame}).
- */
-/**
  * The bound on the interval, counted from the setup write. It spans the
  * server's own work before the bootstrap (session lock, any AI actions it runs
  * first, building the frame) and the transfer; it is not measured against
@@ -154,6 +125,35 @@ export function classifySetupFrame(surface: "game" | "draft", text: unknown): Se
   };
 }
 
+/**
+ * The uncertain interval of a reconnect: from the moment a candidate's setup
+ * frame is sent until its positive bootstrap arrives.
+ *
+ * The server replaces a seat's sender when it handles `Reconnect` /
+ * `ReconnectDraft` and never closes the predecessor, so once the frame is sent
+ * neither the incumbent nor the candidate is known to own the seat. The
+ * candidate is adopted on its positive bootstrap (or, for a draft, on the
+ * server's `DraftActionRejected` answer); an `Error` refusal, a close, the
+ * bound or an abort first retires both sockets.
+ *
+ * `SetupConfirmation` is the single owner of that interval for both server
+ * adapters. It settles exactly once, with whichever of these happens first:
+ *
+ *  - `confirmed`: the candidate delivered a frame of the positive bootstrap set,
+ *    or a draft candidate the server's answer (see {@link classifySetupFrame});
+ *  - `refused`: the candidate delivered the server's `Error` answer to the
+ *    setup (the server installed nothing, but the incumbent's standing is no
+ *    longer known either, so it is treated like a close that carries a reason);
+ *  - `closed`: the candidate closed;
+ *  - `timeout`: the bounded wait elapsed (this also bounds a setup write whose
+ *    receipt never settles);
+ *  - `aborted`: the attachment was cancelled (only once {@link watchAbort} is
+ *    armed, because before the frame is written an abort is delivered to the
+ *    transport through the write's own signal).
+ *
+ * A draft `DraftActionRejected` also confirms: it is the server's answer on a
+ * candidate that may already hold the seat (see {@link classifySetupFrame}).
+ */
 export class SetupConfirmation {
   /** Resolves once, with the first outcome. Never rejects. */
   readonly settled: Promise<SetupConfirmationOutcome>;

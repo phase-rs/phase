@@ -6643,6 +6643,59 @@ describe("WebSocketAdapter — acquired socket ownership", () => {
       }
     });
 
+    it("settles the episode when a bootstrapDelivered listener throws while the bootstrap is dispatched", async () => {
+      const random = vi.spyOn(Math, "random").mockReturnValue(0);
+      const { adapter, candidate, events } = await sentCandidate();
+      let armed = true;
+      adapter.onEvent((event) => {
+        if (event.type !== "bootstrapDelivered" || !armed) return;
+        armed = false;
+        throw new Error("bootstrapDelivered listener failed");
+      });
+      const onError = (event: ErrorEvent) => { event.preventDefault(); };
+      window.addEventListener("error", onError);
+      try {
+        deliverCodec(candidate, "Full", codecGameStarted(5, 5));
+        // The episode is complete despite the throw: announced once, budget reset.
+        await vi.waitFor(() => expect(events).toContainEqual({ type: "reconnected", inGame: true }));
+        expect(armed).toBe(false);
+        const internals = adapter as unknown as { reconnectInFlight: boolean; reconnectStartedAt: number | null };
+        expect(internals.reconnectInFlight).toBe(false);
+        expect(internals.reconnectStartedAt).toBeNull();
+        // A later drop starts a fresh episode and retries, not an instant failure.
+        candidate.readyState = 3;
+        candidate.dispatchSynthetic("close");
+        await vi.waitFor(() => expect(events).toContainEqual(expect.objectContaining({ type: "reconnecting" })));
+        expect(events).not.toContainEqual({ type: "reconnectFailed" });
+      } finally {
+        window.removeEventListener("error", onError);
+        random.mockRestore();
+        adapter.dispose();
+      }
+    });
+
+    it("keeps an incumbent frame from announcing the candidate's episode resumed after an earlier withheld failure", async () => {
+      const { adapter, raw, candidate, events } = await pregameIncumbentWithCandidate();
+      try {
+        // Synthetic: the flag an earlier board-less withheld failure leaves set.
+        (adapter as unknown as { withheldBootstrapFailed: boolean }).withheldBootstrapFailed = true;
+        raw.dispatchSynthetic("message", JSON.stringify({
+          type: "GameStarted",
+          data: {
+            state_revision: 1, state: createMockState(), your_player: 0,
+            player_token: "codec-token", full_key: REPLY_OWNERSHIP_FULL_KEY,
+          },
+        }));
+        await vi.advanceTimersByTimeAsync(0);
+        // Reach guard: the incumbent's frame was applied.
+        expect(events).toContainEqual({ type: "bootstrapDelivered" });
+        expect(events).not.toContainEqual(expect.objectContaining({ type: "reconnected" }));
+        void candidate;
+      } finally {
+        adapter.dispose();
+      }
+    });
+
     it("keeps the adopted candidate, with its bootstrap applied, when a listener throws while it is dispatched", async () => {
       const { adapter, raw, candidate, events, codec } = await sentCandidate();
       let armed = true;

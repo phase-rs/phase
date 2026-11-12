@@ -3660,7 +3660,9 @@ export class WebSocketAdapter implements EngineAdapter {
       this.withheldState = null;
       this.emit({ type: "stateDelivery", withheld: null });
     }
-    if (this.withheldBootstrapFailed) {
+    // An incumbent's frame inside a reconnect interval does not announce the
+    // candidate's episode as resumed (see `frameDecidesEpisode`).
+    if (this.withheldBootstrapFailed && this.frameDecidesEpisode()) {
       this.withheldBootstrapFailed = false;
       this.emit({ type: "reconnected", inGame: true });
     }
@@ -4137,15 +4139,22 @@ export class WebSocketAdapter implements EngineAdapter {
         // The attachment is bootstrapped now: every identity guard above
         // passed and the snapshot is cached.
         this.stateCodec.accept(this.ws);
-        this.emit({ type: "bootstrapDelivered" });
-        if (this.reconnectInFlight) {
-          if (this.frameDecidesEpisode()) this.completeReconnect(true);
-        } else if (this.hostWaitingForOpponent) {
-          this.hostWaitingForOpponent = false;
-          this.emit({
-            type: "opponentJoined",
-            opponentName: data.opponent_name,
-          });
+        // The episode is settled in `finally`: a listener that throws on
+        // `bootstrapDelivered` must not leave a committed bootstrap with its
+        // reconnect episode open (the drain of a confirmed attachment isolates
+        // the throw and keeps the socket).
+        try {
+          this.emit({ type: "bootstrapDelivered" });
+        } finally {
+          if (this.reconnectInFlight) {
+            if (this.frameDecidesEpisode()) this.completeReconnect(true);
+          } else if (this.hostWaitingForOpponent) {
+            this.hostWaitingForOpponent = false;
+            this.emit({
+              type: "opponentJoined",
+              opponentName: data.opponent_name,
+            });
+          }
         }
         this.settleWithheld();
         if (nativeReconnect) {
@@ -4325,24 +4334,34 @@ export class WebSocketAdapter implements EngineAdapter {
           // The notice is this client's only seat assignment; GamePage resets the reconnect state on it, so it precedes the failure.
           const seat = data.withheld.data.your_player;
           this._playerId = seat;
-          this.emit({ type: "bootstrapDelivered" });
-          this.emit({ type: "playerIdentity", playerId: seat, opponentName: null });
-          // An incumbent's notice inside a reconnect interval does not decide
-          // the candidate's episode (see `frameDecidesEpisode`).
-          if (this.frameDecidesEpisode()) {
-            this.rejectInitialization(new AdapterError(AdapterErrorCode.REQUEST_FAILED, data.reason, true));
-            if (this.reconnectInFlight) {
-              this.failReconnect("failed");
-              this.withheldBootstrapFailed = true;
+          try {
+            this.emit({ type: "bootstrapDelivered" });
+            this.emit({ type: "playerIdentity", playerId: seat, opponentName: null });
+          } finally {
+            // The failure is settled even when a listener throws above, and
+            // an incumbent's notice inside a reconnect interval does not
+            // decide the candidate's episode (see `frameDecidesEpisode`).
+            try {
+              if (this.frameDecidesEpisode()) {
+                this.rejectInitialization(new AdapterError(AdapterErrorCode.REQUEST_FAILED, data.reason, true));
+                if (this.reconnectInFlight) {
+                  this.failReconnect("failed");
+                  this.withheldBootstrapFailed = true;
+                }
+              }
+            } finally {
+              this.emit({ type: "operationFailed", message: data.reason });
             }
           }
-          this.emit({ type: "operationFailed", message: data.reason });
           break;
         }
         if (!this.acceptFollowUpFullSessionKey(data.full_key)) break;
         if (data.withheld.type === "GameStarted") {
-          this.emit({ type: "bootstrapDelivered" });
-          if (this.reconnectInFlight && this.frameDecidesEpisode()) this.completeReconnect(true);
+          try {
+            this.emit({ type: "bootstrapDelivered" });
+          } finally {
+            if (this.reconnectInFlight && this.frameDecidesEpisode()) this.completeReconnect(true);
+          }
         } else {
           const pending = this.submission.take(msg.command_id);
           if (pending) {
