@@ -1064,3 +1064,51 @@ fn ai_offers_one_selection_per_held_decision() {
         ));
     }
 }
+
+/// CR 104.3a + CR 800.4a + CR 903.9b: Day of Judgment in a three-player
+/// Commander game. P1's commander is Progenitus, whose redirect to its owner's
+/// library carries a shuffle that waits above the staged batch while P1 makes
+/// the CR 903.9b command-zone choice. P1 concedes at that choice; Progenitus
+/// leaves the game with P1, and the batch, still below the shuffle, delivers
+/// P2's Grizzly Bears and settles.
+#[test]
+fn a_commander_owner_concedes_at_the_command_zone_choice_and_the_batch_settles() {
+    let p2 = PlayerId(2);
+    let mut scenario =
+        GameScenario::new_with_format(engine::types::format::FormatConfig::commander(), 3, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    let progenitus = scenario
+        .add_creature_from_oracle(P1, "Progenitus", 10, 10, PROGENITUS)
+        .as_legendary()
+        .with_subtypes(vec!["Hydra", "Avatar"])
+        .commander()
+        .id();
+    let bears = scenario.add_creature(p2, "Grizzly Bears", 2, 2).id();
+    let judgment = zero_cost_spell(&mut scenario, "Day of Judgment", DAY_OF_JUDGMENT);
+    let mut runner = scenario.build();
+
+    cast_until_decision(&mut runner, judgment);
+    let WaitingFor::ReplacementChoice {
+        player, candidates, ..
+    } = runner.state().waiting_for.clone()
+    else {
+        panic!(
+            "expected the CR 903.9b choice, got {:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert_eq!(player, P1);
+    assert!(candidates
+        .iter()
+        .any(|candidate| candidate.description == "Move to command zone"));
+    assert_eq!(zone(&runner, bears), Zone::Battlefield);
+    round_trip(&mut runner);
+    runner
+        .act(GameAction::Concede { player_id: P1 })
+        .expect("P1 concedes at the command-zone choice");
+    assert!(runner.state().players[1].is_eliminated);
+    finish(&mut runner);
+    assert_eq!(zone(&runner, bears), Zone::Graveyard);
+    assert_eq!(zone(&runner, judgment), Zone::Graveyard);
+    let _ = progenitus;
+}
