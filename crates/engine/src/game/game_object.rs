@@ -3129,6 +3129,7 @@ impl GameObject {
                 additional_cost_payments: self.additional_cost_payments.clone(),
                 cast_cost_paid_object: self.cast_cost_paid_object.clone(),
                 granting_object: None,
+                subject_scope: crate::types::game_state::SubjectIncarnationScope::Live,
             }),
             power: self.power,
             toughness: self.toughness,

@@ -809,6 +809,32 @@ pub struct TriggerSourceContext {
     /// CR 201.5a: the granter stamped on the trigger definition this context was handed with.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub granting_object: Option<ObjectIncarnationRef>,
+    /// Which incarnation of this source a self-subject matcher may read while
+    /// trigger matching is in progress. Matching-local: the trigger collector
+    /// sets `DepartureWindow` only on a clone it passes to matchers, so every
+    /// context that reaches a pending trigger, the stack, a journal or a
+    /// delayed trigger is `Live`. Never serialized and deliberately not written
+    /// by the `Debug` impl below, so it is wire- and golden-neutral.
+    #[serde(skip)]
+    pub subject_scope: SubjectIncarnationScope,
+}
+
+/// CR 603.10 + CR 400.7: the incarnation a trigger source's self-subject
+/// matchers read during trigger matching.
+///
+/// `Live` is every ordinary match: the source is the object as it is now.
+/// `DepartureWindow` is a battlefield source matched against an event that
+/// happened earlier in the same resolution, before a later instruction moved
+/// that source off the battlefield (CR 608.2c instructions in order). The
+/// source existed immediately after that event, so the event's subject
+/// questions about the source ("removed from Chandra", "from this permanent")
+/// are answered from the source's own battlefield-departure record, not from
+/// the post-move object (CR 400.7: a new object).
+#[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
+pub enum SubjectIncarnationScope {
+    #[default]
+    Live,
+    DepartureWindow,
 }
 
 impl std::fmt::Debug for TriggerSourceContext {
@@ -37507,6 +37533,7 @@ impl GameState {
                 additional_cost_payments: _,
                 cast_cost_paid_object,
                 granting_object,
+                subject_scope: _,
             } = context;
             let ObjectIdentityBinding {
                 reference,

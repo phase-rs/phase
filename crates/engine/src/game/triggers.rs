@@ -23,9 +23,9 @@ use crate::types::game_state::{
     AutoMayChoice, CollectedTriggerContextBatch, DamageRecord, DelayedTrigger, DistributionUnit,
     GameState, LatchedBatchedTrigger, LatchedSuppressTrigger, LogicalZoneChangeGroup,
     LogicalZoneChangeTerminalOutcome, MayTriggerAutoChoiceKey, MayTriggerOrigin,
-    ProductionOverride, StackEntry, StackEntryKind, SyntheticTriggerProvenance,
-    TargetSelectionConstraint, TargetSelectionSlot, TriggerObservationTime, TriggerSourceContext,
-    TriggerSourceRead, WaitingFor,
+    ProductionOverride, StackEntry, StackEntryKind, SubjectIncarnationScope,
+    SyntheticTriggerProvenance, TargetSelectionConstraint, TargetSelectionSlot,
+    TriggerObservationTime, TriggerSourceContext, TriggerSourceRead, WaitingFor,
 };
 use crate::types::identifiers::{
     DelayedInstallIdentity, DelayedTriggerInstanceId, DelayedTriggerOrigin, DelayedTriggerToken,
@@ -667,6 +667,10 @@ struct TriggerCollectionSession {
     /// session prepares each event batch with `ObserveEventBatch` and reads
     /// these sources instead of rebuilding them (`BulkMemberTriggerCollection`).
     bulk_member_sources: Option<Vec<OffZoneTriggerSourceCache>>,
+    /// CR 603.10 + CR 608.2c: the action's battlefield departures, discovered
+    /// from its whole raw event list by the post-action pipeline. `None` derives
+    /// them from the collected slice itself.
+    action_departures: Option<ActionDepartures>,
 }
 
 impl TriggerCollectionSession {
@@ -676,6 +680,7 @@ impl TriggerCollectionSession {
             operation_journal: None,
             admitted_matches: 0,
             bulk_member_sources: None,
+            action_departures: None,
         }
     }
 
@@ -689,6 +694,7 @@ impl TriggerCollectionSession {
             operation_journal: Some(operation_journal),
             admitted_matches: 0,
             bulk_member_sources: None,
+            action_departures: None,
         }
     }
 
@@ -2951,6 +2957,12 @@ enum TriggerSourceVisit {
     /// The only visit that admits a printed `ChangesController` definition, and
     /// it admits nothing else.
     ControlChangeWatcher,
+    /// CR 603.10 + CR 608.2c: a battlefield observer that a later instruction
+    /// of the same resolution moved off the battlefield, matched against an
+    /// event that happened while it was still there. Read from its own
+    /// departure record; its self-subject matchers read that record too
+    /// (`SubjectIncarnationScope::DepartureWindow`).
+    ObserverInDepartureWindow,
 }
 
 impl LogicalZoneTriggerCollection<'_> {
@@ -2958,6 +2970,11 @@ impl LogicalZoneTriggerCollection<'_> {
         if matches!(visit, TriggerSourceVisit::ControlChangeWatcher) {
             // Already the immediately-before authority for its event.
             return true;
+        }
+        if matches!(visit, TriggerSourceVisit::ObserverInDepartureWindow) {
+            // The departure-window arm runs over one ordinary event batch; a
+            // logical owner's segments and settlement own their own observers.
+            return matches!(self, Self::Ordinary);
         }
         match self {
             Self::Ordinary => true,
@@ -2979,9 +2996,9 @@ impl LogicalZoneTriggerCollection<'_> {
             }
             Self::Settlement(_) => match visit {
                 TriggerSourceVisit::Observer { .. } => true,
-                TriggerSourceVisit::EventSubject | TriggerSourceVisit::ControlChangeWatcher => {
-                    false
-                }
+                TriggerSourceVisit::EventSubject
+                | TriggerSourceVisit::ControlChangeWatcher
+                | TriggerSourceVisit::ObserverInDepartureWindow => false,
             },
         }
     }
@@ -3181,6 +3198,7 @@ fn collect_observer_triggers_under_lki_attachment(
     registered_this_event: &mut HashSet<(ObjectId, usize)>,
     active_suppress_triggers: &[ActiveSuppressTriggerStatic],
     collection: LogicalZoneTriggerCollection<'_>,
+    visit: TriggerSourceVisit,
 ) -> Vec<MatchedTrigger> {
     let saved_attached_to = state.objects.get(&observer_id).and_then(|o| o.attached_to);
     if lki_attached_to.is_some() {
@@ -3198,10 +3216,7 @@ fn collect_observer_triggers_under_lki_attachment(
         registered_this_event,
         active_suppress_triggers,
         collection,
-        // CR 603.10a: an LKI observer existed on the battlefield before the event.
-        TriggerSourceVisit::Observer {
-            exists_from: TriggerObservationTime::ImmediatelyBefore,
-        },
+        visit,
     );
     // Restore unconditionally, before the caller consumes `matched`, so every
     // early-return path the caller may take is still covered.
@@ -3293,6 +3308,22 @@ fn collect_matching_triggers_inner(
     if collection.omits_member_event_subject(source_context.identity.reference, event) {
         return Vec::new();
     }
+    // CR 603.10 + CR 400.7: the matching-local view of the source. Only
+    // evaluation reads it (the matcher, the whole-event damage filter, the
+    // firing-group expansion with its intervening-if checks, and the batched
+    // subject count); the clean `source_context` is what flows into the built
+    // ability, the pending trigger and the trigger ledgers, so
+    // `DepartureWindow` never escapes matching.
+    let match_source_context: Cow<'_, TriggerSourceContext> = match visit {
+        TriggerSourceVisit::ObserverInDepartureWindow => {
+            let mut scoped = source_context.clone();
+            scoped.subject_scope = SubjectIncarnationScope::DepartureWindow;
+            Cow::Owned(scoped)
+        }
+        TriggerSourceVisit::EventSubject
+        | TriggerSourceVisit::Observer { .. }
+        | TriggerSourceVisit::ControlChangeWatcher => Cow::Borrowed(&source_context),
+    };
     let use_latched_trigger_entries = match source {
         TriggerSource::Live(source_obj) => {
             ObjectIncarnationRef::from_object(source_obj) != source_context.identity.reference
@@ -3441,6 +3472,8 @@ fn collect_matching_triggers_inner(
     );
     for (trig_idx, definition_ref, trig_def, granted_keyword_kind) in all_triggers {
         let source_context = source_context_for_definition(&source_context, trig_def);
+        // Evaluation-only twin of `source_context` (same granter stamp).
+        let match_context = source_context_for_definition(&match_source_context, trig_def);
         // CR 603.10d: a look-back control-change trigger exists, and has its
         // controller, as of immediately before the change, so it is collected
         // only from the watcher latched then (`ControlChangeWatcher`), never
@@ -3581,11 +3614,11 @@ fn collect_matching_triggers_inner(
                 super::trigger_matchers::damage_received_filters_match(
                     event,
                     trig_def,
-                    &source_context,
+                    &match_context,
                     state,
                 )
             } else {
-                matcher(event, trig_def, &source_context, state)
+                matcher(event, trig_def, &match_context, state)
             };
             if !admitted {
                 continue;
@@ -3711,7 +3744,7 @@ fn collect_matching_triggers_inner(
                 None,
                 event_batch,
                 trig_def,
-                &source_context,
+                &match_context,
                 controller,
                 matcher,
                 active_suppress_triggers,
@@ -3746,7 +3779,7 @@ fn collect_matching_triggers_inner(
                     super::trigger_matchers::count_trigger_subjects_in_batch(
                         state,
                         trig_def.valid_card.as_ref(),
-                        &source_context,
+                        &match_context,
                         &trigger_events,
                     )
                 } else {
@@ -4337,17 +4370,233 @@ fn battlefield_entry_observation_indices(events: &[GameEvent]) -> BattlefieldEnt
 /// Start of the entry span of `object_id`'s battlefield entry at `entry_idx`: the entry itself
 /// and the contiguous same-object `CounterAdded` events published immediately before it.
 fn entry_span_start(events: &[GameEvent], entry_idx: usize, object_id: ObjectId) -> usize {
-    let mut start = entry_idx;
-    while start > 0
+    entry_observation_boundary(events, 0, entry_idx, object_id)
+}
+
+/// The observation boundary of the battlefield entry at `entry_idx`: the entry
+/// itself, widened over the contiguous same-object `CounterAdded` prefix that
+/// "enters with counters" publishes before it, never below `floor`.
+fn entry_observation_boundary(
+    events: &[GameEvent],
+    floor: usize,
+    entry_idx: usize,
+    object_id: ObjectId,
+) -> usize {
+    let mut boundary = entry_idx;
+    while boundary > floor
         && matches!(
-            &events[start - 1],
+            &events[boundary - 1],
             GameEvent::CounterAdded { object_id: countered_id, .. }
                 if *countered_id == object_id
         )
     {
-        start -= 1;
+        boundary -= 1;
     }
-    start
+    boundary
+}
+
+/// CR 113.6 + CR 400.7: the index in `events` from which the incarnation of
+/// `object_id` that leaves the battlefield at `departure_idx` was on the
+/// battlefield. That is the observation boundary of its LAST battlefield entry
+/// in `events[floor..departure_idx]` (an earlier stay is a different object),
+/// or `floor` when it was already on the battlefield as the batch began.
+fn battlefield_presence_start_before(
+    events: &[GameEvent],
+    floor: usize,
+    departure_idx: usize,
+    object_id: ObjectId,
+) -> usize {
+    events[floor..departure_idx]
+        .iter()
+        .rposition(|event| {
+            matches!(
+                event,
+                GameEvent::ZoneChanged {
+                    object_id: entered_id,
+                    to: Zone::Battlefield,
+                    ..
+                } if *entered_id == object_id
+            )
+        })
+        .map(|offset| entry_observation_boundary(events, floor, floor + offset, object_id))
+        .unwrap_or(floor)
+}
+
+/// CR 603.10 + CR 608.2c: one battlefield departure of an action, positioned
+/// in the event list a trigger collector scans.
+///
+/// A resolving ability's instructions happen in order, so a permanent a later
+/// instruction moves off the battlefield existed immediately after every
+/// earlier event of the same resolution and can trigger on it (CR 603.10:
+/// ordinary abilities check the game state immediately after the event). The
+/// collector runs once, after the whole chain, so it needs to know where each
+/// departure sits relative to the events it scans; this records that.
+#[derive(Clone, Debug)]
+pub(crate) struct ObservedDeparture {
+    /// How many collector events precede the departure (the window's exclusive
+    /// end).
+    before_count: usize,
+    /// The collector index from which the departing incarnation was on the
+    /// battlefield (the window's inclusive start).
+    presence_start: usize,
+    /// The departure's own record. Its source context is the observer, as it
+    /// last existed on the battlefield (CR 608.2h).
+    record: crate::types::game_state::ZoneChangeRecord,
+}
+
+impl ObservedDeparture {
+    fn object_id(&self) -> ObjectId {
+        self.record.object_id
+    }
+
+    fn window_contains(&self, collector_idx: usize) -> bool {
+        (self.presence_start..self.before_count).contains(&collector_idx)
+    }
+}
+
+/// CR 603.10 + CR 608.2c: every battlefield departure of one action whose
+/// departing object carried a trigger, discovered from the action's whole raw
+/// event list.
+///
+/// The raw list is the authority, not the collector's slice: a departure that
+/// an earlier collector already claimed (a logical zone-change owner, a
+/// deferred-witness context) is absent from the slice, yet the departing
+/// object still observed every event before it. A claimed `ZoneChanged` is
+/// read here only to find the departure; it is never matched again as a
+/// trigger event.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct ActionDepartures(Vec<ObservedDeparture>);
+
+impl ActionDepartures {
+    /// `raw[raw_start..]` is the action's event list; `positions` holds,
+    /// ascending, the raw index of each event the collector receives (a
+    /// subsequence of `raw[raw_start..]`).
+    pub(crate) fn from_positions(raw: &[GameEvent], raw_start: usize, positions: &[usize]) -> Self {
+        debug_assert!(
+            positions.windows(2).all(|pair| pair[0] < pair[1])
+                && positions.first().is_none_or(|first| *first >= raw_start)
+                && positions.last().is_none_or(|last| *last < raw.len()),
+            "collector positions must be an ascending subsequence of the raw action list"
+        );
+        let collector_index = |raw_idx: usize| positions.partition_point(|&p| p < raw_idx);
+        let departures = raw
+            .iter()
+            .enumerate()
+            .skip(raw_start)
+            .filter_map(|(raw_idx, event)| {
+                let GameEvent::ZoneChanged {
+                    object_id,
+                    from: Some(Zone::Battlefield),
+                    record,
+                    ..
+                } = event
+                else {
+                    return None;
+                };
+                // CR 400.7 + CR 608.2h: only the record's own pre-event source
+                // context names the observer; absent or malformed provenance
+                // fails closed, as every other departure arm does.
+                let crate::types::game_state::BattlefieldDepartureSourceContext::Present(context) =
+                    crate::types::game_state::battlefield_departure_trigger_source_context(event)
+                else {
+                    return None;
+                };
+                if context.trigger_entries.is_empty() {
+                    return None;
+                }
+                let presence_start =
+                    battlefield_presence_start_before(raw, raw_start, raw_idx, *object_id);
+                Some(ObservedDeparture {
+                    before_count: collector_index(raw_idx),
+                    presence_start: collector_index(presence_start),
+                    record: (**record).clone(),
+                })
+            })
+            .collect();
+        Self(departures)
+    }
+
+    /// The collector receives the action's whole event list.
+    pub(crate) fn from_events(events: &[GameEvent]) -> Self {
+        let positions: Vec<usize> = (0..events.len()).collect();
+        Self::from_positions(events, 0, &positions)
+    }
+
+    /// The departures whose exact battlefield-departure row is in the ledger,
+    /// each with the event keys its latched triggers can match.
+    fn admitted_observers(self, state: &GameState) -> Vec<DepartureWindowObserver> {
+        self.0
+            .into_iter()
+            .filter_map(|departure| {
+                let context = departure.record.trigger_source_context()?;
+                crate::types::game_state::exact_battlefield_departure_row(
+                    state,
+                    context.identity.reference,
+                )?;
+                let admission = DepartureAdmission::for_context(context);
+                Some(DepartureWindowObserver {
+                    departure,
+                    admission,
+                })
+            })
+            .collect()
+    }
+}
+
+/// CR 603.2: which events a departed observer's latched triggers can match,
+/// derived from the same event keys the battlefield trigger index uses.
+enum DepartureAdmission {
+    /// A latched trigger the index routes to its unclassified bucket.
+    AnyEvent,
+    /// The union of every latched trigger's event keys.
+    Classified(crate::game::trigger_index::Keys),
+}
+
+impl DepartureAdmission {
+    fn for_context(context: &TriggerSourceContext) -> Self {
+        let mut keys = crate::game::trigger_index::Keys::new();
+        for entry in &context.trigger_entries {
+            let (entry_keys, unclassified) =
+                crate::game::trigger_index::keys_from_trigger_def(entry.definition());
+            if unclassified {
+                return Self::AnyEvent;
+            }
+            keys.extend(entry_keys);
+        }
+        Self::Classified(keys)
+    }
+
+    fn admits(&self, event: &GameEvent, state: &GameState) -> bool {
+        // CR 500.7: `ExtraTurnCreated` is turn-insertion accounting, not a
+        // triggerable event; mirrors `trigger_index::candidates_for_event`.
+        if matches!(event, GameEvent::ExtraTurnCreated { .. }) {
+            return false;
+        }
+        match self {
+            Self::AnyEvent => true,
+            Self::Classified(keys) => crate::game::trigger_index::keys_from_event(event, state)
+                .iter()
+                .any(|key| keys.contains(key)),
+        }
+    }
+}
+
+/// One departed observer of a collection pass with its event admission.
+struct DepartureWindowObserver {
+    departure: ObservedDeparture,
+    admission: DepartureAdmission,
+}
+
+/// CR 603.10 + CR 400.7: every level of a matched trigger's ability carries a
+/// `Live` source context; the departure-window scope is matching-local.
+fn ability_trigger_sources_are_live(ability: &ResolvedAbility) -> bool {
+    ability
+        .trigger_source
+        .as_ref()
+        .is_none_or(|source| source.subject_scope == SubjectIncarnationScope::Live)
+        && ability
+            .child_links()
+            .all(|(_, child)| ability_trigger_sources_are_live(child))
 }
 
 fn storm_copy_count_before_cast(state: &GameState) -> i32 {
@@ -5180,6 +5429,24 @@ fn collect_pending_triggers(
     events: &[GameEvent],
 ) -> Vec<PendingTriggerContext> {
     collect_pending_triggers_with_overlay(state, events, TriggerCollectionOverlay::default())
+}
+
+/// [`collect_pending_triggers`] with the action's battlefield departures
+/// discovered from its raw event list (CR 603.10 + CR 608.2c). `None` derives
+/// them from `events`, which is exactly [`collect_pending_triggers`].
+fn collect_pending_triggers_observing(
+    state: &mut GameState,
+    events: &[GameEvent],
+    action_departures: Option<ActionDepartures>,
+) -> Vec<PendingTriggerContext> {
+    let mut session = TriggerCollectionSession::new(TriggerCollectionOverlay::default());
+    session.action_departures = action_departures;
+    collect_pending_triggers_with_collection(
+        state,
+        events,
+        LogicalZoneTriggerCollection::Ordinary,
+        &mut session,
+    )
 }
 
 /// Collect trigger contexts using a read-only authority for an announced
@@ -6106,6 +6373,24 @@ fn collect_pending_triggers_with_collection(
     let battlefield_entry_observations = battlefield_entry_observation_indices(events);
     // CR 603.10a: built on the first co-departure group this pass sees.
     let mut co_departure_index: Option<CoDepartureObserverIndex> = None;
+    // CR 603.10 + CR 608.2c: observers a later instruction of this batch moved
+    // off the battlefield. Each still saw every event of its stay; the END-of-
+    // chain index above no longer lists it. Ordinary collection only: a
+    // logical owner's segments and settlement own their observers.
+    let departure_window: Vec<DepartureWindowObserver> = match collection {
+        LogicalZoneTriggerCollection::Ordinary if !events.is_empty() => session
+            .action_departures
+            .take()
+            .unwrap_or_else(|| ActionDepartures::from_events(events))
+            .admitted_observers(state),
+        LogicalZoneTriggerCollection::Ordinary
+        | LogicalZoneTriggerCollection::Segment(_)
+        | LogicalZoneTriggerCollection::Settlement(_) => Vec::new(),
+    };
+    // CR 603.2c: the departure-window arm's own "one or more" ledger, one set
+    // per departed incarnation, so a batched trigger fires at most once per
+    // incarnation's window and never consumes `batched_this_pass`.
+    let mut departure_window_batched: HashMap<usize, HashSet<(ObjectId, usize)>> = HashMap::new();
 
     for (event_idx, event) in events.iter().enumerate() {
         // CR 603.2 / CR 603.3: Per-event dedup. A single printed trigger definition
@@ -6956,6 +7241,10 @@ fn collect_pending_triggers_with_collection(
                             &mut registered_this_event,
                             &active_suppress_triggers,
                             collection,
+                            // CR 603.10a: an LKI observer existed on the battlefield before the event.
+                            TriggerSourceVisit::Observer {
+                                exists_from: TriggerObservationTime::ImmediatelyBefore,
+                            },
                         );
                         for matched in matched_triggers {
                             if !session.record_match(state, &matched, event) {
@@ -7124,6 +7413,10 @@ fn collect_pending_triggers_with_collection(
                     &mut registered_this_event,
                     &active_suppress_triggers,
                     collection,
+                    // CR 603.10a: an LKI observer existed on the battlefield before the event.
+                    TriggerSourceVisit::Observer {
+                        exists_from: TriggerObservationTime::ImmediatelyBefore,
+                    },
                 );
                 for matched in matched_triggers {
                     if !session.record_match(state, &matched, event) {
@@ -7226,6 +7519,10 @@ fn collect_pending_triggers_with_collection(
                     &mut registered_this_event,
                     &active_suppress_triggers,
                     collection,
+                    // CR 603.10a: an LKI observer existed on the battlefield before the event.
+                    TriggerSourceVisit::Observer {
+                        exists_from: TriggerObservationTime::ImmediatelyBefore,
+                    },
                 );
                 for matched in matched_triggers {
                     if !session.record_match(state, &matched, event) {
@@ -7348,6 +7645,93 @@ fn collect_pending_triggers_with_collection(
                         ));
                     }
                 }
+            }
+        }
+
+        // CR 603.10 + CR 608.2c: an observer that a LATER instruction of this
+        // resolution moved off the battlefield was on the battlefield
+        // immediately after this event, so it triggers on it exactly as a
+        // surviving permanent would (counter removal is not a CR 603.10a
+        // look-back event; ordinary observation applies). The live scan above
+        // cannot see it — it is gone from the END-of-chain index — so it is
+        // matched from its own departure record (CR 608.2h), with its
+        // self-subject questions answered from that record
+        // (`TriggerSourceVisit::ObserverInDepartureWindow`).
+        //
+        // Window: events from the departing incarnation's last battlefield
+        // entry up to, not including, its departure (CR 400.7: an earlier stay
+        // is a different object). Its own departure and any departure
+        // simultaneous with it are the CR 603.10a arms' events, so they are
+        // skipped before any context is resolved.
+        //
+        // Runs after every other per-object arm for this event, so the
+        // registrations they made (the CR 603.10f player-loss arm, the
+        // off-zone scan, look-back control-change watchers) are seen below
+        // and the same printed trigger never fires twice for one event.
+        for (ordinal, observer) in departure_window.iter().enumerate() {
+            let departure = &observer.departure;
+            if !departure.window_contains(event_idx) || !observer.admission.admits(event, state) {
+                continue;
+            }
+            if let GameEvent::ZoneChanged {
+                object_id,
+                from: Some(Zone::Battlefield),
+                record,
+                ..
+            } = event
+            {
+                if *object_id == departure.object_id()
+                    || record.co_departed.contains(&departure.object_id())
+                {
+                    continue;
+                }
+            }
+            let Some(source_context) = departure.record.trigger_source_context() else {
+                continue;
+            };
+            #[cfg(feature = "test-support")]
+            super::perf_counters::record_departure_window_context_resolution();
+            let observer_id = departure.object_id();
+            // CR 603.2 / CR 603.3: one registration per printed trigger per
+            // event. Seeded (read-only) with whatever another arm already
+            // registered for this object and event, so no event fires one
+            // printed trigger twice; `registered_this_event` itself is never
+            // written by this arm.
+            let mut registered_for_window: HashSet<(ObjectId, usize)> = registered_this_event
+                .iter()
+                .filter(|(id, _)| *id == observer_id)
+                .copied()
+                .collect();
+            let batched_for_window = departure_window_batched.entry(ordinal).or_default();
+            let matched_triggers = collect_observer_triggers_under_lki_attachment(
+                state,
+                observer_id,
+                departure.record.attached_to,
+                event,
+                &events[departure.presence_start..departure.before_count],
+                source_context,
+                batched_for_window,
+                &mut registered_for_window,
+                &active_suppress_triggers,
+                collection,
+                TriggerSourceVisit::ObserverInDepartureWindow,
+            );
+            for matched in matched_triggers {
+                debug_assert!(
+                    ability_trigger_sources_are_live(&matched.pending.ability),
+                    "the departure-window subject scope is matching-local"
+                );
+                if !session.record_match(state, &matched, event) {
+                    continue;
+                }
+                if matched.batched {
+                    batched_for_window.insert((observer_id, matched.trig_idx));
+                }
+                registered_for_window.insert((observer_id, matched.trig_idx));
+                pending.push(PendingTriggerContext::batched(
+                    matched.pending,
+                    matched.trigger_events,
+                ));
             }
         }
 
@@ -8570,14 +8954,25 @@ fn ring_level_four_ability(source_id: ObjectId, controller: PlayerId) -> Resolve
 /// Process events and place triggered abilities on the stack in APNAP order.
 /// CR 603.3b: Process triggered abilities waiting to be put on the stack.
 pub fn process_triggers(state: &mut GameState, events: &[GameEvent]) {
+    process_triggers_observing(state, events, None);
+}
+
+/// [`process_triggers`] with the action's battlefield departures discovered
+/// from its raw event list (CR 603.10 + CR 608.2c); `None` derives them from
+/// `events`.
+pub(crate) fn process_triggers_observing(
+    state: &mut GameState,
+    events: &[GameEvent],
+    action_departures: Option<ActionDepartures>,
+) {
     // CR 603.3 + CR 603.3b + CR 608.2n: while an instant or sorcery owes its final
     // part, what triggers waits in the queue for the resolution's batch instead
     // of being put on the stack now.
     if super::stack::resolving_spell_owes_final_part(state) {
-        collect_triggers_into_deferred(state, events);
+        collect_triggers_into_deferred_observing(state, events, action_departures);
         return;
     }
-    let pending = collect_pending_triggers(state, events);
+    let pending = collect_pending_triggers_observing(state, events, action_departures);
     let mut events_out = Vec::new();
     process_collected_triggers_with_delayed_phase_events(state, pending, &[], &mut events_out);
 }
@@ -9961,7 +10356,18 @@ pub(crate) fn handle_order_triggers(
 /// has resolved, or lets `finalize_trigger_target_selection` drain them later
 /// if the continuation paused on a target.
 pub(crate) fn collect_triggers_into_deferred(state: &mut GameState, events: &[GameEvent]) {
-    let pending = collect_pending_triggers(state, events);
+    collect_triggers_into_deferred_observing(state, events, None);
+}
+
+/// [`collect_triggers_into_deferred`] with the action's battlefield departures
+/// discovered from its raw event list (CR 603.10 + CR 608.2c); `None` derives
+/// them from `events`.
+pub(crate) fn collect_triggers_into_deferred_observing(
+    state: &mut GameState,
+    events: &[GameEvent],
+    action_departures: Option<ActionDepartures>,
+) {
+    let pending = collect_pending_triggers_observing(state, events, action_departures);
     state.deferred_triggers.extend(pending);
 }
 
@@ -10168,8 +10574,20 @@ pub(crate) fn collect_parked_triggers_into_deferred(
     events: &[GameEvent],
     origin: DeferredTriggerBatchOrigin,
 ) {
+    collect_parked_triggers_into_deferred_observing(state, events, origin, None);
+}
+
+/// [`collect_parked_triggers_into_deferred`] with the action's battlefield
+/// departures discovered from its raw event list (CR 603.10 + CR 608.2c);
+/// `None` derives them from `events`.
+pub(crate) fn collect_parked_triggers_into_deferred_observing(
+    state: &mut GameState,
+    events: &[GameEvent],
+    origin: DeferredTriggerBatchOrigin,
+    action_departures: Option<ActionDepartures>,
+) {
     let first_new_context = state.deferred_triggers.len();
-    collect_triggers_into_deferred(state, events);
+    collect_triggers_into_deferred_observing(state, events, action_departures);
     stamp_deferred_triggers_from(state, first_new_context, origin);
 }
 
@@ -14557,6 +14975,11 @@ pub(crate) struct UnclaimedTriggerEvents {
 }
 
 impl UnclaimedTriggerEvents {
+    /// Each kept event's position in the full buffer, ascending.
+    pub(crate) fn positions(&self) -> &[usize] {
+        &self.positions
+    }
+
     /// Keep full-buffer positions when a live owner retains an occurrence.
     pub(crate) fn retain(&mut self, mut keep: impl FnMut(&GameEvent) -> bool) {
         let (positions, events) = std::mem::take(&mut self.positions)
@@ -14811,20 +15234,31 @@ pub(crate) fn filter_already_collected_trigger_events_from(
     event_start: usize,
     consumed: &[ConsumedTriggerEventOccurrence],
 ) -> Vec<GameEvent> {
+    uncollected_trigger_events_from(state, events, event_start, consumed).events
+}
+
+/// [`filter_already_collected_trigger_events_from`], keeping each kept event's
+/// position in `events`, so a caller can relate the collected slice back to the
+/// action's raw list (`ActionDepartures::from_positions`).
+pub(crate) fn uncollected_trigger_events_from(
+    state: &GameState,
+    events: &[GameEvent],
+    event_start: usize,
+    consumed: &[ConsumedTriggerEventOccurrence],
+) -> UnclaimedTriggerEvents {
     let mut queued_zone_change_witnesses: Vec<&GameEvent> = state
         .deferred_triggers
         .iter()
         .flat_map(|context| context.trigger_events.iter())
         .filter(|event| matches!(event, GameEvent::ZoneChanged { .. }))
         .collect();
-    filter_consumed_trigger_events_from(
+    let mut unclaimed = unclaimed_trigger_events_from(
         events,
         event_start,
         TriggerCollectionRequester::Ordinary,
         consumed,
-    )
-    .into_iter()
-    .filter(|event| {
+    );
+    unclaimed.retain(|event| {
         if !matches!(event, GameEvent::ZoneChanged { .. }) {
             return true;
         }
@@ -14838,8 +15272,8 @@ pub(crate) fn filter_already_collected_trigger_events_from(
             }
             None => true,
         }
-    })
-    .collect()
+    });
+    unclaimed
 }
 
 /// CR 603.4 + CR 608.2c: does this delayed body still carry work that the

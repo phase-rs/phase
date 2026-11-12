@@ -355,21 +355,17 @@ fn run_post_action_pipeline_core(
         // `filter_already_collected_trigger_events_from` is the single authority
         // for both (CR 603.2c), shared with the search-delivery park family so
         // the two collectors cannot drift.
-        let unconsumed_events = triggers::filter_already_collected_trigger_events_from(
+        let mut unconsumed_events = triggers::uncollected_trigger_events_from(
             state,
             events,
             event_start,
             &consumed_trigger_events,
         );
-        let mut filtered_events: Vec<_> = unconsumed_events
-            .iter()
-            .filter(|event| {
-                !matches!(event, GameEvent::PhaseChanged { .. })
-                    && !state.deferred_entry_events.contains(event)
-                    && !retained_logical_zone_events.contains(event)
-            })
-            .cloned()
-            .collect();
+        unconsumed_events.retain(|event| {
+            !matches!(event, GameEvent::PhaseChanged { .. })
+                && !state.deferred_entry_events.contains(event)
+                && !retained_logical_zone_events.contains(event)
+        });
         delayed_trigger_events = events[event_start..]
             .iter()
             .filter(|event| {
@@ -380,9 +376,19 @@ fn run_post_action_pipeline_core(
             .cloned()
             .collect();
         if skip_trigger_scan {
-            filtered_events.retain(|event| matches!(event, GameEvent::SpellCast { .. }));
+            unconsumed_events.retain(|event| matches!(event, GameEvent::SpellCast { .. }));
             delayed_trigger_events.retain(|event| matches!(event, GameEvent::SpellCast { .. }));
         }
+        // CR 603.10 + CR 608.2c: the action's battlefield departures, found in
+        // its whole raw list. A departure an earlier collector claimed is
+        // absent from the slice below, yet its object observed every event of
+        // the action before it.
+        let action_departures = triggers::ActionDepartures::from_positions(
+            events,
+            event_start,
+            unconsumed_events.positions(),
+        );
+        let filtered_events = unconsumed_events.events;
         // CR 603.3b: If the resolution step that just ran paused for a player
         // resolution-choice (Scry/Surveil/Dig/Search/...), the triggered
         // abilities it generated (e.g. "whenever you scry, ...") must NOT be
@@ -446,11 +452,19 @@ fn run_post_action_pipeline_core(
             || payment_owned
             || completed_resolution_batch
         {
-            triggers::collect_triggers_into_deferred(state, &filtered_events);
+            triggers::collect_triggers_into_deferred_observing(
+                state,
+                &filtered_events,
+                Some(action_departures),
+            );
         } else if announced_cast_batch && state.game_end.is_none() {
             // The action's delayed observers join the batch in the single
             // delayed scan before the combined drain below.
-            triggers::collect_triggers_into_deferred(state, &filtered_events);
+            triggers::collect_triggers_into_deferred_observing(
+                state,
+                &filtered_events,
+                Some(action_departures),
+            );
         } else if state.game_end.is_none() {
             // CR 104.1: only while the game is still going. Once this action
             // has recorded a result on `GameState::game_end` (e.g. a CR 104.4b
@@ -458,9 +472,13 @@ fn run_post_action_pipeline_core(
             // abilities that triggered on the action's events never go on the
             // stack.
             if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
-                hold_pass_triggers(state, &filtered_events);
+                hold_pass_triggers(state, &filtered_events, Some(action_departures));
             } else {
-                triggers::process_triggers(state, &filtered_events);
+                triggers::process_triggers_observing(
+                    state,
+                    &filtered_events,
+                    Some(action_departures),
+                );
             }
         }
     }
@@ -557,7 +575,7 @@ fn run_post_action_pipeline_core(
             {
                 triggers::collect_triggers_into_deferred(state, &sba_events);
             } else {
-                hold_pass_triggers(state, &sba_events);
+                hold_pass_triggers(state, &sba_events, None);
             }
             if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
                 break;
@@ -932,14 +950,21 @@ fn parked_batch_origin(waiting_for: &WaitingFor) -> triggers::DeferredTriggerBat
 
 /// CR 117.5 + CR 603.3b: hold a pass's triggers for the boundary's one batch.
 /// A resolving spell that still owes its final part owns their placement.
-fn hold_pass_triggers(state: &mut GameState, events: &[GameEvent]) {
+/// `action_departures` carries the action's raw-list battlefield departures
+/// (CR 603.10 + CR 608.2c); `None` derives them from `events`.
+fn hold_pass_triggers(
+    state: &mut GameState,
+    events: &[GameEvent],
+    action_departures: Option<triggers::ActionDepartures>,
+) {
     if super::stack::resolving_spell_owes_final_part(state) {
-        triggers::collect_triggers_into_deferred(state, events);
+        triggers::collect_triggers_into_deferred_observing(state, events, action_departures);
     } else {
-        triggers::collect_parked_triggers_into_deferred(
+        triggers::collect_parked_triggers_into_deferred_observing(
             state,
             events,
             triggers::DeferredTriggerBatchOrigin::PriorityBoundary,
+            action_departures,
         );
     }
 }

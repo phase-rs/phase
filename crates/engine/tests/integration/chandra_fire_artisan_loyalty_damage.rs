@@ -30,6 +30,12 @@
 
 use engine::game::combat::AttackTarget;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
+use engine::game::scenario_db::GameScenarioDbExt;
+use engine::types::game_state::SubjectIncarnationScope;
+use engine::types::mana::{ManaType, ManaUnit};
+use engine::types::player::PlayerId;
+
+use crate::support::shared_card_db;
 use engine::game::triggers::drain_order_triggers_with_identity;
 use engine::types::ability::ControllerRef;
 use engine::types::ability::{TargetFilter, TargetRef, TypedFilter};
@@ -763,4 +769,295 @@ fn filtered_subject_fires_once_per_recipient_with_its_removed_count() {
         triggers_from(&runner, armorer).is_empty(),
         "an opponent's permanent is not a permanent you control"
     );
+}
+
+// ---------------------------------------------------------------------------
+// CR 608.2c + CR 603.10: a later instruction of the same resolution moves the
+// observer off the battlefield.
+//
+// Printed cards (Oracle text verbatim, data/card-data.json):
+//   Chandra, Fire Artisan — "Whenever one or more loyalty counters are removed
+//     from Chandra, she deals that much damage to target opponent or
+//     planeswalker."
+//   Fractured Identity — "Exile target nonland permanent. Each player other
+//     than its controller creates a token that's a copy of it."
+//   Aether Snap — "Remove all counters from all permanents and exile all
+//     tokens."
+//   Nadier's Nightblade — "Whenever a token you control leaves the battlefield,
+//     each opponent loses 1 life and you gain 1 life."
+//
+// CR 608.2c: Aether Snap's instructions happen in the order written, so a
+// Chandra token still on the battlefield loses its loyalty counters first and
+// is exiled second. CR 603.10: objects that exist immediately after an event
+// are checked for its triggers — counter removal is not a CR 603.10a look-back
+// event — and the token existed right after the removal, so it triggers.
+// CR 122.2: the exile itself removes nothing (counters simply cease to exist).
+// ---------------------------------------------------------------------------
+
+fn add_mana(runner: &mut GameRunner, player: PlayerId, colored: &[ManaType], generic: usize) {
+    let units = colored
+        .iter()
+        .copied()
+        .chain(std::iter::repeat_n(ManaType::Colorless, generic));
+    for color in units {
+        let _ = runner
+            .state_mut()
+            .add_mana_to_pool(player, ManaUnit::new(color, ObjectId(0), false, vec![]));
+    }
+}
+
+/// The token copy of `name` that `controller` controls on the battlefield.
+fn token_named(runner: &GameRunner, controller: PlayerId, name: &str) -> ObjectId {
+    let state = runner.state();
+    state
+        .battlefield
+        .iter()
+        .copied()
+        .find(|id| {
+            let object = &state.objects[id];
+            object.is_token && object.controller == controller && object.name == name
+        })
+        .unwrap_or_else(|| panic!("{controller:?} controls no token copy of {name}"))
+}
+
+/// Resolve Fractured Identity on `target`; returns P0's token copy of it.
+fn fracture(runner: &mut GameRunner, identity: ObjectId, target: ObjectId) -> ObjectId {
+    let name = runner.state().objects[&target].name.clone();
+    add_mana(runner, P0, &[ManaType::White, ManaType::Blue], 3);
+    runner.cast(identity).target_object(target).resolve();
+    assert_eq!(
+        runner.state().objects[&target].zone,
+        Zone::Exile,
+        "reach: Fractured Identity exiled its target"
+    );
+    token_named(runner, P0, &name)
+}
+
+/// Cast Aether Snap and pass priority until it has left the stack, stopping at
+/// any trigger target prompt its resolution raised. Returns every event.
+fn snap(runner: &mut GameRunner, aether_snap: ObjectId) -> Vec<GameEvent> {
+    add_mana(runner, P0, &[ManaType::Black, ManaType::Black], 3);
+    let mut events = runner.cast(aether_snap).commit().events().to_vec();
+    pass_until(runner, &mut events, |r| {
+        is_trigger_target_prompt(r)
+            || !r
+                .state()
+                .stack
+                .iter()
+                .any(|entry| entry.source_id == aether_snap)
+    });
+    events
+}
+
+fn removed_loyalty(events: &[GameEvent], id: ObjectId) -> u32 {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            GameEvent::CounterRemoved {
+                object_id,
+                counter_type: CounterType::Loyalty,
+                count,
+            } if *object_id == id => Some(*count),
+            _ => None,
+        })
+        .sum()
+}
+
+fn left_battlefield_to_exile(events: &[GameEvent], id: ObjectId) -> bool {
+    events.iter().any(|event| {
+        matches!(
+            event,
+            GameEvent::ZoneChanged {
+                object_id,
+                from: Some(Zone::Battlefield),
+                to: Zone::Exile,
+                ..
+            } if *object_id == id
+        )
+    })
+}
+
+/// CR 603.10 + CR 400.7: every source context the stacked triggers of
+/// `source` carry is `Live` — the departure-window scope is matching-local.
+fn stacked_trigger_sources_are_live(runner: &GameRunner, source: ObjectId) -> bool {
+    runner.state().stack.iter().all(|entry| match &entry.kind {
+        StackEntryKind::TriggeredAbility {
+            source_id, ability, ..
+        } if *source_id == source => ability
+            .trigger_source
+            .as_ref()
+            .is_some_and(|context| context.subject_scope == SubjectIncarnationScope::Live),
+        _ => true,
+    })
+}
+
+struct SnapBoard {
+    runner: GameRunner,
+    chandra: ObjectId,
+    identity: ObjectId,
+    aether_snap: ObjectId,
+}
+
+/// P1 controls the printed Chandra (4 loyalty); P0 holds Fractured Identity
+/// and Aether Snap. `None` only when no card database is available.
+fn snap_board(extra_p0: &[&str]) -> Option<(SnapBoard, Vec<ObjectId>)> {
+    let db = shared_card_db()?;
+    let mut scenario = main_phase();
+    let chandra = scenario.add_real_card(P1, "Chandra, Fire Artisan", Zone::Battlefield, db);
+    let identity = scenario.add_real_card(P0, "Fractured Identity", Zone::Hand, db);
+    let aether_snap = scenario.add_real_card(P0, "Aether Snap", Zone::Hand, db);
+    let extras = extra_p0
+        .iter()
+        .map(|name| scenario.add_real_card(P0, name, Zone::Battlefield, db))
+        .collect();
+    let mut runner = scenario.build();
+    if loyalty(&runner, chandra) == 0 {
+        runner
+            .state_mut()
+            .objects
+            .get_mut(&chandra)
+            .unwrap()
+            .counters
+            .insert(CounterType::Loyalty, 4);
+    }
+    assert_eq!(loyalty(&runner, chandra), 4, "reach: printed loyalty 4");
+    Some((
+        SnapBoard {
+            runner,
+            chandra,
+            identity,
+            aether_snap,
+        },
+        extras,
+    ))
+}
+
+/// Maintainer's case: P0's Chandra token (from Fractured Identity) loses its
+/// four loyalty counters to Aether Snap's first instruction and is exiled by
+/// its second. The token triggers on the removal and deals 4 to P1.
+#[test]
+fn chandra_token_removed_then_exiled_by_one_resolution_deals_that_much() {
+    let Some((board, _)) = snap_board(&[]) else {
+        return;
+    };
+    let SnapBoard {
+        mut runner,
+        chandra,
+        identity,
+        aether_snap,
+    } = board;
+    let token = fracture(&mut runner, identity, chandra);
+    assert_eq!(loyalty(&runner, token), 4, "reach: the copy entered with 4");
+
+    let mut events = snap(&mut runner, aether_snap);
+    assert_eq!(
+        removed_loyalty(&events, token),
+        4,
+        "instruction 1 removed the token's four loyalty counters"
+    );
+    assert!(
+        left_battlefield_to_exile(&events, token),
+        "instruction 2 exiled the token"
+    );
+    assert!(
+        !runner.state().battlefield.contains(&token),
+        "the token is gone from the battlefield"
+    );
+
+    if is_trigger_target_prompt(&runner) {
+        choose_trigger_target(&mut runner, TargetRef::Player(P1), &mut events);
+    }
+    assert_eq!(
+        triggers_from(&runner, token).len(),
+        1,
+        "the departed token's removal trigger is on the stack exactly once"
+    );
+    assert!(
+        stacked_trigger_sources_are_live(&runner, token),
+        "the stacked trigger carries a Live source context"
+    );
+
+    pass_until(&mut runner, &mut events, |r| r.state().stack.is_empty());
+    assert!(runner.state().stack.is_empty());
+    assert_eq!(
+        runner.life(P1),
+        16,
+        "she deals that much (4) damage to the opponent"
+    );
+}
+
+/// Positive control on the live path: a nontoken Chandra is not exiled by
+/// Aether Snap (only tokens are) and triggers exactly once for the four
+/// counters removed, from the live battlefield scan; she then dies to the
+/// zero-loyalty state-based action and the trigger resolves with her last
+/// known information.
+#[test]
+fn live_chandra_loses_counters_to_aether_snap_and_triggers_once() {
+    let Some((board, _)) = snap_board(&[]) else {
+        return;
+    };
+    let SnapBoard {
+        mut runner,
+        chandra,
+        aether_snap,
+        ..
+    } = board;
+    let mut events = snap(&mut runner, aether_snap);
+    assert_eq!(removed_loyalty(&events, chandra), 4);
+    assert!(
+        !left_battlefield_to_exile(&events, chandra),
+        "a nontoken is not exiled"
+    );
+    if is_trigger_target_prompt(&runner) {
+        choose_trigger_target(&mut runner, TargetRef::Player(P0), &mut events);
+    }
+    assert_eq!(triggers_from(&runner, chandra).len(), 1);
+    pass_until(&mut runner, &mut events, |r| r.state().stack.is_empty());
+    assert_eq!(runner.life(P0), 16, "P1's Chandra deals 4 to P0");
+}
+
+/// The token's exile also triggers Nadier's Nightblade, which collects (and
+/// so claims) the exile record before the post-action scan. The removal
+/// trigger must still fire: the departure is read from the action's raw
+/// events, not from the claimed-filtered slice. P1 takes 4 + 1.
+#[test]
+#[ignore = "blocked: Aether Snap's 'all permanents' currently parses as a single-target RemoveCounter, so a second permanent opens a target prompt"]
+fn chandra_token_trigger_survives_a_claimed_exile_record() {
+    let Some((board, extras)) = snap_board(&["Nadier's Nightblade"]) else {
+        return;
+    };
+    let SnapBoard {
+        mut runner,
+        chandra,
+        identity,
+        aether_snap,
+    } = board;
+    let nightblade = extras[0];
+    let token = fracture(&mut runner, identity, chandra);
+
+    let mut events = snap(&mut runner, aether_snap);
+    assert_eq!(removed_loyalty(&events, token), 4);
+    assert!(left_battlefield_to_exile(&events, token));
+    for _ in 0..8 {
+        if is_trigger_target_prompt(&runner) {
+            choose_trigger_target(&mut runner, TargetRef::Player(P1), &mut events);
+        } else if matches!(runner.state().waiting_for, WaitingFor::OrderTriggers { .. }) {
+            drain_order_triggers_with_identity(runner.state_mut());
+        } else {
+            break;
+        }
+    }
+    assert_eq!(
+        triggers_from(&runner, nightblade).len(),
+        1,
+        "reach: Nightblade saw the token leave"
+    );
+    assert_eq!(
+        triggers_from(&runner, token).len(),
+        1,
+        "the token's removal trigger fired once"
+    );
+    pass_until(&mut runner, &mut events, |r| r.state().stack.is_empty());
+    assert_eq!(runner.life(P1), 15, "4 from Chandra and 1 from Nightblade");
+    assert_eq!(runner.life(P0), 21, "Nightblade's 1 life");
 }

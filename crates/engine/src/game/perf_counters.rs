@@ -208,6 +208,17 @@ pub struct CoDepartureObserverCounters {
     pub observer_resolutions: u64,
 }
 
+/// Test-only work counters for the CR 603.10 departure-window arm of trigger
+/// collection (`triggers::ActionDepartures`). Kept out of
+/// [`PerfCounterSnapshot`] for the same reason as the counter sets above.
+#[cfg(feature = "test-support")]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DepartureWindowCounters {
+    /// (earlier event, departed observer) pairs admitted past the departure
+    /// row and event-key gates, so the observer's latched context was matched.
+    pub context_resolutions: u64,
+}
+
 /// Test-only counters for the stack's bulk token executor
 /// (`stack::resolve_bulk_token_run`) and the post-action pipeline it elides.
 /// Kept out of [`PerfCounterSnapshot`] for the same reason as the counter sets
@@ -659,6 +670,12 @@ thread_local! {
         Cell::new(CoDepartureObserverCounters {
             index_builds: 0,
             observer_resolutions: 0,
+        })
+    };
+    #[cfg(feature = "test-support")]
+    static DEPARTURE_WINDOW_COUNTERS: Cell<DepartureWindowCounters> = const {
+        Cell::new(DepartureWindowCounters {
+            context_resolutions: 0,
         })
     };
     #[cfg(feature = "test-support")]
@@ -1286,6 +1303,22 @@ pub fn co_departure_observer_snapshot() -> CoDepartureObserverCounters {
     CO_DEPARTURE_OBSERVER_COUNTERS.with(Cell::get)
 }
 
+/// CR 603.10: one departed observer matched against an earlier event of its
+/// resolution's departure window.
+#[cfg(feature = "test-support")]
+pub fn record_departure_window_context_resolution() {
+    DEPARTURE_WINDOW_COUNTERS.with(|cell| {
+        let mut counters = cell.get();
+        counters.context_resolutions += 1;
+        cell.set(counters);
+    });
+}
+
+#[cfg(feature = "test-support")]
+pub fn departure_window_snapshot() -> DepartureWindowCounters {
+    DEPARTURE_WINDOW_COUNTERS.with(Cell::get)
+}
+
 #[cfg(feature = "test-support")]
 pub fn reset_prior_target_binding_counters() {
     PRIOR_TARGET_BINDING_COUNTERS
@@ -1455,6 +1488,8 @@ pub fn reset() {
     #[cfg(feature = "test-support")]
     CO_DEPARTURE_OBSERVER_COUNTERS
         .with(|counters| counters.set(CoDepartureObserverCounters::default()));
+    #[cfg(feature = "test-support")]
+    DEPARTURE_WINDOW_COUNTERS.with(|counters| counters.set(DepartureWindowCounters::default()));
     #[cfg(feature = "test-support")]
     STACK_BULK_COUNTERS.with(|counters| counters.set(StackBulkCounters::default()));
     #[cfg(feature = "test-support")]
