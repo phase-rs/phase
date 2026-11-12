@@ -98901,3 +98901,50 @@ fn fused_subject_look_exile_preserves_or_rejects_the_complete_instruction() {
         "the public chain must retain the honest gap, not fall back to Dig: {unsupported:?}"
     );
 }
+
+/// CR 115.1c + CR 115.1d: an exact count before "other target" ("Untap two
+/// other target creatures") declares exactly two targets, and "other" stays on
+/// the target filter. Printed lines of Fleet Captain Christopher Pike, Ioreth
+/// of the Healing House and Nimbleclaw Adept, parsed through the full Oracle
+/// pipeline.
+#[test]
+fn exact_count_before_other_target_declares_exactly_two_targets() {
+    for (name, text) in [
+        (
+            "Fleet Captain Christopher Pike",
+            "Yes \u{2014} {1}, {T}: Untap two other target creatures.\nNo \u{2014} {2}, {T}: Tap two other target creatures.",
+        ),
+        (
+            "Ioreth of the Healing House",
+            "{T}: Untap another target permanent.\n{T}: Untap two other target legendary creatures.",
+        ),
+        (
+            "Nimbleclaw Adept",
+            "Bigby's Hand \u{2014} {T}: Untap two other target permanents. Activate only as a sorcery and only once each turn.",
+        ),
+    ] {
+        let parsed = parse_oracle_text(text, name, &[], &["Creature".into()], &[]);
+        let exact_two: Vec<_> = parsed
+            .abilities
+            .iter()
+            .filter(|ability| ability.multi_target == Some(MultiTargetSpec::fixed(2, 2)))
+            .collect();
+        assert!(
+            !exact_two.is_empty(),
+            "{name}: expected an exactly-two target slot in {:?}",
+            parsed.abilities
+        );
+        for ability in exact_two {
+            let Effect::SetTapState { target, .. } = ability.effect.as_ref() else {
+                panic!("{name}: expected a tap-state effect, got {:?}", ability.effect);
+            };
+            let TargetFilter::Typed(filter) = target else {
+                panic!("{name}: expected a typed target, got {target:?}");
+            };
+            assert!(
+                filter.properties.contains(&FilterProp::Another),
+                "{name}: \"other\" belongs to the target filter: {filter:?}"
+            );
+        }
+    }
+}

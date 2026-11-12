@@ -19,7 +19,7 @@ use crate::parser::oracle_ir::ast::*;
 use crate::parser::oracle_ir::context::ParseContext;
 use crate::parser::oracle_nom::bridge::nom_on_lower;
 use crate::types::ability::{PtValue, QuantityExpr, QuantityRef};
-use crate::types::card_type::{CoreType, Supertype};
+use crate::types::card_type::{noncreature_subtype_set, CoreType, Supertype};
 use crate::types::keywords::Keyword;
 use crate::types::mana::ManaColor;
 
@@ -893,7 +893,16 @@ fn parse_animation_type_parts(text: &str, infer_creature: bool) -> (Vec<Supertyp
     if core_types.is_empty() && subtypes.is_empty() {
         return (supertypes, Vec::new());
     }
-    if core_types.is_empty() && infer_creature {
+    // CR 205.3 + CR 301.7: a P/T with no stated card type makes the object a
+    // creature only when its subtypes are creature types. A subtype that the
+    // card-type rules assign to another type (Vehicle, Treasure, Equipment)
+    // keeps that type's object noncreature: a Vehicle is a creature only while
+    // crewed.
+    let only_noncreature_subtypes = !subtypes.is_empty()
+        && subtypes
+            .iter()
+            .all(|subtype| noncreature_subtype_set(subtype).is_some());
+    if core_types.is_empty() && infer_creature && !only_noncreature_subtypes {
         push_unique_string(&mut core_types, "Creature");
     }
 
@@ -1070,6 +1079,67 @@ mod test_den_bugbear {
     use crate::types::ability::{
         ContinuousModification, ControllerRef, Duration, Effect, TargetFilter, TypeFilter,
     };
+
+    /// CR 205.3 + CR 301.7: a stated P/T with only a noncreature subtype does
+    /// not make the object a creature; a creature subtype still does. New New
+    /// York's printed line gives noncreature artifacts the Vehicle subtype and
+    /// a 3/3 P/T, and they become creatures only when crewed.
+    #[test]
+    fn animation_pt_with_a_noncreature_subtype_does_not_infer_creature() {
+        assert_eq!(
+            parse_animation_type_parts("Vehicles in addition to their other types", true).1,
+            vec!["Vehicle".to_string()]
+        );
+        assert_eq!(
+            parse_animation_type_parts("Treasure", true).1,
+            vec!["Treasure".to_string()]
+        );
+        assert_eq!(
+            parse_animation_type_parts("Dragon", true).1,
+            vec!["Creature".to_string(), "Dragon".to_string()],
+            "a creature subtype still implies a creature"
+        );
+
+        let parsed = parse_oracle_text(
+            "At the beginning of combat on your turn, until end of turn, noncreature artifacts you control become 3/3 Vehicles in addition to their other types and gain flying, haste, and crew 1.",
+            "New New York",
+            &[],
+            &["Plane".into()],
+            &[],
+        );
+        let trigger = parsed.triggers.first().expect("the combat trigger");
+        let Some(execute) = trigger.execute.as_ref() else {
+            panic!("the trigger carries its animation");
+        };
+        let Effect::GenericEffect {
+            static_abilities, ..
+        } = execute.effect.as_ref()
+        else {
+            panic!("expected an animation effect, got {:?}", execute.effect);
+        };
+        let modifications: Vec<_> = static_abilities
+            .iter()
+            .flat_map(|s| &s.modifications)
+            .collect();
+        assert!(
+            modifications.contains(&&ContinuousModification::AddSubtype {
+                subtype: "Vehicle".into()
+            }),
+            "the objects become Vehicles: {modifications:?}"
+        );
+        assert!(
+            !modifications.iter().any(|m| matches!(
+                m,
+                ContinuousModification::AddType {
+                    core_type: CoreType::Creature
+                }
+            )),
+            "a Vehicle is not a creature until crewed: {modifications:?}"
+        );
+        assert!(modifications
+            .iter()
+            .any(|m| matches!(m, ContinuousModification::SetPower { value: 3 })));
+    }
 
     #[test]
     fn animation_registered_subtypes_are_canonical_and_word_bounded() {
