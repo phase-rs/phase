@@ -227,6 +227,112 @@ fn blitzball_stadium_grant_draws_per_kind_of_counter_on_the_creature() {
     outcome.assert_hand_drawn(P0, 2);
 }
 
+/// CR 608.2h + CR 400.7: the granted trigger counts the kinds of counter the
+/// creature had as it LAST existed on the battlefield. With one oil counter at
+/// damage time, a +1/+1 counter added while the trigger is on the stack, and an
+/// exile before it resolves, the creature left with two kinds — two cards, not
+/// the one kind its trigger-time snapshot held.
+#[test]
+fn blitzball_stadium_grant_counts_kinds_it_had_when_it_left_the_battlefield() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let stadium = scenario
+        .add_artifact_from_oracle(P0, "Blitzball Stadium", BLITZBALL_STADIUM)
+        .id();
+    let runner_creature = scenario.add_creature(P0, "Runner", 2, 2).id();
+    scenario.with_counter(runner_creature, parse_counter_type("oil"), 1);
+    let add_counter = scenario
+        .add_spell_to_hand_from_oracle(
+            P0,
+            "Growth",
+            true,
+            "Put a +1/+1 counter on target creature.",
+        )
+        .with_mana_cost(ManaCost::zero())
+        .id();
+    let exile = scenario
+        .add_spell_to_hand_from_oracle(P0, "Banish", true, "Exile target creature.")
+        .with_mana_cost(ManaCost::zero())
+        .id();
+    scenario.with_mana_pool(P0, colorless(3));
+    seed_library(&mut scenario, P0);
+    seed_library(&mut scenario, P1);
+    let mut runner = scenario.build();
+
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: stadium,
+            ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("Go for the Goal! activates");
+    if matches!(
+        runner.state().waiting_for,
+        WaitingFor::TargetSelection { .. }
+    ) {
+        runner
+            .act(GameAction::SelectTargets {
+                targets: vec![TargetRef::Object(runner_creature)],
+            })
+            .expect("target the runner");
+    }
+    drive_to_empty_stack(&mut runner);
+
+    runner.pass_both_players();
+    runner
+        .act(GameAction::DeclareAttackers {
+            attacks: vec![(runner_creature, AttackTarget::Player(P1))],
+            bands: vec![],
+        })
+        .expect("the runner attacks");
+    // Stop with the granted trigger on the stack, before it resolves.
+    for _ in 0..16 {
+        if !runner.state().stack.is_empty() {
+            break;
+        }
+        match runner.state().waiting_for.clone() {
+            WaitingFor::OrderTriggers { .. } => {
+                drain_order_triggers_with_identity(runner.state_mut());
+            }
+            _ => {
+                runner.act(GameAction::PassPriority).expect("pass priority");
+            }
+        }
+    }
+    assert_eq!(
+        runner.state().stack.len(),
+        1,
+        "reach guard: the combat-damage trigger is on the stack"
+    );
+    let library_before = runner.state().players[P0.0 as usize].library.len();
+
+    // Commit each spell on top of the trigger and resolve only that spell.
+    let _ = runner
+        .cast(add_counter)
+        .target_object(runner_creature)
+        .commit();
+    runner.resolve_top();
+    let _ = runner.cast(exile).target_object(runner_creature).commit();
+    runner.resolve_top();
+    assert_eq!(
+        runner.state().objects[&runner_creature].zone,
+        Zone::Exile,
+        "reach guard: the creature left the battlefield"
+    );
+    assert_eq!(
+        runner.state().stack.len(),
+        1,
+        "reach guard: the trigger is still waiting"
+    );
+    drive_to_empty_stack(&mut runner);
+
+    assert_eq!(
+        library_before - runner.state().players[P0.0 as usize].library.len(),
+        2,
+        "oil + the +1/+1 counter added in response: two kinds when it left"
+    );
+}
+
 /// Synthetic class card: the counter-kind census of a trigger's own object
 /// after that object has left the battlefield (no printed card yet).
 const DIES_KIND_CENSUS: &str =

@@ -149,6 +149,36 @@ fn source_lki_for_context(
         })
 }
 
+/// CR 608.2h + CR 400.7: the counters of the triggered source as it last existed
+/// on the battlefield. A live exact source answers with its current counters;
+/// once it has left, the EXIT snapshot of that exact incarnation answers (the
+/// same authority `source_intensity` uses), so counters added after the trigger
+/// and before the departure are counted. With no exit record left, the
+/// trigger-time snapshot remains the fallback.
+fn source_counters_lki_for_context(
+    state: &GameState,
+    ctx: &QuantityContext,
+) -> Option<HashMap<CounterType, u32>> {
+    let Some(source) = ctx.trigger_source.as_ref() else {
+        return source_lki_for_context(state, ctx).map(|lki| lki.counters);
+    };
+    Some(match source.source_read(state) {
+        crate::types::game_state::TriggerSourceRead::ExactLive(object) => {
+            object.snapshot_public_characteristics().counters
+        }
+        crate::types::game_state::TriggerSourceRead::Latched(context) => {
+            crate::game::filter::exit_lki_for_incarnation(
+                state,
+                context.identity.reference.object_id,
+                context.identity.reference.incarnation,
+            )
+            .unwrap_or(&context.lki)
+            .counters
+            .clone()
+        }
+    })
+}
+
 /// Digital-only Alchemy: the intensity of the resolving ability's source, read
 /// for the exact source incarnation the ability belongs to. CR 608.2h: while
 /// that incarnation is still in its public zone, its current intensity; once
@@ -8110,7 +8140,7 @@ fn read_counters_on_live_or_lki_scope<T>(
     // Enrage reflex.
     if matches!(scope, ObjectScope::Source | ObjectScope::Anaphoric) && ctx.trigger_source.is_some()
     {
-        return source_lki_for_context(state, &ctx).map(|lki| read(&lki.counters));
+        return source_counters_lki_for_context(state, &ctx).map(|counters| read(&counters));
     }
     // An unbound anaphor resolves through the `Source` lookup — the generic
     // scope helpers have no referent for `Anaphoric` itself.
