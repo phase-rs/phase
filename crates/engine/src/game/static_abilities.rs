@@ -21,6 +21,7 @@ use crate::types::statics::{
     CrewContributionKind, DefendingPlayerAnchorPolarity, ProhibitionScope, StaticMode,
     StaticModeKind,
 };
+use crate::types::zones::Zone;
 
 /// Handler function type for static ability modes.
 /// Receives the `StaticMode` variant the handler was registered under.
@@ -444,7 +445,7 @@ pub(crate) fn prohibition_scope_matches_player(
 /// granting source's controller, not the carrier's. `source_obj` is the object
 /// that carries the static; it still answers the attachment-relative
 /// `EnchantedCreatureController` scope.
-pub(crate) fn prohibition_scope_matches_player_anchored(
+pub fn prohibition_scope_matches_player_anchored(
     scope: &ProhibitionScope,
     player: PlayerId,
     source_obj: &crate::game::game_object::GameObject,
@@ -1183,7 +1184,14 @@ pub(crate) fn transient_cant_be_targeted_prohibits(
         let Some(who) = who else {
             return false;
         };
-        crate::game::layers::transient_effect_is_live(state, tce)
+        // CR 109.2: an unzoned card-type description ("creatures you control")
+        // means permanents on the battlefield, so a creature spell on the stack
+        // is outside the rule's scope. A filter naming its own zone, or a
+        // `SpecificObject` pin, is not restricted this way.
+        let in_scope = obj.zone == Zone::Battlefield
+            || !crate::game::filter::filter_denotes_battlefield_permanent(&tce.affected);
+        in_scope
+            && crate::game::layers::transient_effect_is_live(state, tce)
             && matches_target_filter(
                 state,
                 obj.id,

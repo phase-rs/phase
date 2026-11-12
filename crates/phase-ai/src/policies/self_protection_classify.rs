@@ -15,7 +15,7 @@ use engine::types::identifiers::ObjectId;
 use engine::types::keywords::Keyword;
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
-use engine::types::statics::StaticMode;
+use engine::types::statics::{ProhibitionScope, StaticMode};
 
 use engine::game::ability_utils::declared_targets_in_chain;
 use engine::game::combat::get_valid_block_targets_for_player;
@@ -23,6 +23,7 @@ use engine::game::combat_damage::participates_in_pending_combat_damage_substep;
 use engine::game::effects::effect::generic_effect_application_filter;
 use engine::game::filter::{matches_target_filter, FilterContext};
 use engine::game::keywords::{object_has_effective_keyword_kind, source_matches_protection_target};
+use engine::game::static_abilities::prohibition_scope_matches_player_anchored;
 use engine::game::targeting::find_legal_targets;
 use engine::types::ability::TargetRef;
 use engine::types::keywords::{HexproofFilter, KeywordKind, ProtectionTarget};
@@ -289,8 +290,15 @@ fn any_stack_targets_ai_or_ai_permanent(state: &GameState, ai_player: PlayerId) 
 /// grant can actually answer.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum DefensiveGrant {
-    /// CR 702.18a / CR 702.11a: shroud or unqualified hexproof.
-    CantBeTargeted,
+    /// CR 702.18a / CR 702.11b / CR 109.5: a restriction on being targeted by
+    /// the players `who` names, read relative to `anchor` (the player the grant
+    /// is for, whose "your opponents" it means; CR 102.3 makes that team-aware).
+    /// Shroud names every player; hexproof and Vines of Vastwood name only the
+    /// anchor's opponents, so a teammate's targeted effect is not answered.
+    CantBeTargeted {
+        who: ProhibitionScope,
+        anchor: PlayerId,
+    },
     /// CR 702.11d: hexproof from a specific quality.
     HexproofFrom(HexproofFilter),
     /// CR 702.16: protection from a specific quality.
@@ -301,7 +309,7 @@ enum DefensiveGrant {
     PreventDamage,
 }
 
-fn extract_defensive_grants(ability: &AbilityDefinition) -> Vec<DefensiveGrant> {
+fn extract_defensive_grants(ability: &AbilityDefinition, anchor: PlayerId) -> Vec<DefensiveGrant> {
     let mut grants = Vec::new();
     for effect in collect_chain_effects(ability) {
         match effect {
@@ -315,9 +323,9 @@ fn extract_defensive_grants(ability: &AbilityDefinition) -> Vec<DefensiveGrant> 
                     if !static_definition_affects_self_grant(sd, target.as_ref()) {
                         continue;
                     }
-                    grants.extend(grant_from_static_mode(&sd.mode));
+                    grants.extend(grant_from_static_mode(&sd.mode, anchor));
                     for m in &sd.modifications {
-                        grants.extend(grants_from_modification(m));
+                        grants.extend(grants_from_modification(m, anchor));
                     }
                 }
             }
@@ -338,22 +346,42 @@ fn static_definition_affects_self_grant(
     }
 }
 
-fn grant_from_static_mode(mode: &StaticMode) -> Vec<DefensiveGrant> {
+fn grant_from_static_mode(mode: &StaticMode, anchor: PlayerId) -> Vec<DefensiveGrant> {
     match mode {
-        StaticMode::CantBeTargeted { .. } | StaticMode::Shroud | StaticMode::Hexproof => {
-            vec![DefensiveGrant::CantBeTargeted]
-        }
+        StaticMode::CantBeTargeted { who } => vec![DefensiveGrant::CantBeTargeted {
+            who: who.clone(),
+            anchor,
+        }],
+        StaticMode::Shroud => vec![shroud_grant(anchor)],
+        StaticMode::Hexproof => vec![hexproof_grant(anchor)],
         StaticMode::Protection => Vec::new(),
         _ => Vec::new(),
     }
 }
 
-fn grants_from_modification(m: &ContinuousModification) -> Vec<DefensiveGrant> {
+/// CR 702.18a: shroud means the object can't be the target of any spell or ability.
+fn shroud_grant(anchor: PlayerId) -> DefensiveGrant {
+    DefensiveGrant::CantBeTargeted {
+        who: ProhibitionScope::AllPlayers,
+        anchor,
+    }
+}
+
+/// CR 702.11b: hexproof means the object can't be the target of spells or
+/// abilities opponents control.
+fn hexproof_grant(anchor: PlayerId) -> DefensiveGrant {
+    DefensiveGrant::CantBeTargeted {
+        who: ProhibitionScope::Opponents,
+        anchor,
+    }
+}
+
+fn grants_from_modification(m: &ContinuousModification, anchor: PlayerId) -> Vec<DefensiveGrant> {
     match m {
-        ContinuousModification::AddKeyword { keyword } => grant_from_keyword(keyword),
-        ContinuousModification::AddStaticMode { mode } => grant_from_static_mode(mode),
+        ContinuousModification::AddKeyword { keyword } => grant_from_keyword(keyword, anchor),
+        ContinuousModification::AddStaticMode { mode } => grant_from_static_mode(mode, anchor),
         ContinuousModification::GrantAbility { definition } => {
-            extract_defensive_payload_grants(definition)
+            extract_defensive_payload_grants(definition, anchor)
         }
         _ => Vec::new(),
     }
@@ -361,7 +389,10 @@ fn grants_from_modification(m: &ContinuousModification) -> Vec<DefensiveGrant> {
 
 /// Extract defensive grants from a granted ability without re-requiring self-scope
 /// on inner static definitions (see `modification_is_defensive` GrantAbility arm).
-fn extract_defensive_payload_grants(ability: &AbilityDefinition) -> Vec<DefensiveGrant> {
+fn extract_defensive_payload_grants(
+    ability: &AbilityDefinition,
+    anchor: PlayerId,
+) -> Vec<DefensiveGrant> {
     let mut grants = Vec::new();
     for effect in collect_chain_effects(ability) {
         match effect {
@@ -370,9 +401,9 @@ fn extract_defensive_payload_grants(ability: &AbilityDefinition) -> Vec<Defensiv
                 static_abilities, ..
             } => {
                 for sd in static_abilities {
-                    grants.extend(grant_from_static_mode(&sd.mode));
+                    grants.extend(grant_from_static_mode(&sd.mode, anchor));
                     for m in &sd.modifications {
-                        grants.extend(grants_from_modification(m));
+                        grants.extend(grants_from_modification(m, anchor));
                     }
                 }
             }
@@ -382,9 +413,10 @@ fn extract_defensive_payload_grants(ability: &AbilityDefinition) -> Vec<Defensiv
     grants
 }
 
-fn grant_from_keyword(keyword: &Keyword) -> Vec<DefensiveGrant> {
+fn grant_from_keyword(keyword: &Keyword, anchor: PlayerId) -> Vec<DefensiveGrant> {
     match keyword {
-        Keyword::Shroud | Keyword::Hexproof => vec![DefensiveGrant::CantBeTargeted],
+        Keyword::Shroud => vec![shroud_grant(anchor)],
+        Keyword::Hexproof => vec![hexproof_grant(anchor)],
         Keyword::HexproofFrom(filter) => vec![DefensiveGrant::HexproofFrom(filter.clone())],
         Keyword::Protection(pt) => vec![DefensiveGrant::Protection(pt.clone())],
         Keyword::Indestructible => vec![DefensiveGrant::Indestructible],
@@ -481,20 +513,33 @@ fn harmful_effect_answerable_by_grants(
         })
         .filter(|grant| !matches!(grant, DefensiveGrant::PreventDamage) || lethal != Some(false))
         .any(|grant| {
-            grant_answers_harmful_effect(grant, effect, protected, source, declared_targets)
+            grant_answers_harmful_effect(
+                state,
+                grant,
+                effect,
+                protected,
+                source,
+                declared_targets,
+                threat_controller,
+            )
         })
 }
 
 fn grant_answers_harmful_effect(
+    state: &GameState,
     grant: &DefensiveGrant,
     effect: &Effect,
     protected: &engine::game::game_object::GameObject,
     source: Option<&engine::game::game_object::GameObject>,
     declared_targets: &[TargetRef],
+    threat_controller: PlayerId,
 ) -> bool {
     let targeted = effect_targets(effect, protected.id, declared_targets);
     match grant {
-        DefensiveGrant::CantBeTargeted => targeted,
+        DefensiveGrant::CantBeTargeted { who, anchor } => {
+            targeted
+                && cant_be_targeted_covers_threat(state, who, *anchor, protected, threat_controller)
+        }
         DefensiveGrant::HexproofFrom(filter) => {
             targeted
                 && source.is_some_and(|src| hexproof_from_blocks_source(filter, protected, src))
@@ -506,6 +551,19 @@ fn grant_answers_harmful_effect(
         DefensiveGrant::Indestructible => matches!(effect, Effect::Destroy { .. }),
         DefensiveGrant::PreventDamage => matches!(effect, Effect::DealDamage { .. }),
     }
+}
+
+/// CR 109.5 + CR 102.3: whether a `CantBeTargeted` grant (`who`, read from
+/// `anchor`) prohibits `threat_controller` from targeting `protected`, decided by
+/// the engine's scope authority so a teammate in a team game is not an opponent.
+fn cant_be_targeted_covers_threat(
+    state: &GameState,
+    who: &ProhibitionScope,
+    anchor: PlayerId,
+    protected: &engine::game::game_object::GameObject,
+    threat_controller: PlayerId,
+) -> bool {
+    prohibition_scope_matches_player_anchored(who, threat_controller, protected, anchor, state)
 }
 
 /// CR 115.10a: an object the effect acts on is a target only if the entry
@@ -689,9 +747,9 @@ fn defensive_opportunities(
             target.as_ref(),
             static_def.affected.as_ref(),
         )?;
-        let mut grants = grant_from_static_mode(&static_def.mode);
+        let mut grants = grant_from_static_mode(&static_def.mode, ai_player);
         for modification in &static_def.modifications {
-            grants.extend(grants_from_modification(modification));
+            grants.extend(grants_from_modification(modification, ai_player));
         }
         if grants.is_empty() {
             return None;
@@ -794,6 +852,7 @@ fn stack_payoff_for_opportunity(
                         *recipient_id,
                         source,
                         &declared_targets,
+                        entry.controller,
                     ) {
                         Some(true) => return Some(true),
                         Some(false) => {}
@@ -847,6 +906,7 @@ fn grant_answers_targeted_effect(
     recipient_id: ObjectId,
     source: Option<&engine::game::game_object::GameObject>,
     declared_targets: &[TargetRef],
+    threat_controller: PlayerId,
 ) -> Option<bool> {
     if matches!(
         effect,
@@ -873,7 +933,16 @@ fn grant_answers_targeted_effect(
             }
             let aimed = declared_targets.contains(&TargetRef::Object(recipient_id));
             return match grant {
-                DefensiveGrant::CantBeTargeted => Some(aimed),
+                DefensiveGrant::CantBeTargeted { who, anchor } => Some(
+                    aimed
+                        && cant_be_targeted_covers_threat(
+                            state,
+                            who,
+                            *anchor,
+                            protected,
+                            threat_controller,
+                        ),
+                ),
                 DefensiveGrant::HexproofFrom(filter) => {
                     Some(aimed && hexproof_from_blocks_source(filter, protected, source))
                 }
@@ -887,7 +956,16 @@ fn grant_answers_targeted_effect(
     }
     let targeted = effect_targets(effect, recipient_id, declared_targets);
     match grant {
-        DefensiveGrant::CantBeTargeted => Some(targeted),
+        DefensiveGrant::CantBeTargeted { who, anchor } => Some(
+            targeted
+                && cant_be_targeted_covers_threat(
+                    state,
+                    who,
+                    *anchor,
+                    protected,
+                    threat_controller,
+                ),
+        ),
         DefensiveGrant::HexproofFrom(filter) => Some(
             targeted
                 && source
@@ -1051,7 +1129,7 @@ fn grant_already_effective(
         return false;
     };
     match grant {
-        DefensiveGrant::CantBeTargeted => {
+        DefensiveGrant::CantBeTargeted { .. } => {
             object.has_keyword(&Keyword::Shroud)
                 || object.has_keyword(&Keyword::Hexproof)
                 || restriction_blocks_threat(state, object, threat_controller)
@@ -1185,7 +1263,7 @@ fn combat_payoff_for_opportunity(
                             )
                         });
                     }
-                    DefensiveGrant::CantBeTargeted
+                    DefensiveGrant::CantBeTargeted { .. }
                     | DefensiveGrant::HexproofFrom(_)
                     | DefensiveGrant::PreventDamage => {}
                 }
@@ -1236,7 +1314,7 @@ fn combat_payoff_for_opportunity(
                         });
                     }
                     DefensiveGrant::PreventDamage => ambiguous = true,
-                    DefensiveGrant::CantBeTargeted | DefensiveGrant::HexproofFrom(_) => {}
+                    DefensiveGrant::CantBeTargeted { .. } | DefensiveGrant::HexproofFrom(_) => {}
                 }
             }
             if ambiguous {
@@ -1260,7 +1338,7 @@ pub(crate) fn any_land_sacrifice_protection_payoff(
     ai_player: PlayerId,
     ability: &AbilityDefinition,
 ) -> bool {
-    let grants = extract_defensive_grants(ability);
+    let grants = extract_defensive_grants(ability, ai_player);
     if any_stack_harmful_answerable_by_grants(state, ai_player, &grants) {
         return true;
     }
@@ -1836,6 +1914,7 @@ mod tests {
                 recipient,
                 state.objects.get(&source),
                 &[],
+                PlayerId(1),
             ),
             None
         );
@@ -2165,8 +2244,114 @@ mod tests {
         assert!(any_stack_harmful_answerable_by_grants(
             state,
             P0,
-            &[DefensiveGrant::CantBeTargeted]
+            &[shroud_grant(PlayerId(0))]
         ));
+    }
+
+    /// A Two-Headed Giant game (teams: P0+P1 vs P2+P3) in which `caster` has
+    /// a zero-cost spell with `oracle` at P0's creature on the stack.
+    fn two_headed_giant_spell_at_p0_creature(
+        caster: PlayerId,
+        oracle: &str,
+    ) -> (engine::game::scenario::GameRunner, ObjectId) {
+        use engine::types::game_state::WaitingFor;
+        use engine::types::mana::ManaCost;
+        let mut scenario = engine::game::scenario::GameScenario::new_with_format(
+            engine::types::format::FormatConfig::two_headed_giant(),
+            4,
+            42,
+        );
+        scenario.at_phase(Phase::PreCombatMain);
+        let creature = scenario
+            .add_creature(PlayerId(0), "Protected Bear", 2, 2)
+            .id();
+        let spell = scenario
+            .add_spell_to_hand_from_oracle(caster, "Probe Spell", true, oracle)
+            .with_mana_cost(ManaCost::generic(0))
+            .id();
+        let mut runner = scenario.build();
+        {
+            let state = runner.state_mut();
+            state.active_player = caster;
+            state.priority_player = caster;
+            state.waiting_for = WaitingFor::Priority { player: caster };
+        }
+        runner.cast(spell).target_object(creature).commit();
+        (runner, creature)
+    }
+
+    /// CR 102.3 + CR 109.5: a grant that stops "spells or abilities your
+    /// opponents control" from targeting (Vines of Vastwood) answers an
+    /// opponent's targeted removal, but not a teammate's: in Two-Headed Giant
+    /// the teammate is not an opponent.
+    #[test]
+    fn opponent_scoped_cant_be_targeted_grant_answers_opponent_not_teammate() {
+        const DOOM_BLADE: &str = "Destroy target nonblack creature.";
+        let grant = grant_from_static_mode(
+            &StaticMode::CantBeTargeted {
+                who: ProhibitionScope::Opponents,
+            },
+            PlayerId(0),
+        );
+        assert_eq!(grant.len(), 1);
+
+        let (runner, _) = two_headed_giant_spell_at_p0_creature(PlayerId(2), DOOM_BLADE);
+        assert!(
+            any_stack_harmful_answerable_by_grants(runner.state(), PlayerId(0), &grant),
+            "an opponent's Doom Blade is answered"
+        );
+
+        let (runner, _) = two_headed_giant_spell_at_p0_creature(PlayerId(1), DOOM_BLADE);
+        assert!(
+            !any_stack_harmful_answerable_by_grants(runner.state(), PlayerId(0), &grant),
+            "a teammate's Doom Blade is not stopped by an opponents-only grant"
+        );
+
+        // Shroud names every player, so it answers the teammate's removal too.
+        assert!(any_stack_harmful_answerable_by_grants(
+            runner.state(),
+            PlayerId(0),
+            &[shroud_grant(PlayerId(0))]
+        ));
+    }
+
+    /// CR 611.2c + CR 109.5 + CR 102.3: after the real Vines of Vastwood resolves
+    /// (a transient rule effect, never grafted onto the creature), the restriction
+    /// is already effective against an opponent but not against the caster's
+    /// teammate in Two-Headed Giant.
+    #[test]
+    fn resolved_vines_is_effective_against_opponent_not_teammate() {
+        use engine::game::scenario::{GameScenario, P0};
+        use engine::types::game_state::WaitingFor;
+        use engine::types::mana::ManaCost;
+        const VINES_OF_VASTWOOD: &str = "Kicker {G}\nTarget creature can't be the target of spells or abilities your opponents control this turn. If this spell was kicked, that creature gets +4/+4 until end of turn.";
+        let mut scenario = GameScenario::new_with_format(
+            engine::types::format::FormatConfig::two_headed_giant(),
+            4,
+            42,
+        );
+        scenario.at_phase(Phase::PreCombatMain);
+        let creature = scenario.add_creature(P0, "Protected Bear", 2, 2).id();
+        scenario.add_creature(P0, "Bystander Bear", 2, 2);
+        scenario.add_creature(P0, "Second Bystander", 2, 2);
+        let vines = scenario
+            .add_spell_to_hand(P0, "Vines of Vastwood", true)
+            .with_mana_cost(ManaCost::generic(0))
+            .from_oracle_text(VINES_OF_VASTWOOD)
+            .id();
+        let mut runner = scenario.build();
+        runner.state_mut().waiting_for = WaitingFor::Priority { player: P0 };
+        runner.cast(vines).target_object(creature).resolve();
+        let state = runner.state();
+        let grant = shroud_grant(P0);
+        assert!(
+            grant_already_effective(state, creature, &grant, Some(PlayerId(2))),
+            "an opponent can't target the creature"
+        );
+        assert!(
+            !grant_already_effective(state, creature, &grant, Some(PlayerId(1))),
+            "the teammate is not one of Vines' caster's opponents"
+        );
     }
 
     /// P1 casts `text` at P0's creature (`toughness`, `keywords`).
@@ -2503,7 +2688,7 @@ mod tests {
         let blue = ProtectionTarget::Color(ManaColor::Blue);
 
         let (runner, entity) = entity_aimed_at(false);
-        assert!(!answers(&runner, DefensiveGrant::CantBeTargeted));
+        assert!(!answers(&runner, shroud_grant(PlayerId(0))));
         assert!(!answers(
             &runner,
             DefensiveGrant::HexproofFrom(HexproofFilter::Color(ManaColor::Blue))
@@ -2526,7 +2711,7 @@ mod tests {
 
         let (runner, _) = entity_aimed_at(true);
         assert!(
-            answers(&runner, DefensiveGrant::CantBeTargeted),
+            answers(&runner, shroud_grant(PlayerId(0))),
             "control: the Entity is the ability's target"
         );
     }
@@ -2618,7 +2803,7 @@ mod tests {
             any_stack_harmful_answerable_by_grants(runner.state(), P0, &[grant])
         };
         let red = ProtectionTarget::Color(ManaColor::Red);
-        assert!(!answers(DefensiveGrant::CantBeTargeted));
+        assert!(!answers(shroud_grant(PlayerId(0))));
         assert!(!answers(DefensiveGrant::HexproofFrom(
             HexproofFilter::Color(ManaColor::Red)
         )));
@@ -2728,7 +2913,7 @@ mod tests {
             "reach guard: P1's trigger holds the attacker"
         );
         for grant in [
-            DefensiveGrant::CantBeTargeted,
+            shroud_grant(PlayerId(0)),
             DefensiveGrant::HexproofFrom(HexproofFilter::Color(ManaColor::Blue)),
             DefensiveGrant::Protection(ProtectionTarget::Color(ManaColor::Blue)),
         ] {
@@ -2793,7 +2978,7 @@ mod tests {
         let black = ProtectionTarget::Color(ManaColor::Black);
         let (runner, ai_creature) = murder_at_the_ai_creature();
         for grant in [
-            DefensiveGrant::CantBeTargeted,
+            shroud_grant(PlayerId(0)),
             DefensiveGrant::HexproofFrom(HexproofFilter::Color(ManaColor::Black)),
             DefensiveGrant::Protection(black.clone()),
         ] {
@@ -2875,7 +3060,7 @@ mod tests {
                 },
             });
             for grant in [
-                DefensiveGrant::CantBeTargeted,
+                shroud_grant(PlayerId(0)),
                 DefensiveGrant::HexproofFrom(HexproofFilter::Color(ManaColor::Blue)),
                 DefensiveGrant::Protection(ProtectionTarget::Color(ManaColor::Blue)),
             ] {

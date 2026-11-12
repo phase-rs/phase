@@ -125,15 +125,18 @@ mod tests {
     use super::super::self_protection_classify::THREAT_FLOOR;
     use super::*;
     use engine::ai_support::{ActionMetadata, AiDecisionContext, CandidateAction, TacticalClass};
+    use engine::game::scenario::GameScenario;
     use engine::game::zones::create_object;
     use engine::types::ability::{
         AbilityDefinition, AbilityKind, ContinuousModification, ControllerRef, Effect,
-        QuantityExpr, StaticDefinition, TargetFilter, TypedFilter,
+        QuantityExpr, ResolvedAbility, StaticDefinition, TargetFilter, TargetRef, TypedFilter,
     };
     use engine::types::card_type::CoreType;
-    use engine::types::game_state::WaitingFor;
+    use engine::types::game_state::{StackEntry, StackEntryKind, WaitingFor};
     use engine::types::identifiers::{CardId, ObjectId};
     use engine::types::keywords::Keyword;
+    use engine::types::mana::ManaCost;
+    use engine::types::phase::Phase;
     use engine::types::statics::StaticMode;
     use engine::types::zones::Zone;
     use std::sync::Arc;
@@ -448,9 +451,6 @@ mod tests {
 
     #[test]
     fn stack_targeting_ai_permanent_counts_as_threat() {
-        use engine::types::ability::{ResolvedAbility, TargetRef};
-        use engine::types::game_state::{StackEntry, StackEntryKind};
-
         let mut state = GameState::new_two_player(42);
         let ai_player = PlayerId(1);
         let opp = PlayerId(0);
@@ -726,9 +726,6 @@ mod tests {
 
     #[test]
     fn activation_self_protection_with_threat_allowed() {
-        use engine::types::ability::{ResolvedAbility, TargetRef};
-        use engine::types::game_state::{StackEntry, StackEntryKind};
-
         let mut state = GameState::new_two_player(42);
         let id = ai_object_with_activated(
             &mut state,
@@ -772,30 +769,56 @@ mod tests {
         }
     }
 
-    /// Aerie Mystics-style untargeted shroud on a creature carrying a granted
-    /// "can't be the target of spells or abilities your opponents control"
-    /// (Vines of Vastwood) restriction from `granting_controller`, against the
-    /// opponent's Doom Blade. Returns the activation verdict.
-    fn vines_restricted_shroud_activation_verdict(granting_controller: PlayerId) -> PolicyVerdict {
-        use engine::types::ability::{ResolvedAbility, TargetRef};
-        use engine::types::game_state::{StackEntry, StackEntryKind};
-        use engine::types::statics::ProhibitionScope;
+    /// Aerie Mystics-style untargeted shroud on a creature that Vines of Vastwood
+    /// (cast by `vines_caster` through the production cast/resolve path, which
+    /// installs a transient "your opponents" restriction, never a grafted
+    /// ability) protects, against the opponent's (P1) Doom Blade. Returns the
+    /// activation verdict.
+    fn vines_restricted_shroud_activation_verdict(vines_caster: PlayerId) -> PolicyVerdict {
+        const VINES_OF_VASTWOOD: &str = "Kicker {G}\nTarget creature can't be the target of spells or abilities your opponents control this turn. If this spell was kicked, that creature gets +4/+4 until end of turn.";
 
-        let mut state = GameState::new_two_player(42);
-        let id = ai_object_with_activated(
-            &mut state,
-            grant_effect(Some(TargetFilter::SelfRef), None, Keyword::Shroud),
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let id = scenario.add_creature(AI, "Self-Protector", 2, 2).id();
+        scenario.add_creature(AI, "Bystander Bear", 2, 2);
+        scenario.add_creature(AI, "Second Bystander", 2, 2);
+        let vines = scenario
+            .add_spell_to_hand(vines_caster, "Vines of Vastwood", true)
+            .with_mana_cost(ManaCost::generic(0))
+            .from_oracle_text(VINES_OF_VASTWOOD)
+            .id();
+        let mut runner = scenario.build();
+        {
+            let state = runner.state_mut();
+            state.active_player = vines_caster;
+            state.priority_player = vines_caster;
+            state.waiting_for = WaitingFor::Priority {
+                player: vines_caster,
+            };
+        }
+        runner.cast(vines).target_object(id).resolve();
+        assert!(
+            runner
+                .state()
+                .transient_continuous_effects
+                .iter()
+                .any(|tce| tce.controller == vines_caster
+                    && tce.modifications.iter().any(|m| matches!(
+                        m,
+                        ContinuousModification::AddStaticMode {
+                            mode: StaticMode::CantBeTargeted { .. }
+                        }
+                    ))),
+            "production Vines must install the transient restriction"
         );
-        let mut restriction = StaticDefinition::new(StaticMode::CantBeTargeted {
-            who: ProhibitionScope::Opponents,
-        });
-        restriction.source_controller = Some(granting_controller);
-        state
-            .objects
-            .get_mut(&id)
-            .unwrap()
-            .static_definitions
-            .push(restriction);
+
+        let mut state = runner.state().clone();
+        Arc::make_mut(&mut state.objects.get_mut(&id).unwrap().abilities).push(
+            AbilityDefinition::new(
+                AbilityKind::Activated,
+                grant_effect(Some(TargetFilter::SelfRef), None, Keyword::Shroud),
+            ),
+        );
 
         let opp = PlayerId(1);
         let spell_id = create_object(
@@ -857,9 +880,6 @@ mod tests {
 
     #[test]
     fn destruction_of_another_creature_does_not_justify_self_indestructible() {
-        use engine::types::ability::{ResolvedAbility, TargetRef};
-        use engine::types::game_state::{StackEntry, StackEntryKind};
-
         let mut state = GameState::new_two_player(42);
         let id = ai_object_with_activated(
             &mut state,
@@ -916,9 +936,6 @@ mod tests {
 
     #[test]
     fn lethal_damage_justifies_self_indestructible() {
-        use engine::types::ability::{ResolvedAbility, TargetRef};
-        use engine::types::game_state::{StackEntry, StackEntryKind};
-
         let mut state = GameState::new_two_player(42);
         let id = ai_object_with_activated(
             &mut state,
@@ -966,9 +983,6 @@ mod tests {
 
     #[test]
     fn nonlethal_damage_to_self_fails_open() {
-        use engine::types::ability::{ResolvedAbility, TargetRef};
-        use engine::types::game_state::{StackEntry, StackEntryKind};
-
         let mut state = GameState::new_two_player(42);
         let id = ai_object_with_activated(
             &mut state,

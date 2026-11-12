@@ -5866,7 +5866,6 @@ mod tests {
     /// the controller's teammate to target the enchanted creature.
     #[test]
     fn cant_be_targeted_opponents_static_permits_teammate_in_2hg() {
-        use crate::types::format::FormatConfig;
         let mut state = GameState::new(FormatConfig::two_headed_giant(), 4, 0);
 
         // Creature controlled by P0

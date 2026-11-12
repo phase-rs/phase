@@ -5,6 +5,9 @@ use super::restriction::*;
 use super::support::*;
 use super::test_helpers::P3_SEG;
 use super::*;
+use crate::parser::oracle_keyword::{
+    classify_cant_be_targeted, is_source_qualified_cant_be_targeted, CantBeTargetedScope,
+};
 use crate::types::ability::{
     ActivationRestriction, AggregateFunction, AttackedYouScope, AttackerBlockStatus,
     CardTypeSetSource, CommanderOwnership, Comparator, ControllerRef, CountScope, DamageKindFilter,
@@ -3256,9 +3259,6 @@ fn source_qualified_self_targeting_prohibitions_fail_closed() {
 /// CR 115.1: the qualifier detection is a typed grammar, not a phrase list.
 #[test]
 fn classify_cant_be_targeted_separates_qualified_from_unqualified() {
-    use crate::parser::oracle_keyword::{
-        classify_cant_be_targeted, is_source_qualified_cant_be_targeted, CantBeTargetedScope,
-    };
     assert_eq!(
         classify_cant_be_targeted("can't be the target of spells or abilities"),
         Some(CantBeTargetedScope::AnyPlayer)

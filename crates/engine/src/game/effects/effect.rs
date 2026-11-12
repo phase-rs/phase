@@ -1,4 +1,5 @@
 use crate::game::filter;
+use crate::game::game_object::ObjectIncarnationRefExt;
 use crate::game::layers::evaluate_condition;
 use crate::game::quantity::resolve_quantity_with_targets;
 use crate::types::ability::{
@@ -323,7 +324,6 @@ fn install_transient(
         TargetFilter::SpecificObject { id }
             if modifications.iter().any(is_cant_be_targeted_rule_effect) =>
         {
-            use crate::game::game_object::ObjectIncarnationRefExt;
             state
                 .objects
                 .get(id)

@@ -1572,6 +1572,98 @@ fn veilstone_amulet_protects_creatures_entering_later_and_expires() {
     );
 }
 
+/// CR 109.2 + CR 109.2b: "creatures you control" in Veilstone Amulet's effect is
+/// an unzoned card-type description, so it means creatures on the battlefield. A
+/// creature SPELL on the stack is not one, even while the Amulet trigger that
+/// cast it resolves: an opponent's "Counter target creature spell" may still
+/// target it, and the spell is countered.
+#[test]
+fn veilstone_amulet_does_not_protect_the_triggering_creature_spell_on_the_stack() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.add_basic_land(P1, ManaColor::Blue);
+    scenario.add_basic_land(P1, ManaColor::Blue);
+    scenario.add_artifact_from_oracle(P0, "Veilstone Amulet", VEILSTONE_AMULET);
+    let bear = scenario
+        .add_creature_to_hand(P0, "Grizzly Probe", 2, 2)
+        .id();
+    let essence_scatter = scenario
+        .add_spell_to_hand_from_oracle(
+            P1,
+            "Essence Scatter",
+            true,
+            "Counter target creature spell.",
+        )
+        .with_mana_cost(ManaCost::Cost {
+            generic: 1,
+            shards: vec![engine::types::mana::ManaCostShard::Blue],
+        })
+        .id();
+    let mut runner = scenario.build();
+
+    // P0 casts the creature spell; the Amulet trigger goes on top of it.
+    let bear_card = runner.state().objects[&bear].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: bear,
+            card_id: bear_card,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("cast the creature spell");
+    // Resolve the Amulet trigger only; the creature spell stays on the stack.
+    for _ in 0..4 {
+        if runner.state().stack.len() == 1 {
+            break;
+        }
+        runner.act(GameAction::PassPriority).expect("pass priority");
+    }
+    assert_eq!(
+        runner.state().stack.len(),
+        1,
+        "only the creature spell remains"
+    );
+    assert_eq!(runner.state().objects[&bear].zone, Zone::Stack);
+
+    // The Amulet's effect is live, but P1 may still target the creature spell.
+    runner.act(GameAction::PassPriority).expect("P0 passes");
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { player } if player == P1),
+        "P1 must hold priority, got {:?}",
+        runner.state().waiting_for
+    );
+    // Production cast: the sole legal target is auto-selected.
+    runner
+        .act(cast_action(&runner, essence_scatter))
+        .expect("Essence Scatter must be castable at the creature spell");
+    assert_eq!(
+        runner.state().stack.len(),
+        2,
+        "Essence Scatter is on the stack above the creature spell"
+    );
+    let scatter_targets = runner
+        .state()
+        .stack
+        .iter()
+        .find(|entry| entry.id == essence_scatter)
+        .and_then(|entry| entry.ability())
+        .map(|ability| ability.targets.clone())
+        .unwrap_or_default();
+    assert_eq!(
+        scatter_targets,
+        vec![TargetRef::Object(bear)],
+        "a creature spell is not a battlefield creature (CR 109.2), so the Amulet's          effect does not make it an illegal target"
+    );
+    for _ in 0..8 {
+        if runner.state().stack.is_empty() {
+            break;
+        }
+        runner.act(GameAction::PassPriority).expect("pass priority");
+    }
+    assert_eq!(runner.state().objects[&bear].zone, Zone::Graveyard);
+    assert!(!runner.state().battlefield.contains(&bear));
+}
+
 /// Vines of Vastwood: the restriction is bound to the recipient's incarnation and
 /// is not an ability. Turn to Frog ("loses all abilities", cast later) does not
 /// clear it; a blink makes a new object (CR 400.7) and ends it; it expires at end
