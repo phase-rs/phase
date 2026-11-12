@@ -302,10 +302,14 @@ pub(crate) fn eliminate_players(
         )
     });
 
-    // CR 800.4a + CR 117.2e: whether a parked zone-change owner's replacement
-    // choice is the current operation as the departures begin.
-    let zone_change_pause_was_live = state.pending_replacement.is_some()
-        && state.resolution_stack.active_zone_change_owner_is_parked();
+    // CR 800.4a + CR 117.2e: the member a parked zone-change owner's
+    // replacement choice is paused on, when that choice is the current
+    // operation as the departures begin.
+    let live_zone_change_pause = state
+        .pending_replacement
+        .is_some()
+        .then(|| state.resolution_stack.active_zone_change_owner_pause())
+        .flatten();
 
     let interrupted_ordinary_search = state
         .pending_scoped_library_search
@@ -594,10 +598,17 @@ pub(crate) fn eliminate_players(
         // safety net to its caller — which finishes the resolution and then
         // settles it like any action that completed one: final part, state-based
         // actions, then the queue below (CR 608.2n, CR 117.5).
-        if zone_change_pause_was_live
+        // Only when the departure itself took that pause (its member left the
+        // game): a prompt cleared while its member stays in the game leaves the
+        // owner paused, as at base.
+        if live_zone_change_pause.is_some()
             && state.pending_replacement.is_none()
             && matches!(state.waiting_for, WaitingFor::Priority { .. })
             && state.resolution_stack.active_zone_change_owner_is_parked()
+            && state
+                .resolution_stack
+                .active_zone_change_owner_pause()
+                .is_none()
         {
             resume = DepartureResume::ParkedZoneChangeTail;
         }

@@ -2047,6 +2047,14 @@ impl ResolutionStack {
         std::iter::once(active).chain(announcing_owner).collect()
     }
 
+    /// The member the active logical zone-change owner is currently paused on,
+    /// if it is paused on one.
+    pub(crate) fn active_zone_change_owner_pause(&self) -> Option<ObjectIncarnationRef> {
+        self.last()
+            .and_then(Self::zone_change_owner)
+            .and_then(|(_, paused)| paused.map(|paused| paused.member))
+    }
+
     /// Whether the active frame is a parked logical zone-change owner: a batch
     /// delivery (including a merged permanent's component child) or a paused
     /// `ChangeZone` iteration.
@@ -2165,12 +2173,28 @@ impl ResolutionStack {
             pending.paused_current.as_ref(),
         )?;
         let existing = self.frames.iter().filter(|frame| matches!(frame, ResolutionFrame::BatchDelivery(batch) if batch.logical_zone_change_group.logical_group_id == group)).count();
-        if existing > 0 {
-            // Validate before popping: only the identified immediate parent can be replaced.
-            self.batch_delivery_owner_mut(group)?;
-        }
         if existing > 1 {
             return Err(ResolutionStackError::NoActiveChild);
+        }
+        if existing == 1 {
+            // A resumed owner re-parks over its previous frame, which still
+            // holds the pause it is replacing. The owner is identified by its
+            // group in the frame immediately beneath the new child — never a
+            // buried frame — and the child was validated above against the
+            // pending that replaces it, not against that stale pause.
+            let top = self.frames.top().ok_or(ResolutionStackError::Empty)?;
+            let beneath_child =
+                self.frames
+                    .below(top)
+                    .and_then(|below| match self.frames.get(below) {
+                        Some(ResolutionFrame::BatchDelivery(owner)) => {
+                            Some(owner.logical_zone_change_group.logical_group_id)
+                        }
+                        _ => None,
+                    });
+            if beneath_child != Some(group) {
+                return Err(ResolutionStackError::NoActiveChild);
+            }
         }
         let child = self.take_active_batch_delivery()?.expect("checked child");
         if existing == 1 {

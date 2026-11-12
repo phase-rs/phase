@@ -194,8 +194,8 @@ fn save_and_restore(runner: &mut GameRunner) {
 }
 
 /// The triggered abilities waiting to be put on the stack, as (controller,
-/// Oracle description): those already on the stack plus those its controller is
-/// being asked to order (CR 603.3b).
+/// Oracle description): those already on the stack plus every controller's
+/// group in the APNAP ordering pass (CR 603.3b).
 fn waiting_triggers(state: &GameState) -> Vec<(PlayerId, String)> {
     let mut waiting: Vec<(PlayerId, String)> = state
         .stack
@@ -208,12 +208,16 @@ fn waiting_triggers(state: &GameState) -> Vec<(PlayerId, String)> {
             _ => None,
         })
         .collect();
-    if let WaitingFor::OrderTriggers { player, triggers } = &state.waiting_for {
-        waiting.extend(
-            triggers
-                .iter()
-                .map(|trigger| (*player, trigger.description.clone())),
-        );
+    if let Some(order) = &state.pending_trigger_order {
+        waiting.extend(order.groups.iter().flat_map(|group| {
+            group.triggers.iter().filter_map(|trigger| {
+                trigger
+                    .pending
+                    .description
+                    .clone()
+                    .map(|text| (group.controller, text))
+            })
+        }));
     }
     waiting
 }
@@ -870,6 +874,7 @@ fn unsummon_concession_during_the_prompt_exiles_the_held_component() {
         let mut scenario = GameScenario::new_with_format(FormatConfig::commander(), 3, 7);
         scenario.at_phase(Phase::PreCombatMain);
         let (mender, brokkos) = add_pile(&mut scenario, P1);
+        scenario.add_real_card(P0, "Super Shredder", Zone::Battlefield, db);
         let unsummon = scenario.add_real_card(P0, "Unsummon", Zone::Hand, db);
         scenario.with_mana_pool(P0, mana(ManaType::Blue, 1));
         let mut runner = scenario.build();
@@ -898,6 +903,11 @@ fn unsummon_concession_during_the_prompt_exiles_the_held_component() {
                 "{label}: CR 800.4a: {component:?} leaves the game with its owner"
             );
         }
+        assert_eq!(
+            shredder_triggers(runner.state()),
+            1,
+            "{label}: Super Shredder saw the one merged permanent leave once"
+        );
     }
 }
 
@@ -1152,6 +1162,125 @@ fn another_seat_concession_leaves_a_parked_owner_iteration_intact() {
             mender_departure_triggers(runner.state()),
             vec![P1],
             "{label}: one merged permanent left, so its ability triggers once"
+        );
+    }
+}
+
+/// CR 730.3 + CR 903.9b + CR 616.1: a batch owner that is resumed and then
+/// reaches a merged member whose component prompts. Rebuking Ceremony targets
+/// P2's merged commander pile and Karn, Silver Golem (P1's commander); Karn
+/// moves first and parks on P1's choice. After that answer, the resumed batch
+/// delivers the pile and Brokkos's prompt parks it again, and after either
+/// answer the batch records the merged departure once and finishes. Super
+/// Shredder sees each departure once. Covered with a save/restore at both
+/// prompts, both pile shapes, and both answers at each prompt.
+#[test]
+fn resumed_batch_owner_hands_a_later_merged_member_to_its_component_batch() {
+    for pile_shape in [Pile::BrokkosUnderMender, Pile::MenderOverBrokkos] {
+        for (karn_answer, brokkos_answer) in [(0, 0), (0, 1), (1, 0), (1, 1)] {
+            let db = shared_card_db().expect("integration card fixture must load");
+            let mut scenario = GameScenario::new_with_format(FormatConfig::commander(), 3, 7);
+            scenario.at_phase(Phase::PreCombatMain);
+            let karn = scenario.add_real_card(P1, "Karn, Silver Golem", Zone::Battlefield, db);
+            let (mender, brokkos) = add_pile(&mut scenario, P2);
+            scenario.add_real_card(P2, "Ninth Bridge Patrol", Zone::Battlefield, db);
+            scenario.add_real_card(P0, "Super Shredder", Zone::Battlefield, db);
+            let ceremony = scenario.add_real_card(P0, "Rebuking Ceremony", Zone::Hand, db);
+            scenario.with_mana_pool(P0, mana(ManaType::Green, 5));
+            let mut runner = scenario.build();
+            runner
+                .state_mut()
+                .objects
+                .get_mut(&karn)
+                .expect("Karn exists")
+                .is_commander = true;
+            let pile = merge_pile(&mut runner, pile_shape, mender, brokkos, true);
+            let label = format!("{pile_shape:?}, Karn {karn_answer}, Brokkos {brokkos_answer}");
+
+            cast_until_resolved_or_asked(&mut runner, ceremony, &[pile.survivor, karn]);
+            assert_commander_prompt(runner.state(), P1, karn);
+            save_and_restore(&mut runner);
+            answer(&mut runner, karn_answer);
+            assert_commander_prompt(runner.state(), P2, pile.brokkos);
+            save_and_restore(&mut runner);
+            answer(&mut runner, brokkos_answer);
+
+            resolution_finished(runner.state());
+            assert!(
+                matches!(
+                    runner.state().waiting_for,
+                    WaitingFor::Priority { player: P0 }
+                ) || matches!(runner.state().waiting_for, WaitingFor::OrderTriggers { .. }),
+                "{label}: {:?}",
+                runner.state().waiting_for
+            );
+            assert_eq!(
+                runner.state().objects[&ceremony].zone,
+                Zone::Graveyard,
+                "{label}"
+            );
+            assert_eq!(
+                patrol_triggers(runner.state()),
+                vec![P2],
+                "{label}: Ninth Bridge Patrol observes the one merged departure once"
+            );
+            assert_eq!(
+                shredder_triggers(runner.state()),
+                2,
+                "{label}: Super Shredder saw Karn and the merged permanent leave, once each"
+            );
+        }
+    }
+}
+
+/// CR 800.4a + CR 117.2e: the same resumed batch, reached through a concession.
+/// P1 concedes at Karn's prompt; the resumed ceremony reaches P2's merged pile,
+/// whose Brokkos prompt parks it again within the concession, and P2's answer
+/// finishes it.
+#[test]
+fn concession_resume_reaching_a_merged_member_parks_on_its_component() {
+    for pile_shape in [Pile::BrokkosUnderMender, Pile::MenderOverBrokkos] {
+        let db = shared_card_db().expect("integration card fixture must load");
+        let mut scenario = GameScenario::new_with_format(FormatConfig::commander(), 3, 7);
+        scenario.at_phase(Phase::PreCombatMain);
+        let karn = scenario.add_real_card(P1, "Karn, Silver Golem", Zone::Battlefield, db);
+        let (mender, brokkos) = add_pile(&mut scenario, P2);
+        scenario.add_real_card(P2, "Ninth Bridge Patrol", Zone::Battlefield, db);
+        let ceremony = scenario.add_real_card(P0, "Rebuking Ceremony", Zone::Hand, db);
+        scenario.with_mana_pool(P0, mana(ManaType::Green, 5));
+        let mut runner = scenario.build();
+        runner
+            .state_mut()
+            .objects
+            .get_mut(&karn)
+            .expect("Karn exists")
+            .is_commander = true;
+        let pile = merge_pile(&mut runner, pile_shape, mender, brokkos, true);
+        let label = format!("{pile_shape:?}");
+
+        cast_until_resolved_or_asked(&mut runner, ceremony, &[pile.survivor, karn]);
+        assert_commander_prompt(runner.state(), P1, karn);
+        let conceded = concede(&mut runner, P1);
+        assert!(
+            matches!(
+                conceded.waiting_for,
+                WaitingFor::ReplacementChoice { player: P2, .. }
+            ),
+            "{label}: {:?}",
+            conceded.waiting_for
+        );
+        assert_commander_prompt(runner.state(), P2, pile.brokkos);
+        answer(&mut runner, 1);
+        resolution_finished(runner.state());
+        assert_eq!(
+            runner.state().objects[&ceremony].zone,
+            Zone::Graveyard,
+            "{label}"
+        );
+        assert_eq!(
+            patrol_triggers(runner.state()),
+            vec![P2],
+            "{label}: Ninth Bridge Patrol observes the one merged departure once"
         );
     }
 }
