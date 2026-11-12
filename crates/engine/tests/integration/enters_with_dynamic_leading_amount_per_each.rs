@@ -169,6 +169,12 @@ fn assert_represented(face: &CardFace) {
 /// line is recorded as an unimplemented replacement structure, and that is the
 /// card's coverage gap.
 fn assert_unsupported(text: &str) {
+    assert_unsupported_with_gap(text, "Effect:replacement_structure");
+}
+
+/// As [`assert_unsupported`], with the whole-line gap the enters-with route
+/// records for this line (`gap`).
+fn assert_unsupported_with_gap(text: &str, gap: &str) {
     // The parser normalizes the self-reference to `~`; the rest is verbatim.
     let body = text
         .strip_prefix("This creature ")
@@ -200,11 +206,7 @@ fn assert_unsupported(text: &str) {
         "{text:?}: the whole line must be the only, unimplemented ability, got {:?}",
         face.abilities
     );
-    assert_eq!(
-        card_face_gaps(&face),
-        vec!["Effect:replacement_structure".to_string()],
-        "{text:?}"
-    );
+    assert_eq!(card_face_gaps(&face), vec![gap.to_string()], "{text:?}");
 }
 
 /// CR 614.1c: X counters for each other red creature and a counter
@@ -525,13 +527,18 @@ fn dynamic_counter_list_with_an_amount_override_is_unsupported() {
         fixed_with_override.parse_warnings
     );
 
-    assert_unsupported(
+    // CR 107.3 + CR 107.3i: a list entry that prints X beside a where-X
+    // definition is already declined by the enters-with clause reader, which
+    // records it as an unread clause.
+    assert_unsupported_with_gap(
         "This creature enters with a +1/+1 counter and X charge counters on it, where X is the \
          number of creatures you control.",
+        "Effect:enters_with_clause",
     );
-    assert_unsupported(
+    assert_unsupported_with_gap(
         "This creature enters with X +1/+1 counters and a charge counter on it, where X is the \
          number of creatures you control.",
+        "Effect:enters_with_clause",
     );
     assert_unsupported(
         "This creature enters with a +1/+1 counter and X charge counters on it equal to the \

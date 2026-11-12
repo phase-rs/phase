@@ -5112,8 +5112,10 @@ fn enters_with_counters_outcome(
     }
     // CR 107.3 + CR 122.6 + CR 614.1c: the "equal to" / "where X is" overrides
     // below rewrite only the single-counter `count_expr`; a conjoined counter
-    // list publishes its own entries, so a dynamic entry would keep its bare
-    // `CostXPaid` and the override's quantity would be silently dropped. The
+    // list publishes its own entries, so a dynamic entry would keep its own
+    // count and the override's quantity would be silently dropped. (An entry
+    // that prints X beside a where-X definition already failed closed above;
+    // this covers the "equal to" override and any other dynamic entry.) The
     // list has no per-entry binding for the override, so decline the whole
     // replacement. A fixed-only list is unaffected.
     if counter_entries
