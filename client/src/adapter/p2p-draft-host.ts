@@ -1482,15 +1482,25 @@ export class P2PDraftHost {
       // resubmit that changes only the commander reuse the prior receipt and
       // resolve straight to the recovered-receipt branch, never reaching the
       // reducer with the new designation.
+      //
+      // The receipt is reused only for a retry of seat 0's LATEST accepted
+      // submission (an IDB-failure retry, or serialized concurrent submits).
+      // A revert to an earlier composition (A -> B -> A) is a new submission
+      // and must reach the reducer, or `submitted_decks` keeps B. Receipts are
+      // set only under new ids and persisted/restored in insertion order, so
+      // the last seat-0 entry is the latest accepted one.
       const payloadFingerprint = this.deckPayloadFingerprint(mainDeck, commanders);
-      const priorSubmission = [...this.deckSubmissionReceipts.entries()].find(
-        ([, receipt]) => receipt.seat === 0 && receipt.payloadFingerprint === payloadFingerprint,
-      )?.[0];
+      const latestReceipt = [...this.deckSubmissionReceipts.entries()]
+        .filter(([, receipt]) => receipt.seat === 0)
+        .pop();
+      const retrySubmission = latestReceipt?.[1].payloadFingerprint === payloadFingerprint
+        ? latestReceipt[0]
+        : undefined;
       return this.handleDeckSubmission(
         0,
         mainDeck,
         commanders,
-        priorSubmission ?? crypto.randomUUID(),
+        retrySubmission ?? crypto.randomUUID(),
         { kind: "hostLocal" },
       );
     });
@@ -1932,13 +1942,15 @@ export class P2PDraftHost {
       // admits only Deckbuilding | Pairing | RoundComplete). State what every
       // status does rather than sweeping the rest into a fallback.
       //
-      // `Pairing` is PostDraftPlay::TournamentPairings, the only status this
-      // funnel really reaches besides `Complete`; `generatePairingsInner`
-      // republishes and overwrites it. The other seven are unreachable here —
+      // `Pairing` is PostDraftPlay::TournamentPairings, which this funnel
+      // reaches besides `Complete`; `generatePairingsInner` republishes and
+      // overwrites it. `RoundComplete` is reached by a between-rounds revision
+      // in a Casual pod (MTR 7.3): every seat already submitted, so this
+      // all-submitted branch fires on each revision, and its own arm below
+      // handles it. The remaining six are unreachable here —
       // `apply_submit_deck`'s last-deck arm assigns only Complete or Pairing,
-      // and this branch runs only once every seat has submitted or is a bot —
-      // so they route to the reducer, which refuses whatever it will not
-      // accept.
+      // and a revision leaves the status untouched — so they route to the
+      // reducer, which refuses whatever it will not accept.
       switch (hostView.status) {
         // PostDraftPlay::CompleteImmediately (Quick Draft, Commander Draft).
         // The reducer already assigned Complete and `apply_generate_pairings`
@@ -1960,12 +1972,16 @@ export class P2PDraftHost {
         case "Review":
           await this.broadcastViews();
           break;
+        // A between-rounds revision (MTR 7.3) republishes the pod and never
+        // generates pairings: round advancement stays the host's AdvanceRound.
+        case "RoundComplete":
+          await this.broadcastViews();
+          break;
         case "Lobby":
         case "Drafting":
         case "Paused":
         case "Deckbuilding":
         case "MatchInProgress":
-        case "RoundComplete":
         case "Abandoned":
           await this.generatePairingsInner();
           break;

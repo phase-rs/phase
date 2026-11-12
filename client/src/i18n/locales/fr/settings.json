@@ -41,7 +41,7 @@
     "unCardActions": "Un-card actions",
     "unCardActionsToggle": "Play Un-card actions",
     "unCardActionsDescription": "Join in the silly parts of Unglued, Unhinged, Unstable and Unfinity cards: say-it prompts (Rod of Spanking), the Gotcha! button, and a menu of gestures. Off by default. Prompts and menu entries only appear when a card in the game uses them.",
-    "priorityAlertsDescription": "Soyez prévenu quand la priorité vous revient après une attente. Le son retentit si vous êtes dans un autre onglet ou une autre fenêtre, ou lorsqu'une fenêtre pendant le tour d'un adversaire reste sans réponse pendant {{seconds}} secondes ; son éclat se renforce alors aussi.",
+    "priorityAlertsDescription": "Soyez prévenu quand la priorité vous revient après une attente. Le son retentit si vous êtes dans un autre onglet ou une autre fenêtre, ou lorsqu'une fenêtre pendant le tour d'un adversaire reste sans réponse pendant {{seconds}} secondes ; son éclat se renforce alors aussi. Lueur fait aussi pulser la bordure de l'encadré « Votre priorité » tant que la décision vous revient ; sans Lueur, la bordure reste fixe.",
     "logDockSide": "Position du journal de partie",
     "spellPayment": "Paiement des sorts",
     "manualManaPayment": "Paiement manuel du mana pour les sorts",

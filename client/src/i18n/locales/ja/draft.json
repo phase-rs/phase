@@ -628,9 +628,9 @@
     "tournamentEliminationDesc": "マッチに負けたプレイヤーは敗退し、最後に1人が残るまで対戦します。",
     "podPolicy": "卓の進行方針",
     "policyCompetitive": "競技向け",
-    "policyCompetitiveDesc": "ピックに制限時間があり、時間切れは自動ピック。ラウンドも自動で進みます。",
+    "policyCompetitiveDesc": "ピックに制限時間があり、時間切れは自動ピック。ラウンドも自動で進みます。提出したデッキは確定となり、変更できるのはマッチ中のゲーム間のサイドボード入れ替えのみです。",
     "policyCasual": "カジュアル",
-    "policyCasualDesc": "ピックの制限時間はなく、ラウンドは手動で進めます。問題が起きた場合はホストが調整できます。",
+    "policyCasualDesc": "ピックの制限時間はなく、ラウンドは手動で進めます。問題が起きた場合はホストが調整でき、ラウンド間にデッキを変更できます。",
     "podSize": "卓の人数",
     "podSizeDesc": "全{{count}}席。ドラフト開始前にロビーで空席をボットにできます。",
     "playerCount": "{{count}}人",
@@ -676,11 +676,21 @@
     "roundComplete": "ラウンド完了",
     "waitingNextRound": "ホストが次のラウンドを開始するのを待っています…",
     "nextRoundShortly": "まもなく次のラウンドが始まります…",
+    "editDeck": "デッキを編集",
+    "backToStandings": "順位に戻る",
+    "editDeckHint": "カジュアルの卓です。次のラウンドが始まる前にデッキを変更できます。",
     "pauseReason": {
       "PlayerDisconnected": "プレイヤーの切断によりドラフトを一時停止しています。",
       "PausedByHost": "ホストがドラフトを一時停止しました。",
       "DisconnectGraceExpired": "プレイヤーが制限時間内に戻りませんでした。"
     }
+  },
+  "deckSubmitConfirm": {
+    "title": "このデッキを提出しますか？",
+    "confirm": "提出を確定",
+    "competitive": "競技向けの卓です。提出したデッキはすべてのラウンドで確定となります。Bo3マッチのゲーム間ではサイドボードを入れ替えられます。",
+    "casual": "ラウンド間にデッキを変更できます。",
+    "final": "提出したデッキは確定となります。"
   },
   "betweenGames": {
     "game": "ゲーム{{number}}",

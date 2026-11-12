@@ -22,7 +22,7 @@ use crate::types::game_state::{
     CastingVariant, ConvokeMode, CostResume, CounterCostRootSubtree, DistributionScope,
     DistributionUnit, GameState, LandPlayRecord, LoopDetectionMode, ManaAbilityResume,
     MayTriggerAutoChoiceKey, PayCostKind, PendingCostMoveCompletion, PendingCostMoveResume,
-    PendingCounterPostAction, PendingEffectResolved, PersistedRestoreError,
+    PendingCounterPostAction, PendingEffectResolved, PendingManaAbility, PersistedRestoreError,
     ResolveAllConsentParticipant, ResolveAllConsentRun, ResolveAllPrioritySnapshot, RetargetScope,
     RetargetSlotAddress, StackEntry, StackEntryKind, StackResolutionAutoPassOverlay,
     StackResolutionBudget, StackResolutionEntryFence, StackResolutionPolicy,
@@ -10381,11 +10381,12 @@ fn priority_auto_pass_decision(state: &GameState, player: PlayerId) -> AutoPassD
             // session so the player can respond — unless they have pre-committed
             // to yield priority for that exact triggered ability, in which case
             // the session keeps auto-passing through it. CR 117.1d + CR 605.3a:
-            // the player's own object that can move one of their activatable
-            // mana sources off the battlefield (`Held`) ends it too, since that
-            // activation is lost once the object resolves. (`UntilStackEmpty` is
-            // consent to resolve the stack itself, so it passes through.) The standing rungs
-            // are `priority::standing_priority_pass`'s; Full Control already
+            // `Held` ends it too: the player's own object that can move one of
+            // their activatable mana sources off the battlefield, or their own
+            // activated ability that would waste an untap on its own source. That
+            // mana is lost once the object resolves. (`UntilStackEmpty` is
+            // consent to resolve the stack itself, so it passes through.) The standing rungs are
+            // `priority::standing_priority_pass`'s; Full Control already
             // returned above, so `Withheld` cannot reach this arm.
             let top_needs_response = state.stack.last().is_some_and(|top| {
                 matches!(
@@ -10950,7 +10951,8 @@ fn stack_resolution_session_priority_decision(
                 }
                 StackResolutionPolicy::Committed => {
                     if !session.representatives.contains(&canonical_holder)
-                        && priority_player_has_meaningful_action(state)
+                        && (priority_player_has_meaningful_action(state)
+                            || window_held_for_mana(state, canonical_holder))
                     {
                         return StackResolutionSessionPriorityDecision::Pause;
                     }
@@ -10969,6 +10971,19 @@ fn stack_resolution_session_priority_decision(
     }
 }
 
+/// CR 117.1d + CR 605.3a + CR 117.3d: whether `player`'s own window over the
+/// top of the stack is held for a wasted untap on its own mana source. Another
+/// player's consent to resolve the stack doesn't pass it: the meaningful-action
+/// check never counts a mana activation, so it can't see that window. Only the
+/// bounded untap reason is asked (`priority::own_top_wastes_an_untap`): the
+/// departure reason's board read isn't run for another player's consent.
+fn window_held_for_mana(state: &GameState, player: PlayerId) -> bool {
+    state
+        .stack
+        .back()
+        .is_some_and(|top| priority::own_top_wastes_an_untap(state, player, top))
+}
+
 /// CR 117.3b + CR 117.3d + CR 117.4 + CR 732.2b: whether `participant` has
 /// authorized this stack-resolution session to pass its priority window over
 /// `window_top` inside the fenced cohort without a fresh decision. The single
@@ -10981,29 +10996,34 @@ fn stack_resolution_session_participant_authorizes_pass(
     participant: PlayerId,
     window_top: &StackEntry,
 ) -> bool {
-    let standing_pass = match priority::standing_priority_pass(state, participant, Some(window_top))
-    {
-        // CR 117.1: Full Control is a standing refusal to give up any window —
-        // the session's own representative's included.
-        priority::StandingPriorityPass::Withheld => return false,
-        priority::StandingPriorityPass::Granted => true,
-        // CR 117.1d + CR 605.3a: an own object that can remove an activatable
-        // mana source is no standing pass; only explicit consent skips it.
-        priority::StandingPriorityPass::Held | priority::StandingPriorityPass::Undecided => false,
-    };
     match session.policy {
+        // A representative consented to the session. A non-representative's
+        // skipped windows are not rechecked for a meaningful action (only its
+        // live window is, in `stack_resolution_session_priority_decision`).
+        // CR 117.1: Full Control is the one skipped window consent doesn't cover
+        // (an activated ability, the untap reason's entry, is never skipped), so
+        // the standing-pass ladder isn't read.
+        StackResolutionPolicy::Committed => !priority::holds_full_control(state, participant),
         // A verified AI pass authorizes later windows in this exact fenced
         // cohort; CR 117.3d + CR 732.2b: a representative's standing pass over
         // this window's top authorizes this window.
         StackResolutionPolicy::RecheckNoMeaningfulPriorityAction => {
+            let standing_pass =
+                match priority::standing_priority_pass(state, participant, Some(window_top)) {
+                    // CR 117.1: Full Control is a standing refusal to give up any
+                    // window — the session's own representative's included.
+                    priority::StandingPriorityPass::Withheld => return false,
+                    priority::StandingPriorityPass::Granted => true,
+                    // CR 117.1d + CR 605.3a: an own object that can remove an
+                    // activatable mana source, or an own activated ability that
+                    // would waste an untap on its own source, is no standing
+                    // pass; only explicit consent skips it.
+                    priority::StandingPriorityPass::Held
+                    | priority::StandingPriorityPass::Undecided => false,
+                };
             session.representatives.contains(&participant)
                 && (standing_pass || session.verified_pass_representatives.contains(&participant))
         }
-        // A representative consented to the session. A non-representative's
-        // skipped windows are not rechecked for a meaningful action (only its
-        // live window is, in `stack_resolution_session_priority_decision`);
-        // Full Control was enforced above.
-        StackResolutionPolicy::Committed => true,
     }
 }
 
@@ -11055,28 +11075,51 @@ pub(crate) fn stack_resolution_session_authorized_limit(state: &GameState) -> Op
         .take_while(|(entry, fence)| fence.matches_captured_entry(entry))
         .map(|(entry, _)| entry);
     // `None` when the top entry is outside the fence.
-    fenced_prefix.next()?;
+    let top = fenced_prefix.next()?;
+    // Every run the resolver batches (`stack::resolve_next_with_limit`) is of
+    // triggered abilities, so a spell or an activated ability always resolves
+    // alone, and the window over one is read when it comes rather than looked
+    // ahead to: its window is judged against the board as it is then, after the
+    // entries above it resolved, not before (an untap above it may have untapped
+    // the source). Basalt Monolith's queued "{3}: Untap this artifact" entries
+    // each get their own window. A keyword action
+    // never batches either, but it isn't held for an untap, so its windows are
+    // still looked ahead to as before.
+    let resolves_alone = |entry: &StackEntry| match entry.kind {
+        StackEntryKind::Spell { .. } | StackEntryKind::ActivatedAbility { .. } => true,
+        StackEntryKind::TriggeredAbility { .. }
+        | StackEntryKind::KeywordAction { .. }
+        | StackEntryKind::CombatDamage { .. } => false,
+    };
+    if resolves_alone(top) {
+        return Some(1);
+    }
     // CR 117.3b + CR 117.4: resolving K entries skips every participant's
     // window over each of the next K − 1 entries, each with its own top; the
     // boundary ends before the first window a participant has not authorized
     // (CR 732.2b), so K = 1 + the authorized prefix of those windows. Each
     // window is judged against the board before anything resolves, so it cannot
     // see a mana source an earlier member untaps. That is sound for the `Held`
-    // rung because a batch consumes only windows this look-ahead authorized, and
-    // its members are either the resolver's fixed inert kinds or one repeated
-    // untargeted triggered ability. A member that untaps a mana source which a
-    // later identical member then removes, without pausing, is an accepted
+    // rung's removal reason, because a batch consumes only windows this
+    // look-ahead authorized, and its members are triggered abilities. A
+    // Committed session doesn't read it for a non-representative's skipped
+    // window: no batch kind (inert, self-counter, fixed life gain, fixed
+    // opponent effect, token) moves a mana source off the battlefield. Its untap
+    // reason is for an activated ability only, whose window is never looked
+    // ahead to. A member that untaps a mana source which a later
+    // identical member then removes, without pausing, is an accepted
     // under-approximation.
     let authorized_skipped_windows = fenced_prefix
         .take_while(|window_top| {
-            participants.iter().all(|&participant| {
-                stack_resolution_session_participant_authorizes_pass(
-                    state,
-                    session,
-                    participant,
-                    window_top,
-                )
-            })
+            !resolves_alone(window_top)
+                && participants.iter().all(|&participant| {
+                    stack_resolution_session_participant_authorizes_pass(
+                        state,
+                        session,
+                        participant,
+                        window_top,
+                    )
+                })
         })
         .count();
     let limit = u32::try_from(1 + authorized_skipped_windows).unwrap_or(u32::MAX);
@@ -11256,7 +11299,9 @@ fn run_auto_pass_loop(
                                 {
                                     break;
                                 }
-                                if priority_player_has_meaningful_action(state) {
+                                if priority_player_has_meaningful_action(state)
+                                    || window_held_for_mana(state, player)
+                                {
                                     break;
                                 }
                             }
@@ -12763,6 +12808,10 @@ fn apply_action(
                 .suspended_mana_abilities()
                 .next()
                 .is_some() => {}
+        // CR 605.3b: confirming a mana ability's own payment resolves a mana
+        // ability; it commits no play.
+        GameAction::PassPriority
+            if matches!(state.waiting_for, WaitingFor::ManaAbilityManaPayment { .. }) => {}
         GameAction::PassPriority
         | GameAction::PlayLand { .. }
         | GameAction::CastSpell { .. }
@@ -13145,7 +13194,7 @@ fn apply_non_priority_pass_action(
                     .card_types
                     .core_types
                     .contains(&crate::types::card_type::CoreType::Land);
-                let wf = mana_abilities::activate_mana_ability(
+                let wf = mana_abilities::activate_mana_ability_with_payment_mode(
                     state,
                     source_id,
                     *player,
@@ -13154,6 +13203,7 @@ fn apply_non_priority_pass_action(
                     &mut events,
                     crate::types::game_state::ManaAbilityResume::Priority,
                     None,
+                    payment_mode,
                 )?;
                 // CR 605.3b: Track land mana taps for undo (UntapLandForMana),
                 // matching the TapLandForMana path so dual lands are undoable
@@ -14960,13 +15010,14 @@ fn apply_non_priority_pass_action(
             GameAction::ActivateAbility {
                 source_id,
                 ability_index,
-                ..
+                payment_mode,
             },
         ) => engine_payment_choices::handle_unless_payment_activate_ability(
             state,
             waiting_for.clone(),
             source_id,
             ability_index,
+            payment_mode,
             &mut events,
         )?,
         // CR 702.21a: Player selected a card to discard as ward cost payment.
@@ -15014,6 +15065,57 @@ fn apply_non_priority_pass_action(
             pending_mana_ability.resume.clone(),
             &mut events,
         )?,
+        // CR 118.3a: pin a pool unit to pay a manual mana ability's mana cost.
+        (
+            WaitingFor::ManaAbilityManaPayment {
+                player,
+                pending_mana_ability,
+            },
+            GameAction::SpendPoolMana { pip_id },
+        ) => WaitingFor::ManaAbilityManaPayment {
+            player: *player,
+            pending_mana_ability: Box::new(handle_spend_pool_mana_for_mana_ability(
+                state,
+                *player,
+                pending_mana_ability,
+                pip_id,
+            )?),
+        },
+        // CR 118.3a: remove a pin from a manual mana ability's payment.
+        (
+            WaitingFor::ManaAbilityManaPayment {
+                player,
+                pending_mana_ability,
+            },
+            GameAction::UnspendPoolMana { pip_id },
+        ) => WaitingFor::ManaAbilityManaPayment {
+            player: *player,
+            pending_mana_ability: Box::new(handle_unspend_pool_mana_for_mana_ability(
+                pending_mana_ability,
+                pip_id,
+            )?),
+        },
+        // CR 601.2h via CR 602.2b: the player confirms a manual mana ability's
+        // payment, which is paid from the pool as it stands.
+        (
+            WaitingFor::ManaAbilityManaPayment {
+                pending_mana_ability,
+                ..
+            },
+            GameAction::PassPriority,
+        ) => {
+            let wf = mana_abilities::confirm_manual_mana_ability_payment(
+                state,
+                (**pending_mana_ability).clone(),
+                &mut events,
+            )?;
+            if let Some(order_wf) =
+                super::triggers::preserve_order_triggers_resume(state, wf.clone())
+            {
+                return Ok(ActionResult::applied(events, order_wf));
+            }
+            wf
+        }
         (WaitingFor::ManaPayment { player, .. }, GameAction::CancelCast) => {
             // CR 601.2i: Cancelling at mana payment rolls back the cast — pop
             // the stack entry placed at announcement and return the object to
@@ -15526,7 +15628,7 @@ fn apply_non_priority_pass_action(
             GameAction::ActivateAbility {
                 source_id,
                 ability_index,
-                ..
+                payment_mode,
             },
         ) => {
             let (player, resume) =
@@ -15539,7 +15641,9 @@ fn apply_non_priority_pass_action(
                 && mana_abilities::is_mana_ability(&obj.abilities[ability_index])
             {
                 let ability_def = obj.abilities[ability_index].clone();
-                let wf = mana_abilities::activate_mana_ability(
+                // CR 605.3a + CR 117.1d: a mana ability activated while paying is itself
+                // an activation whose own mana cost the player may direct.
+                let wf = mana_abilities::activate_mana_ability_with_payment_mode(
                     state,
                     source_id,
                     player,
@@ -15548,6 +15652,7 @@ fn apply_non_priority_pass_action(
                     &mut events,
                     resume,
                     None,
+                    payment_mode,
                 )?;
                 // CR 605.4a: no outer scan. `activate_mana_ability`
                 // builds a real typed cursor here, and its completed frame has
@@ -19954,17 +20059,6 @@ pub(super) fn handle_spend_pool_mana(
     player: PlayerId,
     pip_id: crate::types::mana::ManaPipId,
 ) -> Result<(), EngineError> {
-    // The unit must currently exist in the player's pool.
-    let unit = state
-        .players
-        .iter()
-        .find(|p| p.id == player)
-        .and_then(|p| p.mana_pool.shape_of_pip(pip_id))
-        .cloned()
-        .ok_or_else(|| {
-            EngineError::ActionNotAllowed("No such mana unit in pool to pin".to_string())
-        })?;
-
     let pending = state.pending_cast.as_ref().ok_or_else(|| {
         EngineError::ActionNotAllowed("No pending cast to pin mana for".to_string())
     })?;
@@ -19994,17 +20088,7 @@ pub(super) fn handle_spend_pool_mana(
             .map(crate::types::mana::PaymentContext::Spell)
     };
 
-    let mana_spend_permission = super::casting::player_mana_spend_permission_for_payment(
-        state,
-        player,
-        Some(object_id),
-        ctx.as_ref(),
-    );
-    if !mana_unit_eligible_for_cost(&unit, &cost, ctx.as_ref(), mana_spend_permission) {
-        return Err(EngineError::ActionNotAllowed(
-            "Mana unit cannot pay any part of this cost".to_string(),
-        ));
-    }
+    ensure_pool_unit_can_pay(state, player, pip_id, object_id, &cost, ctx.as_ref())?;
 
     if let Some(pc) = state.pending_cast.as_mut() {
         if !pc.pinned_pool_units.contains(&pip_id) {
@@ -20012,6 +20096,88 @@ pub(super) fn handle_spend_pool_mana(
         }
     }
     Ok(())
+}
+
+/// CR 118.3a + CR 106.6: `pip_id` names a unit in `player`'s pool that could
+/// pay part of `cost` under `ctx`; a pin that could never be honored is refused.
+fn ensure_pool_unit_can_pay(
+    state: &GameState,
+    player: PlayerId,
+    pip_id: crate::types::mana::ManaPipId,
+    source: ObjectId,
+    cost: &crate::types::mana::ManaCost,
+    ctx: Option<&crate::types::mana::PaymentContext<'_>>,
+) -> Result<(), EngineError> {
+    // The unit must currently exist in the player's pool.
+    let unit = state
+        .players
+        .iter()
+        .find(|p| p.id == player)
+        .and_then(|p| p.mana_pool.shape_of_pip(pip_id))
+        .ok_or_else(|| {
+            EngineError::ActionNotAllowed("No such mana unit in pool to pin".to_string())
+        })?;
+    let mana_spend_permission =
+        super::casting::player_mana_spend_permission_for_payment(state, player, Some(source), ctx);
+    if !mana_unit_eligible_for_cost(unit, cost, ctx, mana_spend_permission) {
+        return Err(EngineError::ActionNotAllowed(
+            "Mana unit cannot pay any part of this cost".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+/// CR 118.3a: pin a pool unit to pay a manual mana ability's mana sub-cost. A
+/// pin is offered only by the manual window, and only a unit that could pay
+/// part of that cost under the activation's context is accepted (CR 106.6).
+fn handle_spend_pool_mana_for_mana_ability(
+    state: &GameState,
+    player: PlayerId,
+    pending: &PendingManaAbility,
+    pip_id: crate::types::mana::ManaPipId,
+) -> Result<PendingManaAbility, EngineError> {
+    ensure_manual_mana_ability_payment(pending)?;
+    let cost = mana_abilities::pending_mana_sub_cost(state, pending)?.ok_or_else(|| {
+        EngineError::InvalidAction("This mana ability has no mana cost to pay".to_string())
+    })?;
+    let activation_context =
+        casting::activation_payment_context(state, pending.source_id, pending.ability_index);
+    ensure_pool_unit_can_pay(
+        state,
+        player,
+        pip_id,
+        pending.source_id,
+        &cost,
+        Some(&activation_context.as_payment_context()),
+    )?;
+    let mut updated = pending.clone();
+    if !updated.pinned_pool_units.contains(&pip_id) {
+        updated.pinned_pool_units.push(pip_id);
+    }
+    Ok(updated)
+}
+
+/// CR 118.3a: remove a pin from a manual mana ability's payment.
+fn handle_unspend_pool_mana_for_mana_ability(
+    pending: &PendingManaAbility,
+    pip_id: crate::types::mana::ManaPipId,
+) -> Result<PendingManaAbility, EngineError> {
+    ensure_manual_mana_ability_payment(pending)?;
+    let mut updated = pending.clone();
+    updated.pinned_pool_units.retain(|id| *id != pip_id);
+    Ok(updated)
+}
+
+/// CR 601.2g via CR 602.2b: only a manually paid mana ability directs its pool
+/// units; an automatic one's window is paid by activating mana abilities alone.
+fn ensure_manual_mana_ability_payment(pending: &PendingManaAbility) -> Result<(), EngineError> {
+    if casting::payment_mode_pays_mana_manually(pending.payment_mode) {
+        Ok(())
+    } else {
+        Err(EngineError::ActionNotAllowed(
+            "Pool mana is directed only in a manual mana-ability payment".to_string(),
+        ))
+    }
 }
 
 /// CR 118.3a: Remove a previously-recorded pin. Always legal — a no-op if the

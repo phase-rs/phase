@@ -223,6 +223,11 @@
     "splitAttacks": "分配攻击",
     "spread": "分散",
     "spreadEvenly": "均匀分散",
+    "targetTotal_few": "{{count}}个攻击者 · {{damage}}点伤害",
+    "targetTotal_many": "{{count}}个攻击者 · {{damage}}点伤害",
+    "targetTotal_one": "{{count}}个攻击者 · {{damage}}点伤害",
+    "targetTotal_other": "{{count}}个攻击者 · {{damage}}点伤害",
+    "totalsHeading": "攻击合计",
     "unassigned": "未分配",
     "unassignedRemaining_one": "{{count}}个未分配",
     "unassignedRemaining_other": "{{count}}个未分配",
@@ -1114,6 +1119,11 @@
     "assignDamageButton": "分配伤害",
     "assignDamageSubtitle": "{{name}} —— 剩余：{{remaining}}",
     "assignDamageTitle": "分配{{amount}}点战斗伤害",
+    "assignRemainingButton": "+{{amount}}",
+    "assignRemainingTo_few": "将剩余的{{count}}点伤害分配给{{target}}",
+    "assignRemainingTo_many": "将剩余的{{count}}点伤害分配给{{target}}",
+    "assignRemainingTo_one": "将剩余的{{count}}点伤害分配给{{target}}",
+    "assignRemainingTo_other": "将剩余的{{count}}点伤害分配给{{target}}",
     "attackAll": "全部攻击",
     "band": "组队",
     "bandBadge": "组队 {{n}}",
@@ -1604,7 +1614,10 @@
       "subtitleKeepWithBottom": "保留这手牌（你需将{{count}}张牌置于牌库底），或再次调度以获得全新的七张牌。",
       "subtitleOpeningFree": "保留这手牌，或进行一次免费调度（无需将牌置于牌库底）。",
       "subtitleOpeningOne": "保留这手牌，或调度以获得全新的七张牌（保留时你需将 1 张牌置于牌库底）。",
-      "usePowder": "使用{{name}}"
+      "usePowder": "使用{{name}}",
+      "onThePlay": "你先手",
+      "onTheDraw": "你后手",
+      "takeTurn": "你在第 {{turn}} 回合行动"
     },
     "opponentDisconnected": {
       "body": "等待对手重新连接…",
@@ -1695,6 +1708,7 @@
     "cedhWarningUntagged": "未标记",
     "commanderNote": "指挥官：100 张单例套牌，指挥官伤害为 {{threshold}}",
     "config": {
+      "commanderDamage": "指挥官伤害",
       "firstPlayer": {
         "draw": "后手",
         "play": "先手",
@@ -2188,7 +2202,6 @@
     "ringBearerTooltip": "持戒人",
     "sacrifice": "牺牲",
     "selectedCount": "已选{{count}}",
-    "target": "目标",
     "token": "衍生物",
     "tokenTooltip": "真实牌的衍生物复制品",
     "unblocked": "未被阻挡",
@@ -2309,6 +2322,14 @@
     "activateCost": "起动 —— {{cost}}",
     "altKey": "Alt",
     "altParsedAbilities": "Alt：已解析的异能",
+    "attacking": {
+      "battle": "正在攻击战役{{name}}",
+      "nothing": "正在攻击，但未攻击任何玩家、鹏洛客或战役",
+      "planeswalker": "正在攻击{{player}}的鹏洛客{{name}}",
+      "player": "正在攻击{{player}}",
+      "you": "正在攻击你",
+      "yourPlaneswalker": "正在攻击你的鹏洛客{{name}}"
+    },
     "basePT": "（基础{{power}}/{{toughness}}）",
     "chosen": {
       "entry": "{{kind}}：{{value}}",
