@@ -276,6 +276,101 @@ fn doubling_cube_doubles_unrestricted_colorless() {
     );
     assert_eq!(units.len(), 2, "{units:?}");
     assert!(units.iter().all(|unit| unit.restrictions.is_empty()));
+    // CR 106.3 + CR 400.7: the doubled units are produced BY the Cube's ability, so each
+    // names the Cube's producing epoch. This is what a restore admission reads; without the
+    // stamp the unit is unpinned and the boundary refuses the save.
+    // The doubled unit INHERITS the provenance of the mana it doubled (a Temple unit here),
+    // not the Cube's: doubling copies the pool unit, it does not produce new mana from the
+    // Cube. What must hold is that the copy carries that source's PRODUCING EPOCH rather
+    // than an absent or stale one — an unpinned doubled unit is the shape the restore
+    // admission refuses.
+    for unit in &units {
+        let source_epoch: u64 = runner.state().objects[&unit.source_id].incarnation;
+        assert_eq!(
+            unit.source_incarnation,
+            Some(source_epoch),
+            "the doubled unit is pinned to its source's producing epoch, not an absent or \
+             stale one: {unit:?}"
+        );
+    }
+}
+
+/// CR 106.3 + CR 400.7: the doubled units survive a save/restore AND still pay a cost
+/// afterwards. A doubled unit without a pin is exactly the shape the restore admission
+/// refuses, so this leg is what proves the stamp above is load-bearing rather than
+/// decorative.
+#[test]
+fn doubled_mana_survives_restore_and_still_pays() {
+    let Board {
+        mut runner,
+        cube,
+        battlefield: mountains,
+        hand,
+    } = board(
+        &["Mountain", "Mountain", "Mountain", "Mountain"],
+        &["Lightning Bolt"],
+    );
+    let bolt = hand[0];
+    for &mountain in &mountains {
+        tap_land_for_mana(&mut runner, mountain, 0);
+    }
+    assert_eq!(count(&runner, ManaType::Red), 4, "reach: pool is RRRR");
+    let activation = cube_activation(&runner, cube);
+    runner.act(activation).expect("Doubling Cube activates");
+    let doubled = pool_units(&runner);
+    assert_eq!(count(&runner, ManaType::Red), 2, "R doubled: {doubled:?}");
+    assert!(
+        doubled.iter().all(|unit| unit.source_incarnation
+            == Some(runner.state().objects[&unit.source_id].incarnation)),
+        "reach-guard: every doubled unit is pinned before the save: {doubled:?}"
+    );
+    let before: Vec<Option<u64>> = doubled.iter().map(|unit| unit.source_incarnation).collect();
+
+    let restored = engine::types::game_state::PersistedGameState::capture(runner.state().clone())
+        .into_game_state()
+        .expect("CR 106.3: a pool whose doubled units are pinned is admitted");
+    let mut runner = GameRunner::from_state(restored);
+    let after = pool_units(&runner);
+    assert_eq!(
+        after.len(),
+        2,
+        "the restore kept the doubled units: {after:?}"
+    );
+    assert_eq!(
+        after
+            .iter()
+            .map(|unit| unit.source_incarnation)
+            .collect::<Vec<_>>(),
+        before,
+        "and their producing epochs survived admission unchanged: {after:?}"
+    );
+
+    // CR 601.2h: the restored units still pay a real cost. Auto payment spends the pinned
+    // red mana the restore admitted.
+    let card_id = runner.state().objects[&bolt].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: bolt,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("the restored cast is announced");
+    if matches!(
+        runner.state().waiting_for,
+        WaitingFor::TargetSelection { .. }
+    ) {
+        runner
+            .act(GameAction::ChooseTarget {
+                target: Some(TargetRef::Player(P1)),
+            })
+            .expect("P1 is a legal target");
+    }
+    assert!(
+        count(&runner, ManaType::Red) < 2,
+        "the restored doubled mana paid the spell: {:?}",
+        pool_units(&runner)
+    );
 }
 
 /// C4 — CR 605.3a: Doubling Cube can be activated while paying for a spell.

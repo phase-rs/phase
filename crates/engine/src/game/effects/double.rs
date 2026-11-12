@@ -220,10 +220,6 @@ fn resolve_double_mana(
         return Err(EffectError::PlayerNotFound);
     }
     for mana_type in doubled_pool_mana(state, player_id, color) {
-        // CR 106.3 + CR 400.7: this doubling adds mana from `ability.source_id`
-        // without moving it, so its live epoch is the producing incarnation.
-        let source_incarnation =
-            crate::game::mana_payment::live_source_incarnation(state, ability.source_id);
         // CR 118.3a: stamp a pip id on pool entry so the unit can be pinned.
         let _ = state.add_mana_to_pool(
             player_id,
@@ -236,7 +232,7 @@ fn resolve_double_mana(
                 restrictions: vec![],
                 grants: vec![],
                 expiry: None,
-                source_incarnation,
+                source_incarnation: None,
             },
         );
 
