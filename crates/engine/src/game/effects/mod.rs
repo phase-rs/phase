@@ -1549,6 +1549,28 @@ pub(crate) fn drain_pending_continuation(state: &mut GameState, events: &mut Vec
                 )
             });
         if let Some((source_id, links, collects)) = scoped_channels {
+            // CR 701.17c + CR 608.2c: the answered seat's mill completed in this
+            // action (`Milled` rides the batch completion), so its cards join the
+            // clause's tracked set like the legs' do, wherever a replacement sent
+            // them. Only a tail that reads the set needs it.
+            let tail_reads_set = state
+                .active_ability_continuation()
+                .and_then(|pending| pending.player_scope_tail.as_ref())
+                .is_some_and(|scope| chain_references_tracked_set(&scope.after_scope));
+            if tail_reads_set {
+                let milled: Vec<_> = events
+                    .iter()
+                    .filter_map(|event| match event {
+                        GameEvent::Milled { object_id, .. } => {
+                            Some((*object_id, Some(ThisWayCause::Milled)))
+                        }
+                        _ => None,
+                    })
+                    .collect();
+                if !milled.is_empty() {
+                    publish_tracked_set_with_causes(state, milled);
+                }
+            }
             // CR 608.2c + CR 608.2f: the answered seat's moves join the clause's
             // "this way" ledger under the same action-local bound as the
             // created-token read above.
@@ -15091,6 +15113,23 @@ fn affected_objects_from_events(
         {
             Vec::new()
         }
+        // CR 701.17c: an effect that refers to a milled card finds it in the
+        // public zone it moved to, so a card a replacement redirected out of the
+        // graveyard (Rest in Peace, Leyline of the Void — CR 614.6) is still a
+        // milled card and joins "those cards". `Milled` is emitted once per card
+        // that left the library (`mill::complete_mill_delivery`), on the paused
+        // and unpaused paths alike, and names the zone the card actually
+        // reached; a card a replacement returned to the library is not in it.
+        Effect::Mill {
+            destination: crate::types::zones::Zone::Graveyard,
+            ..
+        } => events
+            .iter()
+            .filter_map(|event| match event {
+                GameEvent::Milled { object_id, .. } => Some(*object_id),
+                _ => None,
+            })
+            .collect(),
         _ => {
             let dest_zone = match effect {
                 Effect::ChangeZone { destination, .. }
