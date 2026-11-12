@@ -5581,18 +5581,6 @@ impl<'a> DocEmitter<'a> {
     fn last_ability_definition(&self) -> Option<AbilityDefinition> {
         self.last_ability_node().and_then(lower_spell_node)
     }
-    /// CR 608.2c: the resolved-root proof for the spell line about to be
-    /// parsed. At cast the engine appends every later spell ability of the card
-    /// to the first as a sub-ability (`combined_spell_ability_def`), so only a
-    /// line parsed before any ability was emitted can be the root, and only on
-    /// a card whose spell text is never appended under another spell
-    /// (`card_spell_root`).
-    fn spell_line_chain_root(&self, card_spell_root: ResolvedChainRoot) -> ResolvedChainRoot {
-        match (card_spell_root, self.last_ability_id()) {
-            (ResolvedChainRoot::Proven, None) => ResolvedChainRoot::Proven,
-            (ResolvedChainRoot::Unproven, _) | (_, Some(_)) => ResolvedChainRoot::Unproven,
-        }
-    }
     fn last_trigger(&self) -> Option<&TriggerDefinition> {
         self.last_trigger.as_ref()
     }
@@ -5995,9 +5983,12 @@ fn parse_normalized_oracle_ir(
     //   the first spell ability under a `GiftDelivery` root (`synthesize_gift`);
     // - overload (CR 702.96b): the overloaded spell requires no targets;
     // - awaken (CR 702.113a): the awaken spell ability is appended below it;
-    // - an Arcane spell (CR 702.47b): the engine splices onto a spell with the
-    //   splice card's subtype (`eligible_splice_cards`), every printed splice
-    //   subtype is Arcane, and the spliced text is appended below it;
+    // - an Arcane spell (CR 702.47b): the spliced text is appended below it.
+    //   The engine splices only onto a spell sharing the splice card's subtype
+    //   (`eligible_splice_cards`), and Arcane is the only subtype a printed
+    //   splice names; the "instant or sorcery" and "Anything" qualities are not
+    //   subtypes, so the engine offers them no host. Supporting them would make
+    //   every instant and sorcery a host;
     // - a second spell paragraph: the engine appends it below the first
     //   (`combined_spell_ability_def`), with any condition of its own.
     // The keywords are read from the card's own printed keyword lines, typed by
@@ -8091,8 +8082,7 @@ fn parse_normalized_oracle_ir(
             // is a pure `&AbilityIr -> AbilityDefinition`, so lowering here and
             // again in `ability_ir_at` repeats one computation rather than
             // performing two different ones.
-            let root = emitter.spell_line_chain_root(card_spell_root);
-            let ir = parse_spell_line_ir(&line, &mut ctx, root);
+            let ir = parse_spell_line_ir(&line, &mut ctx, card_spell_root);
             let lowered = lower_ability_ir(&ir);
             // A prevention with a target role or a dynamic quantity this route
             // cannot bind faithfully stays here as its gap: falling through would
@@ -8733,8 +8723,7 @@ fn parse_normalized_oracle_ir(
                     modal: None,
                 }
             } else {
-                let root = emitter.spell_line_chain_root(card_spell_root);
-                parse_spell_line_ir(parse_line, &mut ctx, root)
+                parse_spell_line_ir(parse_line, &mut ctx, card_spell_root)
             };
 
             // CR 614.15 + CR 608.2c: a PARTIAL cross-line self-replacement whose
@@ -9115,8 +9104,7 @@ fn parse_normalized_oracle_ir(
             // The one site in the family whose shell stays `default()`: it stamps
             // no root field at all, not even `description`, so the conversion is
             // the bare entry-point swap with nothing to carry.
-            let root = emitter.spell_line_chain_root(card_spell_root);
-            let ir = parse_spell_line_ir(&effect_text, &mut ctx, root);
+            let ir = parse_spell_line_ir(&effect_text, &mut ctx, card_spell_root);
             // Whether to emit *at all* is control flow, not a property of the
             // definition, so the guard stays here rather than becoming a shell
             // field. `has_unimplemented` reads a lowered root, and an

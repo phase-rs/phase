@@ -334,10 +334,10 @@ pub(crate) enum LeadingConditionRoute {
     TargetPtThreshold,
     /// CR 608.2c: `bind_target_controller_condition` — a trailing gate on the
     /// controller of the gated chain root's own single target (Skulking Killer,
-    /// Unified Will). The engine runs only the gated root's DIRECT sub when its
-    /// gate is false, and only when that sub is an unconditional independent
-    /// instruction, so the chain must keep anything after the root reachable:
-    /// see `keep_own_target_gate_tail_reachable`.
+    /// Unified Will). On a false gate the engine runs only the gated root's
+    /// DIRECT sub, and only some shapes of it, so the assembled chain must
+    /// keep the gate readable and everything after the root reachable: see
+    /// `keep_own_target_gate_readable`.
     OwnTargetController,
 }
 
@@ -5096,7 +5096,7 @@ struct AnnouncedRoles {
 /// single-node clause and the other shape stays an explicit gap. Below a
 /// single-node clause the next instruction is that direct sub; whether it is
 /// one the false path runs is checked once the chain is finished
-/// (`keep_own_target_gate_tail_reachable`).
+/// (`keep_own_target_gate_readable`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum GatedClauseShape {
     SingleInstruction,
@@ -5507,7 +5507,7 @@ pub(super) enum GatedInstructionPosition {
     /// dispatched), and only then on the sub itself; both must hold, so the
     /// parent's targets would decide it. An overloaded spell announces no
     /// targets (CR 702.96b), so its gate would read none. A root whose entry
-    /// point wires no proof (a reflexive or granted body parsed elsewhere) is
+    /// point wires no proof (a reflexive body, a granted activated body) is
     /// declined conservatively.
     AfterInstruction,
 }
@@ -10110,6 +10110,7 @@ fn parse_ability_use_count_condition(lower: &str) -> Option<(AbilityUseTally, Co
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::parser::oracle_ir::context::ResolvedChainRoot;
     use crate::parser::oracle_nom::condition::parse_inner_condition;
     use crate::parser::parse_oracle_text;
     use crate::types::ability::{
@@ -12615,6 +12616,151 @@ mod tests {
         );
     }
 
+    /// CR 608.2c: on a false gate the engine runs the gated root's direct sub
+    /// only when it is an independent instruction without a condition, and it
+    /// runs no tail through an else branch's absence. Two assembled shapes that
+    /// fail that are explicit gaps: a ", and" tail, which lowers as a
+    /// continuation step of the gated root, and an "Otherwise," branch, which
+    /// the root carries as its else (declined conservatively). The positive
+    /// twin, an independent next sentence, binds. Synthetic texts; nearest
+    /// printed card: Unified Will.
+    #[test]
+    fn target_controller_suffix_with_an_unrunnable_next_instruction_is_an_explicit_gap() {
+        let gated = "Destroy target artifact if its controller controls no creatures";
+        let (bound, warnings) = parse_single_ability(
+            &format!("{gated}. You gain 2 life."),
+            "Synthetic",
+            &["Instant"],
+            &[],
+        );
+        assert!(warnings.is_empty(), "reach guard: {warnings:?}");
+        assert!(
+            bound.condition.is_some(),
+            "reach guard: an independent tail binds"
+        );
+
+        // Reach guard for the else row: the same "Otherwise," text under an
+        // ordinary gate lowers to an else branch on the gated root.
+        let (otherwise, _) = parse_single_ability(
+            "Destroy target artifact if you control an artifact. Otherwise, you gain 2 life.",
+            "Synthetic",
+            &["Instant"],
+            &[],
+        );
+        assert!(
+            otherwise.condition.is_some() && otherwise.else_ability.is_some(),
+            "reach guard: \"Otherwise,\" lowers to the root's else: {otherwise:?}"
+        );
+
+        for tail in [", and you gain 2 life.", ". Otherwise, you gain 2 life."] {
+            let text = format!("{gated}{tail}");
+            let (root, warnings) = parse_single_ability(&text, "Synthetic", &["Instant"], &[]);
+            if tail.starts_with(',') {
+                assert!(
+                    root.sub_ability.as_deref().is_some_and(|next| {
+                        next.sub_link == crate::types::ability::SubAbilityLink::ContinuationStep
+                            && next.condition.is_none()
+                    }),
+                    "reach guard: {text}: the tail is a continuation step: {root:?}"
+                );
+            }
+            assert_eq!(root.condition, None, "{text}");
+            assert!(
+                root.effect
+                    .unimplemented_description()
+                    .is_some_and(|fragment| nom_primitives::scan_contains(
+                        fragment,
+                        "its controller controls no creatures"
+                    )),
+                "{text}: the gated instruction must be an explicit gap: {:?} {warnings:?}",
+                root.effect
+            );
+        }
+    }
+
+    /// CR 608.2c: the building block `keep_own_target_gate_readable` turns the
+    /// gated root into a gap when the assembled root announces no target of its
+    /// own, even with no tail to reach. The gate is attached to a target-less
+    /// one-node chain ("Draw a card.") so that only the target check can fail.
+    /// The twin with a targeted root ("Destroy target artifact.") keeps the gate.
+    #[test]
+    fn own_target_gate_requires_the_assembled_root_to_declare_its_target() {
+        let (gate, _, _) = full_strip(
+            "Destroy target artifact",
+            "its controller controls no creatures",
+        );
+        let gate = gate.expect("reach guard: the strip binds at a root");
+        for (text, kept) in [("Draw a card.", false), ("Destroy target artifact.", true)] {
+            let mut ir = crate::parser::oracle_effect::parse_effect_chain_ir(
+                text,
+                AbilityKind::Spell,
+                &mut ParseContext::default(),
+            );
+            let [root] = ir.clauses.as_mut_slice() else {
+                panic!("reach guard: {text}: one clause");
+            };
+            root.condition = Some(gate.clone());
+            super::super::keep_own_target_gate_readable(&mut ir, Some(&gate));
+            assert_eq!(ir.clauses[0].condition.is_some(), kept, "{text}");
+            assert_eq!(
+                ir.clauses[0]
+                    .parsed
+                    .effect
+                    .unimplemented_description()
+                    .is_some(),
+                !kept,
+                "{text}"
+            );
+        }
+    }
+
+    /// CR 608.2c: the gate is checked on the ASSEMBLED chain. Stave Off's
+    /// printed "Target creature gains protection from the color of your choice
+    /// until end of turn." parses to one targeted node, but assembly wraps it
+    /// under a `Choose` root that announces no target, with the targeted grant
+    /// as a continuation step below. A gate on that root could not read the
+    /// target, and a false gate would skip everything after it, so the suffix
+    /// is an explicit gap. The suffix is synthetic. Reach guards: the clause
+    /// alone binds at the strip seam, and the printed card assembles under the
+    /// `Choose` root.
+    #[test]
+    fn target_controller_suffix_on_an_assembly_rerooted_chain_is_an_explicit_gap() {
+        let printed = "Target creature gains protection from the color of your choice until end \
+                       of turn";
+        let condition = "that creature's controller controls no other creatures";
+        assert_full_strip_binds(printed, condition);
+        let (plain, warnings) =
+            parse_single_ability(&format!("{printed}."), "Stave Off", &["Instant"], &[]);
+        assert!(warnings.is_empty(), "reach guard: {warnings:?}");
+        assert!(
+            matches!(*plain.effect, Effect::Choose { .. })
+                && plain.effect.target_filter().is_none(),
+            "reach guard: assembly puts a target-less Choose root above the grant: {:?}",
+            plain.effect
+        );
+        assert!(
+            sub_chain(&plain).iter().any(|def| def
+                .effect
+                .target_filter()
+                .is_some_and(|filter| !filter.is_context_ref())),
+            "reach guard: the targeted grant sits below the root: {plain:?}"
+        );
+
+        let text = format!("{printed} if {condition}.");
+        let (root, warnings) = parse_single_ability(&text, "Stave Off", &["Instant"], &[]);
+        assert_eq!(root.condition, None, "{text}: {:?}", root.effect);
+        for def in sub_chain(&root) {
+            assert_eq!(def.condition, None, "{text}: {:?}", def.effect);
+        }
+        assert!(
+            root.effect
+                .unimplemented_description()
+                .is_some_and(|fragment| nom_primitives::scan_contains(fragment, condition)),
+            "the gated instruction must be an explicit gap: {:?} {warnings:?}",
+            root.effect
+        );
+    }
+
     /// CR 602.2 + CR 608.2c: an activated ability's effect resolves as that
     /// ability's root, so its entry point proves the root and the suffix binds
     /// on it through full parsing. Synthetic text; nearest printed cards:
@@ -12655,7 +12801,6 @@ mod tests {
     ///   cards, and put one of them into your hand." is such a recognizer.
     #[test]
     fn resolved_root_proof_is_consumed_by_the_parse_it_is_handed_to() {
-        use crate::parser::oracle_ir::context::ResolvedChainRoot;
         let proven = || ParseContext {
             resolved_chain_root: ResolvedChainRoot::Proven,
             ..Default::default()
