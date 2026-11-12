@@ -790,6 +790,20 @@ class LogFieldTests(Harness):
         )["head_pickup"]
         self.assertEqual((pickup["heads"], pickup["latency_hours"]["total"]), (1, 2.0))
 
+    def test_head_pickup_ignores_commit_dates_when_choosing_the_opening_head(self) -> None:
+        # 1: opening commit dated after the PR opened (clock skew) is still the opening head.
+        # 2: a commit made before the PR opened but pushed later is still a pickup.
+        prs = [
+            pr_node(1, created="2026-10-27T10:00:00Z", timelineItems=connection([commit(H[1], "2026-10-27T10:05:00Z")])),
+            pr_node(2, created="2026-10-27T10:00:00Z", timelineItems=connection(
+                [commit(H[1], "2026-10-27T08:00:00Z"), commit(H[2], "2026-10-27T09:00:00Z")])),
+        ]
+        pickup = self.log_block(
+            prs, event(1, "observation", "2026-10-27T11:00:00Z", H[1]),
+            event(2, "observation", "2026-10-27T10:30:00Z", H[1]), event(2, "observation", "2026-10-28T12:00:00Z", H[2]),
+        )["head_pickup"]
+        self.assertEqual((pickup["heads"], pickup["latency_hours"]["total"]), (1, 27.0))
+
     def test_request_changes_ends_a_hold_as_blocked(self) -> None:
         held = self.log_block(
             [pr_node(1)], event(1, "held", "2026-10-27T00:00:00Z", outcome="held"),

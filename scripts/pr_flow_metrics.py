@@ -786,12 +786,17 @@ def log_fields(snapshot: dict[str, Any], external: list[dict[str, Any]], fetched
         for t, event in timed:
             if event.get("head_sha"):
                 first_seen.setdefault(event["head_sha"], t)
-        known = [h for h in first_seen if h in arrivals]
+        known = sorted((h for h in first_seen if h in arrivals), key=lambda h: arrivals[h])
         without_arrival += len(first_seen) - len(known)
+        # The earliest logged head is taken as the one the PR opened with, unless a force-push
+        # after opening put it there; commit dates cannot tell an opening head from a later push.
         opened = parse_time(pr["createdAt"])
-        for head in known:
-            if arrivals[head] <= opened:  # the head the PR opened with was never picked up after a push
-                continue
+        pushed_after_open = {
+            node["afterCommit"]["oid"] for node in pr["timelineItems"]["nodes"]
+            if node["__typename"] == "HeadRefForcePushedEvent" and node.get("afterCommit")
+            and parse_time(node["createdAt"]) > opened
+        }
+        for head in known[0 if known and known[0] in pushed_after_open else 1:]:
             pickup_heads += 1
             latency = hours_between(arrivals[head], first_seen[head])
             if latency < 0:
