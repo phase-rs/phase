@@ -69,6 +69,7 @@ mod doom_s_time_platform_exile_with_time_counters;
 mod doomsday;
 mod doomsday_excruciator_copy;
 mod doorman_and_or_block_restriction_union;
+mod doubling_cube_mana_ability;
 mod dragon_egg_token_granted_activated_pump;
 mod dragon_man_reformed_robot_graveyard_discard_cost;
 mod dragon_whelp_activation_threshold_8388;

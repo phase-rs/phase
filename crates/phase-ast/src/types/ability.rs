@@ -30069,6 +30069,21 @@ enum CreatedReferentPublisher {
 }
 
 impl Effect {
+    /// CR 605.1a + CR 701.10f: whether resolving this effect adds mana to a mana
+    /// pool — `Effect::Mana`, or doubling a pool's mana (CR 701.10f: "that player
+    /// adds an amount of mana of that type equal to the amount they already have").
+    /// The single shape authority every "could add mana" classifier reads.
+    pub fn adds_mana_on_resolution(&self) -> bool {
+        matches!(
+            self,
+            Effect::Mana { .. }
+                | Effect::Double {
+                    target_kind: DoubleTarget::ManaPool { .. },
+                    ..
+                }
+        )
+    }
+
     /// CR 608.2c: true for the structural "repeat this process" directive
     /// node (`RuntimeHandled { RepeatProcess }`).
     pub fn is_repeat_directive(&self) -> bool {
@@ -35920,7 +35935,9 @@ pub(crate) fn cost_moves_card_to_or_from_library(ability_def: &AbilityDefinition
 }
 
 /// CR 605.1a, criteria (1)-(3) ONLY — no target (CR 115.6), the root effect adds
-/// mana, and it's not a loyalty ability (CR 606.2). Deliberately EXCLUDES the
+/// mana (`Effect::Mana`, or a pool doubling per CR 701.10f — see
+/// [`Effect::adds_mana_on_resolution`]), and it's not a loyalty ability
+/// (CR 606.2). Deliberately EXCLUDES the
 /// fourth criterion ("its cost and effect don't move any card to or from a
 /// library"), which is why this is NOT the mana-ability test and must never be
 /// used for activation routing — use [`is_mana_ability`] for that.
@@ -35949,7 +35966,14 @@ pub fn produces_mana_on_activation(ability_def: &AbilityDefinition) -> bool {
     // makes this not-a-mana-ability under today's behavior, and this change
     // must not widen mana-ability status for any shipping card.
     let target_attached = match &*ability_def.effect {
-        Effect::Mana { target, .. } => target.as_ref().and_then(|r| r.declared_filters().next()),
+        Effect::Mana { target, .. } => target
+            .as_ref()
+            .and_then(|r| r.declared_filters().next())
+            .map(|(_, filter)| filter),
+        // CR 605.1a + CR 701.10f: doubling a pool's mana adds mana; it requires a
+        // target only when the shared target-slot authority surfaces one ("you" is a
+        // context reference — Doubling Cube).
+        effect if effect.adds_mana_on_resolution() => extract_target_filter_from_effect(effect),
         _ => return false,
     };
     // CR 605.1a: A targeted mana-producing ability is not a mana ability.
@@ -36037,7 +36061,8 @@ pub fn could_be_activated_mana_ability(def: &AbilityDefinition) -> bool {
 
 /// CR 605.1b: could this triggered ability body — if its trigger observed an
 /// activated mana ability — be a triggered mana ability? True when its OWN
-/// resolution could add mana (any reachable `Effect::Mana`, whatever else the
+/// resolution could add mana (any reachable effect for which
+/// [`Effect::adds_mana_on_resolution`] holds, whatever else the
 /// chain does or in whatever order) and it requires no target anywhere in that
 /// resolution (CR 115.6). Separately registered payloads (delayed, reflexive,
 /// replacement bodies) are not this ability's resolution and are not walked
@@ -36048,8 +36073,11 @@ pub fn could_be_triggered_mana_ability_body(def: &AbilityDefinition) -> bool {
     let mut adds_mana = false;
     let mut targets = false;
     let _ = visit_ability_def_scoped(def, ResolutionScope::OwnResolutionOnly, &mut |effect| {
-        if let Effect::Mana { target, .. } = effect {
+        // CR 605.1a + CR 701.10f: a pool doubling adds mana too.
+        if effect.adds_mana_on_resolution() {
             adds_mana = true;
+        }
+        if let Effect::Mana { target, .. } = effect {
             if target
                 .as_ref()
                 .is_some_and(|role| role.declared_filters().next().is_some())

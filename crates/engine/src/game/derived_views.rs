@@ -42,14 +42,14 @@ use crate::types::display_only::{CanonicalDigest, DisplayOnly};
 use crate::types::events::GameEvent;
 use crate::types::format::TurnStructure;
 use crate::types::game_state::{
-    CastingVariant, CombatDamageSubStep, GameState, StackEntry, StackEntryKind, StackPaidSnapshot,
-    SyntheticTriggerProvenance, TriggerSourceRead, WaitingFor,
+    CastingVariant, CombatDamageSubStep, GameState, PendingManaAbility, StackEntry, StackEntryKind,
+    StackPaidSnapshot, SyntheticTriggerProvenance, TriggerSourceRead, WaitingFor,
 };
 use crate::types::identifiers::ObjectId;
 use crate::types::interaction::InteractionId;
 use crate::types::keywords::Keyword;
 use crate::types::layers::Layer;
-use crate::types::mana::ManaCost;
+use crate::types::mana::{ManaCost, ManaPipId, ManaPool, PaymentContext};
 use crate::types::player::PlayerId;
 use crate::types::statics::{StaticMode, StaticModeKind};
 use crate::types::zones::Zone;
@@ -459,6 +459,15 @@ pub fn family_of(axis: ResourceAxis) -> UnboundedFamily {
         | ResourceAxis::LtbTriggers
         | ResourceAxis::SacTriggers => UnboundedFamily::Triggers,
     }
+}
+
+/// CR 601.2g + CR 605.3a: display data for a manual mana ability's payment
+/// window: the ability's source, its mana sub-cost and the pinned pool units.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ManaAbilityPaymentView {
+    pub source_id: ObjectId,
+    pub cost: ManaCost,
+    pub pinned_pool_units: Vec<ManaPipId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -911,14 +920,22 @@ pub struct DerivedViews {
     pub player_status: Vec<PlayerStatusView>,
 
     /// CR 118.3a + CR 601.2g: during the viewer's own manual mana payment for a
-    /// spell, the portion of the locked cost still UNPAID by the pool units they
-    /// have pinned (selected) so far — the cost reduced against a pool of ONLY
-    /// those pinned units. Lets the payment UI show the cost shrinking as the
-    /// player picks mana, and "covered" (`NoCost`) when their selection alone
-    /// pays the whole cost. `None` outside a non-convoke spell `ManaPayment` the
+    /// spell or a manual mana ability, the portion of the locked cost still
+    /// UNPAID by the pool units they have pinned (selected) so far — the cost
+    /// reduced against a pool of ONLY those pinned units. Lets the payment UI
+    /// show the cost shrinking as the player picks mana, and "covered"
+    /// (`NoCost`) when their selection alone pays the whole cost. `None` outside
+    /// a non-convoke spell `ManaPayment` or a manual `ManaAbilityManaPayment` the
     /// viewer controls. Viewer-scoped — one caster's private in-progress choice.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_payment_remaining: Option<ManaCost>,
+
+    /// CR 601.2g + CR 602.2b + CR 605.3a: the viewer's own manual payment of a
+    /// mana ability's mana cost — its source, the mana it costs (X announced)
+    /// and the pool units they've directed. `None` outside that window.
+    /// Viewer-scoped, like `pending_payment_remaining`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mana_ability_payment: Option<ManaAbilityPaymentView>,
 
     /// CR 901: Engine-authored Planechase presentation state. The frontend
     /// renders this directly instead of deriving the active plane from command
@@ -1246,20 +1263,36 @@ pub struct ClientGameState {
 }
 
 /// CR 118.3a + CR 601.2g: the cost still unpaid by `viewer`'s pinned pool units
-/// during their own manual mana payment for a spell. Reduces the locked spell
-/// cost against a pool containing ONLY the pinned units (so the residual is
-/// exactly what the player has chosen to spend), under the same spend-restriction
-/// context (`PaymentContext::Spell`) the finalize spend uses. Returns `None`
+/// during their own manual mana payment for a spell or a manual mana ability.
+/// Reduces the locked cost against a pool containing ONLY the pinned units (so
+/// the residual is exactly what the player has chosen to spend), under the same
+/// spend-restriction context the finalize spend uses (`PaymentContext::Spell`
+/// for a spell, the activation's context for a mana ability). Returns `None`
 /// unless the viewer is mid (non-convoke) spell `ManaPayment` with a pending
-/// cast — activated-ability mana payment keeps its full-cost display, and
-/// convoke/improvise/delve pay via board taps tracked by their own staged UI.
+/// cast, or mid their own manual `ManaAbilityManaPayment` — activated-ability
+/// mana payment keeps its full-cost display, and convoke/improvise/delve pay
+/// via board taps tracked by their own staged UI.
 ///
-/// Uses the current spell's typed mana-spend permission when matching pinned
-/// units to colored or colorless requirements. This projection subtracts only
-/// pinned mana units; it does not subtract life payments.
+/// Uses the payment's typed mana-spend permission when matching pinned units to
+/// colored or colorless requirements. This projection subtracts only pinned
+/// mana units; it does not subtract life payments.
 fn pending_payment_remaining(state: &GameState, viewer: PlayerId) -> Option<ManaCost> {
-    use crate::types::game_state::WaitingFor;
-    use crate::types::mana::{ManaPool, PaymentContext};
+    if let Some(pending) = manual_mana_ability_payment(state, viewer) {
+        let cost = crate::game::mana_abilities::pending_mana_sub_cost(state, pending).ok()??;
+        let activation_context = crate::game::casting::activation_payment_context(
+            state,
+            pending.source_id,
+            pending.ability_index,
+        );
+        return remaining_after_pins(
+            state,
+            viewer,
+            pending.source_id,
+            &pending.pinned_pool_units,
+            &cost,
+            Some(&activation_context.as_payment_context()),
+        );
+    }
 
     let WaitingFor::ManaPayment {
         player,
@@ -1279,33 +1312,89 @@ fn pending_payment_remaining(state: &GameState, viewer: PlayerId) -> Option<Mana
     if pending.activation_ability_index.is_some() {
         return None;
     }
-    let cost = pending.cost.clone();
-
-    // Scratch pool of ONLY the pinned units = the player's current selection.
-    let player_obj = state.players.iter().find(|p| p.id == viewer)?;
-    let selected = ManaPool::from_units(
-        player_obj
-            .mana_pool
-            .units()
-            .filter(|unit| pending.pinned_pool_units.contains(&unit.pip_id)),
-    );
 
     // CR 106.6: reduce under the SAME spend-restriction context the finalize
     // spend uses, so restricted mana the spell can't accept stays in the residual.
     let spell_meta = crate::game::casting::build_spell_meta(state, viewer, pending.object_id);
     let ctx = spell_meta.as_ref().map(PaymentContext::Spell);
+    remaining_after_pins(
+        state,
+        viewer,
+        pending.object_id,
+        &pending.pinned_pool_units,
+        &pending.cost,
+        ctx.as_ref(),
+    )
+}
+
+/// CR 118.3a + CR 106.6: `cost` reduced against a scratch pool of ONLY
+/// `viewer`'s pinned units (their current selection), under `ctx` and the
+/// payment's mana-spend permission for `source`.
+fn remaining_after_pins(
+    state: &GameState,
+    viewer: PlayerId,
+    source: ObjectId,
+    pins: &[ManaPipId],
+    cost: &ManaCost,
+    ctx: Option<&PaymentContext<'_>>,
+) -> Option<ManaCost> {
+    let player_obj = state.players.iter().find(|p| p.id == viewer)?;
+    let selected = ManaPool::from_units(
+        player_obj
+            .mana_pool
+            .units()
+            .filter(|unit| pins.contains(&unit.pip_id)),
+    );
     Some(crate::game::mana_payment::reduce_cost_by_pool(
         &selected,
-        &cost,
-        ctx.as_ref(),
+        cost,
+        ctx,
         crate::game::casting::player_mana_spend_permission_for_payment(
             state,
             viewer,
-            Some(pending.object_id),
-            ctx.as_ref(),
+            Some(source),
+            ctx,
         ),
         None,
     ))
+}
+
+/// CR 601.2g + CR 605.3a: the mana ability `viewer` is paying for by hand in
+/// its own `ManaAbilityManaPayment` window. An automatic window is paid by
+/// activating mana abilities alone, so it has nothing to display here.
+fn manual_mana_ability_payment(state: &GameState, viewer: PlayerId) -> Option<&PendingManaAbility> {
+    let WaitingFor::ManaAbilityManaPayment {
+        player,
+        pending_mana_ability,
+    } = &state.waiting_for
+    else {
+        return None;
+    };
+    (*player == viewer
+        && crate::game::casting::payment_mode_pays_mana_manually(pending_mana_ability.payment_mode))
+    .then_some(pending_mana_ability.as_ref())
+}
+
+/// CR 601.2g + CR 602.2b + CR 605.3a: the viewer's own manual mana-ability
+/// payment window — the source, its mana sub-cost (X announced) and the pins
+/// still naming a unit in their pool.
+fn mana_ability_payment_view(
+    state: &GameState,
+    viewer: PlayerId,
+) -> Option<ManaAbilityPaymentView> {
+    let pending = manual_mana_ability_payment(state, viewer)?;
+    let cost = crate::game::mana_abilities::pending_mana_sub_cost(state, pending).ok()??;
+    let pool = &state.players.iter().find(|p| p.id == viewer)?.mana_pool;
+    Some(ManaAbilityPaymentView {
+        source_id: pending.source_id,
+        cost,
+        pinned_pool_units: pending
+            .pinned_pool_units
+            .iter()
+            .copied()
+            .filter(|pip| pool.contains_pip(*pip))
+            .collect(),
+    })
 }
 
 /// CR 309.4a-c: name the room each venturing player's marker currently sits on.
@@ -1823,6 +1912,7 @@ pub fn derive_views(state: &GameState, viewer: Option<PlayerId>) -> DerivedViews
     // pinned (selected) pool mana — drives the payment UI's live-shrinking cost.
     if let Some(viewer) = viewer {
         views.pending_payment_remaining = pending_payment_remaining(state, viewer);
+        views.mana_ability_payment = mana_ability_payment_view(state, viewer);
     }
 
     if state.format_config.format.is_planechase_family() {
@@ -3345,24 +3435,27 @@ mod tests {
     use super::*;
     use crate::game::combat::CombatState;
     use crate::game::game_object::ObjectIncarnationRefExt;
+    use crate::game::scenario::{GameScenario, P0, P1};
     use crate::game::triggers::{PendingTrigger, PendingTriggerContext};
     use crate::game::zones::create_object;
     use crate::types::ability::{
         DelayedTriggerCondition, DelayedTriggerKind, Duration, Effect, EffectKind, ModalChoice,
         ResolvedAbility, RestrictionExpiry, StaticCondition, TargetFilter, TargetRef,
     };
+    use crate::types::actions::GameAction;
     use crate::types::card_printing::CardPrinting;
     use crate::types::card_type::CoreType;
     use crate::types::format::FormatConfig;
     use crate::types::game_state::{
-        CommanderDamageEntry, DelayedTrigger, DistributionScope, DistributionUnit, PendingCast,
-        StackEntry, StackEntryKind, StackPaidSnapshot, TargetEffectDetail, TargetSelectionProgress,
-        TargetSelectionSlot, TriggerOrderGroup, WaitingFor, ZoneChangeRecord,
+        CastPaymentMode, CommanderDamageEntry, DelayedTrigger, DistributionScope, DistributionUnit,
+        PendingCast, StackEntry, StackEntryKind, StackPaidSnapshot, TargetEffectDetail,
+        TargetSelectionProgress, TargetSelectionSlot, TriggerOrderGroup, WaitingFor,
+        ZoneChangeRecord,
     };
     use crate::types::identifiers::{
         CardId, DelayedTriggerInstanceId, DelayedTriggerOrigin, DelayedTriggerToken, TriggerFiring,
     };
-    use crate::types::mana::ManaCost;
+    use crate::types::mana::{ManaCost, ManaType, ManaUnit};
     use crate::types::phase::Phase;
     use crate::types::statics::ActivationExemption;
     use crate::types::zones::Zone;
@@ -5956,6 +6049,70 @@ mod tests {
             derive_views(&state, Some(PlayerId(1))).pending_payment_remaining,
             None,
         );
+    }
+
+    /// CR 601.2g + CR 602.2b + CR 605.3a: in the payer's own manual Rakdos
+    /// Signet window (`{1}, {T}: Add {B}{R}.`) the engine publishes the Signet,
+    /// its `{1}` and the pins, and the remaining cost shrinks with the pins.
+    /// The opponent sees neither.
+    #[test]
+    fn mana_ability_payment_view_reflects_the_manual_window_for_its_payer_only() {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let signet = scenario
+            .add_artifact_from_oracle(P0, "Rakdos Signet", "{1}, {T}: Add {B}{R}.")
+            .id();
+        let mut runner = scenario.build();
+        for color in [ManaType::Black, ManaType::Red] {
+            let _ = runner
+                .state_mut()
+                .add_mana_to_pool(P0, ManaUnit::new(color, ObjectId(0), false, vec![]));
+        }
+        let red = runner.state().players[0]
+            .mana_pool
+            .units()
+            .find(|unit| unit.color == ManaType::Red)
+            .map(|unit| unit.pip_id)
+            .expect("the floating {R}");
+        let ability_index = runner.state().objects[&signet]
+            .abilities
+            .iter()
+            .position(crate::game::mana_abilities::is_mana_ability)
+            .expect("the Signet's mana ability");
+        runner
+            .act(GameAction::ActivateAbility {
+                source_id: signet,
+                ability_index,
+                payment_mode: CastPaymentMode::Manual,
+            })
+            .expect("the manual activation opens its window");
+
+        let views = derive_views(runner.state(), Some(P0));
+        assert_eq!(
+            views.mana_ability_payment,
+            Some(ManaAbilityPaymentView {
+                source_id: signet,
+                cost: ManaCost::generic(1),
+                pinned_pool_units: vec![],
+            })
+        );
+        assert_eq!(views.pending_payment_remaining, Some(ManaCost::generic(1)));
+
+        runner
+            .act(GameAction::SpendPoolMana { pip_id: red })
+            .expect("the {R} can pay the {1}");
+        let views = derive_views(runner.state(), Some(P0));
+        assert_eq!(
+            views
+                .mana_ability_payment
+                .map(|view| view.pinned_pool_units),
+            Some(vec![red])
+        );
+        assert_eq!(views.pending_payment_remaining, Some(ManaCost::NoCost));
+
+        let opponent = derive_views(runner.state(), Some(P1));
+        assert_eq!(opponent.mana_ability_payment, None);
+        assert_eq!(opponent.pending_payment_remaining, None);
     }
 
     #[test]
