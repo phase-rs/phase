@@ -11,33 +11,48 @@ use crate::parser::oracle_nom::bridge::{nom_parse_lower, split_once_on_lower};
 use crate::types::ability::{AbilityKind, TriggerCondition, TriggerDefinition};
 use crate::types::triggers::TriggerMode;
 
-use super::oracle_effect::parse_effect_chain;
+use super::oracle_effect::parse_effect_chain_with_provenance;
+use super::oracle_ir::history_provenance::Lowered;
 use super::oracle_util::strip_reminder_text;
 
 const NUMBERED_VISIT_PIPE: &str = " | ";
 
 /// Parse `"Visit — …"` or `"N—M | …"` / `"N | …"` attraction visit lines.
-pub(crate) fn parse_visit_trigger(line: &str, card_name: &str) -> Option<TriggerDefinition> {
+#[cfg(test)]
+fn parse_visit_trigger(line: &str, card_name: &str) -> Option<TriggerDefinition> {
+    parse_visit_trigger_with_provenance(line, card_name).map(|lowered| lowered.value)
+}
+
+pub(crate) fn parse_visit_trigger_with_provenance(
+    line: &str,
+    card_name: &str,
+) -> Option<Lowered<TriggerDefinition>> {
     let stripped = strip_reminder_text(line);
     let lower = stripped.to_ascii_lowercase();
 
     if let Some((min, max, effect_text)) = parse_numbered_visit_line(&lower, &stripped) {
+        let lowered = parse_effect_chain_with_provenance(&effect_text, AbilityKind::Spell);
         let mut trigger = TriggerDefinition::new(TriggerMode::VisitAttraction)
             .valid_card(crate::types::ability::TargetFilter::SelfRef)
-            .execute(parse_effect_chain(&effect_text, AbilityKind::Spell));
+            .execute(lowered.value);
         if min != 1 || max != 6 {
             trigger.condition = Some(TriggerCondition::AttractionVisitRoll { min, max });
         }
-        return Some(trigger);
+        return Some(Lowered {
+            value: trigger,
+            history: lowered.history,
+        });
     }
 
     let effect = strip_visit_effect_text(&stripped)?;
     let _ = card_name;
-    Some(
-        TriggerDefinition::new(TriggerMode::VisitAttraction)
+    let lowered = parse_effect_chain_with_provenance(effect, AbilityKind::Spell);
+    Some(Lowered {
+        value: TriggerDefinition::new(TriggerMode::VisitAttraction)
             .valid_card(crate::types::ability::TargetFilter::SelfRef)
-            .execute(parse_effect_chain(effect, AbilityKind::Spell)),
-    )
+            .execute(lowered.value),
+        history: lowered.history,
+    })
 }
 
 /// Returns visit triggers paired with their source line index (for source-order
@@ -49,7 +64,7 @@ pub(crate) fn parse_attraction_visit_triggers(
     lines: &[&str],
     card_name: &str,
 ) -> (
-    Vec<(usize, TriggerDefinition)>,
+    Vec<(usize, Lowered<TriggerDefinition>)>,
     std::collections::HashSet<usize>,
 ) {
     let mut triggers = Vec::new();
@@ -61,7 +76,7 @@ pub(crate) fn parse_attraction_visit_triggers(
         }
         let lower = trimmed.to_ascii_lowercase();
         if is_attraction_visit_line(&lower) {
-            if let Some(trigger) = parse_visit_trigger(trimmed, card_name) {
+            if let Some(trigger) = parse_visit_trigger_with_provenance(trimmed, card_name) {
                 triggers.push((idx, trigger));
                 consumed.insert(idx);
             }

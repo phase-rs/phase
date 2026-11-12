@@ -629,6 +629,7 @@ mod tests {
         let span = OracleSourceSpan::exact(line, line, 0, fragment.len(), 0);
         let slot = b.begin_item(span, Some(fragment));
         OracleItemIr {
+            ability_history: Vec::new(),
             id: slot.id(),
             source: slot.source().clone(),
             node,

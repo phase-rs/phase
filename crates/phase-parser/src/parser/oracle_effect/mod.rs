@@ -3081,6 +3081,7 @@ fn try_parse_when_next_event(tp: TextPair) -> Option<ParsedEffectClause> {
     let effect_lower = after.lower;
 
     // Check for "that creature enters with an additional +1/+1 counter on it" pattern
+    let mut history = Vec::new();
     let mut inner = if let Some(parsed) = try_parse_enters_with_additional_counters(effect_lower) {
         parsed
     } else {
@@ -3088,11 +3089,19 @@ fn try_parse_when_next_event(tp: TextPair) -> Option<ParsedEffectClause> {
         // hand down the event-source binding so the bare spell anaphor is not
         // refined to a parent target the delayed trigger does not have.
         // Standalone mode, matching this builder's pre-existing entry point.
-        lower_ability_ir(&parse_ability_ir_standalone_with_spell_anaphor(
-            effect_text,
-            AbilityKind::Spell,
-            SpellAnaphorBinding::EventSource,
-        ))
+        let lowered =
+            lower_ability_ir_with_provenance(&parse_ability_ir_standalone_with_spell_anaphor(
+                effect_text,
+                AbilityKind::Spell,
+                SpellAnaphorBinding::EventSource,
+            ));
+        history.extend(lowered.history.into_iter().map(|record| {
+            crate::parser::oracle_ir::history_provenance::PendingHistory::nested(
+                record,
+                crate::parser::oracle_ir::history_provenance::InstructionStep::DelayedPayload,
+            )
+        }));
+        lowered.value
     };
     // CR 608.2k: In a "when you next cast a <spell> this turn" delayed trigger the
     // "that <spell>" anaphor in the body names the newly-cast spell object (the
@@ -3111,13 +3120,16 @@ fn try_parse_when_next_event(tp: TextPair) -> Option<ParsedEffectClause> {
     {
         use crate::types::triggers::TriggerMode;
 
-        return Some(build_when_next_delayed_trigger(
+        let mut clause = build_when_next_delayed_trigger(
             TriggerMode::SpellCast,
             spell_filter,
             Some(TargetFilter::Controller),
             inner,
             Some((TriggerMode::AbilityActivated, ability_filter)),
-        ));
+        );
+        clause.history = history;
+        clause.head_text = Some(tp.original[..tp.original.len() - effect_text.len()].to_string());
+        return Some(clause);
     }
 
     let combined_filter = extract_when_next_spell_filter(condition_fragment)?;
@@ -3129,8 +3141,8 @@ fn try_parse_when_next_event(tp: TextPair) -> Option<ParsedEffectClause> {
     trigger_def.valid_target = Some(TargetFilter::Controller);
 
     Some(ParsedEffectClause {
-        history: Vec::new(),
-        head_text: None,
+        history,
+        head_text: Some(tp.original[..tp.original.len() - effect_text.len()].to_string()),
         optional_targeting: false,
         unlowered_guard: None,
         effect: Effect::CreateDelayedTrigger {
@@ -12580,12 +12592,23 @@ fn parse_effect_clause_inner_with_damage_context(
         // CR 603.7 + CR 608.2k: reflexive delayed body — keep the event-source
         // binding for a bare spell anaphor.
         // Standalone mode, matching this builder's pre-existing entry point.
-        let inner = lower_ability_ir(&parse_ability_ir_standalone_with_spell_anaphor(
-            effect_text,
-            AbilityKind::Spell,
-            SpellAnaphorBinding::EventSource,
-        ));
-        return build_reflexive_coin_flip_trigger(is_win, inner);
+        let lowered =
+            lower_ability_ir_with_provenance(&parse_ability_ir_standalone_with_spell_anaphor(
+                effect_text,
+                AbilityKind::Spell,
+                SpellAnaphorBinding::EventSource,
+            ));
+        let mut clause = build_reflexive_coin_flip_trigger(is_win, lowered.value);
+        clause.head_text = Some(text[..text.len() - effect_text.len()].to_string());
+        clause
+            .history
+            .extend(lowered.history.into_iter().map(|record| {
+                crate::parser::oracle_ir::history_provenance::PendingHistory::nested(
+                    record,
+                    crate::parser::oracle_ir::history_provenance::InstructionStep::DelayedPayload,
+                )
+            }));
+        return clause;
     }
 
     // CR 705: "If you win/lose the flip, [effect]" — coin flip branch.
@@ -20706,7 +20729,7 @@ fn try_parse_gain_energy(
         return Some(clause);
     }
     if let Some(continuation) = parse_energy_gain_continuation(rest) {
-        clause.sub_ability = Some(Box::new({
+        let lowered = {
             let ir = parse_effect_chain_ir_with_damage_context(
                 continuation,
                 AbilityKind::Spell,
@@ -20714,8 +20737,18 @@ fn try_parse_gain_energy(
                 0,
                 Some(damage_context),
             );
-            lower_effect_chain_ir(&ir)
-        }));
+            lower::lower_effect_chain_ir_with_provenance(&ir)
+        };
+        clause.sub_ability = Some(Box::new(lowered.value));
+        clause
+            .history
+            .extend(lowered.history.into_iter().map(|record| {
+                crate::parser::oracle_ir::history_provenance::PendingHistory::nested(
+                    record,
+                    crate::parser::oracle_ir::history_provenance::InstructionStep::SubAbility,
+                )
+            }));
+        clause.head_text = Some(tp.lower[..tp.lower.len() - continuation.len()].to_string());
         return Some(clause);
     }
     None

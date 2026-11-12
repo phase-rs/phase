@@ -219,7 +219,9 @@ fn parse_replacement_line_inner(
     // --- "As ~ is turned face up, [effect]" → TurnFaceUp replacement (megamorph/
     //     disguise). CR 614.1e + CR 708.11: the effect applies as the permanent is
     //     turned face up, so it is a replacement, not a stack triggered ability. ---
-    if let Some(def) = parse_turned_face_up_replacement(&norm_lower, &text) {
+    if let Some(def) = parse_turned_face_up_replacement_with_provenance(&norm_lower, &text) {
+        *history = def.history;
+        let def = def.value;
         return Some(def);
     }
 
@@ -276,7 +278,10 @@ fn parse_replacement_line_inner(
     // --- "You may have ~ enter as a copy of [filter]" (clone replacement) ---
     // CR 707.9: "Enter as a copy" is a replacement effect modifying the ETB event.
     match parse_clone_replacement(&norm_lower, &text, card_name) {
-        Ok(Some(def)) => return Some(def),
+        Ok(Some(def)) => {
+            *history = def.history;
+            return Some(def.value);
+        }
         Ok(None) => {}
         // A recognized clone rider that could not be represented is not an
         // absent rider. Stop this parser so the outer router records the whole
@@ -353,9 +358,13 @@ fn parse_replacement_line_inner(
     }
 
     // --- "If an opponent causes you to discard this card, put it onto the battlefield instead" ---
-    if let Some(def) =
-        parse_discard_self_to_battlefield_replacement(&norm_lower, &normalized, &text)
-    {
+    if let Some(def) = parse_discard_self_to_battlefield_replacement_with_provenance(
+        &norm_lower,
+        &normalized,
+        &text,
+    ) {
+        *history = def.history;
+        let def = def.value;
         return Some(def);
     }
 
@@ -366,9 +375,13 @@ fn parse_replacement_line_inner(
     }
 
     // --- "If enchanted land would be destroyed, instead {effect}" ---
-    if let Some(def) =
-        parse_enchanted_land_destroy_sacrifice_replacement(&norm_lower, &normalized, &text)
-    {
+    if let Some(def) = parse_enchanted_land_destroy_sacrifice_replacement_with_provenance(
+        &norm_lower,
+        &normalized,
+        &text,
+    ) {
+        *history = def.history;
+        let def = def.value;
         return Some(def);
     }
 
@@ -394,7 +407,8 @@ fn parse_replacement_line_inner(
         // "instead exile it with three egg counters on it" routes through
         // here (self-die `~ would die`), not through the non-self path.
         if let Some(execute) = self_die_exile_anaphor_execute(&normalized, &text) {
-            def = def.execute(execute);
+            *history = execute.history;
+            def = def.execute(execute.value);
             return Some(def);
         }
         // Fall through: anaphor didn't match — keep prior coverage for compound
@@ -402,7 +416,10 @@ fn parse_replacement_line_inner(
         // chain parser.
         let effect_text = extract_replacement_effect(&normalized);
         if let Some(e) = effect_text {
-            def = def.execute(parse_effect_chain(&e, AbilityKind::Spell));
+            let lowered =
+                super::oracle_effect::parse_effect_chain_with_provenance(&e, AbilityKind::Spell);
+            *history = lowered.history;
+            def = def.execute(lowered.value);
         }
         return Some(def);
     }
@@ -414,7 +431,8 @@ fn parse_replacement_line_inner(
     //       "If a nontoken creature an opponent controls would die, exile it instead." (Valentin)
     //       "If a creature an opponent controls would die, exile it instead." (Vren)
     if let Some(def) = parse_creature_die_exile_replacement(&norm_lower, &normalized) {
-        return Some(def);
+        *history = def.history;
+        return Some(def.value);
     }
 
     // --- "If a [filter] would enter and it wasn't cast, exile it instead" ---
@@ -493,7 +511,12 @@ fn parse_replacement_line_inner(
             if optional_modal_present {
                 def = def.mode(ReplacementMode::Optional { decline: None });
             }
-            def = def.execute(parse_effect_chain(effect_after_modal, AbilityKind::Spell));
+            let lowered = super::oracle_effect::parse_effect_chain_with_provenance(
+                effect_after_modal,
+                AbilityKind::Spell,
+            );
+            *history = lowered.history;
+            def = def.execute(lowered.value);
         }
         apply_proliferate_player_scope(&lower, &mut def);
         return Some(def);
@@ -514,7 +537,9 @@ fn parse_replacement_line_inner(
     // --- Explore replacement: "If a creature you control would explore, instead …"
     // (Twists and Turns / Topography Tracker class).
     if nom_primitives::scan_contains(&lower, "would explore") {
-        if let Some(def) = parse_explore_replacement(&lower, &text) {
+        if let Some(def) = parse_explore_replacement_with_provenance(&lower, &text) {
+            *history = def.history;
+            let def = def.value;
             return Some(def);
         }
     }
@@ -525,7 +550,9 @@ fn parse_replacement_line_inner(
     // then that creature connives") contains "would"/"draw" text that the draw
     // arm would otherwise mis-claim.
     if nom_primitives::scan_contains(&lower, "would connive") {
-        if let Some(def) = parse_connive_replacement(&lower, &text) {
+        if let Some(def) = parse_connive_replacement_with_provenance(&lower, &text) {
+            *history = def.history;
+            let def = def.value;
             return Some(def);
         }
     }
@@ -534,7 +561,9 @@ fn parse_replacement_line_inner(
     // controller's | your] untap step, [effect] instead" (Freyalise's Winds,
     // Edge of Malacol). CR 502.3 + CR 502.4 + CR 614.1a.
     if nom_primitives::scan_contains(&lower, "would untap during") {
-        if let Some(def) = parse_untap_step_replacement(&text, &lower) {
+        if let Some(def) = parse_untap_step_replacement_with_provenance(&text, &lower) {
+            *history = def.history;
+            let def = def.value;
             return Some(def);
         }
     }
@@ -575,7 +604,9 @@ fn parse_replacement_line_inner(
         .parse(i)
     });
     if let Some((draw_scope, threshold)) = draw_antecedent {
-        let def = parse_draw_replacement(&text, &normalized, &lower, draw_scope)?;
+        let def = parse_draw_replacement_with_provenance(&text, &normalized, &lower, draw_scope)?;
+        *history = def.history;
+        let def = def.value;
         // CR 121.2a: the single composition step for a count-form antecedent's
         // threshold, applied to every draw-replacement form parsed above.
         return match threshold {
@@ -640,7 +671,10 @@ fn parse_replacement_line_inner(
             // seam, exactly as the CR 615.5 prevention follow-up path does for
             // damage recipients. Generic `ParentTarget*` resolution is left
             // untouched.
-            let mut execute = parse_effect_chain(&e, AbilityKind::Spell);
+            let lowered =
+                super::oracle_effect::parse_effect_chain_with_provenance(&e, AbilityKind::Spell);
+            *history = lowered.history;
+            let mut execute = lowered.value;
             rewrite_replacement_event_recipient_to_post_replacement_target(&mut execute);
             def = def.execute(execute);
         }
@@ -1189,11 +1223,11 @@ fn parse_discard_to_library_top_replacement(
     )
 }
 
-fn parse_discard_self_to_battlefield_replacement(
+fn parse_discard_self_to_battlefield_replacement_with_provenance(
     norm_lower: &str,
     normalized: &str,
     original_text: &str,
-) -> Option<ReplacementDefinition> {
+) -> Option<Lowered<ReplacementDefinition>> {
     let ((), after_prefix) = nom_on_lower(normalized, norm_lower, |i| {
         value(
             (),
@@ -1210,16 +1244,19 @@ fn parse_discard_self_to_battlefield_replacement(
     if !tail.trim_end_matches('.').trim().is_empty() {
         return None;
     }
-    let execute = parse_effect_chain(effect_text, AbilityKind::Spell);
-    Some(
-        ReplacementDefinition::new(ReplacementEvent::Discard)
+    let lowered =
+        super::oracle_effect::parse_effect_chain_with_provenance(effect_text, AbilityKind::Spell);
+    let execute = lowered.value;
+    Some(Lowered {
+        value: ReplacementDefinition::new(ReplacementEvent::Discard)
             .execute(execute)
             .valid_card(TargetFilter::SelfRef)
             .condition(ReplacementCondition::EventSourceControlledBy {
                 controller: ControllerRef::Opponent,
             })
             .description(original_text.to_string()),
-    )
+        history: lowered.history,
+    })
 }
 
 /// CR 614.1a + CR 614.12 + CR 614.12a: Karoo-style self-ETB cost replacement.
@@ -1443,11 +1480,11 @@ fn replace_self_refs(text: &str, card_name: &str) -> String {
 
 /// CR 614.1a: "instead" marks the enchanted-land destruction event as replaced
 /// by the parsed sacrifice/grant effect chain.
-fn parse_enchanted_land_destroy_sacrifice_replacement(
+fn parse_enchanted_land_destroy_sacrifice_replacement_with_provenance(
     norm_lower: &str,
     normalized: &str,
     original_text: &str,
-) -> Option<ReplacementDefinition> {
+) -> Option<Lowered<ReplacementDefinition>> {
     let ((), rest) = nom_on_lower(normalized, norm_lower, |i| {
         let (i, _) = tag("if ").parse(i)?;
         let (i, _) = tag("enchanted land").parse(i)?;
@@ -1459,15 +1496,18 @@ fn parse_enchanted_land_destroy_sacrifice_replacement(
     if effect_text.is_empty() {
         return None;
     }
-    let mut execute = parse_effect_chain(effect_text, AbilityKind::Spell);
+    let lowered =
+        super::oracle_effect::parse_effect_chain_with_provenance(effect_text, AbilityKind::Spell);
+    let mut execute = lowered.value;
     bind_enchanted_land_grant_to_replaced_object(&mut execute);
 
-    Some(
-        ReplacementDefinition::new(ReplacementEvent::Destroy)
+    Some(Lowered {
+        value: ReplacementDefinition::new(ReplacementEvent::Destroy)
             .valid_card(TargetFilter::AttachedTo)
             .execute(execute)
             .description(original_text.to_string()),
-    )
+        history: lowered.history,
+    })
 }
 
 fn bind_enchanted_land_grant_to_replaced_object(def: &mut AbilityDefinition) {
@@ -3272,7 +3312,9 @@ pub(crate) fn lower_as_enters_or_face_up_counters(text: &str) -> Option<Vec<Repl
     }
 
     // Reuse the counter + quantity effect stack (where-X → ObjectCount / Another).
-    let mut execute = parse_effect_chain(effect_text, AbilityKind::Spell);
+    let lowered =
+        super::oracle_effect::parse_effect_chain_with_provenance(effect_text, AbilityKind::Spell);
+    let mut execute = lowered.value;
 
     // Scoping guard + self-anaphor normalization: every effect in the chain must
     // place counters on the entering/turned-up permanent itself (none may be
@@ -3311,6 +3353,9 @@ pub(crate) fn lower_as_enters_or_face_up_counters(text: &str) -> Option<Vec<Repl
         ));
     }
 
+    for ir in &mut irs {
+        ir.history = lowered.history.clone();
+    }
     Some(irs)
 }
 
@@ -3419,7 +3464,7 @@ fn parse_clone_replacement(
     norm_lower: &str,
     original_text: &str,
     card_name: &str,
-) -> Result<Option<ReplacementDefinition>, ()> {
+) -> Result<Option<Lowered<ReplacementDefinition>>, ()> {
     // CR 614.1c: Two grammatical framings of the same ETB-copy replacement class:
     //   (a) "you may have ~ enter as a copy of ..."     (Phantasmal Image class)
     //   (b) "as ~ enters, you may have it become a copy of ..." (Cursed Mirror class)
@@ -3538,8 +3583,16 @@ fn parse_clone_replacement(
     // trigger, including its intervening-if guard, and consume literal `If`
     // only at this accepted replacement branch. The parent's copied-card
     // referent is forwarded to either rider.
-    if let Some(rider) = post_replacement_rider {
-        copy_effect = copy_effect.sub_ability(rider);
+    let mut history = Vec::new();
+    if let Some(mut rider) = post_replacement_rider {
+        for record in &mut rider.history {
+            record.prepend(super::oracle_ir::history_provenance::InstructionStep::SubAbility);
+            if enter_tapped {
+                record.prepend(super::oracle_ir::history_provenance::InstructionStep::SubAbility);
+            }
+        }
+        history.extend(rider.history);
+        copy_effect = copy_effect.sub_ability(rider.value);
     }
 
     // CR 614.1c: When the verb phrase includes "tapped" ("enter tapped as a copy
@@ -3562,8 +3615,8 @@ fn parse_clone_replacement(
         copy_effect
     };
 
-    Ok(Some(
-        ReplacementDefinition::new(ReplacementEvent::Moved)
+    Ok(Some(Lowered {
+        value: ReplacementDefinition::new(ReplacementEvent::Moved)
             .execute(execute_effect)
             .mode(ReplacementMode::Optional { decline: None })
             .valid_card(TargetFilter::SelfRef)
@@ -3572,7 +3625,8 @@ fn parse_clone_replacement(
             // permanent's own DEATH.
             .destination_zone(Zone::Battlefield)
             .description(original_text.to_string()),
-    ))
+        history,
+    }))
 }
 
 /// Locate the clone-verb phrase in a normalised Oracle line and return
@@ -3733,7 +3787,9 @@ fn attach_zone_to_filter(filter: TargetFilter, zone: Zone) -> TargetFilter {
 /// reflexive connector; `Err(())` means a recognized connector could not be
 /// represented and the owning replacement must fail closed rather than discard
 /// its rider.
-fn parse_post_replacement_rider(post_period: &str) -> Result<Option<AbilityDefinition>, ()> {
+fn parse_post_replacement_rider(
+    post_period: &str,
+) -> Result<Option<Lowered<AbilityDefinition>>, ()> {
     // Strip the sentence terminator / separator space preceding the reflexive
     // clause. These are structural punctuation, not parsing dispatch.
     let trimmed = post_period.trim_start_matches(['.', ' ']);
@@ -3762,7 +3818,9 @@ fn parse_post_replacement_rider(post_period: &str) -> Result<Option<AbilityDefin
     {
         return Ok(None);
     }
-    let mut def = super::oracle_effect::parse_effect_chain(trimmed, AbilityKind::Spell);
+    let lowered =
+        super::oracle_effect::parse_effect_chain_with_provenance(trimmed, AbilityKind::Spell);
+    let mut def = lowered.value;
     // Reject unimplemented fallbacks — the chain parser returns
     // `Effect::Unimplemented` when no pattern matches, which would attach a
     // dead sub_ability to the clone replacement.
@@ -3779,7 +3837,10 @@ fn parse_post_replacement_rider(post_period: &str) -> Result<Option<AbilityDefin
         Some(condition) if condition.is_optional_effect_performed() => {}
         Some(_) | None => return Err(()),
     }
-    Ok(Some(def))
+    Ok(Some(Lowered {
+        value: def,
+        history: lowered.history,
+    }))
 }
 
 /// Parse the suffix of a clone replacement, which carries the optional
@@ -7521,7 +7582,8 @@ fn parse_external_enters_tapped(
 fn parse_creature_die_exile_replacement(
     norm_lower: &str,
     original_text: &str,
-) -> Option<ReplacementDefinition> {
+) -> Option<Lowered<ReplacementDefinition>> {
+    let mut history = Vec::new();
     // Must contain "would die" and "instead" (exile-instead pattern).
     let (before_die, _) = nom_primitives::scan_split_at_phrase(norm_lower, |i| {
         tag::<_, _, OracleError<'_>>("would die").parse(i)
@@ -7625,8 +7687,15 @@ fn parse_creature_die_exile_replacement(
         // strips a leading "and " automatically.
         let continuation = anaphor.continuation.original.trim();
         if !continuation.is_empty() {
-            let chain = parse_effect_chain(continuation, AbilityKind::Spell);
-            exile_self = exile_self.sub_ability(chain);
+            let mut lowered = super::oracle_effect::parse_effect_chain_with_provenance(
+                continuation,
+                AbilityKind::Spell,
+            );
+            for record in &mut lowered.history {
+                record.prepend(super::oracle_ir::history_provenance::InstructionStep::SubAbility);
+            }
+            history.extend(lowered.history);
+            exile_self = exile_self.sub_ability(lowered.value);
         }
         exile_self
     } else {
@@ -7640,7 +7709,12 @@ fn parse_creature_die_exile_replacement(
             } else {
                 anaphor.continuation.original.trim()
             };
-        parse_effect_chain(orig_effect, AbilityKind::Spell)
+        let lowered = super::oracle_effect::parse_effect_chain_with_provenance(
+            orig_effect,
+            AbilityKind::Spell,
+        );
+        history.extend(lowered.history);
+        lowered.value
     };
 
     // CR 700.4 + CR 614.1a: Dying is any battlefield-to-graveyard move,
@@ -7654,7 +7728,10 @@ fn parse_creature_die_exile_replacement(
     if let Some(cond) = replacement_condition {
         def = def.condition(cond);
     }
-    Some(def)
+    Some(Lowered {
+        value: def,
+        history,
+    })
 }
 
 /// CR 614.1a + CR 614.1d + CR 614.12: "If a [filter] would enter and it wasn't
@@ -7968,7 +8045,8 @@ fn parse_exile_anaphor_clause<'a>(input: TextPair<'a>) -> ExileAnaphorMatch<'a> 
 fn self_die_exile_anaphor_execute(
     normalized: &str,
     original_text: &str,
-) -> Option<AbilityDefinition> {
+) -> Option<Lowered<AbilityDefinition>> {
+    let mut history = Vec::new();
     // Find the boundary `, ` that separates "If ~ would die" from the
     // replacement effect text.
     let (_, (_before, after_norm)) = nom_primitives::split_once_on(normalized, ", ").ok()?;
@@ -8016,10 +8094,20 @@ fn self_die_exile_anaphor_execute(
     );
     let continuation = anaphor.continuation.original.trim();
     if !continuation.is_empty() {
-        let chain = parse_effect_chain(continuation, AbilityKind::Spell);
-        exile_self = exile_self.sub_ability(chain);
+        let mut lowered = super::oracle_effect::parse_effect_chain_with_provenance(
+            continuation,
+            AbilityKind::Spell,
+        );
+        for record in &mut lowered.history {
+            record.prepend(super::oracle_ir::history_provenance::InstructionStep::SubAbility);
+        }
+        history.extend(lowered.history);
+        exile_self = exile_self.sub_ability(lowered.value);
     }
-    Some(exile_self)
+    Some(Lowered {
+        value: exile_self,
+        history,
+    })
 }
 
 /// Parse graveyard-destination zone-change replacements (CR 614.6).
@@ -11194,13 +11282,15 @@ fn strip_optional_draw_skip<'a>(lower_body: &str, original_body: &'a str) -> Opt
 fn attach_optional_draw_skip_rider(
     def: ReplacementDefinition,
     remainder: &str,
+    history: &mut Vec<HistoryProvenance>,
 ) -> Option<ReplacementDefinition> {
     let trimmed = remainder.trim_start_matches(['.', ' ']);
     if trimmed.is_empty() {
         return Some(def);
     }
     let rider = parse_post_replacement_rider(remainder).ok()??;
-    Some(def.execute(rider))
+    history.extend(rider.history);
+    Some(def.execute(rider.value))
 }
 
 /// CR 614.1a: Assign the replacement's player scope from the antecedent subject
@@ -11243,11 +11333,27 @@ fn apply_draw_player_scope(lower: &str, def: &mut ReplacementDefinition) {
 /// "as long as" gate, or a substitute `execute`, each with its player scope
 /// and antecedent conditions. A count-form threshold is composed by the caller,
 /// once, after whichever form succeeds.
-fn parse_draw_replacement(
+fn parse_draw_replacement_with_provenance(
     text: &str,
     normalized: &str,
     lower: &str,
     draw_scope: DrawReplacementScope,
+) -> Option<Lowered<ReplacementDefinition>> {
+    let mut history = Vec::new();
+    let definition =
+        parse_draw_replacement_inner(text, normalized, lower, draw_scope, &mut history)?;
+    Some(Lowered {
+        value: definition,
+        history,
+    })
+}
+
+fn parse_draw_replacement_inner(
+    text: &str,
+    normalized: &str,
+    lower: &str,
+    draw_scope: DrawReplacementScope,
+    history: &mut Vec<HistoryProvenance>,
 ) -> Option<ReplacementDefinition> {
     // CR 614.1a: An "As long as <state>, if you would draw a
     // card, ..." gate (Archmage Ascension) precedes the draw antecedent with
@@ -11279,7 +11385,7 @@ fn parse_draw_replacement(
         if let Some(remainder) = strip_optional_draw_skip(&effect_lower, effect) {
             def = def.mode(ReplacementMode::Optional { decline: None });
             def = def.quantity_modification(QuantityModification::Prevent);
-            def = attach_optional_draw_skip_rider(def, remainder)?;
+            def = attach_optional_draw_skip_rider(def, remainder, history)?;
             apply_draw_player_scope(lower, &mut def);
             // CR 504.1 + CR 614.1a + CR 614.11: draw-step timing and "while …"
             // quantity gates are independent antecedent dimensions — compose
@@ -11348,7 +11454,12 @@ fn parse_draw_replacement(
         if optional_modal_present {
             def = def.mode(ReplacementMode::Optional { decline: None });
         }
-        let mut execute = parse_effect_chain(effect_after_modal, AbilityKind::Spell);
+        let lowered = super::oracle_effect::parse_effect_chain_with_provenance(
+            effect_after_modal,
+            AbilityKind::Spell,
+        );
+        history.extend(lowered.history);
+        let mut execute = lowered.value;
         rewrite_draw_replacement_execute_referents(&mut execute, effect_after_modal);
         def = def.execute(execute);
     }
@@ -11672,21 +11783,27 @@ fn parse_scry_count_replacement(lower: &str, original_text: &str) -> Option<Repl
 /// CR 701.44 + CR 614.1a: Parse explore replacement effects such as Twists and
 /// Turns ("instead you scry 1, then that creature explores") and Topography
 /// Tracker ("instead it explores, then it explores again").
-fn parse_explore_replacement(lower: &str, original_text: &str) -> Option<ReplacementDefinition> {
+fn parse_explore_replacement_with_provenance(
+    lower: &str,
+    original_text: &str,
+) -> Option<Lowered<ReplacementDefinition>> {
     if !nom_primitives::scan_contains(lower, "if a creature you control would explore") {
         return None;
     }
     let (_, execute_text) = split_once_on_lower(original_text, lower, "instead ")?;
     let execute_text = execute_text.trim().trim_end_matches('.');
 
-    Some(
-        ReplacementDefinition::new(ReplacementEvent::Explore)
+    let lowered =
+        super::oracle_effect::parse_effect_chain_with_provenance(execute_text, AbilityKind::Spell);
+    Some(Lowered {
+        value: ReplacementDefinition::new(ReplacementEvent::Explore)
             .valid_card(TargetFilter::Typed(
                 TypedFilter::creature().controller(ControllerRef::You),
             ))
-            .execute(parse_effect_chain(execute_text, AbilityKind::Spell))
+            .execute(lowered.value)
             .description(original_text.to_string()),
-    )
+        history: lowered.history,
+    })
 }
 
 /// CR 701.50a + CR 614.1a: "If a creature you control would connive, instead
@@ -11695,21 +11812,27 @@ fn parse_explore_replacement(lower: &str, original_text: &str) -> Option<Replace
 /// `valid_card` filter scopes the conniving permanent ("a creature you control")
 /// and the `execute` chain after "instead" is the modified action the connive
 /// applier runs in place of the bare connive.
-fn parse_connive_replacement(lower: &str, original_text: &str) -> Option<ReplacementDefinition> {
+fn parse_connive_replacement_with_provenance(
+    lower: &str,
+    original_text: &str,
+) -> Option<Lowered<ReplacementDefinition>> {
     if !nom_primitives::scan_contains(lower, "if a creature you control would connive") {
         return None;
     }
     let (_, execute_text) = split_once_on_lower(original_text, lower, "instead ")?;
     let execute_text = execute_text.trim().trim_end_matches('.');
 
-    Some(
-        ReplacementDefinition::new(ReplacementEvent::Connive)
+    let lowered =
+        super::oracle_effect::parse_effect_chain_with_provenance(execute_text, AbilityKind::Spell);
+    Some(Lowered {
+        value: ReplacementDefinition::new(ReplacementEvent::Connive)
             .valid_card(TargetFilter::Typed(
                 TypedFilter::creature().controller(ControllerRef::You),
             ))
-            .execute(parse_effect_chain(execute_text, AbilityKind::Spell))
+            .execute(lowered.value)
             .description(original_text.to_string()),
-    )
+        history: lowered.history,
+    })
 }
 
 /// CR 502.3 + CR 502.4 + CR 614.1a: untap-step replacement —
@@ -11729,7 +11852,10 @@ fn parse_connive_replacement(lower: &str, original_text: &str) -> Option<Replace
 /// external target choice during the turn-up (Gift of Doom "you may attach it to
 /// a creature") are gapped by `turn_face_up_effect_is_self_resolving` rather than
 /// mis-resolved. `norm_lower` has self-references normalized to `~`.
-fn parse_turned_face_up_replacement(norm_lower: &str, text: &str) -> Option<ReplacementDefinition> {
+fn parse_turned_face_up_replacement_with_provenance(
+    norm_lower: &str,
+    text: &str,
+) -> Option<Lowered<ReplacementDefinition>> {
     // Anchored self-referential lead.
     tag::<_, _, OracleError<'_>>("as ~ is turned face up, ")
         .parse(norm_lower)
@@ -11750,17 +11876,20 @@ fn parse_turned_face_up_replacement(norm_lower: &str, text: &str) -> Option<Repl
     // Effects that need an external target choice (Gift of Doom's "you may attach
     // it to a creature") would require a turn-up-time choice the apply path does
     // not provide; gap them rather than silently mis-resolve the host.
-    let execute = parse_effect_chain(effect_text, AbilityKind::Spell);
+    let lowered =
+        super::oracle_effect::parse_effect_chain_with_provenance(effect_text, AbilityKind::Spell);
+    let execute = lowered.value;
     if !turn_face_up_effect_is_self_resolving(&execute) {
         return None;
     }
 
-    Some(
-        ReplacementDefinition::new(ReplacementEvent::TurnFaceUp)
+    Some(Lowered {
+        value: ReplacementDefinition::new(ReplacementEvent::TurnFaceUp)
             .valid_card(TargetFilter::SelfRef)
             .execute(execute)
             .description(text.to_string()),
-    )
+        history: lowered.history,
+    })
 }
 
 /// CR 708.11: True when every effect in an "As ~ is turned face up" chain resolves
@@ -11803,10 +11932,19 @@ pub(crate) fn is_as_self_enters_frame(lower: &str) -> bool {
 /// the permanent onto the battlefield (the post-replacement drain, before SBAs,
 /// triggers or priority). CR 614.12: the permanent's own replacement applies to
 /// its own entry. Scoped by `as_enters_one_shot_is_admissible`.
+#[cfg(test)]
 pub(crate) fn parse_as_enters_one_shot_replacement(
     text: &str,
     card_name: &str,
 ) -> Option<ReplacementDefinition> {
+    parse_as_enters_one_shot_replacement_with_provenance(text, card_name)
+        .map(|lowered| lowered.value)
+}
+
+pub(crate) fn parse_as_enters_one_shot_replacement_with_provenance(
+    text: &str,
+    card_name: &str,
+) -> Option<Lowered<ReplacementDefinition>> {
     let text = strip_reminder_text(text);
     let normalized = replace_self_refs(&text, card_name);
     let lower = normalized.to_lowercase();
@@ -11816,17 +11954,19 @@ pub(crate) fn parse_as_enters_one_shot_replacement(
     if body.is_empty() {
         return None;
     }
-    let execute = parse_effect_chain(body, AbilityKind::Spell);
-    if !as_enters_one_shot_is_admissible(&execute) {
+    let execute =
+        super::oracle_effect::parse_effect_chain_with_provenance(body, AbilityKind::Spell);
+    if !as_enters_one_shot_is_admissible(&execute.value) {
         return None;
     }
-    Some(
-        ReplacementDefinition::new(ReplacementEvent::Moved)
+    Some(Lowered {
+        value: ReplacementDefinition::new(ReplacementEvent::Moved)
             .valid_card(TargetFilter::SelfRef)
             .destination_zone(Zone::Battlefield)
-            .execute(execute)
+            .execute(execute.value)
             .description(text.to_string()),
-    )
+        history: execute.history,
+    })
 }
 
 /// CR 614.1c + CR 603.6d: the instruction happens as part of the entry event,
@@ -11918,7 +12058,10 @@ fn amount_reads_only_controller_life(amount: &QuantityExpr) -> bool {
     })
 }
 
-fn parse_untap_step_replacement(original_text: &str, lower: &str) -> Option<ReplacementDefinition> {
+fn parse_untap_step_replacement_with_provenance(
+    original_text: &str,
+    lower: &str,
+) -> Option<Lowered<ReplacementDefinition>> {
     if !nom_primitives::scan_contains(lower, "untap step")
         || !nom_primitives::scan_contains(lower, "instead")
     {
@@ -11956,13 +12099,16 @@ fn parse_untap_step_replacement(original_text: &str, lower: &str) -> Option<Repl
         return None;
     }
 
-    Some(
-        ReplacementDefinition::new(ReplacementEvent::Untap)
+    let lowered =
+        super::oracle_effect::parse_effect_chain_with_provenance(effect_text, AbilityKind::Spell);
+    Some(Lowered {
+        value: ReplacementDefinition::new(ReplacementEvent::Untap)
             .valid_card(filter)
             .condition(ReplacementCondition::DuringUntapStep)
-            .execute(parse_effect_chain(effect_text, AbilityKind::Spell))
+            .execute(lowered.value)
             .description(original_text.to_string()),
-    )
+        history: lowered.history,
+    })
 }
 
 #[derive(Clone, Copy)]
@@ -15122,7 +15268,7 @@ fn parse_damage_prevention_replacement_with_provenance(
             AbilityKind::Spell,
             &mut followup_ctx,
         );
-        history = lowered.history;
+        history.extend(lowered.history);
         let mut followup_def = lowered.value;
         // CR 615.5 + CR 609.7: `parse_target` maps "the source's controller" /
         // "that source's controller" to `ParentTargetController` (correct for

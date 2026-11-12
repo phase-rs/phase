@@ -996,6 +996,54 @@ mod tests {
     }
 
     #[test]
+    fn spacecraft_activation_document_seam_keeps_history_without_serializing_it() {
+        let text = "3+ | {T}: Tap all creatures ~ blocked this turn.";
+        let mut doc = crate::parser::oracle::parse_oracle_ir(
+            text,
+            "History witness",
+            &[],
+            &["Artifact".to_string()],
+            &["Spacecraft".to_string()],
+        );
+        let item = doc
+            .items
+            .iter()
+            .find(|item| {
+                matches!(
+                    item.node,
+                    super::super::doc::OracleNodeIr::PreLoweredSpell(_)
+                )
+            })
+            .expect("threshold activation stays on its pre-lowered document route");
+        assert_eq!(item.ability_history.len(), 1);
+        let super::super::doc::OracleNodeIr::PreLoweredSpell(definition) = &item.node else {
+            unreachable!()
+        };
+        assert!(definition.cost.is_some());
+        assert!(matches!(
+            definition.effect.as_ref(),
+            Effect::SetTapState { .. }
+        ));
+        let serialized = serde_json::to_value(item).unwrap();
+        let mut without_history = item.clone();
+        without_history.ability_history.clear();
+        assert_eq!(serialized, serde_json::to_value(without_history).unwrap());
+        assert!(!document_flagged(&mut doc));
+        let definition = doc
+            .items
+            .iter_mut()
+            .find_map(|item| match &mut item.node {
+                super::super::doc::OracleNodeIr::PreLoweredSpell(definition) => Some(definition),
+                _ => None,
+            })
+            .unwrap();
+        let misplaced = definition.clone();
+        replace_population(definition, bare());
+        definition.sub_ability = Some(Box::new(misplaced));
+        assert!(document_flagged(&mut doc));
+    }
+
+    #[test]
     fn casting_prohibition_tail_keeps_its_history_producer() {
         let text = "Your opponents can't cast spells, tap all creatures ~ blocked this turn.";
         let mut lowered = lower(text, source_context());
