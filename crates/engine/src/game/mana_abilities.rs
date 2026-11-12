@@ -752,17 +752,20 @@ fn produce_mana_from_bound_ability(
         // they attach to each produced `ManaUnit`.
         let mana_node = find_mana_effect(&scoped);
         let (produced_mana, restrictions, grants, expiry, source_could_produce_two_or_more_colors) =
-            match mana_node.map(|n| (&n.effect, n)) {
-                Some((
-                    Effect::Mana {
-                        produced,
-                        restrictions,
-                        grants,
-                        expiry,
-                        target: None,
-                    },
-                    mana_resolved,
-                )) => {
+            match (&scoped.effect, mana_node.map(|n| (&n.effect, n))) {
+                (
+                    _,
+                    Some((
+                        Effect::Mana {
+                            produced,
+                            restrictions,
+                            grants,
+                            expiry,
+                            target: None,
+                        },
+                        mana_resolved,
+                    )),
+                ) => {
                     let mana = match color_override.clone() {
                         // `Combination` is pre-chosen — skip `resolve_mana_types`
                         // so the exact sequence lands in the pool (CR 605.3b).
@@ -794,10 +797,13 @@ fn produce_mana_from_bound_ability(
                 // read now, after its cost was paid (CR 601.2h). Added mana carries
                 // no restriction (Doubling Cube ruling), so no restriction/grant/
                 // expiry templates apply.
-                Effect::Double {
-                    target_kind: DoubleTarget::ManaPool { color },
-                    ..
-                } => {
+                (
+                    Effect::Double {
+                        target_kind: DoubleTarget::ManaPool { color },
+                        ..
+                    },
+                    _,
+                ) => {
                     // CR 605.3b: the doubling read every unit in the pool, so a
                     // land refund (`UntapLandForMana`) could no longer reverse all
                     // coupled mana — the recipient's undo window closes here.

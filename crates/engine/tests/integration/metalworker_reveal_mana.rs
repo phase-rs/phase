@@ -127,7 +127,7 @@ fn metalworker_prompts_any_number_and_two_revealed_artifacts_add_four_colorless(
         "the reveal prompt continues the mana ability's activation"
     );
     assert!(
-        runner.state().waiting_for.withholds_priority(),
+        runner.state().withholds_priority(),
         "no player receives priority while the activation's reveal is pending"
     );
 
@@ -144,7 +144,7 @@ fn metalworker_prompts_any_number_and_two_revealed_artifacts_add_four_colorless(
         !runner.state().waiting_for.is_mana_ability_continuation(),
         "the continuation is cleared once the activation completes"
     );
-    assert!(!runner.state().waiting_for.withholds_priority());
+    assert!(!runner.state().withholds_priority());
 }
 
 #[test]
