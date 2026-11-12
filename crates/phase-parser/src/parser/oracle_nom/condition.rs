@@ -4957,6 +4957,8 @@ fn type_filter_is_permanent(type_filter: &TypeFilter) -> bool {
         || type_filter_to_core_type(type_filter).is_some_and(CoreType::is_permanent_type)
 }
 
+/// The card type a type-axis filter names, or `None` for a filter that names no
+/// single card type.
 pub(crate) fn type_filter_to_core_type(type_filter: &TypeFilter) -> Option<CoreType> {
     match type_filter {
         TypeFilter::Creature => Some(CoreType::Creature),
@@ -4967,6 +4969,7 @@ pub(crate) fn type_filter_to_core_type(type_filter: &TypeFilter) -> Option<CoreT
         TypeFilter::Sorcery => Some(CoreType::Sorcery),
         TypeFilter::Planeswalker => Some(CoreType::Planeswalker),
         TypeFilter::Battle => Some(CoreType::Battle),
+        // CR 308.1: Kindred maps to its core type.
         TypeFilter::Kindred => Some(CoreType::Kindred),
         TypeFilter::Permanent
         | TypeFilter::Card

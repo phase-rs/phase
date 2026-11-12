@@ -5143,13 +5143,13 @@ fn head_stamps_clause_scope(text: &str) -> bool {
 
 /// CR 115.1 + CR 115.10a + CR 601.2c: every role production announces for the
 /// instruction `effect_text`, read from the head effect and every descendant
-/// through the phase-ast enumerator. `None` when the text does not reach a
-/// readable Stack-timed declaration, so a caller (or a test) that gets `Some`
-/// knows the input parsed and passed every gate in front of the role count.
+/// through the phase-ast enumerator. `None` when the text fails one of the gates
+/// below; `Some` means it passed them, and the role count it carries is what
+/// shows the input parsed (an unparsed clause announces no role).
 ///
-/// The gates, in order: the printed text carries the word "target " (every arm
-/// of the timing ladder keys on it, and both production re-timings of an
-/// enchanted/equipped host require its absence); no optional-count quantifier
+/// The gates, in order: the printed text carries the word "target " (the
+/// timing ladder's target-declaring arms key on it, and both production
+/// re-timings of an enchanted/equipped host require its absence); no optional-count quantifier
 /// ("up to", "any number of") precedes any target phrase, whether or not the
 /// clause fixup stamped `multi_target` for this effect kind; the head carries
 /// no clause-scope prefix and no announcer override; the clause lowers to Stack
@@ -11437,10 +11437,11 @@ mod tests {
 
     /// Reach guard shared by every decline row: the condition is recognized by
     /// the shared grammar, and the effect passes every gate in front of the role
-    /// count (it parses, carries a printed "target ", is Stack-timed and has no
-    /// ambiguous cardinality), yielding exactly `expected` announced roles. A
-    /// parse failure or an early gate returns `None` there and fails the row
-    /// instead of satisfying a later `is_none()` vacuously.
+    /// count (it carries a printed "target ", is Stack-timed and has no
+    /// ambiguous cardinality), yielding exactly `expected` announced roles. An
+    /// early gate returns `None` and a parse failure announces no role, so
+    /// either fails the row instead of satisfying a later `is_none()`
+    /// vacuously.
     fn announced_roles_reaching_count(
         effect: &str,
         condition: &str,
