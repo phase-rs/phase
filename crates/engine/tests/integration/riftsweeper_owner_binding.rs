@@ -1,5 +1,6 @@
 //! Ordinary full-Oracle witnesses for R2, independent of Beam casting.
 
+use engine::game::merge::{merge_object_onto, MergeSide};
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::types::ability::TargetRef;
 use engine::types::actions::GameAction;
@@ -464,8 +465,6 @@ fn worldsouls_rage_keeps_damage_target_and_resolution_land_choice_separate() {
 // only that card; its split sibling stays in exile.
 #[test]
 fn riftsweeper_moves_only_the_chosen_card_not_its_co_exiled_merge_component() {
-    use engine::game::merge::{merge_object_onto, MergeSide};
-
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     let source = scenario

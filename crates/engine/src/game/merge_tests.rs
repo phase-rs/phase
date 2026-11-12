@@ -11,6 +11,7 @@
 use crate::game::game_object::ObjectIncarnationRefExt;
 use crate::game::merge::*;
 use crate::game::scenario::{GameScenario, P0};
+use crate::types::ability::{ForwardedResultContext, TargetFilter};
 use crate::types::events::GameEvent;
 use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
 use crate::types::player::PlayerId;
@@ -522,7 +523,6 @@ fn exile_records_component_backlink_and_continuity_return_collects_all() {
 /// naming the referent itself expands to the whole pile.
 #[test]
 fn unrelated_target_context_is_not_a_departure_of_the_selected_survivor() {
-    use crate::types::ability::{ForwardedResultContext, TargetFilter};
     let (mut state, host, rider, _p0) = two_creatures();
     state.battlefield.retain(|&id| id != rider);
     let mut events = Vec::new();
@@ -573,6 +573,66 @@ fn unrelated_target_context_is_not_a_departure_of_the_selected_survivor() {
         ),
         vec![host, rider],
         "a producer that moved the referent itself records its departure"
+    );
+}
+
+/// CR 730.3c + CR 400.7e + CR 603.10a: a `TriggeringSource` reference finds the
+/// object a merged permanent became only when the trigger event is that
+/// referent's own departure from the battlefield. The same referent under an
+/// unrelated object's zone-change event is not a departure of it.
+#[test]
+fn triggering_source_expands_only_for_the_referents_own_departure() {
+    let (mut state, host, rider, p0) = two_creatures();
+    state.battlefield.retain(|&id| id != rider);
+    let mut events = Vec::new();
+    merge_object_onto(&mut state, rider, host, MergeSide::Top, &mut events);
+    let bystander = crate::game::zones::create_object(
+        &mut state,
+        crate::types::identifiers::CardId(9702),
+        p0,
+        "Bystander".to_string(),
+        Zone::Battlefield,
+    );
+    let mut departure_events = Vec::new();
+    crate::game::zones::move_to_zone(&mut state, host, Zone::Exile, &mut departure_events);
+    let mut unrelated_events = Vec::new();
+    crate::game::zones::move_to_zone(
+        &mut state,
+        bystander,
+        Zone::Graveyard,
+        &mut unrelated_events,
+    );
+    let zone_change_of = |events: &[GameEvent], id: ObjectId| {
+        events
+            .iter()
+            .find(|event| matches!(event, GameEvent::ZoneChanged { object_id, .. } if *object_id == id))
+            .cloned()
+            .expect("the move publishes its zone change")
+    };
+    let ability = fresh_reference(host);
+
+    state.current_trigger_event = Some(zone_change_of(&unrelated_events, bystander));
+    assert_eq!(
+        expand_returned_merge_components(
+            &state,
+            &ability,
+            vec![host],
+            &TargetFilter::TriggeringSource
+        ),
+        vec![host],
+        "another object's departure is not evidence for this referent"
+    );
+
+    state.current_trigger_event = Some(zone_change_of(&departure_events, host));
+    assert_eq!(
+        expand_returned_merge_components(
+            &state,
+            &ability,
+            vec![host],
+            &TargetFilter::TriggeringSource
+        ),
+        vec![host, rider],
+        "the referent's own battlefield departure finds every card it became"
     );
 }
 

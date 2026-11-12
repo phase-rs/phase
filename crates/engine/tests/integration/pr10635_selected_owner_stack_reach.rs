@@ -162,3 +162,57 @@ fn unresolved_turn_the_earth_reaches_only_its_live_targets() {
         "the exiled target is illegal and is not acted on"
     );
 }
+
+/// CR 903.9b + CR 614.1: a commander Chaos Warp would shuffle into its owner's
+/// library may go to the command zone instead. The library move's proposed
+/// event is read by the stack reader's replacement check through the shared
+/// classification, so the move answers nothing for a commander target, as a
+/// scalar library move does, and still names an ordinary target.
+#[test]
+fn unresolved_chaos_warp_does_not_claim_a_commander_that_may_be_redirected() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    // CR 903.3: the commander designation is an attribute of the card.
+    let commander = {
+        let mut builder = scenario.add_creature(P1, "Commanding Bear", 2, 2);
+        builder.as_legendary().commander();
+        builder.id()
+    };
+    let bear = scenario.add_creature(P1, "Grizzly Bears", 2, 2).id();
+    let warp_commander = scenario
+        .add_spell_to_hand_from_oracle(P0, "Chaos Warp", true, CHAOS_WARP)
+        .id();
+    let warp_bear = scenario
+        .add_spell_to_hand_from_oracle(P0, "Chaos Warp", true, CHAOS_WARP)
+        .id();
+    let mut runner = main_phase(scenario);
+    runner.state_mut().format_config.command_zone = true;
+
+    runner.cast(warp_bear).target_object(bear).commit();
+    let bear_entry = runner
+        .state()
+        .stack
+        .back()
+        .expect("Chaos Warp on the bear")
+        .id;
+    assert_eq!(
+        library_move_reach(runner.state(), bear_entry),
+        vec![TargetRef::Object(bear)],
+        "control: an ordinary target is reached"
+    );
+
+    runner
+        .cast(warp_commander)
+        .target_object(commander)
+        .commit();
+    let commander_entry = runner
+        .state()
+        .stack
+        .back()
+        .expect("Chaos Warp on the commander")
+        .id;
+    assert!(
+        library_move_reach(runner.state(), commander_entry).is_empty(),
+        "the commander's own replacement may send it elsewhere, so the move does not claim it"
+    );
+}

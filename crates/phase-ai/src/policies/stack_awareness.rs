@@ -583,6 +583,7 @@ mod tests {
     use super::*;
     use crate::config::AiConfig;
     use engine::ai_support::{ActionMetadata, AiDecisionContext, CandidateAction, TacticalClass};
+    use engine::game::scenario::{GameScenario, P0, P1};
     use engine::game::zones::create_object;
     use engine::types::ability::{
         BounceSelection, EffectKind, QuantityRef, ResolvedAbility, TargetFilter,
@@ -1175,7 +1176,6 @@ mod tests {
     /// valued as a board wipe.
     #[test]
     fn chaos_warp_on_the_stack_tucks_its_live_target() {
-        use engine::game::scenario::{GameScenario, P0, P1};
         let mut scenario = GameScenario::new();
         scenario.at_phase(engine::types::phase::Phase::PreCombatMain);
         let bear = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();

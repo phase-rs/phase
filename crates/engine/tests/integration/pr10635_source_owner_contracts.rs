@@ -1,8 +1,14 @@
 //! Production death-trigger coverage for source-bound owner-library shuffles.
 
+use engine::game::merge::{merge_object_onto, MergeSide};
 use engine::game::scenario::{GameScenario, P0, P1};
+use engine::types::actions::GameAction;
 use engine::types::events::{GameEvent, PlayerActionKind};
+use engine::types::game_state::CastPaymentMode;
+use engine::types::game_state::StackEntryKind;
 use engine::types::game_state::WaitingFor;
+use engine::types::identifiers::ObjectId;
+use engine::types::mana::{ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::zones::Zone;
 
@@ -185,8 +191,6 @@ fn ceased_stolen_dragon_token_still_shuffles_its_owners_library() {
 // Both the survivor and its absorbed component must arrive before the one shuffle.
 #[test]
 fn alabaster_dragon_death_shuffles_the_whole_merged_pile_once() {
-    use engine::game::merge::{merge_object_onto, MergeSide};
-
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     let dragon = scenario
@@ -248,12 +252,6 @@ fn alabaster_dragon_death_shuffles_the_whole_merged_pile_once() {
 // merged permanent. Its split sibling must stay in the graveyard.
 #[test]
 fn activated_graveyard_return_does_not_sweep_the_former_merge_sibling() {
-    use engine::game::merge::{merge_object_onto, MergeSide};
-    use engine::types::actions::GameAction;
-    use engine::types::game_state::CastPaymentMode;
-    use engine::types::identifiers::ObjectId;
-    use engine::types::mana::{ManaType, ManaUnit};
-
     const SKELETON: &str =
         "{1}{B}: Return this card from your graveyard to the battlefield tapped.";
 
@@ -312,11 +310,6 @@ fn activated_graveyard_return_does_not_sweep_the_former_merge_sibling() {
 // successor. The effect acts on the successor it can still find.
 #[test]
 fn alabaster_death_after_the_survivor_is_exiled_still_shuffles_the_sibling() {
-    use engine::game::merge::{merge_object_onto, MergeSide};
-    use engine::types::actions::GameAction;
-    use engine::types::identifiers::ObjectId;
-    use engine::types::mana::{ManaType, ManaUnit};
-
     const CREMATE: &str = "Exile target card from a graveyard. Draw a card.";
 
     let mut scenario = GameScenario::new();
@@ -349,7 +342,6 @@ fn alabaster_death_after_the_survivor_is_exiled_still_shuffles_the_sibling() {
 
     // Destroy the merged permanent, then stop as soon as its dies trigger is the
     // top of the stack so the response window is available.
-    use engine::types::game_state::StackEntryKind;
     runner.cast(murder).target_object(dragon).commit();
     let top_is_trigger = |runner: &engine::game::scenario::GameRunner| {
         runner
@@ -472,8 +464,6 @@ const AVENGING_ANGEL: &str =
 /// CR 730.3c) is not implemented for this path (known gap, #10759).
 #[test]
 fn merged_ordered_placement_keeps_the_single_chosen_card() {
-    use engine::game::merge::{merge_object_onto, MergeSide};
-
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     let angel = scenario
@@ -534,8 +524,6 @@ const ANGEL_THEN_UNRELATED_SHUFFLE: &str = "Flying\nWhen this creature dies, you
 
 #[test]
 fn unrelated_later_shuffle_does_not_widen_an_ordered_departure_placement() {
-    use engine::game::merge::{merge_object_onto, MergeSide};
-
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     let angel = scenario
@@ -602,8 +590,6 @@ const BUTCHER_GHOUL: &str = "Undying (When this creature dies, if it had no +1/+
 /// This test passes unchanged at the merge base.
 #[test]
 fn undying_return_of_a_merged_permanent_keeps_the_base_population() {
-    use engine::game::merge::{merge_object_onto, MergeSide};
-
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     let ghoul = scenario
@@ -655,8 +641,6 @@ const TEL_JILAD_STYLUS: &str = "{T}: Put target permanent you own on the bottom 
 /// cards is not asserted. This test passes unchanged at the merge base.
 #[test]
 fn stylus_on_a_live_merged_permanent_keeps_the_base_component_delivery() {
-    use engine::game::merge::{merge_object_onto, MergeSide};
-
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     scenario.with_library_top(P0, &["Existing A", "Existing B"]);
