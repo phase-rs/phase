@@ -38714,7 +38714,7 @@ mod resolved_information_tests {
     }
 
     #[test]
-    fn reveal_until_reveal_only_records_exact_retained_information() {
+    fn reveal_until_reveal_only_records_controller_until_action_boundary() {
         let mut state = GameState::new_two_player(42);
         let revealed = create_object(
             &mut state,
@@ -38747,8 +38747,12 @@ mod resolved_information_tests {
 
         effects::resolve_effect(&mut state, &ability, &mut events).unwrap();
 
+        // CR 701.20a: RevealOnly retains Controller UntilActionBoundary reveal
+        // (public visibility comes from the Controller reveal being accessible
+        // to all viewers via filter_state_for_scope; no Public UntilZoneChange
+        // is emitted because RevealOnly has no zone change to retire it).
         assert!(state.revealed_cards.contains(&revealed));
-        assert!(state.public_revealed_cards.contains(&revealed));
+        assert!(!state.public_revealed_cards.contains(&revealed));
         let information = state
             .resolved_rules_journal
             .entries()
@@ -38758,7 +38762,8 @@ mod resolved_information_tests {
                 _ => None,
             })
             .collect::<Vec<_>>();
-        assert_eq!(information.len(), 2);
+        // Only the Controller UntilActionBoundary information is recorded
+        assert_eq!(information.len(), 1);
 
         let mut replay = pre_state;
         for command in &information {

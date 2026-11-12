@@ -203,12 +203,14 @@ fn resolve_reveal(
         )
         .expect("resolved reveal-until occurrences must be live and distinct");
 
-    // CR 701.20a + CR 400.7: Only reveal-only and paused optional dispositions
-    // retain these exact library occurrences after the resolver returns. Publish
-    // those occurrences here, before any later zone change can create a new one.
-    if matches!(matched_disposition, RevealUntilDisposition::RevealOnly)
-        || matches!((kept_optional_to, hit_cards.as_slice()), (Some(_), [_]))
-    {
+    // CR 701.20a + CR 400.7: A paused optional disposition (single hit with a
+    // controller choice) retains the exact library occurrence until the choice
+    // resolves and the card changes zones. RevealOnly has no zone change, so
+    // its public reveal lifetime is bounded by the action boundary (the
+    // Controller reveal at UntilActionBoundary already makes cards visible to
+    // all viewers via filter_state_for_scope). Do NOT publish a Public
+    // UntilZoneChange reveal for RevealOnly — it would never retire.
+    if matches!((kept_optional_to, hit_cards.as_slice()), (Some(_), [_])) {
         state
             .resolve_and_apply_information(
                 &revealed_in_order,
