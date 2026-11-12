@@ -67,6 +67,75 @@ fn redirect_moved_to(destination: Zone, redirected_to: Zone) -> ReplacementDefin
         ))
 }
 
+/// CR 101.4c + CR 616.1: a staged batch consults every member before any
+/// prompt, so `player` holds one decision per member of `held` and first
+/// chooses which to make. Pin that prompt (the announcement order is the
+/// batch's, so the set is pinned), make the first announced member's decision
+/// first, and check its choice is the one published. Returns the members in
+/// announcement order; every member after the first still holds its decision.
+fn make_first_held_decision(
+    runner: &mut GameRunner,
+    player: engine::types::player::PlayerId,
+    held: &[ObjectId],
+) -> Vec<ObjectId> {
+    let WaitingFor::ReplacementDecisionOrder {
+        player: chooser,
+        objects,
+    } = runner.state().waiting_for.clone()
+    else {
+        panic!(
+            "expected the held decisions' order prompt, got {:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert_eq!(chooser, player);
+    let mut offered = objects.clone();
+    offered.sort();
+    let mut expected = held.to_vec();
+    expected.sort();
+    assert_eq!(offered, expected, "one held decision per staged member");
+    runner
+        .act(GameAction::SelectCards {
+            cards: vec![objects[0]],
+        })
+        .expect("make the first announced member's decision first");
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::ReplacementChoice { .. }
+    ));
+    assert_eq!(
+        runner
+            .state()
+            .pending_replacement
+            .as_ref()
+            .and_then(|pending| pending.proposed.affected_object_id()),
+        Some(objects[0]),
+        "the selected member's choice is published"
+    );
+    let staged = runner
+        .state()
+        .resolution_stack
+        .iter()
+        .find_map(|frame| match frame {
+            engine::types::resolution::ResolutionFrame::BatchDelivery(batch) => {
+                batch.staged.as_ref()
+            }
+            _ => None,
+        })
+        .expect("the staged batch is parked");
+    for later in &objects[1..] {
+        assert!(
+            staged
+                .members
+                .iter()
+                .any(|member| member.identity.object_id == *later
+                    && member.held_decision.is_some()),
+            "every later member still holds its own decision"
+        );
+    }
+    objects
+}
+
 /// CR 616.1: source-linked exile tracking is part of the parked zone-move
 /// request and must survive an optional replacement choice.
 #[test]
@@ -182,17 +251,16 @@ fn dig_rest_pile_library_redirect_pauses_before_tracked_set_publish() {
     let paused = runner
         .act(GameAction::SelectCards { cards: vec![kept] })
         .expect("Dig submits the kept card and reaches the first bottom placement");
+    // CR 101.4c: the staged rest pile consulted both rest cards before any
+    // prompt; P0 orders its two held placements and makes the first announced
+    // one first. The second rest card is parked behind that choice as a held
+    // decision (it was an unconsulted `remaining` entry before the scheduler).
     assert!(matches!(
         paused.waiting_for,
-        WaitingFor::ReplacementChoice { .. }
+        WaitingFor::ReplacementDecisionOrder { player: P0, .. }
     ));
-    let parked_order = runner
-        .state()
-        .active_batch_delivery()
-        .expect("the second rest card is parked behind the first replacement choice")
-        .remaining
-        .clone();
-    assert_eq!(parked_order.len(), 1);
+    // The batch first parks at that order prompt, so the parked-state checks
+    // are made there, exactly where the first placement prompt used to be.
     assert!(
         runner.state().chain_tracked_set_id.is_none(),
         "the kept set cannot publish while a rest placement remains undecided"
@@ -203,6 +271,13 @@ fn dig_rest_pile_library_redirect_pauses_before_tracked_set_publish() {
             "reveal bookkeeping must remain intact while the rest-pile batch is parked"
         );
     }
+    let announced = make_first_held_decision(&mut runner, P0, &[rest_a, rest_b]);
+    let parked_order = announced[1..].to_vec();
+    assert_eq!(parked_order.len(), 1);
+    assert!(
+        runner.state().chain_tracked_set_id.is_none(),
+        "the kept set cannot publish while a rest placement remains undecided"
+    );
 
     let first_redirect = runner
         .act(GameAction::ChooseReplacement { index: 0 })
@@ -305,10 +380,13 @@ fn dig_zero_kept_deferred_rest_pile_publishes_an_empty_tracked_set() {
     let paused = runner
         .act(GameAction::SelectCards { cards: vec![] })
         .expect("an empty up-to selection reaches the rest-pile replacement choice");
+    // CR 101.4c: both rest cards were consulted before any prompt; P0 orders
+    // its two held placements and makes the first announced one first.
     assert!(matches!(
         paused.waiting_for,
-        WaitingFor::ReplacementChoice { .. }
+        WaitingFor::ReplacementDecisionOrder { player: P0, .. }
     ));
+    make_first_held_decision(&mut runner, P0, &[rest_a, rest_b]);
 
     let reparking = runner
         .act(GameAction::ChooseReplacement { index: 0 })
@@ -763,15 +841,20 @@ fn dig_deferred_reveal_rest_pile_repauses_and_completes_once() {
     let rest_pause = runner
         .act(GameAction::ChooseReplacement { index: 0 })
         .expect("kept-card resolution enters the deferred rest-pile route");
+    // CR 101.4c: the staged rest pile consulted both rest cards before any
+    // prompt; P0 orders its two held placements and makes the first announced
+    // one first. The second rest placement is parked behind that redirect as a
+    // held decision (an unconsulted `remaining` entry before the scheduler).
     assert!(matches!(
         rest_pause.waiting_for,
-        WaitingFor::ReplacementChoice { .. }
+        WaitingFor::ReplacementDecisionOrder { player: P0, .. }
     ));
+    let announced = make_first_held_decision(&mut runner, P0, &[rest_a, rest_b]);
+    assert_eq!(announced.len(), 2);
     let first_rest_park = runner
         .state()
         .active_batch_delivery()
         .expect("the second rest placement is parked behind the first redirect");
-    assert_eq!(first_rest_park.remaining.len(), 1);
     assert!(
         matches!(
             first_rest_park.completion.as_ref(),
@@ -11752,19 +11835,24 @@ fn cascade_bottom_batch_pauses_for_library_redirect_before_completion() {
     resolve_ability_chain(runner.state_mut(), &ability, &mut initial_events, 0)
         .expect("cascade should reach its library-bottom cleanup");
 
+    // CR 101.4c: the staged bottom batch consults every miss before any
+    // prompt, so P0 holds one placement decision per miss and first chooses
+    // which to make (the first announced one). The later misses are the parked
+    // suffix as held decisions (unconsulted `remaining` entries before the
+    // scheduler), still batch-owned.
     assert!(
         matches!(
             runner.state().waiting_for,
-            WaitingFor::ReplacementChoice { .. }
+            WaitingFor::ReplacementDecisionOrder { player: P0, .. }
         ),
         "the first cascade bottom placement must surface its competing Moved redirects"
     );
-    let parked_order = runner
-        .state()
-        .active_batch_delivery()
-        .expect("the remaining randomized cascade suffix must be batch-owned")
-        .remaining
-        .clone();
+    let announced = make_first_held_decision(&mut runner, P0, &misses);
+    let parked_order = announced[1..].to_vec();
+    assert!(
+        runner.state().active_batch_delivery().is_some(),
+        "the remaining randomized cascade suffix must be batch-owned"
+    );
     assert_eq!(
         parked_order.len(),
         misses.len() - 1,
@@ -11791,9 +11879,19 @@ fn cascade_bottom_batch_pauses_for_library_redirect_before_completion() {
         Zone::Library,
         "the chosen redirect suppresses the original bottom placement"
     );
+    // The suffix re-pauses: P0 still holds both later placements, so it orders
+    // them again (CR 101.4d) and makes the next announced one first.
     assert!(
-        matches!(redirected.waiting_for, WaitingFor::ReplacementChoice { .. }),
+        matches!(
+            redirected.waiting_for,
+            WaitingFor::ReplacementDecisionOrder { player: P0, .. }
+        ),
         "the remaining batch suffix must re-pause while the Library redirects remain active"
+    );
+    assert_eq!(
+        make_first_held_decision(&mut runner, P0, &parked_order),
+        parked_order,
+        "the re-pause offers the suffix in its announcement order"
     );
     for redirect_source in redirect_sources {
         runner
@@ -11804,9 +11902,22 @@ fn cascade_bottom_batch_pauses_for_library_redirect_before_completion() {
             .replacement_definitions
             .clear();
     }
-    let completed = runner
+    let mut completed = runner
         .act(GameAction::ChooseReplacement { index: 0 })
         .expect("the now-unredirected parked cascade suffix drains");
+    // The last miss's decision was held while the redirects were active, so
+    // it is still asked; it now drains the same way as the one just answered.
+    assert!(
+        matches!(completed.waiting_for, WaitingFor::ReplacementChoice { .. }),
+        "the last held placement is asked after the previous answer, got {:?}",
+        completed.waiting_for
+    );
+    let last = runner
+        .act(GameAction::ChooseReplacement { index: 0 })
+        .expect("the last held placement drains");
+    completed.events.extend(last.events);
+    completed.waiting_for = last.waiting_for;
+    assert!(matches!(completed.waiting_for, WaitingFor::Priority { .. }));
     let library: Vec<_> = runner.state().players[P0.0 as usize]
         .library
         .iter()
@@ -12250,23 +12361,23 @@ fn put_on_top_batch_redirects_and_preserves_chosen_order_without_redirects() {
     resolve_ability_chain(redirected.state_mut(), &ability, &mut redirected_events, 0)
         .expect("put-on-top reaches its first library placement");
 
+    // CR 101.4c: the staged top placement consults both cards before any
+    // prompt, so P0 holds both placements and first chooses which to make (the
+    // first announced). The other card is the parked suffix as a held decision
+    // (an unconsulted `remaining` entry before the scheduler).
     assert!(
         matches!(
             redirected.state().waiting_for,
-            WaitingFor::ReplacementChoice { .. }
+            WaitingFor::ReplacementDecisionOrder { player: P0, .. }
         ),
         "the first top placement must surface its competing Moved redirects"
     );
+    let announced = make_first_held_decision(&mut redirected, P0, &[first, second]);
     assert!(
         redirected.state().active_batch_delivery().is_some(),
         "the remaining placement must be carried by the batch across the pause"
     );
-    let parked_order = redirected
-        .state()
-        .active_batch_delivery()
-        .expect("the remaining top placement is batch-owned")
-        .remaining
-        .clone();
+    let parked_order = announced[1..].to_vec();
     assert!(
         !redirected_events.iter().any(|event| matches!(
             event,
@@ -12460,9 +12571,13 @@ fn discover_bottom_batch_pauses_before_its_hit_and_continuation_complete() {
             choice: engine::types::actions::CastChoice::Decline,
         })
         .expect("declined discover starts the replacement-aware miss batch");
+    // CR 101.4c: the staged miss batch consults both misses before any prompt,
+    // so P0 holds both placements and first chooses which to make (the first
+    // announced). The other miss is the parked suffix as a held decision (an
+    // unconsulted `remaining` entry before the scheduler).
     assert!(matches!(
         paused.waiting_for,
-        WaitingFor::ReplacementChoice { .. }
+        WaitingFor::ReplacementDecisionOrder { player: P0, .. }
     ));
     assert_eq!(
         runner.state().objects[&hit].zone,
@@ -12470,12 +12585,12 @@ fn discover_bottom_batch_pauses_before_its_hit_and_continuation_complete() {
         "the raw hit-to-hand instruction waits until the miss batch completes"
     );
     assert_eq!(runner.state().players[P0.0 as usize].life, 20);
-    let parked_order = runner
-        .state()
-        .active_batch_delivery()
-        .expect("the remaining randomized discover misses are batch-owned")
-        .remaining
-        .clone();
+    let announced = make_first_held_decision(&mut runner, P0, &[miss_a, miss_b]);
+    assert!(
+        runner.state().active_batch_delivery().is_some(),
+        "the remaining randomized discover misses are batch-owned"
+    );
+    let parked_order = announced[1..].to_vec();
     let first_redirect = runner
         .act(GameAction::ChooseReplacement { index: 0 })
         .expect("the first discover miss is redirected before the batch completes");

@@ -71,6 +71,28 @@ fn assert_settled(runner: &GameRunner) {
     );
 }
 
+/// CR 101.4c + CR 101.4d + CR 616.1: the staged population's sweep consults
+/// every entrant before any prompt, and the order restarts after every answer
+/// (an answer that re-parks the same member holds that decision again). While
+/// P0 holds two or more decisions, it first chooses which to make; make
+/// `subject`'s first. `held` is every member that holds a decision, in
+/// announcement order. Returns whether P0 was asked to order.
+fn make_decision_first(runner: &mut GameRunner, held: &[ObjectId], subject: ObjectId) -> bool {
+    let WaitingFor::ReplacementDecisionOrder { player, objects } =
+        runner.state().waiting_for.clone()
+    else {
+        return false;
+    };
+    assert_eq!(player, P0);
+    assert_eq!(objects, held, "P0 orders exactly its held decisions");
+    runner
+        .act(GameAction::SelectCards {
+            cards: vec![subject],
+        })
+        .expect("make the chosen held decision first");
+    true
+}
+
 fn choose_source(runner: &mut GameRunner, source: ObjectId, expected_count: usize) {
     let WaitingFor::ReplacementChoice {
         player, candidates, ..
@@ -153,7 +175,19 @@ fn open_the_vaults_mox_diamond_orders_root_maze_against_archelos() {
     let mut runner = scenario.build();
     assert!(!runner.state().objects[&archelos].tapped);
     runner.cast(vaults).resolve();
+    // Both entrants hold an ordering decision after the sweep, so P0 first
+    // chooses which to make; the Mox's goes first, as before.
+    assert!(
+        make_decision_first(&mut runner, &[mox, thopter], mox),
+        "P0 holds both entrants' orderings after the sweep"
+    );
     choose_source(&mut runner, mox, 3);
+    // CR 101.4d: the answer re-parks the Mox on its own optional discard, so
+    // the order restarts and P0 again chooses which held decision to make.
+    assert!(
+        make_decision_first(&mut runner, &[mox, thopter], mox),
+        "the Mox's re-parked optional discard is held and the order restarts"
+    );
     assert!(
         runner
             .state()
@@ -174,6 +208,12 @@ fn open_the_vaults_mox_diamond_orders_root_maze_against_archelos() {
             cards: vec![forest],
         })
         .expect("pay Mox discard");
+    // CR 101.4d: paying the discard re-parks the Mox on the Root Maze /
+    // Archelos ordering, so the order restarts once more.
+    assert!(
+        make_decision_first(&mut runner, &[mox, thopter], mox),
+        "the Mox's re-parked entry ordering is held and the order restarts"
+    );
     let pending = runner
         .state()
         .pending_replacement
@@ -444,6 +484,13 @@ fn fu7_foreign_owned_mox_does_not_reassign_departed_beacon_payer() {
 /// entry ordering was pending is never returned, and it has no battlefield
 /// occurrence slot to finalize. Open the Vaults returns both Ornithopters from
 /// P0's graveyard; Root Maze and Archelos make each entry an ordering choice.
+///
+/// Since the live scheduler (CR 616.1 + CR 101.4) the sweep consults both
+/// entrants before any prompt, so the later Ornithopter is no longer
+/// unconsulted when it leaves: it HOLDS its own ordering decision while P0
+/// makes the first one. The property is unchanged: the held member whose
+/// object moved is retired (its decision is never asked), it is not returned,
+/// and the population settles.
 #[test]
 fn open_the_vaults_skips_a_graveyard_member_that_left_during_the_first_choice() {
     let mut scenario = GameScenario::new();
@@ -464,6 +511,10 @@ fn open_the_vaults_skips_a_graveyard_member_that_left_during_the_first_choice() 
         .id();
     let mut runner = scenario.build();
     runner.cast(vaults).resolve();
+    assert!(
+        make_decision_first(&mut runner, &[first, later], first),
+        "P0 holds both Ornithopters' orderings after the sweep"
+    );
     assert_eq!(
         runner
             .state()
@@ -473,10 +524,22 @@ fn open_the_vaults_skips_a_graveyard_member_that_left_during_the_first_choice() 
         Some(first),
         "the first Ornithopter's entry ordering is live"
     );
+    assert!(
+        runner
+            .state()
+            .active_batch_delivery()
+            .and_then(|pending| pending.staged.as_ref())
+            .and_then(|staged| staged
+                .members
+                .iter()
+                .find(|member| member.identity.object_id == later))
+            .is_some_and(|member| member.held_decision.is_some()),
+        "the later Ornithopter holds its own ordering decision"
+    );
     assert_eq!(runner.state().objects[&later].zone, Zone::Graveyard);
 
-    // Stand-in for another effect exiling the not-yet-consulted member while
-    // the first Ornithopter's ordering is pending.
+    // Stand-in for another effect exiling the held member while the first
+    // Ornithopter's ordering is pending.
     engine::game::zones::move_to_zone(runner.state_mut(), later, Zone::Exile, &mut Vec::new());
 
     choose_source(&mut runner, root_maze, 2);

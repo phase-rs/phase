@@ -913,6 +913,12 @@ fn unexpectedly_absent_fixed_depth_component_arrangement_survives_reopen() {
 
 /// CR 903.9b + CR 401.4: an earlier consultation can pause while the seeded
 /// permanent has not yet been consulted. Its original submitted order survives.
+///
+/// Since the live scheduler (CR 616.1 + CR 101.4) the sweep consults every
+/// member before any prompt, so the seeded merged permanent, which needs no
+/// choice, is already approved (not unconsulted) when the commander's choice
+/// is asked. The property is unchanged: the submitted component seed survives
+/// that pause and its round trip, and delivery honours it.
 #[test]
 fn hallowed_burial_commander_first_pause_round_trips_unconsulted_component_seed() {
     let mut scenario =
@@ -958,9 +964,29 @@ fn hallowed_burial_commander_first_pause_round_trips_unconsulted_component_seed(
         .unwrap();
     assert_eq!(
         member.state,
-        engine::types::game_state::StagedBatchMemberState::Unconsulted
+        engine::types::game_state::StagedBatchMemberState::Approved
     );
-    assert_eq!(member.approved_event, None);
+    assert!(
+        member.held_decision.is_none(),
+        "the seeded permanent needs no choice"
+    );
+    assert!(
+        matches!(
+            member.approved_event,
+            Some(engine::types::proposed_event::ProposedEvent::ZoneChange {
+                object_id,
+                to: Zone::Library,
+                ..
+            }) if object_id == host
+        ),
+        "the sweep approved the seeded permanent's own library move, got {:?}",
+        member.approved_event
+    );
+    assert_eq!(
+        staged.asking.map(|asking| asking.object_id),
+        Some(commander),
+        "the commander's choice is the one asked"
+    );
     assert_eq!(
         staged.arrangements[0]
             .batch
