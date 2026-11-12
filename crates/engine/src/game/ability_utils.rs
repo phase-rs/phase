@@ -1,12 +1,12 @@
 use crate::game::game_object::ObjectIncarnationRefExt;
 use crate::types::ability::{
-    attach_attachment_claims_announcement_slot, attach_host_filter_needs_target_slot,
-    become_copy_recipient_slot_filter, damage_replacement_source_slot_filter,
-    damage_replacement_target_roles, effect_bound_filter_matches,
-    effect_needs_parent_target_combat_relation_slot, effect_needs_target_creature_quantity_slot,
-    effect_references_target_player, effect_stack_target_declaration_matching,
-    effect_target_filter_references_chosen_player, effect_target_slot_filter,
-    extract_target_filter_from_effect, fight_declared_slot_filters,
+    attach_attachment_claims_announcement_slot, attach_declared_slot_filters,
+    attach_host_filter_needs_target_slot, become_copy_recipient_slot_filter,
+    damage_replacement_source_slot_filter, damage_replacement_target_roles,
+    effect_bound_filter_matches, effect_needs_parent_target_combat_relation_slot,
+    effect_needs_target_creature_quantity_slot, effect_references_target_player,
+    effect_stack_target_declaration_matching, effect_target_filter_references_chosen_player,
+    effect_target_slot_filter, extract_target_filter_from_effect, fight_declared_slot_filters,
     fight_subject_needs_target_slot, filter_references_target_opponent, is_any_target_filter,
     mass_all_target_filter, move_counter_stack_target_filters,
     one_sided_fight_source_supplies_quantity_creature, paired_subject_filters,
@@ -8984,7 +8984,8 @@ fn effect_slot_denotes_damage_any_target(effect: &Effect, slot: AbilityTargetSlo
 /// A `Fight` is the other multi-slot shape whose slots do NOT share a filter (CR 601.2c:
 /// an appropriate object for each target the spell requires), and it is read from
 /// [`fight_declared_slot_filters`] — the cast path's own order authority — rather than
-/// from the single-filter extraction.
+/// from the single-filter extraction. `Attach` is the third, read from
+/// [`attach_declared_slot_filters`] for the same reason.
 /// Returns `None` where the node declares no stack-time filter.
 pub(crate) fn declared_slot_announcement_filter(
     node: &ResolvedAbility,
@@ -9014,6 +9015,41 @@ pub(crate) fn declared_slot_announcement_filter(
     // altogether.
     if let Effect::Fight { subject, target } = &node.effect {
         let declared: Vec<&TargetFilter> = fight_declared_slot_filters(subject, target).collect();
+        if declared.len() == node.targets.len() {
+            return declared.get(index).map(|filter| (*filter).clone());
+        }
+    }
+    // CR 115.1a/c/d/e + CR 601.2c + CR 608.2d: an `Attach` instruction declares its
+    // two operands with two DIFFERENT filters — "Attach target Equipment to target
+    // creature" (Magnetic Theft) names the ATTACHMENT first and the HOST second —
+    // so recovering one filter for the whole node judges the Equipment slot against
+    // the host's "target creature" and refuses an untouched save carrying ordinary
+    // noncreature Equipment. `extract_target_filter_from_effect` reads that single
+    // filter off `Effect::target_filter()`, whose Attach arm surfaces `target` (the
+    // host) only.
+    // `attach_declared_slot_filters` is the cast path's own order authority:
+    // `collect_target_slots_inner`'s Attach arm calls
+    // `collect_attach_attachment_target_slots` and then pushes the host, and both
+    // conjuncts of that arm's gates — `attach_attachment_claims_announcement_slot`
+    // (CR 608.2d: a DESCRIBED operand is chosen while resolving and claims no slot)
+    // and `attach_host_filter_needs_target_slot` — are exactly the ones the iterator
+    // re-applies, so the positions it yields are the positions announced.
+    //
+    // Same length guard as the Fight arm, for two shapes that leave the node unable
+    // to say which filter declared a position: a DECLINED optional slot compacts
+    // `targets`, and a "attach any number of target Equipment" announcement pushes
+    // one slot per chosen Equipment (a count this filter-only recovery cannot
+    // recompute without legal-target state) while the iterator yields the operand
+    // once. Both fall through to the single-filter reading below — exactly what this
+    // function answered before this arm existed — rather than guessing a role.
+    if let Effect::Attach {
+        attachment,
+        target,
+        selection,
+    } = &node.effect
+    {
+        let declared: Vec<&TargetFilter> =
+            attach_declared_slot_filters(attachment, target, selection).collect();
         if declared.len() == node.targets.len() {
             return declared.get(index).map(|filter| (*filter).clone());
         }
@@ -16339,15 +16375,100 @@ mod tests {
         );
     }
 
+    /// CR 115.1a/c/d/e + CR 601.2c + CR 608.2d: the per-slot announcement recovery
+    /// ([`declared_slot_announcement_filter`]) hands each `Attach` slot its OWN filter —
+    /// the attachment at position 0, the host at position 1 — and claims no attachment
+    /// slot at all for a DESCRIBED operand.
+    #[test]
+    fn attach_slot_announcement_filters_follow_the_declared_order() {
+        let equipment = TargetFilter::Typed(
+            TypedFilter::default().with_type(TypeFilter::Subtype("Equipment".to_string())),
+        );
+        let creature = TargetFilter::Typed(TypedFilter::creature());
+        let source = ObjectId(1);
+        let equipment_id = ObjectId(2);
+        let creature_id = ObjectId(3);
+
+        // "Attach target Equipment to target creature" (Magnetic Theft): the
+        // attachment is announced first, the host second.
+        let two_slot = ResolvedAbility::new(
+            Effect::Attach {
+                attachment: equipment.clone(),
+                target: creature.clone(),
+                selection: AttachSelection::Targeted,
+            },
+            vec![
+                TargetRef::Object(equipment_id),
+                TargetRef::Object(creature_id),
+            ],
+            source,
+            PlayerId(0),
+        );
+        assert_eq!(
+            declared_slot_announcement_filter(&two_slot, 0),
+            Some(equipment.clone()),
+            "slot 0 is the ATTACHMENT: the filter is the Equipment, never the host's"
+        );
+        assert_eq!(
+            declared_slot_announcement_filter(&two_slot, 1),
+            Some(creature.clone()),
+            "slot 1 is the HOST: the creature the Equipment is attached to"
+        );
+
+        // CR 608.2d: a DESCRIBED attachment ("attach any number of Equipment you
+        // control to target creature") claims no announcement slot, so the host is the
+        // only slot and position 0 recovers it.
+        let described = ResolvedAbility::new(
+            Effect::Attach {
+                attachment: equipment,
+                target: creature.clone(),
+                selection: AttachSelection::AtResolution {
+                    count: AttachCardinality::AnyNumber,
+                },
+            },
+            vec![TargetRef::Object(creature_id)],
+            source,
+            PlayerId(0),
+        );
+        assert_eq!(
+            declared_slot_announcement_filter(&described, 0),
+            Some(creature.clone()),
+            "a described attachment declares nothing, so the host lands at position 0"
+        );
+
+        // An anaphoric host ("attach this Equipment to it") resolves without a slot:
+        // the printed-target attachment is the whole declaration.
+        let anaphoric_host = ResolvedAbility::new(
+            Effect::Attach {
+                attachment: TargetFilter::Typed(
+                    TypedFilter::default().with_type(TypeFilter::Subtype("Equipment".to_string())),
+                ),
+                target: TargetFilter::ParentTarget,
+                selection: AttachSelection::Targeted,
+            },
+            vec![TargetRef::Object(equipment_id)],
+            source,
+            PlayerId(0),
+        );
+        assert_eq!(
+            declared_slot_announcement_filter(&anaphoric_host, 0),
+            Some(TargetFilter::Typed(
+                TypedFilter::default().with_type(TypeFilter::Subtype("Equipment".to_string()))
+            )),
+            "a context-ref host declares nothing, so the attachment lands at position 0"
+        );
+    }
+
     use crate::types::ability::{
-        AbilityCost, AbilityKind, AggregateFunction, BounceSelection, CardTypeSetSource,
-        CastManaObjectScope, CastManaSpentMetric, Comparator, ContinuousModification,
-        ControllerRef, CountScope, CounterTransferMode, DamageChannel, DamageKindFilter, Duration,
-        Effect, FilterProp, GameRestriction, LibraryPosition, ModalChoice,
-        ModalSelectionConstraint, MultiTargetSpec, ObjectProperty, ObjectScope, ProhibitedActivity,
-        PtStat, PtValue, PtValueScope, QuantityExpr, QuantityRef, RestrictionExpiry,
-        RestrictionPlayerScope, SearchSelectionConstraint, SharedQuality, SharedQualityRelation,
-        StaticDefinition, TargetFilter, TargetRef, TypeFilter, TypedFilter, UnlessPayModifier,
+        AbilityCost, AbilityKind, AggregateFunction, AttachSelection, BounceSelection,
+        CardTypeSetSource, CastManaObjectScope, CastManaSpentMetric, Comparator,
+        ContinuousModification, ControllerRef, CountScope, CounterTransferMode, DamageChannel,
+        DamageKindFilter, Duration, Effect, FilterProp, GameRestriction, LibraryPosition,
+        ModalChoice, ModalSelectionConstraint, MultiTargetSpec, ObjectProperty, ObjectScope,
+        ProhibitedActivity, PtStat, PtValue, PtValueScope, QuantityExpr, QuantityRef,
+        RestrictionExpiry, RestrictionPlayerScope, SearchSelectionConstraint, SharedQuality,
+        SharedQualityRelation, StaticDefinition, TargetFilter, TargetRef, TypeFilter, TypedFilter,
+        UnlessPayModifier,
     };
     use crate::types::card_type::CoreType;
     use crate::types::game_state::{

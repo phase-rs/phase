@@ -48,7 +48,7 @@
 use crate::support::shared_card_db;
 use engine::ai_support::legal_actions_full;
 use engine::game::devotion::count_devotion;
-use engine::game::game_object::ObjectIncarnationRefExt;
+use engine::game::game_object::{AttachTarget, ObjectIncarnationRefExt};
 use engine::game::mana_abilities::is_mana_ability;
 use engine::game::printed_cards::rehydrate_game_from_card_db;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
@@ -1748,6 +1748,175 @@ fn a_bushwhack_park_with_its_two_fighters_swapped_is_refused() {
              refused, got {other:?}"
         ),
     }
+}
+
+/// Printed **Magnetic Theft** is `{R}` Instant — "Attach target Equipment to target
+/// creature. (Control of the Equipment doesn't change.)" (Scryfall `/cards/named?
+/// exact=Magnetic+Theft`, oracle text verified).
+const MAGNETIC_THEFT: &str =
+    "Attach target Equipment to target creature. (Control of the Equipment doesn't change.)";
+
+/// The two-operand `Attach` park: `equipment` is the ATTACHMENT slot's object (an
+/// ordinary noncreature Equipment artifact), `creature` the HOST slot's, and the
+/// untapped Mountain pays the `{R}`, so the cast parks on the ordinary manual
+/// payment prompt with both operands announced and latched. The spare Equipment and
+/// spare creature keep either slot from auto-selecting its only legal object, so the
+/// caster really announces both.
+struct MagneticTheftPark {
+    runner: GameRunner,
+    spell: ObjectId,
+    equipment: ObjectId,
+    creature: ObjectId,
+    mountain: ObjectId,
+}
+
+fn magnetic_theft_announced_mid_payment() -> MagneticTheftPark {
+    let mut sc = GameScenario::new();
+    sc.at_phase(Phase::PreCombatMain);
+    let spell = sc
+        .add_spell_to_hand_from_oracle(P0, "Magnetic Theft", true, MAGNETIC_THEFT)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Red],
+            generic: 0,
+        })
+        .id();
+    // CR 301.5: an Equipment is an artifact with the Equipment subtype — an ordinary
+    // one is NOT a creature, which is what makes the host's "target creature" filter
+    // the wrong filter for this slot.
+    let equipment = sc
+        .add_artifact_from_oracle(P0, "Sword of the Test", "Equipped creature gets +1/+0.")
+        .with_subtypes(vec!["Equipment"])
+        .id();
+    sc.add_artifact_from_oracle(P0, "Spare Sword", "Equipped creature gets +1/+0.")
+        .with_subtypes(vec!["Equipment"]);
+    let creature = sc.add_creature(P0, "Bearer", 2, 2).id();
+    sc.add_creature(P0, "Spare Bear", 1, 1);
+    let mountain = sc
+        .add_land_from_oracle(P0, "Mountain", "{T}: Add {R}.")
+        .id();
+    let mut runner = sc.build();
+
+    cast(&mut runner, spell);
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::TargetSelection { .. }
+        ),
+        "reach guard: the cast asks for its two operands, got {:?}",
+        runner.state().waiting_for
+    );
+    // CR 601.2c + CR 115.1a: positions are the declared slots — attachment first,
+    // host second.
+    runner
+        .act(GameAction::SelectTargets {
+            targets: vec![TargetRef::Object(equipment), TargetRef::Object(creature)],
+        })
+        .expect("both announced operands are legal for their own slots");
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::ManaPayment { .. }),
+        "reach guard: the cast parks on the manual mana payment, got {:?}",
+        runner.state().waiting_for
+    );
+    MagneticTheftPark {
+        runner,
+        spell,
+        equipment,
+        creature,
+        mountain,
+    }
+}
+
+/// CR 115.1a/c/d/e + CR 601.2c + CR 608.2d: an `Attach` instruction announces its
+/// two operands with two DIFFERENT filters — "target Equipment" for the attachment,
+/// "target creature" for the host — so a save whose recorded facts satisfy those
+/// filters slot by slot is an announcement the spell really made: it must be
+/// admitted, and the resumed cast must actually attach the Equipment.
+///
+/// This is the witness for the per-slot recovery in
+/// `ability_utils::declared_slot_announcement_filter`. Recovering one filter for the
+/// whole effect reads `Effect::target_filter()`'s Attach arm — the HOST's "target
+/// creature" — for BOTH positions, so slot 0 is judged as a creature and the
+/// untouched save of an ordinary noncreature Equipment is refused at the restore
+/// boundary (`SnapshotContradictsDeclaredFilter` naming the Equipment).
+#[test]
+fn a_magnetic_theft_park_keeps_each_operands_own_filter_through_restore() {
+    let MagneticTheftPark {
+        runner,
+        spell,
+        equipment,
+        creature,
+        mountain,
+    } = magnetic_theft_announced_mid_payment();
+
+    // Reach guard: the engine-written latch records both operands, attachment first,
+    // and the attachment really is a noncreature Equipment — the shape the shared
+    // host filter cannot admit.
+    let parked = runner
+        .state()
+        .pending_cast
+        .as_deref()
+        .expect("reach guard: the ManaPayment prompt owns the cast");
+    let latched = parked
+        .committed_target_facts
+        .as_deref()
+        .expect("reach guard: the parked cast carries its announced-target latch");
+    let latched_ids: Vec<ObjectId> = latched
+        .iter()
+        .filter_map(|fact| match fact {
+            ActivationTargetFact::Object { id, .. } => Some(*id),
+            ActivationTargetFact::Player(_) => None,
+        })
+        .collect();
+    assert_eq!(
+        latched_ids,
+        vec![equipment, creature],
+        "CR 601.2c: the latch records the declared slots in order — attachment, then host"
+    );
+    let equipment_types = runner.state().objects[&equipment].card_types.clone();
+    assert!(
+        equipment_types.core_types.contains(&CoreType::Artifact)
+            && !equipment_types.core_types.contains(&CoreType::Creature),
+        "anti-vacuity: the announced attachment is a noncreature artifact, so the host's \
+         \"target creature\" filter cannot admit it: {equipment_types:?}"
+    );
+
+    let restored_state = admitted(persisted_json(runner.state())).map_err(|error| {
+        format!(
+            "a Magnetic Theft park whose facts satisfy their own slots' filters must be \
+             admitted: {error:?}"
+        )
+    });
+    let restored_state =
+        restored_state.expect("reach: the honest two-operand announcement is admitted");
+
+    // The resumed save pays the locked {R} and attaches from the restored state, not
+    // from the pre-save runner.
+    let mut resumed = GameRunner::from_state(restored_state);
+    assert!(
+        matches!(resumed.state().waiting_for, WaitingFor::ManaPayment { .. }),
+        "reach guard: the restored state still owes the manual mana payment, got {:?}",
+        resumed.state().waiting_for
+    );
+    tap_land_for_mana(&mut resumed, mountain);
+    resumed
+        .act(GameAction::PassPriority)
+        .expect("the restored save pays its locked cost");
+    assert!(
+        resumed.state().stack.iter().any(|entry| entry.id == spell),
+        "reach guard: the resumed save put Magnetic Theft on the stack"
+    );
+    resumed.advance_until_stack_empty();
+    assert!(
+        resumed.state().stack.is_empty(),
+        "reach guard: the resumed Magnetic Theft resolved"
+    );
+    // CR 701.3a + CR 301.5: the Aura/Equipment becomes attached to the creature it was
+    // announced against, and control of the Equipment does not change.
+    assert_eq!(
+        resumed.state().objects[&equipment].attached_to,
+        Some(AttachTarget::Object(creature)),
+        "the resumed save attaches the announced Equipment to the announced creature"
+    );
 }
 
 /// The Bone Splinters park: its announced target has been SACRIFICED to pay part

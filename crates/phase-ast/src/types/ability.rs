@@ -26732,6 +26732,37 @@ pub fn fight_declared_slot_filters<'a>(
         .filter(|filter| !filter.is_context_ref())
 }
 
+/// CR 115.1a / CR 115.1c / CR 115.1d / CR 115.1e + CR 601.2c: the filters that
+/// `Effect::Attach`'s two operands contribute to announcement, in DECLARED order.
+///
+/// "Attach target Equipment to target creature" (Magnetic Theft) declares TWO
+/// slots with two DIFFERENT filters: the ATTACHMENT is announced first and the
+/// HOST second, exactly as `collect_target_slots_inner`'s Attach arm pushes them
+/// (`collect_attach_attachment_target_slots` then the host). Both conjuncts are
+/// the live declaration's own gates, so a slot count read from this iterator can
+/// never disagree with the announcement it describes:
+///
+/// 1. the attachment claims a slot only when
+///    [`attach_attachment_claims_announcement_slot`] holds — a DESCRIBED operand
+///    (`AttachSelection::AtResolution`, CR 608.2d) is chosen while the effect
+///    resolves and claims nothing, and
+/// 2. the host claims one only when [`attach_host_filter_needs_target_slot`]
+///    holds (a context anaphor resolves without a slot).
+///
+/// No `is_context_ref` filter is layered on top: both gates already exclude
+/// context references, and re-filtering could only DIVERGE from the live
+/// declaration, misaligning every position after the dropped one.
+pub fn attach_declared_slot_filters<'a>(
+    attachment: &'a TargetFilter,
+    target: &'a TargetFilter,
+    selection: &AttachSelection,
+) -> impl Iterator<Item = &'a TargetFilter> {
+    attach_attachment_claims_announcement_slot(attachment, selection)
+        .then_some(attachment)
+        .into_iter()
+        .chain(attach_host_filter_needs_target_slot(target).then_some(target))
+}
+
 /// CR 115.1a + CR 601.2c: the effect's announced roles, without resolved-node
 /// metadata. Shares the role matcher used by `node_has_stack_target_declaration`;
 /// callers inspect descendants and clause-level unless-payers separately.
@@ -26783,9 +26814,7 @@ pub fn effect_stack_target_declaration_matching(
         selection,
     } = effect
     {
-        return (attach_attachment_claims_announcement_slot(attachment, selection)
-            && predicate(attachment))
-            || (attach_host_filter_needs_target_slot(target) && predicate(target));
+        return attach_declared_slot_filters(attachment, target, selection).any(predicate);
     }
     if let Effect::EachDealsDamageEqualToPower { recipient, .. } = effect {
         return predicate(recipient);
