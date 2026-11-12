@@ -4072,6 +4072,16 @@ export interface PlayerStatusView {
   source?: ObjectId | null;
 }
 
+/**
+ * CR 601.2g + CR 605.3a: display data for a manual mana ability's payment
+ * window. Mirrors `engine::game::derived_views::ManaAbilityPaymentView`.
+ */
+export interface ManaAbilityPaymentView {
+  source_id: ObjectId;
+  cost: ManaCost;
+  pinned_pool_units: number[];
+}
+
 export interface PlanechaseView {
   active_plane?: ObjectId | null;
   planar_controller?: PlayerId | null;
@@ -4423,8 +4433,10 @@ export interface TurnOrderSlotView {
   turns_from_now: number;
   turn_number: number;
   is_viewer?: boolean;
-  is_starting_player?: boolean;
 }
+
+/** Mirrors `engine::game::derived_views::PlayDrawPosition` (CR 103.1 + CR 103.1a). */
+export type PlayDrawPosition = "OnThePlay" | "OnTheDraw";
 
 /** CR 509.1g: engine-authored public `(blocker, attacker)` combat display pair. */
 export type BlockerAssignmentPair = [ObjectId, ObjectId];
@@ -4635,14 +4647,22 @@ export interface DerivedViews {
   player_status?: PlayerStatusView[];
   /**
    * CR 118.3a + CR 601.2g: during the viewing player's own manual mana payment
-   * for a spell, the portion of the locked cost still UNPAID by the pool units
-   * they have pinned (selected). The payment UI renders this as the cost shrinks
-   * while the player picks mana; an empty/`NoCost` value means their selection
-   * alone covers the whole cost. Omitted outside a non-convoke spell payment the
-   * viewer controls. Mirrors
+   * for a spell or a manual mana ability, the portion of the locked cost still
+   * UNPAID by the pool units they have pinned (selected). The payment UI renders
+   * this as the cost shrinks while the player picks mana; an empty/`NoCost`
+   * value means their selection alone covers the whole cost. Omitted outside a
+   * non-convoke spell payment or a manual mana-ability payment the viewer
+   * controls. Mirrors
    * `engine::game::derived_views::DerivedViews::pending_payment_remaining`.
    */
   pending_payment_remaining?: ManaCost;
+  /**
+   * CR 601.2g + CR 602.2b + CR 605.3a: the viewing player's own manual payment
+   * of a mana ability's mana cost — its source, the mana it costs (X announced)
+   * and the pool units they've directed. Omitted outside that window. Mirrors
+   * `engine::game::derived_views::DerivedViews::mana_ability_payment`.
+   */
+  mana_ability_payment?: ManaAbilityPaymentView;
   /** Engine-authored Planechase state and planar-die legality. */
   planechase?: PlanechaseView | null;
   /** Engine-authored Archenemy state. */
@@ -4654,6 +4674,13 @@ export interface DerivedViews {
   turn_order?: TurnOrderSlotView[];
   /** One-based projected turn position for the current viewer. */
   viewer_turn_number?: number;
+  /**
+   * Engine-authored side-relative play/draw position for the viewer in a
+   * two-sided game; absent before the starting player is determined and in
+   * multiplayer pods (use `viewer_turn_number`). Mirrors
+   * `engine::game::derived_views::DerivedViews::viewer_play_draw`.
+   */
+  viewer_play_draw?: PlayDrawPosition;
   /**
    * CR 732.2a: `∞` HUD rows — one per (engine-attributed player, pumped axis)
    * of every unbounded-resource loop. Empty/omitted when no loop is active. The
@@ -4728,6 +4755,27 @@ export interface DerivedViews {
    * it through `lifeReadout`. Mirrors `engine::game::derived_views::DerivedViews::life_magnitude`.
    */
   life_magnitude?: Record<string, DisplayMagnitude>;
+  /**
+   * CR 508.1a + CR 510.1a + CR 120.3a/b: per-candidate-attacker projection of unblocked damage,
+   * published only while the attack declaration prompt is open; keyed by attacker id. Display-only;
+   * before replacement and prevention effects. Mirrors
+   * `engine::game::derived_views::DerivedViews::unblocked_attack_previews`.
+   */
+  unblocked_attack_previews?: Record<string, UnblockedAttackPreview>;
+  /**
+   * CR 506.4c: each attacking creature's current attack target, keyed by attacker id. An attacker
+   * whose relation has ended is absent: it is still attacking, but not any player, planeswalker,
+   * or battle. Mirrors `engine::game::derived_views::DerivedViews::attack_targets`.
+   */
+  attack_targets?: Record<string, AttackTarget>;
+}
+
+/** Mirrors `engine::game::derived_views::UnblockedAttackPreview`. */
+export interface UnblockedAttackPreview {
+  /** CR 510.1a + CR 702.4b: combat damage across every damage step it would assign in. */
+  damage: number;
+  /** CR 120.3a / CR 120.3b: life loss that damage causes a player (0 for infect). */
+  life_loss: number;
 }
 
 /** Mirrors `engine::types::game_state::NextSpellModifier` (serde tag="type"). */

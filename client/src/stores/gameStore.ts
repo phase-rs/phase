@@ -265,13 +265,13 @@ interface GameStoreState {
   restoredStackAutomation: RestoredStackAutomationPresentation | null;
   /**
    * Pure-data carrier for the starting-player d20 contest (CR 103.1): the
-   * game-start `DieRolled` batch plus the engine's authoritative starting
-   * player. Set once by `initGame` (null when the starter was chosen
-   * explicitly). A GamePage effect consumes it to drive the dice overlay and
+   * game-start batch carrying the `StartingPlayerContest` event, whose
+   * `winner` the overlay reports. Set once by `initGame` (null when the starter
+   * was chosen explicitly). A GamePage effect consumes it to drive the dice overlay and
    * clears it via `clearStartingContest`. The store holds only data — it never
    * calls the UI store, keeping the layer boundary clean.
    */
-  startingContest: { events: GameEvent[]; startingPlayer: PlayerId } | null;
+  startingContest: { events: GameEvent[] } | null;
   /**
    * PlayerIds bound to AI controllers this game. Client-owned lobby/session
    * config (NOT game-state derivation): set at game init from the resolved AI
@@ -591,20 +591,15 @@ export const useGameStore = create<GameStore>()(
       }));
       // CR 103.1: capture the starting-player d20 contest as pure data so the
       // dice overlay can animate the engine's authoritative result. Present only
-      // when the engine rolled (random starter); empty for an explicit
-      // play/draw choice. `current_starting_player` is the engine's pick — never
-      // recomputed from the rolls on the frontend.
+      // when the engine rolled; absent for an explicit play/draw choice. The
+      // overlay reads the roll winner from the event itself — never recomputed from
+      // the rolls, and never taken from `current_starting_player`.
       const initEvents = initResult.events ?? [];
       // The engine emits a single StartingPlayerContest event (round structure +
       // winner) at the head of the game-start batch when it ran a roll-off
       // (random starter); absent for an explicit play/draw choice.
       const rolledStart = initEvents[0]?.type === "StartingPlayerContest";
-      const startingContest = rolledStart
-        ? {
-            events: initEvents,
-            startingPlayer: state.current_starting_player ?? state.active_player,
-          }
-        : null;
+      const startingContest = rolledStart ? { events: initEvents } : null;
       get().commitEngineSnapshot(snapshot, {
         extraState: {
           gameId,
