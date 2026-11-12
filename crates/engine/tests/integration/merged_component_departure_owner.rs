@@ -410,6 +410,26 @@ fn chaos_warp_hands_a_parked_component_back_to_the_owner_iteration() {
                 .position(|event| matches!(event, GameEvent::CardsRevealed { player: P1, .. }))
                 .unwrap_or_else(|| panic!("{label}: the owner reveals"));
             assert!(shuffle < reveal, "{label}: shuffle, then reveal");
+            let count_of = |matcher: &dyn Fn(&GameEvent) -> bool| {
+                events.iter().filter(|event| matcher(event)).count()
+            };
+            assert_eq!(
+                count_of(&|event| matches!(
+                    event,
+                    GameEvent::PlayerPerformedAction {
+                        player_id: P1,
+                        action: PlayerActionKind::ShuffledLibrary,
+                        ..
+                    }
+                )),
+                1,
+                "{label}: the owner's tail shuffles exactly once"
+            );
+            assert_eq!(
+                count_of(&|event| matches!(event, GameEvent::CardsRevealed { player: P1, .. })),
+                1,
+                "{label}: the owner's tail reveals exactly once"
+            );
             let brokkos_destination = if answer_index == 0 {
                 Zone::Command
             } else {
@@ -915,6 +935,60 @@ fn unsummon_concession_during_the_prompt_exiles_the_held_component() {
             1,
             "{label}: Super Shredder saw the one merged permanent leave once"
         );
+    }
+}
+
+/// CR 800.4a + CR 730.3: the spell's controller concedes while the
+/// owner of the merged pile is choosing. P0's spell leaves with P0; P1's prompt,
+/// the component child and the owner beneath it (a ChangeZone iteration for
+/// Chaos Warp, a batch for Rebuking Ceremony) are untouched, and after P1's
+/// answer nothing is left parked.
+#[test]
+fn spell_controller_concession_during_the_owners_prompt_leaves_nothing_parked() {
+    for spell_name in ["Chaos Warp", "Rebuking Ceremony"] {
+        for answer_index in [0, 1] {
+            let db = shared_card_db().expect("integration card fixture must load");
+            let mut scenario = GameScenario::new_with_format(FormatConfig::commander(), 3, 7);
+            scenario.at_phase(Phase::PreCombatMain);
+            let (mender, brokkos) = add_pile(&mut scenario, P1);
+            let karn = scenario.add_real_card(P2, "Karn, Silver Golem", Zone::Battlefield, db);
+            let spell = scenario.add_real_card(P0, spell_name, Zone::Hand, db);
+            scenario.with_library_top(P1, &["Library Card A", "Library Card B"]);
+            let mut pool = mana(ManaType::Red, 3);
+            pool.extend(mana(ManaType::Green, 5));
+            scenario.with_mana_pool(P0, pool);
+            let mut runner = scenario.build();
+            let pile = merge_pile(&mut runner, Pile::BrokkosUnderMender, mender, brokkos, true);
+            let label = format!("{spell_name}, answer {answer_index}");
+            let targets: Vec<ObjectId> = if spell_name == "Chaos Warp" {
+                vec![pile.survivor]
+            } else {
+                vec![karn, pile.survivor]
+            };
+
+            cast_until_resolved_or_asked(&mut runner, spell, &targets);
+            assert_commander_prompt(runner.state(), P1, pile.brokkos);
+            let conceded = concede(&mut runner, P0);
+            assert!(
+                matches!(
+                    conceded.waiting_for,
+                    WaitingFor::ReplacementChoice { player: P1, .. }
+                ),
+                "{label}: the owner's prompt is untouched: {:?}",
+                conceded.waiting_for
+            );
+            assert_commander_prompt(runner.state(), P1, pile.brokkos);
+            answer(&mut runner, answer_index);
+            // The recipient of priority is not asserted: with a leave trigger
+            // waiting, the engine hands it to the departed active player, as it
+            // does at the merge base for an unmerged Rebuking Ceremony.
+            resolution_finished(runner.state());
+            assert_eq!(
+                runner.state().objects[&pile.mender].zone,
+                Zone::Library,
+                "{label}"
+            );
+        }
     }
 }
 
