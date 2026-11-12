@@ -6499,6 +6499,95 @@ mod tests {
         );
     }
 
+    /// CR 608.2c + CR 614.6: declined replacements preserve each batch's tokens
+    /// in instruction order. Constructed custody fixture, independent of
+    /// the printed spell's event grouping. Both answers use the engine action path.
+    #[test]
+    fn r15_parked_owner_hands_off_two_offered_batches_once() {
+        use crate::game::scenario::{GameScenario, P0};
+        let mut scenario = GameScenario::new();
+        scenario.add_creature_from_oracle(P0, "Jinnie Fay, Jetmir's Second", 3, 3,
+            "If you would create one or more tokens, you may instead create that many 2/2 green Cat creature tokens with haste or that many 3/1 green Dog creature tokens with vigilance.");
+        let mut runner = scenario.build();
+        let source_id = add_copy_source(runner.state_mut(), "Grizzly Bears");
+        let mut copy = named_attack_copy_spec(runner.state(), source_id, Vec::new());
+        copy.tapped = false;
+        copy.enters_attacking = false;
+        copy.attack_request = crate::types::proposed_event::TokenAttackRequest::Unspecified;
+        runner
+            .state_mut()
+            .push_copy_token(PendingCopyTokenResolution {
+                created_ids: Vec::new(),
+                remaining: (0..2)
+                    .map(|_| PendingCopyTokenBatch {
+                        owner: P0,
+                        copy: Box::new(copy.clone()),
+                        count: 1,
+                    })
+                    .collect(),
+                effect_kind: EffectKind::CopyTokenOf,
+                source_id,
+                referent_set: None,
+                offered_batch: OfferedBatchCustody::Settled,
+            });
+        let mut events = Vec::new();
+        drain_pending_copy_token_resolution(runner.state_mut(), &mut events);
+        let created = |events: &[GameEvent]| {
+            events
+                .iter()
+                .filter_map(|event| match event {
+                    GameEvent::TokenCreated { object_id, .. } => Some(*object_id),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        for prompt in 0..2 {
+            let WaitingFor::ReplacementChoice {
+                player, candidates, ..
+            } = &runner.state().waiting_for
+            else {
+                panic!(
+                    "required Jinnie Fay prompt {prompt}: {:?}",
+                    runner.state().waiting_for
+                );
+            };
+            assert_eq!(*player, P0);
+            assert!(candidates
+                .iter()
+                .any(|candidate| candidate.source_name == "Jinnie Fay, Jetmir's Second"));
+            let decline = candidates
+                .iter()
+                .position(|candidate| candidate.description == "Decline")
+                .expect("Decline offered");
+            let tokens = created(&events);
+            assert_eq!(tokens.len(), prompt, "one token per answered batch");
+            assert_eq!(
+                runner
+                    .state()
+                    .active_copy_token()
+                    .expect("parked owner")
+                    .created_ids,
+                tokens,
+                "second-prompt owner prefix contains the first token exactly once"
+            );
+            events.extend(
+                runner
+                    .act(GameAction::ChooseReplacement { index: decline })
+                    .expect("decline accepted")
+                    .events,
+            );
+        }
+        let tokens = created(&events);
+        assert_eq!(tokens.len(), 2);
+        assert_ne!(tokens[0], tokens[1]);
+        assert_eq!(runner.state().last_created_token_ids, tokens);
+        assert!(runner.state().active_copy_token().is_none());
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { .. }
+        ));
+    }
+
     /// CR 608.2c + CR 111.1: the liminal batch terminal of
     /// `apply_copy_token_after_replacement_with_created_ids` re-syncs the batch ledger onto an
     /// ACTIVE CopyToken owner (a resumed batch's route) by merging, so the token an earlier batch
