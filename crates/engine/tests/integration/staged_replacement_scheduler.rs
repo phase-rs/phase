@@ -19,7 +19,7 @@ use engine::types::actions::GameAction;
 use engine::types::counter::CounterType;
 use engine::types::game_state::{PersistedGameState, WaitingFor};
 use engine::types::identifiers::ObjectId;
-use engine::types::mana::ManaCost;
+use engine::types::mana::{ManaColor, ManaCost};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 use engine::types::zones::Zone;
@@ -161,52 +161,63 @@ fn finish(runner: &mut GameRunner) {
 /// CR 101.4c + CR 616.1 + CR 702.89a: Wrath of God says "Destroy all
 /// creatures. They can't be regenerated." P1's two creatures each wear Hyena
 /// Umbra and Felidar Umbra, so P1 has two simultaneous choices of which armor
-/// applies. P1 chooses which creature's choice to make first: the second.
-/// Each answer destroys exactly the chosen Aura; the other stays attached.
+/// applies. P1 chooses which creature's choice to make first, and either may
+/// be first. Each answer destroys exactly the chosen Aura; the other stays
+/// attached.
 #[test]
 fn wrath_of_god_lets_one_player_order_their_umbra_choices() {
-    let mut scenario = GameScenario::new();
-    scenario.at_phase(Phase::PreCombatMain);
-    let first = scenario.add_creature(P1, "Grizzly Bears", 2, 2).id();
-    let first_hyena = umbra(&mut scenario, P1, "Hyena Umbra", HYENA_UMBRA);
-    let first_felidar = umbra(&mut scenario, P1, "Felidar Umbra", FELIDAR_UMBRA);
-    let second = scenario.add_creature(P1, "Runeclaw Bear", 2, 2).id();
-    let second_hyena = umbra(&mut scenario, P1, "Hyena Umbra", HYENA_UMBRA);
-    let second_felidar = umbra(&mut scenario, P1, "Felidar Umbra", FELIDAR_UMBRA);
-    let wrath = zero_cost_spell(&mut scenario, "Wrath of God", WRATH_OF_GOD);
-    let mut runner = scenario.build();
-    attach(&mut runner, first_hyena, first);
-    attach(&mut runner, first_felidar, first);
-    attach(&mut runner, second_hyena, second);
-    attach(&mut runner, second_felidar, second);
-    engine::game::layers::flush_layers(runner.state_mut());
+    for second_first in [false, true] {
+        let case = format!("second_first={second_first}");
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let first = scenario.add_creature(P1, "Grizzly Bears", 2, 2).id();
+        let first_hyena = umbra(&mut scenario, P1, "Hyena Umbra", HYENA_UMBRA);
+        let first_felidar = umbra(&mut scenario, P1, "Felidar Umbra", FELIDAR_UMBRA);
+        let second = scenario.add_creature(P1, "Runeclaw Bear", 2, 2).id();
+        let second_hyena = umbra(&mut scenario, P1, "Hyena Umbra", HYENA_UMBRA);
+        let second_felidar = umbra(&mut scenario, P1, "Felidar Umbra", FELIDAR_UMBRA);
+        let wrath = zero_cost_spell(&mut scenario, "Wrath of God", WRATH_OF_GOD);
+        let mut runner = scenario.build();
+        attach(&mut runner, first_hyena, first);
+        attach(&mut runner, first_felidar, first);
+        attach(&mut runner, second_hyena, second);
+        attach(&mut runner, second_felidar, second);
+        engine::game::layers::flush_layers(runner.state_mut());
 
-    cast_until_decision(&mut runner, wrath);
-    assert_eq!(
-        runner.state().waiting_for,
-        WaitingFor::ReplacementDecisionOrder {
-            player: P1,
-            objects: vec![first, second],
-        },
-        "P1 holds both choices and chooses which to make first"
-    );
-    round_trip(&mut runner);
-    select_decision(&mut runner, second);
-    assert_eq!(asked_choice(&runner), (P1, second));
-    choose_source(&mut runner, second_felidar);
-    // One decision is left, so it is asked without a selection.
-    assert_eq!(asked_choice(&runner), (P1, first));
-    round_trip(&mut runner);
-    choose_source(&mut runner, first_hyena);
-    finish(&mut runner);
+        cast_until_decision(&mut runner, wrath);
+        assert_eq!(
+            runner.state().waiting_for,
+            WaitingFor::ReplacementDecisionOrder {
+                player: P1,
+                objects: vec![first, second],
+            },
+            "{case}: P1 holds both choices and chooses which to make first"
+        );
+        round_trip(&mut runner);
+        // The first creature loses Hyena Umbra and the second Felidar Umbra,
+        // whichever is answered first.
+        let order = if second_first {
+            [(second, second_felidar), (first, first_hyena)]
+        } else {
+            [(first, first_hyena), (second, second_felidar)]
+        };
+        select_decision(&mut runner, order[0].0);
+        assert_eq!(asked_choice(&runner), (P1, order[0].0), "{case}");
+        choose_source(&mut runner, order[0].1);
+        // One decision is left, so it is asked without a selection.
+        assert_eq!(asked_choice(&runner), (P1, order[1].0), "{case}");
+        round_trip(&mut runner);
+        choose_source(&mut runner, order[1].1);
+        finish(&mut runner);
 
-    assert_eq!(zone(&runner, first), Zone::Battlefield);
-    assert_eq!(zone(&runner, second), Zone::Battlefield);
-    assert_eq!(zone(&runner, second_felidar), Zone::Graveyard);
-    assert_eq!(attached_to(&runner, second_hyena), Some(second));
-    assert_eq!(zone(&runner, first_hyena), Zone::Graveyard);
-    assert_eq!(attached_to(&runner, first_felidar), Some(first));
-    assert_eq!(zone(&runner, wrath), Zone::Graveyard);
+        assert_eq!(zone(&runner, first), Zone::Battlefield, "{case}");
+        assert_eq!(zone(&runner, second), Zone::Battlefield, "{case}");
+        assert_eq!(zone(&runner, second_felidar), Zone::Graveyard, "{case}");
+        assert_eq!(attached_to(&runner, second_hyena), Some(second), "{case}");
+        assert_eq!(zone(&runner, first_hyena), Zone::Graveyard, "{case}");
+        assert_eq!(attached_to(&runner, first_felidar), Some(first), "{case}");
+        assert_eq!(zone(&runner, wrath), Zone::Graveyard, "{case}");
+    }
 }
 
 /// Wrath of God over P0's two Umbra-armored creatures: C1 wears P1's Hyena
@@ -896,6 +907,10 @@ fn held_umbra_destructions_whose_choice_is_gone_are_settled_when_selected() {
         "neither Aura's move is a choice any more, got {:?}",
         runner.state().waiting_for
     );
+    // CR 608.2n: the selection settled the whole population, so Wrath of God
+    // has finished resolving.
+    assert!(runner.state().stack.is_empty());
+    assert_eq!(zone(&runner, wrath), Zone::Graveyard);
     finish(&mut runner);
     for (host, hyena, spider) in [
         (first, first_hyena, first_spider),
@@ -983,48 +998,155 @@ fn akromas_vengeance_asks_once_about_an_umbra_in_either_order() {
     }
 }
 
-/// CR 616.1 + CR 702.89a: the host wears Hyena Umbra and Spider Umbra, both
-/// population members of Akroma's Vengeance. Whichever order the battlefield
-/// lists them, P1 first chooses which armor applies; neither Aura is asked
-/// about its own move before that, because the armor decides one of them.
-/// Then the chosen Aura's move and the other Aura's own move are asked, once
-/// each.
-#[test]
-fn akromas_vengeance_asks_the_armor_before_either_aura_in_either_order() {
-    for auras_first in [true, false] {
-        let case = format!("auras_first={auras_first}");
-        let mut scenario = GameScenario::new();
-        scenario.at_phase(Phase::PreCombatMain);
-        scenario.add_creature_from_oracle(P0, "Dauthi Voidwalker", 3, 2, DAUTHI_VOIDWALKER);
-        scenario.add_enchantment_from_oracle(P0, "Rest in Peace", REST_IN_PEACE);
-        let host_first = !auras_first;
-        let early_host = host_first.then(|| scenario.add_creature(P1, "Grizzly Bears", 2, 2).id());
-        let hyena = umbra(&mut scenario, P1, "Hyena Umbra", HYENA_UMBRA);
-        let spider = umbra(&mut scenario, P1, "Spider Umbra", SPIDER_UMBRA);
-        let host =
-            early_host.unwrap_or_else(|| scenario.add_creature(P1, "Grizzly Bears", 2, 2).id());
-        let vengeance = zero_cost_spell(&mut scenario, "Akroma's Vengeance", AKROMAS_VENGEANCE);
-        let mut runner = scenario.build();
-        attach(&mut runner, hyena, host);
-        attach(&mut runner, spider, host);
-        engine::game::layers::flush_layers(runner.state_mut());
+/// A prompt shown while a population settles.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Shown {
+    Order(Vec<ObjectId>),
+    Choice(ObjectId),
+}
 
-        cast_until_decision(&mut runner, vengeance);
-        assert_eq!(asked_choice(&runner), (P1, host), "{case}: the armor first");
-        round_trip(&mut runner);
-        choose_source(&mut runner, hyena);
-        // P1 now holds the chosen Hyena Umbra's move (a live child of the
-        // host) and Spider Umbra's own move: two simultaneous choices, so P1
-        // orders them (CR 101.4c). Each is asked exactly once.
-        let mut asked = answer_all(&mut runner);
-        asked.sort();
-        let mut expected = vec![(P1, hyena), (P1, spider)];
-        expected.sort();
-        assert_eq!(asked, expected, "{case}: then each Aura's own move, once");
-        finish(&mut runner);
-        assert_eq!(zone(&runner, host), Zone::Battlefield, "{case}");
-        assert_eq!(zone(&runner, hyena), Zone::Exile, "{case}");
-        assert_eq!(zone(&runner, spider), Zone::Exile, "{case}");
+/// CR 101.4c + CR 616.1 + CR 702.89a: Akroma's Vengeance says "Destroy all
+/// artifacts, creatures, and enchantments." P1's Grizzly Bears wears P1's
+/// Hyena Umbra and Spider Umbra, and P0's Dauthi Voidwalker and Rest in Peace
+/// both apply to each Aura's move to P1's graveyard. P1 has three simultaneous
+/// choices (which armor applies, and each Aura's own move) and chooses the
+/// order: every one of them can be made first, whichever order the battlefield
+/// lists the permanents.
+///
+/// P1 always applies Hyena Umbra's armor. CR 616.2: that makes "destroy this
+/// Aura" part of the creature's replaced event, and that destruction's own
+/// choice is asked.
+/// - Armor first: the armor's destruction of Hyena Umbra replaces the Aura's
+///   own unanswered choice, so each Aura is asked once.
+/// - Spider Umbra first, then the armor: likewise, three questions.
+/// - Hyena Umbra first, then the armor: the Aura's own move was already
+///   answered (Rest in Peace) when the armor destroys it, so the armor's
+///   destruction is asked as well, and that answer (Dauthi Voidwalker) is the
+///   one applied.
+#[test]
+fn akromas_vengeance_lets_one_player_order_the_armor_and_both_auras_moves() {
+    for auras_first in [true, false] {
+        for first_pick in ["armor", "Hyena Umbra", "Spider Umbra"] {
+            let case = format!("auras_first={auras_first}, first_pick={first_pick}");
+            let mut scenario = GameScenario::new();
+            scenario.at_phase(Phase::PreCombatMain);
+            let dauthi = scenario
+                .add_creature_from_oracle(P0, "Dauthi Voidwalker", 3, 2, DAUTHI_VOIDWALKER)
+                .id();
+            let peace = scenario
+                .add_enchantment_from_oracle(P0, "Rest in Peace", REST_IN_PEACE)
+                .id();
+            let host_first = !auras_first;
+            let early_host =
+                host_first.then(|| scenario.add_creature(P1, "Grizzly Bears", 2, 2).id());
+            let hyena = umbra(&mut scenario, P1, "Hyena Umbra", HYENA_UMBRA);
+            let spider = umbra(&mut scenario, P1, "Spider Umbra", SPIDER_UMBRA);
+            let host =
+                early_host.unwrap_or_else(|| scenario.add_creature(P1, "Grizzly Bears", 2, 2).id());
+            let vengeance = zero_cost_spell(&mut scenario, "Akroma's Vengeance", AKROMAS_VENGEANCE);
+            let mut runner = scenario.build();
+            attach(&mut runner, hyena, host);
+            attach(&mut runner, spider, host);
+            engine::game::layers::flush_layers(runner.state_mut());
+
+            // Which decision P1 makes first when offered several.
+            let preference = match first_pick {
+                "armor" => [host, hyena, spider],
+                "Hyena Umbra" => [hyena, host, spider],
+                _ => [spider, host, hyena],
+            };
+            cast_until_decision(&mut runner, vengeance);
+            let mut shown = Vec::new();
+            let mut armor_applied = false;
+            for _ in 0..16 {
+                match runner.state().waiting_for.clone() {
+                    WaitingFor::ReplacementDecisionOrder { player, objects } => {
+                        assert_eq!(player, P1, "{case}");
+                        let pick = *preference
+                            .iter()
+                            .find(|object| objects.contains(object))
+                            .expect("an offered decision");
+                        shown.push(Shown::Order(objects));
+                        round_trip(&mut runner);
+                        select_decision(&mut runner, pick);
+                    }
+                    WaitingFor::ReplacementChoice { .. } => {
+                        let (player, subject) = asked_choice(&runner);
+                        assert_eq!(player, P1, "{case}");
+                        shown.push(Shown::Choice(subject));
+                        round_trip(&mut runner);
+                        let source = if subject == host {
+                            armor_applied = true;
+                            hyena
+                        } else if subject == hyena && armor_applied {
+                            dauthi
+                        } else {
+                            peace
+                        };
+                        choose_source(&mut runner, source);
+                    }
+                    _ => break,
+                }
+            }
+
+            // Announcement order: the battlefield's order of the members.
+            let members = if auras_first {
+                vec![hyena, spider, host]
+            } else {
+                vec![host, hyena, spider]
+            };
+            let without = |made: ObjectId| -> Vec<ObjectId> {
+                members
+                    .iter()
+                    .copied()
+                    .filter(|object| *object != made)
+                    .collect()
+            };
+            // The armor's destruction of Hyena Umbra is the creature's
+            // decision, so it is listed where the creature is.
+            let after_armor = if auras_first {
+                vec![spider, hyena]
+            } else {
+                vec![hyena, spider]
+            };
+            let expected = match first_pick {
+                "armor" => vec![
+                    Shown::Order(members.clone()),
+                    Shown::Choice(host),
+                    Shown::Order(after_armor),
+                    Shown::Choice(hyena),
+                    Shown::Choice(spider),
+                ],
+                "Hyena Umbra" => vec![
+                    Shown::Order(members.clone()),
+                    Shown::Choice(hyena),
+                    Shown::Order(without(hyena)),
+                    Shown::Choice(host),
+                    Shown::Order(after_armor),
+                    Shown::Choice(hyena),
+                    Shown::Choice(spider),
+                ],
+                _ => vec![
+                    Shown::Order(members.clone()),
+                    Shown::Choice(spider),
+                    Shown::Order(without(spider)),
+                    Shown::Choice(host),
+                    Shown::Choice(hyena),
+                ],
+            };
+            assert_eq!(shown, expected, "{case}");
+            finish(&mut runner);
+            assert_eq!(zone(&runner, host), Zone::Battlefield, "{case}");
+            assert_eq!(zone(&runner, hyena), Zone::Exile, "{case}");
+            assert_eq!(
+                void_counters(&runner, hyena),
+                1,
+                "{case}: the armor's destruction moved Hyena Umbra, through Dauthi Voidwalker"
+            );
+            assert_eq!(zone(&runner, spider), Zone::Exile, "{case}");
+            assert_eq!(void_counters(&runner, spider), 0, "{case}");
+            assert_eq!(zone(&runner, vengeance), Zone::Graveyard, "{case}");
+        }
     }
 }
 
@@ -1158,6 +1280,7 @@ fn open_the_vaults_asks_entry_choices_in_apnap_order() {
             scenario
                 .add_creature_to_graveyard(owner, "Ornithopter", 0, 2)
                 .as_artifact_creature()
+                .with_subtypes(vec!["Thopter"])
                 .from_oracle_text("Flying")
                 .id()
         };
@@ -1919,6 +2042,7 @@ fn a_further_choice_on_the_same_entry_is_ordered_with_the_others() {
         scenario
             .add_creature_to_graveyard(P0, "Ornithopter", 0, 2)
             .as_artifact_creature()
+            .with_subtypes(vec!["Thopter"])
             .from_oracle_text("Flying")
             .id()
     };
@@ -2076,4 +2200,310 @@ fn a_departure_during_a_selection_asks_the_earlier_seat_first() {
     assert_eq!(attached_to(&runner, c1_spider), Some(c1));
     assert_eq!(zone(&runner, c2_spider), Zone::Exile);
     assert_eq!(attached_to(&runner, c2_hyena), Some(c2));
+}
+
+/// CR 614.5 + CR 616.1f + CR 800.4a: in a three-player game Open the Vaults
+/// returns two of P0's Ornithopters. P0's Root Maze ("Artifacts and lands
+/// enter tapped"), P1's Archelos ("As long as Archelos is untapped, other
+/// permanents enter untapped") and P2's Thalia, Heretic Cathar ("Creatures and
+/// nonbasic lands your opponents control enter tapped") all apply to each
+/// entry. P0 applies Root Maze to the first Ornithopter, whose entry then
+/// needs an order between Archelos and Thalia: that further choice is held
+/// beside the second Ornithopter's. P2 concedes and Thalia leaves the game.
+///
+/// The first entry keeps Root Maze applied and has only Archelos left, so it
+/// is not asked about again and Root Maze is not offered for it a second time.
+/// The second entry is asked with the two replacements that remain.
+#[test]
+fn a_departure_keeps_the_replacements_already_applied_to_a_held_entry() {
+    let p2 = PlayerId(2);
+    let mut scenario = GameScenario::new_n_player(3, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    let maze = scenario
+        .add_enchantment_from_oracle(P0, "Root Maze", ROOT_MAZE)
+        .id();
+    let archelos = scenario
+        .add_creature_from_oracle(P1, "Archelos, Lagoon Mystic", 2, 4, ARCHELOS)
+        .as_legendary()
+        .id();
+    scenario
+        .add_creature_from_oracle(p2, "Thalia, Heretic Cathar", 3, 2, THALIA_HERETIC_CATHAR)
+        .as_legendary();
+    let thopter = |scenario: &mut GameScenario| {
+        scenario
+            .add_creature_to_graveyard(P0, "Ornithopter", 0, 2)
+            .as_artifact_creature()
+            .with_subtypes(vec!["Thopter"])
+            .from_oracle_text("Flying")
+            .id()
+    };
+    let first = thopter(&mut scenario);
+    let second = thopter(&mut scenario);
+    let vaults = zero_cost_spell(&mut scenario, "Open the Vaults", OPEN_THE_VAULTS);
+    let mut runner = scenario.build();
+
+    cast_until_decision(&mut runner, vaults);
+    let selection = WaitingFor::ReplacementDecisionOrder {
+        player: P0,
+        objects: vec![first, second],
+    };
+    assert_eq!(runner.state().waiting_for, selection);
+    select_decision(&mut runner, first);
+    assert_eq!(asked_choice(&runner), (P0, first));
+    choose_source(&mut runner, maze);
+    assert_eq!(
+        runner.state().waiting_for,
+        selection,
+        "the first entry's further choice is held beside the second's"
+    );
+    runner
+        .act(GameAction::Concede { player_id: p2 })
+        .expect("P2 concedes while P0's selection is open");
+
+    assert_eq!(
+        asked_choice(&runner),
+        (P0, second),
+        "the first entry has one replacement left and is not asked about again"
+    );
+    let WaitingFor::ReplacementChoice { candidates, .. } = runner.state().waiting_for.clone()
+    else {
+        unreachable!("asked_choice checked the prompt");
+    };
+    let mut sources: Vec<ObjectId> = candidates
+        .iter()
+        .map(|candidate| candidate.source_id)
+        .collect();
+    sources.sort();
+    let mut remaining = vec![maze, archelos];
+    remaining.sort();
+    assert_eq!(sources, remaining, "Thalia left the game");
+    round_trip(&mut runner);
+    choose_source(&mut runner, archelos);
+    finish(&mut runner);
+    // First entry: Root Maze, then Archelos. Second entry: Archelos, then
+    // Root Maze. The replacement applied last decides how each enters.
+    assert_eq!(zone(&runner, first), Zone::Battlefield);
+    assert!(!runner.state().objects[&first].tapped);
+    assert_eq!(zone(&runner, second), Zone::Battlefield);
+    assert!(runner.state().objects[&second].tapped);
+    assert_eq!(zone(&runner, vaults), Zone::Graveyard);
+}
+
+/// CR 614.12a + CR 800.4a: Open the Vaults returns a Pendant of Prosperity
+/// ("This artifact enters under the control of an opponent of your choice") to
+/// P0 and to P1. P0 is asked first and P1's choice is held. P2 concedes while
+/// P0's choice is open.
+///
+/// Each choice is made as its Pendant enters, so it offers the opponents its
+/// owner has then. With four players P0 is asked again with P1 and P3, then P1
+/// with P0 and P3; P2 is offered to neither. With three players each owner has
+/// one opponent left, so nothing is asked and each Pendant enters under the
+/// other owner's control.
+#[test]
+fn a_held_entry_controller_choice_offers_the_opponents_still_in_the_game() {
+    let (p2, p3) = (PlayerId(2), PlayerId(3));
+    for players in [3u8, 4] {
+        let case = format!("{players} players");
+        let mut scenario = GameScenario::new_n_player(players, 0x10637);
+        scenario.at_phase(Phase::PreCombatMain);
+        let mut pendant = |owner: PlayerId| {
+            scenario
+                .add_artifact_to_graveyard(owner, "Pendant of Prosperity")
+                .from_oracle_text(PENDANT_OF_PROSPERITY)
+                .id()
+        };
+        let p0_pendant = pendant(P0);
+        let p1_pendant = pendant(P1);
+        let vaults = zero_cost_spell(&mut scenario, "Open the Vaults", OPEN_THE_VAULTS);
+        let mut runner = scenario.build();
+
+        cast_until_decision(&mut runner, vaults);
+        assert!(
+            matches!(
+                runner.state().waiting_for,
+                WaitingFor::EntryControllerChoice { player: P0, .. }
+            ),
+            "{case}: {:?}",
+            runner.state().waiting_for
+        );
+        runner
+            .act(GameAction::Concede { player_id: p2 })
+            .expect("P2 concedes while P1's choice is held");
+        let (p0_choice, p1_choice) = if players == 4 {
+            for (owner, opponents) in [(P0, vec![P1, p3]), (P1, vec![P0, p3])] {
+                assert_eq!(
+                    runner.state().waiting_for,
+                    WaitingFor::EntryControllerChoice {
+                        player: owner,
+                        candidates: opponents,
+                    },
+                    "{case}: each owner is offered the opponents still in the game"
+                );
+                round_trip(&mut runner);
+                runner
+                    .act(GameAction::ChooseEntryController { opponent: p3 })
+                    .expect("the owner chooses an opponent");
+            }
+            (p3, p3)
+        } else {
+            assert!(
+                matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+                "{case}: each owner has one opponent left and is not asked, got {:?}",
+                runner.state().waiting_for
+            );
+            (P1, P0)
+        };
+        finish(&mut runner);
+        for (pendant, controller) in [(p0_pendant, p0_choice), (p1_pendant, p1_choice)] {
+            let object = &runner.state().objects[&pendant];
+            assert_eq!(object.zone, Zone::Battlefield, "{case}");
+            assert_eq!(object.controller, controller, "{case}");
+        }
+    }
+}
+
+const TWILIGHTS_CALL: &str = "You may cast this spell as though it had flash if you pay {2} more to cast it. (You may cast it any time you could cast an instant.)\nEach player returns all creature cards from their graveyard to the battlefield.";
+const NAMELESS_RACE: &str = "Trample\nAs this creature enters, pay any amount of life. The amount you pay can't be more than the total number of white nontoken permanents your opponents control plus the total number of white cards in their graveyards.\nNameless Race's power and toughness are each equal to the life paid as it entered.";
+const MINION_OF_THE_WASTES: &str = "Trample\nAs this creature enters, pay any amount of life.\nMinion of the Wastes's power and toughness are each equal to the life paid as it entered.";
+const SWORDS_TO_PLOWSHARES: &str =
+    "Exile target creature. Its controller gains life equal to its power.";
+
+/// CR 614.12a + CR 800.4a: in a three-player game Twilight's Call ("Each
+/// player returns all creature cards from their graveyard to the battlefield")
+/// returns P0's Nameless Race and Minion of the Wastes, each with "As this
+/// creature enters, pay any amount of life." Nameless Race's payment "can't be
+/// more than the total number of white nontoken permanents your opponents
+/// control plus the total number of white cards in their graveyards": the one
+/// white card is Swords to Plowshares in P2's graveyard, so its payment is at
+/// most 1 while P0 is choosing which payment to make first.
+///
+/// P2 concedes at that selection and Swords to Plowshares leaves the game. The
+/// payment is made as the creature enters, so Nameless Race's is now a
+/// determined 0 and is not asked; only Minion of the Wastes's payment is.
+#[test]
+fn a_held_entry_payment_is_asked_on_its_present_terms_after_a_departure() {
+    let p2 = PlayerId(2);
+    let mut scenario = GameScenario::new_n_player(3, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    let race = scenario
+        .add_creature_to_graveyard(P0, "Nameless Race", 0, 0)
+        .from_oracle_text(NAMELESS_RACE)
+        .id();
+    let minion = scenario
+        .add_creature_to_graveyard(P0, "Minion of the Wastes", 0, 0)
+        .with_subtypes(vec!["Minion"])
+        .from_oracle_text(MINION_OF_THE_WASTES)
+        .id();
+    scenario
+        .add_spell_to_graveyard(p2, "Swords to Plowshares", true)
+        .from_oracle_text(SWORDS_TO_PLOWSHARES)
+        .with_color(vec![ManaColor::White]);
+    let call = zero_cost_spell(&mut scenario, "Twilight's Call", TWILIGHTS_CALL);
+    let mut runner = scenario.build();
+    let life_before = runner.life(P0);
+
+    cast_until_decision(&mut runner, call);
+    assert_eq!(
+        runner.state().waiting_for,
+        WaitingFor::ReplacementDecisionOrder {
+            player: P0,
+            objects: vec![race, minion],
+        },
+        "P0 holds both payments and chooses which to make first"
+    );
+    round_trip(&mut runner);
+    runner
+        .act(GameAction::Concede { player_id: p2 })
+        .expect("P2 concedes while P0's selection is open");
+
+    let WaitingFor::PayAmountChoice {
+        player,
+        max,
+        source_id,
+        ..
+    } = runner.state().waiting_for.clone()
+    else {
+        panic!(
+            "expected Minion of the Wastes's payment, got {:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert_eq!((player, source_id), (P0, minion));
+    assert_eq!(i32::try_from(max).expect("a life total"), life_before);
+    round_trip(&mut runner);
+    runner
+        .act(GameAction::SubmitPayAmount { amount: 3 })
+        .expect("P0 pays 3 life for Minion of the Wastes");
+    finish(&mut runner);
+    assert_eq!(runner.life(P0), life_before - 3);
+    assert_eq!(zone(&runner, minion), Zone::Battlefield);
+    assert_eq!(runner.state().objects[&minion].power, Some(3));
+    // CR 704.5f: Nameless Race entered as a 0/0 and was put into its owner's
+    // graveyard.
+    assert_eq!(zone(&runner, race), Zone::Graveyard);
+    assert_eq!(zone(&runner, call), Zone::Graveyard);
+}
+
+/// CR 614.12a: Open the Vaults returns P0's two Phyrexian Processors ("As this
+/// artifact enters, pay any amount of life"). P0 holds both payments and makes
+/// the second Processor's first, paying 15 of 20 life. The other payment is
+/// made as its Processor enters, so it is offered at most the 5 life P0 has
+/// left, not the 20 P0 had when it was first raised.
+#[test]
+fn a_held_entry_payment_is_limited_by_the_payment_made_before_it() {
+    for second_first in [false, true] {
+        let case = format!("second_first={second_first}");
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let mut processor = || {
+            scenario
+                .add_artifact_to_graveyard(P0, "Phyrexian Processor")
+                .from_oracle_text(PHYREXIAN_PROCESSOR)
+                .id()
+        };
+        let processors = [processor(), processor()];
+        let vaults = zero_cost_spell(&mut scenario, "Open the Vaults", OPEN_THE_VAULTS);
+        let mut runner = scenario.build();
+        assert_eq!(runner.life(P0), 20, "{case}");
+
+        cast_until_decision(&mut runner, vaults);
+        assert_eq!(
+            runner.state().waiting_for,
+            WaitingFor::ReplacementDecisionOrder {
+                player: P0,
+                objects: processors.to_vec(),
+            },
+            "{case}"
+        );
+        let [early, late] = if second_first {
+            [processors[1], processors[0]]
+        } else {
+            processors
+        };
+        select_decision(&mut runner, early);
+        for (processor, offered, paid) in [(early, 20, 15), (late, 5, 4)] {
+            let WaitingFor::PayAmountChoice {
+                player,
+                max,
+                source_id,
+                ..
+            } = runner.state().waiting_for.clone()
+            else {
+                panic!(
+                    "{case}: expected a life payment, got {:?}",
+                    runner.state().waiting_for
+                );
+            };
+            assert_eq!((player, source_id, max), (P0, processor, offered), "{case}");
+            round_trip(&mut runner);
+            runner
+                .act(GameAction::SubmitPayAmount { amount: paid })
+                .expect("P0 pays life");
+        }
+        finish(&mut runner);
+        assert_eq!(runner.life(P0), 1, "{case}");
+        for processor in processors {
+            assert_eq!(zone(&runner, processor), Zone::Battlefield, "{case}");
+        }
+    }
 }

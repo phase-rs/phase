@@ -209,13 +209,6 @@ fn is_umbra_armor_replacement(rid: ReplacementId) -> bool {
     rid.index == UMBRA_ARMOR_DESTROY_INDEX
 }
 
-/// CR 702.89a: whether applying this replacement destroys its own source, as
-/// Umbra armor destroys "this Aura". Among one player's simultaneous decisions,
-/// the staged scheduler asks a decision offering it before the source's own.
-pub(crate) fn replacement_destroys_its_source(rid: ReplacementId) -> bool {
-    is_umbra_armor_replacement(rid)
-}
-
 /// CR 614.10 + CR 614.10a: virtual replacement id for the turn-scoped combat
 /// skip. The affected `PlayerId` is encoded into the sentinel `ObjectId` the
 /// same way `compleated_replacement_id` carries its host object id.
@@ -14287,6 +14280,19 @@ fn continue_replacement_impl(
         return replay_pending_replacement(state, affected, events);
     }
 
+    apply_chosen_mandatory_replacement(state, pending, rid, registry, events)
+}
+
+/// CR 616.1: apply the mandatory replacement whose turn it is, making any
+/// choice it carries first (CR 614.12a). Shared by the answer to an ordering
+/// prompt and by the refresh of a held as-enters prompt whose terms changed.
+fn apply_chosen_mandatory_replacement(
+    state: &mut GameState,
+    mut pending: PendingReplacement,
+    rid: ReplacementId,
+    registry: &IndexMap<ReplacementEvent, ReplacementHandlerEntry>,
+    events: &mut Vec<GameEvent>,
+) -> ReplacementResult {
     let mut proposed = pending.proposed.clone();
     if let Some((player, entry_candidates)) = entry_controller_choice(state, &proposed, rid) {
         pending.candidates = vec![rid];
@@ -14452,6 +14458,92 @@ pub(crate) fn reconsult_pending_replacement(
             replacement_registry(),
             events,
         )
+    })
+}
+
+/// CR 614.12a: whether a pre-entry prompt raised earlier for `pending` and held
+/// unanswered still states what its replacement would ask now: the same player,
+/// with the same eligible opponents, options or payable maximum.
+pub(crate) fn held_entry_prompt_is_current(
+    state: &GameState,
+    pending: &PendingReplacement,
+    prompt: &WaitingFor,
+) -> bool {
+    let [rid] = pending.candidates.as_slice() else {
+        return false;
+    };
+    match prompt {
+        WaitingFor::EntryControllerChoice { player, candidates } => {
+            entry_controller_choice(state, &pending.proposed, *rid)
+                .is_some_and(|(chooser, eligible)| chooser == *player && eligible == *candidates)
+        }
+        WaitingFor::NamedChoice {
+            player,
+            choice_type,
+            options,
+            ..
+        } => as_enters_named_choice(state, &pending.proposed, *rid).is_some_and(|choice| {
+            choice.player == *player
+                && choice.choice_type == *choice_type
+                && choice.options == *options
+        }),
+        WaitingFor::PayAmountChoice { player, max, .. } => {
+            as_enters_pay_choice(state, &pending.proposed, *rid)
+                .is_some_and(|choice| choice.player == *player && choice.max == *max)
+        }
+        _ => false,
+    }
+}
+
+/// CR 614.12a + CR 616.1: raise again the pre-entry choice of the pending
+/// replacement whose turn to apply was already chosen, against the current
+/// game. The choice is made as the permanent enters, so one raised earlier and
+/// held unanswered is asked on its present terms; one that no longer needs an
+/// answer (a single eligible opponent, a determined payment of 0) applies
+/// through the same authority an ordering answer uses. CR 614.5 keeps the
+/// applied set, and a candidate that no longer applies is not applied: the
+/// modified event is consulted afresh instead.
+pub(crate) fn reraise_pending_entry_prompt(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+) -> ReplacementResult {
+    state.replacement_auto_choice_tail = None;
+    resume_pending_replacement(state, events, |state, events| {
+        let pending = state
+            .pending_replacement
+            .take()
+            .expect("an entry prompt is raised again for its pending event");
+        let registry = replacement_registry();
+        prepare_replacement_index_for_pipeline(state);
+        let chosen = match pending.candidates.as_slice() {
+            [rid] if !pending.is_optional => Some(*rid).filter(|rid| {
+                find_applicable_replacements(state, &pending.proposed, registry).contains(rid)
+            }),
+            _ => None,
+        };
+        let Some(rid) = chosen else {
+            return pipeline_loop(state, pending.proposed, pending.depth, registry, events);
+        };
+        let announced = events.len();
+        let result = apply_chosen_mandatory_replacement(state, pending, rid, registry, events);
+        // The choice was announced when it was first raised.
+        let same_choice = matches!(result, ReplacementResult::NeedsChoice(_))
+            && state.pending_replacement.as_ref().is_some_and(|parked| {
+                parked.candidates.as_slice() == [rid] && !parked.proposed.already_applied(&rid)
+            });
+        if same_choice
+            && matches!(
+                events.get(announced..),
+                Some([GameEvent::EffectResolved {
+                    kind: crate::types::ability::EffectKind::Choose
+                        | crate::types::ability::EffectKind::PayCost,
+                    ..
+                }])
+            )
+        {
+            events.truncate(announced);
+        }
+        result
     })
 }
 

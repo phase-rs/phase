@@ -2215,12 +2215,36 @@ fn handle_replacement_choice_inner(
             // choice on its own event; the batch holds it and asks again in
             // APNAP order.
             if same_event_repark && staged_consult_owner.is_some() {
-                if let Some(waiting) = crate::game::zone_pipeline::hold_answer_repark(
+                if let Some(handback) = crate::game::zone_pipeline::hold_answer_repark(
                     state,
                     events,
                     replacement_action_event_start,
                 ) {
-                    return Ok(waiting);
+                    return match handback {
+                        crate::game::zone_pipeline::StagedConsultationHandback::NotOwned => {
+                            Ok(state.waiting_for.clone())
+                        }
+                        crate::game::zone_pipeline::StagedConsultationHandback::Parked(waiting) => {
+                            Ok(*waiting)
+                        }
+                        // CR 608.2c: the held choice needed no answer after
+                        // all and the population settled, so this answer ends
+                        // as any other that settles its batch.
+                        crate::game::zone_pipeline::StagedConsultationHandback::Settled => {
+                            finish_replacement_execute_epilogue(
+                                state,
+                                ReplacementExecuteEpilogue {
+                                    zone_change_object_id: None,
+                                    enters_battlefield: false,
+                                    parked_single_discard,
+                                    parked_affected_object_id,
+                                    pending_phase_drain_life_loser,
+                                    action_event_start: replacement_action_event_start,
+                                },
+                                events,
+                            )
+                        }
+                    };
                 }
             }
             Ok(state.waiting_for.clone())

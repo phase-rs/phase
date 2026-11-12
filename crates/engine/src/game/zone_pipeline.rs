@@ -2060,7 +2060,7 @@ fn run_staged_batch(
 /// What one `run_staged_batch` call remembers across its approval steps.
 #[derive(Default)]
 struct StagedApprovalRun {
-    /// The members whose held decision this run asked again from its event
+    /// The members whose held decision this run consulted again in place
     /// because it no longer stood; see `schedule_staged_decisions`.
     reconsulted: Vec<ObjectIncarnationRef>,
     /// Whether every member's `blocked` flag matches the outstanding decisions
@@ -2221,9 +2221,10 @@ fn settle_staged_consult(
 /// Only a park that can be put back exactly is held: a pending replacement
 /// whose prompt is a replacement-family prompt, no paused cost or discard
 /// carrier, nothing left above the consultation's drain point once its ready
-/// drain is taken, and no drain under a prevention's live child. Any other park
-/// is left published (returns `false`): it is asked at once, at its member's
-/// place in the sweep, ahead of the decisions already held.
+/// drain is taken, and, for a live child, a destruction or move with no drain
+/// under its host's prevention. Any other park is left published (returns
+/// `false`): it is asked at once, at its member's place in the sweep, ahead of
+/// the decisions already held.
 fn hold_parked_decision(
     state: &mut GameState,
     owner: &mut PendingBatchDeliveries,
@@ -2260,15 +2261,29 @@ fn hold_parked_decision(
         }
         _ => return false,
     };
-    if owner
+    let Some(member) = owner
         .staged
         .as_ref()
         .and_then(|staged| staged.members.get(index))
-        .is_none()
+    else {
+        return false;
+    };
+    let live_child = kind == ParkedDecisionKind::LiveChild;
+    // CR 702.89a: a live child is held only where the scheduler can finish it
+    // without its answer path: a destruction or move parked under its host's
+    // prevention (Umbra armor destroying its Aura), which
+    // `reconsult_held_decision` delivers through the destruction tail.
+    if live_child
+        && !(matches!(
+            member.state,
+            StagedBatchMemberState::PreventedWithChild | StagedBatchMemberState::Abandoned
+        ) && matches!(
+            pending.proposed,
+            ProposedEvent::Destroy { .. } | ProposedEvent::ZoneChange { .. }
+        ))
     {
         return false;
     }
-    let live_child = kind == ParkedDecisionKind::LiveChild;
     let drain = state
         .resolution_stack
         .retain_consultation_post_replacement(point);
@@ -2383,12 +2398,9 @@ fn refresh_staged_blocking(state: &GameState, owner: &mut PendingBatchDeliveries
 }
 
 /// CR 101.4 + CR 616.1: the held decisions to ask next: the APNAP-first
-/// chooser, and that player's decisions as (member index, subject).
-///
-/// CR 702.89a: among one player's decisions, a decision about an Aura waits
-/// while another of them offers that Aura's Umbra armor, which would destroy
-/// it: that answer can replace the question. A decision never waits on
-/// another player's: the earlier seat is always asked first.
+/// chooser, and that player's decisions as (member index, subject). A decision
+/// never waits on another: the earlier seat is asked first (CR 101.4), and a
+/// player holding several chooses which to make first (CR 101.4c).
 fn next_staged_decisions(
     state: &GameState,
     staged: &crate::types::game_state::StagedBatchDelivery,
@@ -2406,7 +2418,7 @@ fn next_staged_decisions(
         .filter_map(|member| member.held_decision.as_ref())
         .map(|decision| decision.chooser)
         .min_by_key(|chooser| rank(*chooser))?;
-    let mine: Vec<(usize, ObjectId, &HeldReplacementDecision)> = staged
+    let mine = staged
         .members
         .iter()
         .enumerate()
@@ -2416,69 +2428,54 @@ fn next_staged_decisions(
                 (
                     index,
                     decision_subject(&decision.pending).unwrap_or(member.identity.object_id),
-                    decision,
                 )
             })
         })
         .collect();
-    // Each object one of these decisions would move, with the deciding members.
-    let mut movers: HashMap<ObjectId, Vec<usize>> = HashMap::new();
-    for (index, _, decision) in &mine {
-        for candidate in &decision.pending.candidates {
-            if replacement::replacement_destroys_its_source(*candidate) {
-                movers.entry(candidate.source).or_default().push(*index);
-            }
-        }
-    }
-    let ready: Vec<(usize, ObjectId)> = mine
-        .iter()
-        .filter(|(index, subject, _)| {
-            !movers
-                .get(subject)
-                .is_some_and(|deciders| deciders.iter().any(|decider| decider != index))
-        })
-        .map(|(index, subject, _)| (*index, *subject))
-        .collect();
-    if ready.is_empty() {
-        // CR 303.4d: two Auras cannot enchant each other, so printed Umbras
-        // never wait on each other; the prompt is still never left empty.
-        return Some((
-            chooser,
-            mine.iter()
-                .map(|(index, subject, _)| (*index, *subject))
-                .collect(),
-        ));
-    }
-    Some((chooser, ready))
+    Some((chooser, mine))
 }
 
 /// CR 101.4 + CR 101.4c + CR 616.1: ask the outstanding decisions. The
 /// APNAP-first chooser goes first; a chooser holding two or more decisions
 /// chooses which to make first. With nothing outstanding, approval is done.
 ///
-/// A decision that no longer stands is not asked as it was held: it is asked
-/// again from its own event ([`settle_fallen_held_decision`]), at most once
-/// per member per run (`reconsulted`), so the run ends after at most one
-/// further consultation per member whatever the new consultation parks.
+/// A decision that cannot be asked as it was held is settled first by
+/// [`reconsult_held_decision`]: one whose event can no longer happen is
+/// dropped, and one whose chooser left or whose offer changed is consulted
+/// again in place, at most once per member per run (`reconsulted`), so the run
+/// ends after at most one further consultation per member whatever that
+/// consultation parks.
 fn schedule_staged_decisions(
     state: &mut GameState,
     owner: &mut PendingBatchDeliveries,
     events: &mut Vec<GameEvent>,
     reconsulted: &mut Vec<ObjectIncarnationRef>,
 ) -> StagedConsult {
-    retire_moved_held_members(state, owner);
     let staged = owner.staged.as_ref().expect("approving owner is staged");
+    // CR 400.7 + CR 800.4a: nobody is asked about an event that cannot happen,
+    // and no selection is offered to a player who left.
+    let unanswerable = staged.members.iter().position(|member| {
+        member.held_decision.as_ref().is_some_and(|decision| {
+            held_decision_is_void(state, member)
+                || (!crate::game::players::is_alive(state, decision.chooser)
+                    && !reconsulted.contains(&member.identity))
+        })
+    });
+    if let Some(index) = unanswerable {
+        reconsulted.push(staged.members[index].identity);
+        return reconsult_held_decision(state, owner, index, events);
+    }
     let Some((chooser, mine)) = next_staged_decisions(state, staged) else {
         return StagedConsult::AllConsulted;
     };
     if let [(index, _)] = mine.as_slice() {
         let index = *index;
-        let member = &owner.staged.as_ref().expect("staged").members[index];
+        let member = &staged.members[index];
         let identity = member.identity;
         let decision = member.held_decision.clone().expect("held");
         if !reconsulted.contains(&identity) && !held_decision_stands(state, &decision) {
             reconsulted.push(identity);
-            return settle_fallen_held_decision(state, owner, index, events);
+            return reconsult_held_decision(state, owner, index, events);
         }
         publish_held_decision(state, owner, index);
     } else {
@@ -2490,40 +2487,6 @@ fn schedule_staged_decisions(
     StagedConsult::Paused
 }
 
-/// CR 400.7: a held member whose own object moved or changed incarnation while
-/// another decision was asked cannot undergo its move; its decision is dropped.
-/// A live child's host keeps its decision: the child's event is another
-/// object's. Such a decision is the member's own, so no other member waits on
-/// it.
-fn retire_moved_held_members(state: &GameState, owner: &mut PendingBatchDeliveries) {
-    let Some(staged) = owner.staged.as_ref() else {
-        return;
-    };
-    let moved: Vec<usize> = staged
-        .members
-        .iter()
-        .enumerate()
-        .filter(|(_, member)| {
-            member
-                .held_decision
-                .as_ref()
-                .is_some_and(|decision| decision.boundary.is_some())
-                && !staged_member_is_live(state, member)
-        })
-        .map(|(index, _)| index)
-        .collect();
-    for index in moved {
-        if let Some(member) = owner
-            .staged
-            .as_mut()
-            .and_then(|staged| staged.members.get_mut(index))
-        {
-            member.held_decision = None;
-        }
-        mark_staged_member_preempted(owner, index);
-    }
-}
-
 /// CR 400.7: the member's frozen incarnation is still the live object.
 fn staged_member_is_live(state: &GameState, member: &StagedBatchMember) -> bool {
     state
@@ -2533,22 +2496,40 @@ fn staged_member_is_live(state: &GameState, member: &StagedBatchMember) -> bool 
         == Some(member.identity)
 }
 
+/// CR 400.7 + CR 800.4a: whether the event of the member's held decision can
+/// no longer happen: its event does not survive (its object moved, or a player
+/// it needs left), or, for the member's own event, the member's object changed
+/// incarnation or the member is already finished. A live child's event is
+/// another object's, so its host's object is not checked.
+fn held_decision_is_void(state: &GameState, member: &StagedBatchMember) -> bool {
+    let Some(decision) = member.held_decision.as_deref() else {
+        return false;
+    };
+    let own = decision.boundary.is_some();
+    (own && (matches!(
+        member.state,
+        StagedBatchMemberState::Terminal | StagedBatchMemberState::Abandoned
+    ) || !staged_member_is_live(state, member)))
+        || !replacement::replacement_event_survives(state, &decision.pending.proposed)
+}
+
 /// CR 616.1 + CR 614.5: whether a held decision still stands: its chooser is
-/// in the game, its event can still happen, and, for a choice among
-/// replacements, its candidates and chooser are what the replacement pipeline
-/// would offer now (`pending_replacement_needs_reconsult`).
+/// in the game, its event can still happen, and what it asks is what the
+/// replacement pipeline would ask now. For a choice among replacements that is
+/// the candidates and the chooser (`pending_replacement_needs_reconsult`).
 ///
-/// CR 614.12a: an as-enters choice is raised for the one replacement the
-/// pipeline already selected, so its record lists that replacement alone and
-/// has no offer to compare; it stands with its event, as the published one
-/// does in `settle_replacement_after_departure_inner`.
+/// CR 614.12a: a pre-entry prompt was raised for the one replacement whose
+/// turn to apply was chosen. It is made as the permanent enters, so it stands
+/// only while that replacement would raise the same prompt now: the same
+/// eligible opponents, options or payable maximum
+/// (`held_entry_prompt_is_current`).
 fn held_decision_stands(state: &mut GameState, decision: &HeldReplacementDecision) -> bool {
     if !crate::game::players::is_alive(state, decision.chooser)
         || !replacement::replacement_event_survives(state, &decision.pending.proposed)
     {
         return false;
     }
-    match decision.prompt {
+    match &decision.prompt {
         HeldDecisionPrompt::Replacement => {
             let published = state.pending_replacement.replace(decision.pending.clone());
             let stands =
@@ -2556,91 +2537,73 @@ fn held_decision_stands(state: &mut GameState, decision: &HeldReplacementDecisio
             state.pending_replacement = published;
             stands
         }
-        HeldDecisionPrompt::Raised(_) => true,
+        HeldDecisionPrompt::Raised(prompt) => {
+            replacement::held_entry_prompt_is_current(state, &decision.pending, prompt)
+        }
     }
 }
 
-/// Drop member `index`'s own held decision so the sweep consults it again. A
-/// member's own held decision applied nothing to the game (its replacements
-/// only rewrote its own pending event and its drain has not run), so a new
-/// consultation asks the question as it now stands. A live child is settled by
-/// [`resettle_live_child`] instead.
-fn requeue_held_member(owner: &mut PendingBatchDeliveries, index: usize) {
-    let member = &mut owner.staged.as_mut().expect("staged").members[index];
-    member.held_decision = None;
-    if member.state == StagedBatchMemberState::Abandoned {
-        return;
-    }
-    member.state = StagedBatchMemberState::Unconsulted;
-    member.pending_outcome = None;
-    member.approved_post_replacement = None;
-    member.blocked = false;
-    if let StagedMemberOperation::Destroy(operation) = member.operation {
-        member.operation = StagedMemberOperation::Destroy(StagedDestroyOperation {
-            outer: StagedDestroyOuterApproval::Unapproved,
-            ..operation
-        });
-    }
-}
-
-/// A held decision that no longer stands is asked again from its own event: a
-/// member's own decision through the member's consultation, a live child's
-/// through the child's event.
-fn settle_fallen_held_decision(
-    state: &mut GameState,
-    owner: &mut PendingBatchDeliveries,
-    index: usize,
-    events: &mut Vec<GameEvent>,
-) -> StagedConsult {
-    let live_child = owner.staged.as_ref().expect("staged").members[index]
-        .held_decision
-        .as_ref()
-        .is_some_and(|decision| decision.boundary.is_none());
-    if live_child {
-        return resettle_live_child(state, owner, index, events);
-    }
-    requeue_held_member(owner, index);
-    StagedConsult::Continue
-}
-
-/// CR 616.1 + CR 800.4a: settle member `index`'s held live child that no
-/// longer stands, as the departure's replacement authority settles a published
-/// one (`settle_replacement_after_departure_inner`). The replacement that
-/// ordered the child was applied when it was chosen (CR 702.89a: Umbra armor
-/// removed the damage), so the member itself is not consulted again and that
-/// choice is not asked twice. A child event that can no longer happen is
-/// dropped and the prevention stands. One that can is consulted again in place
-/// (`reconsult_pending_replacement`): a remaining choice is held or published
-/// like any other park, and an event with no choice left is delivered by the
-/// destruction tail the replacement itself uses when nothing parks.
+/// CR 616.1 + CR 614.5 + CR 800.4a: settle member `index`'s held decision that
+/// can no longer be asked as it was held, as the departure's replacement
+/// authority settles a published one
+/// (`settle_replacement_after_departure_inner`).
 ///
-/// A surviving child waits, still held, while another decision is published;
-/// it is settled here when it is next to be asked.
-fn resettle_live_child(
+/// A decision whose event can no longer happen is dropped, even while another
+/// decision is published ([`drop_void_held_decision`]). Any other is consulted
+/// again in place, from its pending event: the replacements already applied to
+/// that event stay applied and are not offered again (CR 614.5), and its pause
+/// boundary and ready drain are kept. A choice among replacements is consulted
+/// through `reconsult_pending_replacement`; a pre-entry prompt is raised again
+/// on its present terms through `reraise_pending_entry_prompt` (CR 614.12a).
+/// What the consultation leaves is settled as any consultation's result: a
+/// remaining choice is held or published like any other park, and a result is
+/// retained for the member.
+///
+/// While another decision is published, or another member is still finishing
+/// its own consultation, the decision waits, still held; it is consulted here
+/// when it is next to be asked.
+fn reconsult_held_decision(
     state: &mut GameState,
     owner: &mut PendingBatchDeliveries,
     index: usize,
     events: &mut Vec<GameEvent>,
 ) -> StagedConsult {
-    let member = &mut owner.staged.as_mut().expect("staged").members[index];
-    let decision = member.held_decision.take().expect("held");
-    if replacement::replacement_event_survives(state, &decision.pending.proposed) {
-        if !matches!(
-            decision.pending.proposed,
-            ProposedEvent::Destroy { .. } | ProposedEvent::ZoneChange { .. }
-        ) {
-            // Only a destruction is known to park under a prevention; any
-            // other child is asked again through its member's consultation.
-            requeue_held_member(owner, index);
-            return StagedConsult::Continue;
+    let member = &owner
+        .staged
+        .as_ref()
+        .expect("approving owner is staged")
+        .members[index];
+    let Some(decision) = member.held_decision.as_deref() else {
+        return StagedConsult::Continue;
+    };
+    if held_decision_is_void(state, member) {
+        drop_void_held_decision(state, owner, index, events);
+        return StagedConsult::Continue;
+    }
+    if staged_decision_is_published(state) {
+        return StagedConsult::Paused;
+    }
+    // A member still finishing its own consultation (an approved destruction's
+    // inner move) goes first; the scheduler comes back to this decision.
+    if staged_asking_index(owner).is_some() {
+        return StagedConsult::Continue;
+    }
+    let live_child = decision.boundary.is_none();
+    let boundary_event = decision.pending.delivery_boundary_event().clone();
+    let point = state.resolution_stack.consult_drain_point();
+    let (_, prompt) = restore_held_decision(state, owner, index);
+    let result = match prompt {
+        HeldDecisionPrompt::Replacement => {
+            replacement::reconsult_pending_replacement(state, events)
         }
-        if staged_decision_is_published(state) {
-            member.held_decision = Some(decision);
-            return StagedConsult::Paused;
-        }
-        let point = state.resolution_stack.consult_drain_point();
-        state.pending_replacement = Some(decision.pending);
-        match replacement::reconsult_pending_replacement(state, events) {
+        HeldDecisionPrompt::Raised(_) => replacement::reraise_pending_entry_prompt(state, events),
+    };
+    if live_child {
+        // CR 702.89a: the replacement that ordered the child was applied when
+        // it was chosen, so the host is not consulted again. A child with no
+        // choice left is delivered by the destruction tail the replacement
+        // itself uses when nothing parks.
+        match result {
             ReplacementResult::NeedsChoice(player) => {
                 state.waiting_for = replacement::replacement_choice_waiting_for(player, state);
             }
@@ -2653,44 +2616,133 @@ fn resettle_live_child(
         }
         if staged_decision_is_published(state) {
             if hold_parked_decision(state, owner, index, point, ParkedDecisionKind::LiveChild) {
+                release_staged_asking(owner, index);
                 return StagedConsult::Continue;
             }
-            let staged = owner.staged.as_mut().expect("staged");
-            staged.asking = Some(staged.members[index].identity);
             return StagedConsult::Paused;
         }
+        settle_live_child_host(state, owner, index, events);
+        return StagedConsult::Continue;
     }
-    // CR 800.4a: an abandoned host keeps its abandonment; any other host's
-    // prevention is its terminal, as when a published child is abandoned. The
-    // published member's own boundary is not this member's to clear.
-    if owner.staged.as_ref().expect("staged").members[index].state
-        != StagedBatchMemberState::Abandoned
-    {
-        let published_boundary = owner.paused_current.take();
-        mark_staged_member_terminal(state, owner, index, ZoneMoveCompletion::Prevented, events);
-        owner.paused_current = published_boundary;
+    let outcome = match result {
+        ReplacementResult::NeedsChoice(player) => {
+            // CR 616.1f: the same event parked again keeps its owner's
+            // boundary, as an answer's re-park does. A staged consultation
+            // parks with no other delivery context to carry forward.
+            if let Some(pending) = state.pending_replacement.as_mut() {
+                pending.inherit_delivery_boundary(&boundary_event);
+            }
+            state.waiting_for = replacement::replacement_choice_waiting_for(player, state);
+            return settle_staged_consult(state, owner, index, StagedConsult::Paused, point);
+        }
+        ReplacementResult::Execute(event) => StagedMemberOutcome::Approved(event),
+        ReplacementResult::Prevented => StagedMemberOutcome::Prevented,
+    };
+    // CR 616.1: an approved consultation's ready drain belongs to its member.
+    let mut retained = if matches!(outcome, StagedMemberOutcome::Approved(_)) {
+        state
+            .resolution_stack
+            .retain_consultation_post_replacement(point)
+    } else {
+        None
+    };
+    if retain_asking_member_outcome(state, owner, index, outcome, &mut retained, events) {
+        return StagedConsult::Continue;
     }
-    StagedConsult::Continue
+    if let Some(drain) = retained {
+        state.resolution_stack.push_post_replacement(drain);
+    }
+    StagedConsult::Paused
 }
 
-/// Publish member `index`'s held decision: put back exactly what the
-/// replacement pipeline left, and make it the asking member.
-fn publish_held_decision(state: &mut GameState, owner: &mut PendingBatchDeliveries, index: usize) {
+/// CR 400.7 + CR 800.4a: drop member `index`'s held decision whose event can
+/// no longer happen. This is cancellation, not replacement prevention, as when
+/// a published decision's event is abandoned (`finish_abandoned_replacement`):
+/// a member whose own object moved is retired with no occurrence, one whose
+/// object is still there but whose move needs a player who left stays where it
+/// is, and a live child's host keeps the prevention that ordered the child.
+fn drop_void_held_decision(
+    state: &mut GameState,
+    owner: &mut PendingBatchDeliveries,
+    index: usize,
+    events: &mut Vec<GameEvent>,
+) {
+    let member = &mut owner.staged.as_mut().expect("staged").members[index];
+    let Some(decision) = member.held_decision.take() else {
+        return;
+    };
+    if decision.boundary.is_none() {
+        settle_live_child_host(state, owner, index, events);
+        return;
+    }
+    if matches!(
+        member.state,
+        StagedBatchMemberState::Terminal | StagedBatchMemberState::Abandoned
+    ) {
+        return;
+    }
+    if !staged_member_is_live(state, member) {
+        mark_staged_member_preempted(owner, index);
+        return;
+    }
+    // The published member's own boundary is not this member's to clear.
+    let published_boundary = owner.paused_current.take();
+    mark_staged_member_terminal(state, owner, index, ZoneMoveCompletion::Remained, events);
+    owner.paused_current = published_boundary;
+}
+
+/// CR 702.89a + CR 800.4a: the host of a live child that needs no further
+/// answer. An abandoned host keeps its abandonment; any other host's
+/// prevention is its terminal, as when a published child is settled.
+fn settle_live_child_host(
+    state: &mut GameState,
+    owner: &mut PendingBatchDeliveries,
+    index: usize,
+    events: &mut Vec<GameEvent>,
+) {
+    release_staged_asking(owner, index);
+    if owner.staged.as_ref().expect("staged").members[index].state
+        == StagedBatchMemberState::Abandoned
+    {
+        return;
+    }
+    // The published member's own boundary is not this member's to clear.
+    let published_boundary = owner.paused_current.take();
+    mark_staged_member_terminal(state, owner, index, ZoneMoveCompletion::Prevented, events);
+    owner.paused_current = published_boundary;
+}
+
+/// Put back what the replacement pipeline left for member `index`'s held
+/// decision (its pending replacement, the member's pause boundary and the
+/// consultation's ready drain) and make it the asking member. Returns the
+/// chooser and how the prompt is restored.
+fn restore_held_decision(
+    state: &mut GameState,
+    owner: &mut PendingBatchDeliveries,
+    index: usize,
+) -> (PlayerId, HeldDecisionPrompt) {
     let staged = owner.staged.as_mut().expect("approving owner is staged");
     let member = &mut staged.members[index];
     let decision = *member
         .held_decision
         .take()
-        .expect("only a held decision is published");
+        .expect("only a held decision is restored");
     staged.asking = Some(member.identity);
     state.pending_replacement = Some(decision.pending);
     owner.paused_current = decision.boundary;
     if let Some(drain) = decision.drain {
         state.resolution_stack.push_post_replacement(drain);
     }
-    state.waiting_for = match decision.prompt {
+    (decision.chooser, decision.prompt)
+}
+
+/// Publish member `index`'s held decision: put back exactly what the
+/// replacement pipeline left, and make it the asking member.
+fn publish_held_decision(state: &mut GameState, owner: &mut PendingBatchDeliveries, index: usize) {
+    let (chooser, prompt) = restore_held_decision(state, owner, index);
+    state.waiting_for = match prompt {
         HeldDecisionPrompt::Replacement => {
-            replacement::replacement_choice_waiting_for(decision.chooser, state)
+            replacement::replacement_choice_waiting_for(chooser, state)
         }
         HeldDecisionPrompt::Raised(waiting) => *waiting,
     };
@@ -2699,13 +2751,13 @@ fn publish_held_decision(state: &mut GameState, owner: &mut PendingBatchDeliveri
 /// CR 101.4d + CR 616.1: an answer to the asking member's decision left its
 /// event needing a further choice (a re-park, such as Progenitus's redirect
 /// exposing its owner's CR 903.9b choice). Hold that choice like any other and
-/// ask again in APNAP order. Returns the next prompt, or `None` when the
-/// choice cannot be held and stays published as the pipeline left it.
+/// ask again in APNAP order. Returns how the population continued, or `None`
+/// when the choice cannot be held and stays published as the pipeline left it.
 pub(crate) fn hold_answer_repark(
     state: &mut GameState,
     events: &mut Vec<GameEvent>,
     run_start: usize,
-) -> Option<WaitingFor> {
+) -> Option<StagedConsultationHandback> {
     let group = state
         .active_batch_delivery()
         .or_else(|| {
@@ -2769,21 +2821,24 @@ pub(crate) fn hold_answer_repark(
         }
     }
     release_staged_asking(&mut owner, index);
-    match continue_staged_batch_after_answer(state, owner, events, run_start, boundary) {
-        StagedConsultationHandback::Parked(waiting) => Some(*waiting),
-        StagedConsultationHandback::Settled | StagedConsultationHandback::NotOwned => {
-            Some(state.waiting_for.clone())
-        }
-    }
+    Some(continue_staged_batch_after_answer(
+        state, owner, events, run_start, boundary,
+    ))
 }
 
 /// Checked restore of the replacement-choice scheduler (CR 616.1 + CR 101.4):
-/// every held decision has a living chooser in seat range and a present
-/// subject that no other held decision is about, an as-enters prompt is still
-/// live for its pending replacement, the asking member has a published
-/// decision, held decisions are outstanding only while something is asked,
-/// every blocked member waits on an outstanding decision, and a selection
-/// prompt offers exactly its APNAP-first chooser's held decisions.
+/// every held decision has a chooser in seat range and a present subject that
+/// no other held decision is about, an as-enters prompt is still live for its
+/// pending replacement, the asking member has a published decision, held
+/// decisions are outstanding only while something is asked, every blocked
+/// member waits on an outstanding decision, and a selection prompt offers
+/// exactly its APNAP-first chooser's held decisions.
+///
+/// CR 800.4a: a held decision whose chooser left the game waits only behind a
+/// published decision, never behind a selection; it is consulted again before
+/// it is asked ([`reconsult_held_decision`]). A held pre-entry prompt likewise
+/// states the terms it was raised on until it is next to be asked
+/// (CR 614.12a).
 pub(crate) fn validate_restored_staged_scheduler(state: &GameState) -> Result<(), String> {
     let published = staged_decision_is_published(state);
     for owner in state.resolution_stack.staged_batch_owners() {
@@ -2805,7 +2860,7 @@ pub(crate) fn validate_restored_staged_scheduler(state: &GameState) -> Result<()
                 return Err("two held staged decisions are about the same object".to_string());
             }
             if decision.chooser.0 as usize >= state.players.len()
-                || !crate::game::players::is_alive(state, decision.chooser)
+                || (!published && !crate::game::players::is_alive(state, decision.chooser))
             {
                 return Err("a held staged decision's chooser is not in the game".to_string());
             }
@@ -2863,6 +2918,16 @@ pub(crate) fn validate_restored_staged_scheduler(state: &GameState) -> Result<()
                 "a replacement decision order is open while a decision is asked".to_string(),
             );
         }
+        // CR 800.4a: a selection is raised only once no held decision is a
+        // departed player's.
+        if staged.members.iter().any(|member| {
+            member
+                .held_decision
+                .as_ref()
+                .is_some_and(|decision| !crate::game::players::is_alive(state, decision.chooser))
+        }) {
+            return Err("a held staged decision's chooser is not in the game".to_string());
+        }
         let (first, mine) = match next_staged_decisions(state, staged) {
             Some((chooser, mine)) => (
                 Some(chooser),
@@ -2908,10 +2973,25 @@ pub(crate) fn publish_selected_staged_decision(
         .clone()
         .expect("held");
     if !held_decision_stands(state, &decision) {
-        // The chosen decision changed since it was held: ask it again from
-        // its own event, in order.
+        // The chosen decision changed since it was held: consult it again in
+        // place. CR 101.4c: what is left of it for the same player is the
+        // decision they chose to make first, so it is asked now; anything else
+        // is asked in order.
         let run_start = events.len();
-        settle_fallen_held_decision(state, &mut owner, index, events);
+        let reconsulted = reconsult_held_decision(state, &mut owner, index, events);
+        let still_theirs = reconsulted == StagedConsult::Continue
+            && owner.staged.as_ref().expect("staged").members[index]
+                .held_decision
+                .as_ref()
+                .is_some_and(|held| held.chooser == decision.chooser);
+        if still_theirs {
+            let approval_end = events.len();
+            park_staged_run_events(state, &mut owner, events, run_start, approval_end);
+            publish_held_decision(state, &mut owner, index);
+            sync_staged_requests(&mut owner);
+            state.repark_batch_owner_below_children(owner, boundary);
+            return Some(state.waiting_for.clone());
+        }
         return Some(
             match continue_staged_batch_after_answer(state, owner, events, run_start, boundary) {
                 StagedConsultationHandback::Parked(waiting) => *waiting,
@@ -4346,11 +4426,6 @@ pub(crate) fn record_staged_batch_consultation_result(
         return StagedConsultationHandback::NotOwned;
     };
     let boundary = state.resolution_stack.capture_child_boundary();
-    let live_child = state.pending_replacement.is_some()
-        || !matches!(
-            state.waiting_for,
-            WaitingFor::Priority { .. } | WaitingFor::ReplacementChoice { .. }
-        );
     let refuse =
         |state: &mut GameState,
          owner: PendingBatchDeliveries,
@@ -4383,53 +4458,68 @@ pub(crate) fn record_staged_batch_consultation_result(
         refuse(state, owner, retained);
         return StagedConsultationHandback::Parked(Box::new(waiting));
     }
-    member.pending_outcome = Some(outcome.clone());
+    if !retain_asking_member_outcome(state, &mut owner, cursor, outcome, &mut retained, events) {
+        let waiting = state.waiting_for.clone();
+        let approval_end = events.len();
+        park_staged_run_events(state, &mut owner, events, run_start, approval_end);
+        refuse(state, owner, retained);
+        return StagedConsultationHandback::Parked(Box::new(waiting));
+    }
+    continue_staged_batch_after_answer(state, owner, events, run_start, boundary)
+}
+
+/// CR 614.6 + CR 616.1: retain the asking member `cursor`'s consultation
+/// result, with the approved consultation's ready drain (`retained`). A
+/// replacement applied for the member may have left a live child (CR 702.89a:
+/// Umbra armor destroying its Aura); CR 101.4d: that newly exposed decision is
+/// held like any other, to be asked in APNAP order. Returns `false` when a
+/// decision stays published instead: a child that cannot be held, or an
+/// outcome that cannot be finalized yet. Any drain not attached is left in
+/// `retained` for the caller to put back.
+fn retain_asking_member_outcome(
+    state: &mut GameState,
+    owner: &mut PendingBatchDeliveries,
+    cursor: usize,
+    outcome: StagedMemberOutcome,
+    retained: &mut Option<crate::types::game_state::PostReplacementDrainStack>,
+    events: &mut Vec<GameEvent>,
+) -> bool {
+    let live_child = state.pending_replacement.is_some()
+        || !matches!(
+            state.waiting_for,
+            WaitingFor::Priority { .. } | WaitingFor::ReplacementChoice { .. }
+        );
+    let prevented = matches!(outcome, StagedMemberOutcome::Prevented);
+    let member = &mut owner
+        .staged
+        .as_mut()
+        .expect("the asking member is staged")
+        .members[cursor];
+    member.pending_outcome = Some(outcome);
     if live_child {
+        if prevented {
+            member.state = StagedBatchMemberState::PreventedWithChild;
+        }
         if let Some(drain) = retained.take() {
-            attach_member_drain(&mut owner, cursor, drain);
+            attach_member_drain(owner, cursor, drain);
         }
-        if matches!(outcome, StagedMemberOutcome::Prevented) {
-            if let Some(member) = owner
-                .staged
-                .as_mut()
-                .and_then(|staged| staged.members.get_mut(cursor))
-            {
-                member.state = StagedBatchMemberState::PreventedWithChild;
-            }
-        }
-        // CR 101.4d + CR 616.1: the answer exposed a new decision (a live
-        // child). Hold it like any other and ask again in APNAP order; one
-        // that cannot be held stays published, as before.
         let point = state.resolution_stack.consult_drain_point();
-        if !hold_parked_decision(
-            state,
-            &mut owner,
-            cursor,
-            point,
-            ParkedDecisionKind::LiveChild,
-        ) {
-            let waiting = state.waiting_for.clone();
-            let approval_end = events.len();
-            park_staged_run_events(state, &mut owner, events, run_start, approval_end);
-            state.repark_batch_owner_below_children(owner, boundary);
-            return StagedConsultationHandback::Parked(Box::new(waiting));
+        if !hold_parked_decision(state, owner, cursor, point, ParkedDecisionKind::LiveChild) {
+            return false;
         }
-        release_staged_asking(&mut owner, cursor);
-        return continue_staged_batch_after_answer(state, owner, events, run_start, boundary);
+        release_staged_asking(owner, cursor);
+        return true;
     }
     state.waiting_for = WaitingFor::Priority {
         player: state.active_player,
     };
-    if !finalize_staged_pending_outcome_on(state, &mut owner, events) {
-        let approval_end = events.len();
-        park_staged_run_events(state, &mut owner, events, run_start, approval_end);
-        refuse(state, owner, retained);
-        return StagedConsultationHandback::Parked(Box::new(state.waiting_for.clone()));
+    if !finalize_staged_pending_outcome_on(state, owner, events) {
+        return false;
     }
     if let Some(drain) = retained.take() {
-        attach_member_drain(&mut owner, cursor, drain);
+        attach_member_drain(owner, cursor, drain);
     }
-    continue_staged_batch_after_answer(state, owner, events, run_start, boundary)
+    true
 }
 
 /// Run a staged owner on after an answer settled its asking member: the
@@ -4879,62 +4969,43 @@ pub(crate) fn reconcile_staged_batch_after_departure(
     Ok(crate::game::engine_resolution_choices::DepartureSettlement::NotSettled)
 }
 
-/// CR 800.4a + CR 800.4h + CR 616.1: after a departure, a held decision that
-/// no longer stands (its event no longer survives, its chooser left, or its
-/// candidates or chooser changed, `pending_replacement_needs_reconsult`) is
-/// asked again from its own event; the others keep their decision. A member's
-/// own held decision applied nothing to the game: its replacements only
-/// rewrote its own pending event and its drain has not run. It is dropped and
-/// its member consulted again by the sweep through the same consult functions.
-/// A live child's host already had a replacement applied, so the child is
-/// settled on its own event instead ([`resettle_live_child`]); those members
-/// are returned for the caller to settle once the published decision is held.
-/// The published decision was already settled by the departure's own
-/// replacement authority.
+/// CR 800.4a + CR 800.4h + CR 616.1: after a departure, the held decisions
+/// that no longer stand: the event can no longer happen, the chooser left, or
+/// the candidates, chooser or pre-entry terms changed
+/// (`pending_replacement_needs_reconsult`, `held_entry_prompt_is_current`).
+/// The caller settles each through [`reconsult_held_decision`] once the
+/// published decision is held; the others keep their decision. The published
+/// decision was already settled by the departure's own replacement authority.
 fn settle_held_decisions_after_departure(
     state: &mut GameState,
-    owner: &mut PendingBatchDeliveries,
+    owner: &PendingBatchDeliveries,
 ) -> (HeldDepartureSettlement, Vec<usize>) {
-    let mut fallen_children = Vec::new();
+    let mut fallen = Vec::new();
     let Some(staged) = owner.staged.as_ref() else {
-        return (HeldDepartureSettlement::Unchanged, fallen_children);
+        return (HeldDepartureSettlement::Unchanged, fallen);
     };
     if staged.stage != BatchDeliveryStage::Approving {
-        return (HeldDepartureSettlement::Unchanged, fallen_children);
+        return (HeldDepartureSettlement::Unchanged, fallen);
     }
-    let held: Vec<usize> = staged
-        .members
-        .iter()
-        .enumerate()
-        .filter(|(_, member)| member.held_decision.is_some())
-        .map(|(index, _)| index)
-        .collect();
-    if held.is_empty() {
-        return (HeldDepartureSettlement::Unchanged, fallen_children);
-    }
-    let mut settlement = HeldDepartureSettlement::Unchanged;
     let published = state.pending_replacement.take();
-    for index in held {
-        let staged = owner.staged.as_ref().expect("staged");
-        let member = staged.members[index].clone();
-        let decision = member.held_decision.as_ref().expect("held");
-        let live_child = decision.boundary.is_none();
-        let own_event_live = live_child || staged_member_is_live(state, &member);
-        if own_event_live && held_decision_stands(state, decision) {
+    for (index, member) in staged.members.iter().enumerate() {
+        let Some(decision) = member.held_decision.as_deref() else {
             continue;
-        }
-        settlement = HeldDepartureSettlement::Reconsulting;
-        if live_child {
-            fallen_children.push(index);
-        } else {
-            requeue_held_member(owner, index);
+        };
+        if held_decision_is_void(state, member) || !held_decision_stands(state, decision) {
+            fallen.push(index);
         }
     }
     state.pending_replacement = published;
-    (settlement, fallen_children)
+    let settlement = if fallen.is_empty() {
+        HeldDepartureSettlement::Unchanged
+    } else {
+        HeldDepartureSettlement::Reconsulting
+    };
+    (settlement, fallen)
 }
 
-/// Whether a departure dropped any held decision for a new consultation.
+/// Whether a departure left any held decision to be consulted again.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum HeldDepartureSettlement {
     Unchanged,
@@ -5006,7 +5077,7 @@ fn reconcile_staged_owner(
     group_id: LogicalZoneChangeGroupId,
     events: &mut Vec<GameEvent>,
 ) -> bool {
-    let (settlement, fallen_children) = settle_held_decisions_after_departure(state, owner);
+    let (settlement, fallen) = settle_held_decisions_after_departure(state, owner);
     demote_published_after_departure(state, owner, settlement);
     sync_staged_requests(owner);
     let prompt_group = match &state.waiting_for {
@@ -5076,11 +5147,11 @@ fn reconcile_staged_owner(
         }
     }
 
-    // CR 616.1: the fallen live children, on their own events. What they
-    // deliver belongs to this owner's run.
+    // CR 616.1: the fallen decisions, each consulted again in place. What
+    // that delivers belongs to this owner's run.
     let run_start = events.len();
-    for index in fallen_children {
-        resettle_live_child(state, owner, index, events);
+    for index in fallen {
+        reconsult_held_decision(state, owner, index, events);
     }
     let live = owner.staged.as_ref().is_some_and(|staged| {
         staged.members.iter().any(|member| {

@@ -12431,9 +12431,9 @@ fn apply_action(
             | WaitingFor::RevealUntilBottomOrder { .. }
             | WaitingFor::DigBottomOrder { .. }
             // CR 701.20a + CR 101.4c: choosing which of a staged population's
-            // replacement decisions to make first is part of delivering that
-            // same instruction, so a reveal-dig's cards stay public through it
-            // until the first decision itself is answered.
+            // replacement decisions to make first answers none of them, so
+            // cards revealed before the selection stay public across it. The
+            // decision it publishes is then cleared or kept by its own arm.
             | WaitingFor::ReplacementDecisionOrder { .. }
     ) && !ripple_resolution_cast_in_flight(state)
     {
