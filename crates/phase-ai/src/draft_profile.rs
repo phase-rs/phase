@@ -47,7 +47,7 @@ use engine::game::effects::effect::generic_effect_application_filter;
 use engine::types::ability::{
     extract_target_filter_from_effect, AbilityCost, AbilityDefinition, AbilityKind,
     ContinuousModification, ControllerRef, Effect, PlayerFilter, PtValue, StaticDefinition,
-    TargetFilter, TypeFilter,
+    TargetFilter, TypeFilter, TypedFilter,
 };
 use engine::types::card::CardFace;
 use engine::types::card_type::CoreType;
@@ -56,9 +56,7 @@ use engine::types::statics::StaticMode;
 use engine::types::zones::Zone;
 
 use crate::ability_chain::collect_chain_effects;
-use crate::cast_facts::{
-    collect_definition_effects, collect_face_effects, is_direct_removal, EffectProfile,
-};
+use crate::cast_facts::{collect_face_effects, is_direct_removal, EffectProfile};
 use crate::draft_eval::{dominant_colors, produced_color_count};
 use crate::features::mana_ramp::{chain_has_mana_effect, chain_searches_for_land};
 use crate::policies::effect_classify::{pt_value_is_non_negative, quantity_is_non_negative};
@@ -1269,19 +1267,19 @@ fn type_names_permanent(filter: &TypeFilter) -> bool {
     )
 }
 
-/// Whether a type-line constraint admits a creature. A constraint naming only
-/// another card type (artifact, enchantment, land, planeswalker) is aimed at
-/// that type, not at creatures, even where a permanent can carry both.
-fn type_admits_creature(filter: &TypeFilter) -> bool {
+/// Whether a type-line constraint names a creature-compatible card type
+/// (CR 205.2a). A constraint naming only another card type (artifact,
+/// enchantment, land, planeswalker) is aimed at that type, not at creatures.
+fn type_names_a_creature(filter: &TypeFilter) -> bool {
     match filter {
         TypeFilter::Creature
         | TypeFilter::Permanent
         | TypeFilter::Card
         | TypeFilter::Any
         | TypeFilter::Subtype(_) => true,
-        TypeFilter::Non(inner) => !matches!(**inner, TypeFilter::Creature | TypeFilter::Permanent),
-        TypeFilter::AnyOf(filters) => filters.iter().any(type_admits_creature),
-        TypeFilter::Land
+        TypeFilter::AnyOf(filters) => filters.iter().any(type_names_a_creature),
+        TypeFilter::Non(_)
+        | TypeFilter::Land
         | TypeFilter::Artifact
         | TypeFilter::Enchantment
         | TypeFilter::Instant
@@ -1290,6 +1288,43 @@ fn type_admits_creature(filter: &TypeFilter) -> bool {
         | TypeFilter::Battle
         | TypeFilter::Kindred => false,
     }
+}
+
+/// Whether a type-line constraint forbids creatures outright.
+fn type_excludes_creatures(filter: &TypeFilter) -> bool {
+    match filter {
+        TypeFilter::Non(inner) => matches!(**inner, TypeFilter::Creature | TypeFilter::Permanent),
+        TypeFilter::AnyOf(filters) => filters.iter().any(type_excludes_creatures),
+        TypeFilter::Creature
+        | TypeFilter::Permanent
+        | TypeFilter::Card
+        | TypeFilter::Any
+        | TypeFilter::Subtype(_)
+        | TypeFilter::Land
+        | TypeFilter::Artifact
+        | TypeFilter::Enchantment
+        | TypeFilter::Instant
+        | TypeFilter::Sorcery
+        | TypeFilter::Planeswalker
+        | TypeFilter::Battle
+        | TypeFilter::Kindred => false,
+    }
+}
+
+/// Whether a typed filter can name a creature.
+///
+/// `type_filters` is a conjunction ("artifact creature" is `[Artifact,
+/// Creature]`), and CR 205.2b says an object with multiple card types matches
+/// effects that apply to any of them — so ANY member that names a creature
+/// admits one, and only an explicit `noncreature` veto excludes the
+/// conjunction. Testing `all(...)`, as this once did, rejected every
+/// artifact-creature filter and lost Arcum Dagsson's removal reading. An empty
+/// list is the parser's "no type-line constraint" encoding (see
+/// `TypedFilter::type_filters`), which admits a creature by default.
+fn typed_filter_admits_creature(typed: &TypedFilter) -> bool {
+    let names_creature =
+        typed.type_filters.is_empty() || typed.type_filters.iter().any(type_names_a_creature);
+    names_creature && !typed.type_filters.iter().any(type_excludes_creatures)
 }
 
 /// Whether `filter` can name a creature an opponent controls. Object
@@ -1307,7 +1342,7 @@ fn may_be_opposing_creature(filter: &TargetFilter) -> bool {
         TargetFilter::Any => true,
         TargetFilter::Typed(typed) => {
             !matches!(typed.controller, Some(ControllerRef::You))
-                && typed.type_filters.iter().all(type_admits_creature)
+                && typed_filter_admits_creature(typed)
         }
         TargetFilter::Or { filters } => filters.iter().any(may_be_opposing_creature),
         // CR 109.3: every constraint of an `And` must hold for the match.
@@ -1408,7 +1443,7 @@ fn sacrifice_reaches_opposing_creature(
             parent_target.is_some_and(filter_can_name_creature)
         }
         TargetFilter::Typed(typed) => {
-            let admits_creature = typed.type_filters.iter().all(type_admits_creature);
+            let admits_creature = typed_filter_admits_creature(typed);
             match &typed.controller {
                 Some(scope) => admits_creature && sacrifice_scope_can_be_opposing(scope),
                 None => admits_creature && player_scope_instructs_others(player_scope),
@@ -1466,7 +1501,7 @@ fn player_scope_instructs_others(scope: Option<&PlayerFilter>) -> bool {
 fn filter_can_name_creature(filter: &TargetFilter) -> bool {
     match filter {
         TargetFilter::Any => true,
-        TargetFilter::Typed(typed) => typed.type_filters.iter().all(type_admits_creature),
+        TargetFilter::Typed(typed) => typed_filter_admits_creature(typed),
         TargetFilter::Or { filters } => filters.iter().any(filter_can_name_creature),
         // CR 109.3: every constraint of an `And` must hold for the match.
         TargetFilter::And { filters } => filters.iter().all(filter_can_name_creature),
@@ -1474,21 +1509,47 @@ fn filter_can_name_creature(filter: &TargetFilter) -> bool {
     }
 }
 
-/// Whether a sacrifice on `ability`'s chain can reach an opposing creature.
-/// The chain's leading target is the parent for "its controller sacrifices
-/// it" (`ParentTarget`).
+/// Whether a sacrifice anywhere on `ability`'s chain can reach an opposing
+/// creature (CR 701.21a).
+///
+/// The bindings live on the individual definition, not on the chain root: the
+/// parser stamps `player_scope` on the clause that carries it (By Invitation
+/// Only's `Choose` root has none while its `Sacrifice` child is `All`;
+/// Gravelighter's `Draw` root has none while its else-branch sacrifice is
+/// `All`; Rankle's modal root has none while its third mode is `All`), and a
+/// `ParentTarget` binds to the target declared by the enclosing clause (Arcum
+/// Dagsson's leading `TargetOnly`). Flattening the chain and applying the
+/// root's scope and target to every clause loses both, so walk the tree
+/// instead: a node with its own `player_scope` starts a new population, and a
+/// node without one resolves inside the enclosing population.
 fn ability_has_removal_sacrifice(ability: &AbilityDefinition) -> bool {
-    let player_scope = ability.player_scope.as_ref();
-    let parent_target = extract_target_filter_from_effect(&ability.effect);
-    collect_definition_effects(ability)
+    let chain_root_target = extract_target_filter_from_effect(&ability.effect);
+    node_has_removal_sacrifice(ability, None, chain_root_target)
+}
+
+fn node_has_removal_sacrifice(
+    ability: &AbilityDefinition,
+    inherited_scope: Option<&PlayerFilter>,
+    parent_target: Option<&TargetFilter>,
+) -> bool {
+    let scope = ability.player_scope.as_ref().or(inherited_scope);
+    if matches!(
+        ability.effect.as_ref(),
+        Effect::Sacrifice { target, .. }
+            if sacrifice_reaches_opposing_creature(target, scope, parent_target)
+    ) {
+        return true;
+    }
+    // CR 608.2c: a node that declares its own target is the parent binding for
+    // its "its controller sacrifices it" child.
+    let child_parent = extract_target_filter_from_effect(&ability.effect).or(parent_target);
+    ability
+        .sub_ability
+        .as_deref()
         .into_iter()
-        .any(|effect| {
-            matches!(
-                effect,
-                Effect::Sacrifice { target, .. }
-                    if sacrifice_reaches_opposing_creature(target, player_scope, parent_target)
-            )
-        })
+        .chain(ability.else_ability.as_deref())
+        .chain(ability.mode_abilities.iter())
+        .any(|child| node_has_removal_sacrifice(child, scope, child_parent))
 }
 
 /// Whether any ability or trigger on the face instructs an opposing creature's
@@ -4099,18 +4160,19 @@ mod tests {
     fn crack_the_earth_each_player_sacrifices_is_removal() {
         let p = DraftProfile::kamigawa_block();
         let red = vec!["R".to_string()];
-        // Crack the Earth (BOK): "Each player sacrifices a permanent of their
-        // choice." This can reach an opponent's creature and is removal.
-        // The effect targets each player, and each player sacrifices their
-        // choice. The Sacrifice effect's target filter has an explicit player
-        // scope (TargetPlayer/EachPlayer) that resolves to opponents.
+        // Crack the Earth (BOK): {R} Sorcery — Arcane, "Each player
+        // sacrifices a permanent of their choice." This can reach an
+        // opponent's creature and is removal. The Sacrifice effect's target
+        // filter has no controller scope, so the ability's own `All` player
+        // scope is what instructs the opponent.
         let crack = oracle_face(serde_json::json!({
             "name": "Crack the Earth",
-            "manaCost": "{1}{R}",
-            "manaValue": 2.0,
+            "manaCost": "{R}",
+            "manaValue": 1.0,
             "colors": ["R"],
-            "type": "Sorcery",
+            "type": "Sorcery — Arcane",
             "types": ["Sorcery"],
+            "subtypes": ["Arcane"],
             "text": "Each player sacrifices a permanent of their choice.",
         }));
         // Positive guard: the spell's "each player" scope is what instructs
@@ -4120,11 +4182,17 @@ mod tests {
             Some(PlayerFilter::All),
             "Crack the Earth is an each-player instruction"
         );
+        // The printed card is Arcane, so the guide classifies both — removal
+        // still wins the single class bonus.
+        assert!(classify(&crack).contains(&CardClass::ArcaneSpell));
         assert!(sacrifice_is_removal(&crack));
         assert!(classify(&crack).contains(&CardClass::Removal));
         assert!(roles(&crack).contains(&DeckRole::Removal));
         let scored = first_pick(p, &card("Crack the Earth", "BOK", &red, &crack));
-        assert_eq!(scored.class_bonus, 0.9, "Crack the Earth is removal");
+        assert_eq!(
+            scored.class_bonus, 0.9,
+            "removal outranks Crack the Earth's 0.35 Arcane bonus"
+        );
     }
 
     #[test]
@@ -4282,5 +4350,192 @@ mod tests {
         assert!(roles(&akki).contains(&DeckRole::Removal));
         let scored = first_pick(p, &card("Akki Underminer", "CHK", &red, &akki));
         assert_eq!(scored.class_bonus, 0.9, "Akki Underminer is removal");
+    }
+
+    /// By Invitation Only (VOW): "Choose a number between 0 and 13. Each
+    /// player sacrifices that many creatures of their choice." The all-player
+    /// scope sits on the Sacrifice CHILD; the Choose root carries none, so a
+    /// classifier that reads only the root's scope misses the edict.
+    #[test]
+    fn by_invitation_only_child_scoped_sacrifice_is_removal() {
+        let invitation = oracle_face(serde_json::json!({
+            "name": "By Invitation Only",
+            "manaCost": "{3}{W}{W}",
+            "manaValue": 5.0,
+            "colors": ["W"],
+            "type": "Sorcery",
+            "types": ["Sorcery"],
+            "text": "Choose a number between 0 and 13. Each player sacrifices that many creatures of their choice.",
+        }));
+        // Positive guard: the printed scope lives on the child, not the root.
+        let root = invitation.abilities.first().expect("spell ability");
+        assert!(root.player_scope.is_none(), "the Choose root has no scope");
+        assert_eq!(
+            root.sub_ability
+                .as_deref()
+                .and_then(|child| child.player_scope.clone()),
+            Some(PlayerFilter::All),
+            "the Sacrifice child instructs each player"
+        );
+        assert!(sacrifice_is_removal(&invitation));
+        assert!(classify(&invitation).contains(&CardClass::Removal));
+        assert!(roles(&invitation).contains(&DeckRole::Removal));
+    }
+
+    /// Gravelighter (NEO): "When this creature enters, draw a card if a
+    /// creature died this turn. Otherwise, each player sacrifices a creature
+    /// of their choice." The scope sits on the else-branch sacrifice, not on
+    /// the Draw root.
+    #[test]
+    fn gravelighter_else_branch_sacrifice_is_removal() {
+        let gravelighter = oracle_face(serde_json::json!({
+            "name": "Gravelighter",
+            "manaCost": "{2}{B}",
+            "manaValue": 3.0,
+            "colors": ["B"],
+            "type": "Creature — Spirit",
+            "types": ["Creature"],
+            "subtypes": ["Spirit"],
+            "power": "2",
+            "toughness": "2",
+            "keywords": ["Flying"],
+            "text": "Flying\nWhen this creature enters, draw a card if a creature died this turn. Otherwise, each player sacrifices a creature of their choice.",
+        }));
+        // Positive guard: the else branch, not the trigger root, is scoped.
+        let trigger_root = gravelighter
+            .triggers
+            .iter()
+            .find_map(|trigger| trigger.execute.as_deref())
+            .expect("positive guard: Gravelighter's trigger resolves an ability");
+        assert!(trigger_root.player_scope.is_none());
+        assert_eq!(
+            trigger_root
+                .else_ability
+                .as_deref()
+                .and_then(|branch| branch.player_scope.clone()),
+            Some(PlayerFilter::All),
+            "the else-branch sacrifice instructs each player"
+        );
+        assert!(sacrifice_is_removal(&gravelighter));
+        assert!(classify(&gravelighter).contains(&CardClass::Removal));
+        assert!(roles(&gravelighter).contains(&DeckRole::Removal));
+    }
+
+    /// Rankle, Master of Pranks (ELD): the modal root is a bare
+    /// `GenericEffect`; the third mode's sacrifice is the one scoped to every
+    /// player.
+    #[test]
+    fn rankle_modal_sacrifice_is_removal() {
+        let rankle = oracle_face(serde_json::json!({
+            "name": "Rankle, Master of Pranks",
+            "manaCost": "{2}{B}{B}",
+            "manaValue": 4.0,
+            "colors": ["B"],
+            "type": "Legendary Creature — Faerie Rogue",
+            "types": ["Creature"],
+            "subtypes": ["Faerie", "Rogue"],
+            "power": "3",
+            "toughness": "3",
+            "keywords": ["Flying", "Haste"],
+            "text": "Flying, haste\nWhenever Rankle deals combat damage to a player, choose any number —\n• Each player discards a card.\n• Each player loses 1 life and draws a card.\n• Each player sacrifices a creature of their choice.",
+        }));
+        // Positive guard: the modal root is unscoped; a mode is the scoped
+        // sacrifice.
+        let modal_root = rankle
+            .triggers
+            .iter()
+            .find_map(|trigger| trigger.execute.as_deref())
+            .expect("positive guard: Rankle's trigger resolves an ability");
+        assert!(modal_root.player_scope.is_none());
+        assert!(modal_root.mode_abilities.iter().any(|mode| {
+            mode.player_scope == Some(PlayerFilter::All)
+                && matches!(mode.effect.as_ref(), Effect::Sacrifice { .. })
+        }));
+        assert!(sacrifice_is_removal(&rankle));
+        assert!(classify(&rankle).contains(&CardClass::Removal));
+        assert!(roles(&rankle).contains(&DeckRole::Removal));
+    }
+
+    /// Arcum Dagsson: "Target artifact creature's controller sacrifices it."
+    /// CR 205.2b: an object with multiple card types matches effects that apply
+    /// to any of them, so the artifact-creature conjunction is a creature
+    /// target and the bound sacrifice is removal.
+    #[test]
+    fn arcum_dagsson_artifact_creature_target_is_removal() {
+        let arcum = oracle_face(serde_json::json!({
+            "name": "Arcum Dagsson",
+            "manaCost": "{3}{U}",
+            "manaValue": 4.0,
+            "colors": ["U"],
+            "type": "Legendary Creature — Human Artificer",
+            "types": ["Creature"],
+            "subtypes": ["Human", "Artificer"],
+            "power": "2",
+            "toughness": "2",
+            "text": "{T}: Target artifact creature's controller sacrifices it. That player may search their library for a noncreature artifact card, put it onto the battlefield, then shuffle.",
+        }));
+        // Positive guard: the leading clause declares the conjunction and the
+        // sacrifice anaphors to it.
+        let parent = arcum
+            .abilities
+            .first()
+            .and_then(|ability| extract_target_filter_from_effect(&ability.effect))
+            .expect("positive guard: Arcum Dagsson declares a target");
+        let TargetFilter::Typed(typed) = parent else {
+            panic!("artifact creature is a typed filter, got {parent:?}");
+        };
+        assert!(typed.type_filters.contains(&TypeFilter::Artifact));
+        assert!(typed.type_filters.contains(&TypeFilter::Creature));
+        assert!(collect_face_effects(&arcum).iter().any(|effect| matches!(
+            effect,
+            Effect::Sacrifice {
+                target: TargetFilter::ParentTarget,
+                ..
+            }
+        )));
+        assert!(sacrifice_is_removal(&arcum));
+        assert!(classify(&arcum).contains(&CardClass::Removal));
+        assert!(roles(&arcum).contains(&DeckRole::Removal));
+    }
+
+    /// Building-block controls for the conjunction reading: the creature axis
+    /// is satisfied by ANY type constraint, and an explicit noncreature veto
+    /// still excludes the conjunction.
+    #[test]
+    fn typed_conjunction_admits_a_creature_only_if_one_type_does() {
+        let typed = |type_filters: Vec<TypeFilter>| {
+            TargetFilter::Typed(TypedFilter {
+                type_filters,
+                controller: None,
+                properties: Vec::new(),
+            })
+        };
+        let artifact_creature = typed(vec![TypeFilter::Artifact, TypeFilter::Creature]);
+        assert!(filter_can_name_creature(&artifact_creature));
+        assert!(sacrifice_reaches_opposing_creature(
+            &artifact_creature,
+            Some(&PlayerFilter::All),
+            None
+        ));
+        // An artifact is not necessarily a creature.
+        assert!(!filter_can_name_creature(&typed(vec![
+            TypeFilter::Artifact
+        ])));
+        // An explicit noncreature veto excludes the conjunction.
+        assert!(!filter_can_name_creature(&typed(vec![
+            TypeFilter::Artifact,
+            TypeFilter::Non(Box::new(TypeFilter::Creature)),
+        ])));
+        // A creature with a nonartifact restriction still admits a creature.
+        assert!(filter_can_name_creature(&typed(vec![
+            TypeFilter::Creature,
+            TypeFilter::Non(Box::new(TypeFilter::Artifact)),
+        ])));
+        // An unscoped bare creature instruction stays with the controller.
+        assert!(!sacrifice_reaches_opposing_creature(
+            &typed(vec![TypeFilter::Creature]),
+            None,
+            None
+        ));
     }
 }
