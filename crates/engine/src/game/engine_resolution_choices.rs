@@ -1187,7 +1187,8 @@ pub(super) fn handles(waiting_for: &WaitingFor) -> bool {
 /// `handles()` — it only includes choices that are unambiguously part of
 /// spell/ability resolution (CR 608.2). Choices like `DiscardChoice`,
 /// `CommanderZoneChoice`, `ChooseLegend`, etc. can occur outside of
-/// resolution and are NOT included here.
+/// resolution and are NOT included here unless they carry resolution context
+/// (e.g., `DiscardChoice::discard_frame`).
 pub(super) fn is_mid_resolution_pause(waiting_for: &WaitingFor) -> bool {
     matches!(
         waiting_for,
@@ -1241,6 +1242,9 @@ pub(super) fn is_mid_resolution_pause(waiting_for: &WaitingFor) -> bool {
             | WaitingFor::RippleBottomOrder { .. }
             | WaitingFor::OutsideGameChoice { .. }
             | WaitingFor::ResolutionOptionalPaymentChoice { .. }
+            | WaitingFor::DiscardChoice { discard_frame: Some(_), .. }
+            | WaitingFor::ReturnAsAuraTarget { .. }
+            | WaitingFor::TargetSelection { .. }
     )
 }
 

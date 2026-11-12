@@ -322,15 +322,16 @@ pub(crate) fn eliminate_players(
         })
         .flatten();
 
-    // CR 603.10a + CR 603.3a: the observers of the departure as they were
-    // immediately before it. The leaving players' objects leave the game in the
-    // same event that ends their control effects (CR 800.4a); a look-back
+    // CR 603.10a + CR 603.10f + CR 603.3a: the observers of the departure as they
+    // were immediately before it. The leaving players' objects leave the game in
+    // the same event that ends their control effects (CR 800.4a); a look-back
     // ability reads its source as it was immediately before that event, so an
     // observer a leaving player stole triggers under that player and is retired
-    // with them (CR 800.4d) rather than handed to its owner.
-    let looked_back_observers = (departure_triggers == DepartureTriggers::CollectedByDeparture
-        && !leaving_set.is_empty())
-    .then(|| super::triggers::ImmediatelyBeforeObservers::latch(state));
+    // with them (CR 800.4d) rather than handed to its owner. Every mode reads
+    // them: a "whenever a player loses the game" ability looks back the same way
+    // (CR 603.10f), whichever collector ends up scanning the departure's events.
+    let looked_back_observers = (!leaving_set.is_empty())
+        .then(|| super::triggers::ImmediatelyBeforeObservers::latch(state));
 
     for &player in players_to_eliminate {
         // Skip if already eliminated (e.g. a teammate eliminated alongside an
@@ -461,13 +462,33 @@ pub(crate) fn eliminate_players(
     // waits to be put on the stack; the pruning below drops any whose controller
     // left (CR 800.4d) and the drain puts the rest on the stack together. CR 104.1:
     // once the game is over, nothing triggered goes on the stack.
-    if departure_triggers == DepartureTriggers::CollectedByDeparture && game_over_winner.is_none() {
-        super::triggers::collect_unclaimed_triggers_into_deferred(
-            state,
-            events,
-            first_event,
-            looked_back_observers.map(|observers| (observers, departure_end)),
-        );
+    if game_over_winner.is_none() {
+        match departure_triggers {
+            DepartureTriggers::CollectedByDeparture => {
+                super::triggers::collect_unclaimed_triggers_into_deferred(
+                    state,
+                    events,
+                    first_event,
+                    looked_back_observers.map(|observers| (observers, departure_end)),
+                );
+            }
+            // CR 603.10f + CR 603.2c: a caller's post-action scan reads the live
+            // game, so the departure's look-back events are collected here — and
+            // claimed — before that scan runs (issue #10157: a "whenever a player
+            // loses the game" ability belongs to the player who controlled it at
+            // the loss, not to whoever owns it once the control effects end).
+            DepartureTriggers::PlacedByPass | DepartureTriggers::ScannedByCaller => {
+                if let Some(observers) = looked_back_observers {
+                    super::triggers::collect_departure_look_back_triggers(
+                        state,
+                        observers,
+                        events,
+                        first_event,
+                        departure_end,
+                    );
+                }
+            }
+        }
     }
 
     // CR 603.3b + CR 800.4a: Always resolve in-flight trigger-ordering work

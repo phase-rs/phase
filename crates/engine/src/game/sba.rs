@@ -88,11 +88,25 @@ fn mid_resolution_entry_pauses_sba(state: &GameState) -> bool {
     // prompt (`resolve_optional_effect_decision` runs before the handler
     // restores Priority) are a documented deferral: their object SBAs run on
     // the next priority-gated pass instead.
-    let paused_on_prompt = state.resolving_stack_entry.is_some()
-        && !matches!(state.waiting_for, WaitingFor::Priority { .. });
-    paused_on_prompt
+    resolution_is_paused_off_priority(state)
         || state.pending_replacement.is_some()
         || matches!(state.waiting_for, WaitingFor::ReturnAsAuraTarget { .. })
+}
+
+/// CR 704.3 + CR 704.4: whether a spell or ability's resolution is under way and
+/// parked off the priority boundary, so no player receives priority and no
+/// state-based action is checked yet.
+///
+/// The resolution carrier, not the open prompt's variant, is the authority: every
+/// prompted pause of a live resolution (a scry, a search, a discard, a CR 616.1
+/// replacement ordering, a CR 303.4f Aura-host choice, …) has a carrier and a
+/// non-`Priority` wait, while a prompt outside a resolution (the cleanup discard,
+/// an SBA-owned commander or legend choice) has none. A list of prompt variants
+/// is necessarily incomplete — `DiscardChoice`, for one, occurs both during a
+/// resolution and at cleanup.
+pub(crate) fn resolution_is_paused_off_priority(state: &GameState) -> bool {
+    state.resolving_stack_entry.is_some()
+        && !matches!(state.waiting_for, WaitingFor::Priority { .. })
 }
 
 /// CR 704.3: Run state-based actions in a fixpoint loop until no more actions are performed,

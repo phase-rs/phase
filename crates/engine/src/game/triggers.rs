@@ -9315,6 +9315,63 @@ pub(crate) fn collect_unclaimed_triggers_into_deferred(
     collect_unclaimed_delayed_triggers_into_deferred(state, events, &delayed);
 }
 
+/// CR 603.10 + CR 603.10f + CR 603.3a + CR 603.2c: collect a departure's
+/// look-back events against the observers latched immediately before it, and
+/// claim those occurrences for the ordinary collector.
+///
+/// A departure whose events a later pass scans ([`DepartureTriggers::PlacedByPass`])
+/// or whose caller scans them ([`DepartureTriggers::ScannedByCaller`]) would
+/// otherwise be matched against the game as it stands after the departure. For a
+/// "whenever a player loses the game" ability that is the wrong controller: the
+/// departure ends the leaving players' control effects (CR 800.4a), so live
+/// matching hands a stolen observer to its owner instead of attributing the
+/// trigger to the player who controlled it when the loss happened (CR 603.10f +
+/// CR 603.3a). Collecting against the latched observers fixes the attribution;
+/// the CR 800.4d pruning then retires it if that controller left. Claiming the
+/// occurrences keeps the later scan from firing the same observers again
+/// (CR 603.2c).
+pub(crate) fn collect_departure_look_back_triggers(
+    state: &mut GameState,
+    observers: ImmediatelyBeforeObservers,
+    events: &[GameEvent],
+    event_start: usize,
+    end: usize,
+) {
+    let consumed = state.consumed_before_priority_trigger_events.clone();
+    let mut looked_back_events = Vec::new();
+    let mut occurrences = Vec::new();
+    for index in event_start..end {
+        let event = &events[index];
+        if !departure_event_looks_back(event) {
+            continue;
+        }
+        let occurrence = trigger_event_occurrence(events, index);
+        let claimed = consumed.iter().any(|claim| {
+            claim.event == *event
+                && claim.occurrence == occurrence
+                && claim.scope.consumes(TriggerCollectionRequester::Ordinary)
+        });
+        if claimed {
+            continue;
+        }
+        looked_back_events.push(event.clone());
+        occurrences.push(ConsumedTriggerEventOccurrence {
+            event: event.clone(),
+            occurrence,
+            scope: ConsumedTriggerEventScope::OrdinaryCollectorsOnly,
+        });
+    }
+    if looked_back_events.is_empty() {
+        return;
+    }
+    observers.collect_into_deferred(state, &looked_back_events);
+    // CR 603.7b: the claim is ordinary-scope only, so a delayed ability is still
+    // entitled to the same occurrence on its own scan.
+    state
+        .consumed_before_priority_trigger_events
+        .extend(occurrences);
+}
+
 /// Collect `events`' triggers into the queue stamped `origin`: a priority
 /// boundary's own batch, or an SBA batch parked behind a choice.
 ///
