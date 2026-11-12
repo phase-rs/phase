@@ -15,8 +15,8 @@
 //!   replacement declined (Jinnie Fay, CR 614.6), an ordering between token
 //!   replacements (Parallel Lives + Halving Season, CR 616.1e), and an optional
 //!   token replacement accepted, whose substitute creation's tokens join the
-//!   referent (Jinnie Fay's Cats and Dogs, Moonlit Meditation's and Esix's
-//!   copies; CR 614.6 and Jinnie Fay's ruling, verbatim: "Anything else
+//!   referent (Jinnie Fay's Cat replacing Moonlit Meditation's copy for
+//!   Kiki-Jiki, Moonlit Meditation's and Esix's copies; CR 614.6 and Jinnie Fay's ruling, verbatim: "Anything else
 //!   specified in the effect creating the tokens (such as tapped, attacking,
 //!   “That token gains haste,” or “Exile that token at end of combat”) still
 //!   applies.").
@@ -2414,98 +2414,5 @@ fn r20_esix_copy_joins_those_tokens() {
         members, tokens,
         "the referent lists both copies in TokenCreated order"
     );
-    assert_end_step_exiles_every_token(driven);
-}
-
-/// R21: Twinflame on two Grizzly Bears with P0's Jinnie Fay, accepted at the
-/// first copy's event with the Cat branch. Jinnie Fay's ruling: "Anything else
-/// specified in the effect creating the tokens ... still applies", so the
-/// Cats are among "those tokens" (CR 614.6). The token-choice seed keeps Jinnie
-/// Fay off the second copy's event, which creates a Bears copy.
-#[test]
-fn r21_jinnie_cat_is_one_of_those_tokens() {
-    r21_jinnie_cat(PauseCarry::Live);
-}
-
-/// R21 through the engine's save/restore pipeline at the Jinnie Fay prompt and
-/// at the branch prompt, while the owner's first batch is marked.
-#[test]
-fn r21_jinnie_cat_is_one_of_those_tokens_across_save_and_restore() {
-    r21_jinnie_cat(PauseCarry::SavedAndRestored);
-}
-
-fn r21_jinnie_cat(carry: PauseCarry) {
-    let mut prompts: Vec<&'static str> = Vec::new();
-    let mut restores = 0;
-    let driven = cast_twinflame_with(&[BEARS, BEARS], &[(P0, JINNIE)], |waiting, driven| {
-        let action = match waiting {
-            WaitingFor::ReplacementChoice { candidates, .. } => GameAction::ChooseReplacement {
-                index: accept_index(candidates, JINNIE),
-            },
-            WaitingFor::ChooseOneOfBranch { .. } => GameAction::ChooseBranch { index: 0 },
-            _ => return None,
-        };
-        prompts.push(waiting.variant_name());
-        let owner = copy_token_owner(&driven.runner)
-            .cloned()
-            .expect("REACH-GUARD: the CopyToken owner is parked at every Jinnie Fay prompt");
-        assert_eq!(
-            owner.offered_batch,
-            OfferedBatchCustody::AtReplacementPrompt,
-            "the owner's first batch is owed the tokens of whatever replaces its creation"
-        );
-        if let PauseCarry::SavedAndRestored = carry {
-            driven.runner = save_and_restore(&driven.runner);
-            restores += 1;
-            assert_eq!(
-                copy_token_owner(&driven.runner).cloned(),
-                Some(owner),
-                "the owner, its marked batch included, crosses the wire unchanged"
-            );
-            assert_eq!(
-                driven.runner.state().waiting_for,
-                *waiting,
-                "the restored game is at the same prompt"
-            );
-        }
-        Some(action)
-    });
-    let Some(driven) = driven else {
-        return;
-    };
-    assert_eq!(
-        prompts,
-        vec!["ReplacementChoice", "ChooseOneOfBranch"],
-        "REACH-GUARD: one Jinnie Fay prompt and one branch prompt"
-    );
-    if let PauseCarry::SavedAndRestored = carry {
-        assert_eq!(
-            restores, 2,
-            "REACH-GUARD: saved and restored at both prompts"
-        );
-    }
-    let tokens = driven.created_tokens();
-    let bears = named(&driven, BEARS);
-    assert_eq!(
-        bears.len(),
-        1,
-        "REACH-GUARD: the second batch is one Bears copy, got {tokens:?}"
-    );
-    // Measured: the Cat branch creates no Cat ("that many" reads zero), a
-    // count defect outside this row. The row asserts only that whatever the
-    // substitute created is a Cat and is among "those tokens".
-    assert!(
-        tokens
-            .iter()
-            .filter(|id| !bears.contains(id))
-            .all(|id| driven.runner.state().objects[id].name == "Cat"),
-        "every substitute token is Jinnie Fay's Cat, got {tokens:?}"
-    );
-    assert_eq!(
-        driven.runner.state().last_created_token_ids,
-        tokens,
-        "LastCreated lists every created token in TokenCreated order"
-    );
-    assert_referent_is_every_token(&driven);
     assert_end_step_exiles_every_token(driven);
 }
