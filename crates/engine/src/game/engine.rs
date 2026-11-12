@@ -11545,8 +11545,14 @@ fn run_auto_pass_loop(
     state: &mut GameState,
     result: &mut ActionResult,
 ) -> Result<bool, EngineError> {
-    // The iteration cap below is the sustained-growth backstop; the shared
-    // growth ceilings (`runaway_growth_exceeded`) catch heavy-per-iteration loops.
+    // Per-dispatch resource ceilings for a runaway mandatory cascade.
+    // Sized above the largest legitimate single-dispatch burst (a Scute Swarm
+    // landfall copies every Scute in one resolution — tested boards reach ~2,936
+    // permanents) yet far below the WASM linear-memory exhaustion threshold
+    // (hundreds of thousands of objects). The iteration cap below is the
+    // sustained-growth backstop; these deltas catch heavy-per-iteration loops.
+    const MAX_EVENT_GROWTH: usize = 50_000;
+    const MAX_OBJECT_GROWTH: usize = 16_000;
     let events_baseline = result.events.len();
     let objects_baseline = state.objects.len();
 
@@ -11657,10 +11663,10 @@ fn run_auto_pass_loop(
                         // A mandatory cascade growing the board or
                         // event stream past the resource ceiling cannot settle —
                         // halt gracefully rather than exhaust WASM memory.
-                        if runaway_growth_exceeded(
-                            result.events.len().saturating_sub(events_baseline),
-                            state.objects.len().saturating_sub(objects_baseline),
-                        ) {
+                        if result.events.len().saturating_sub(events_baseline) > MAX_EVENT_GROWTH
+                            || state.objects.len().saturating_sub(objects_baseline)
+                                > MAX_OBJECT_GROWTH
+                        {
                             emit_resolution_halt(state, result);
                             return Ok(advanced);
                         }
@@ -11903,22 +11909,6 @@ pub(crate) fn resume_auto_pass_after_resolve_all(
     }
 }
 
-/// Per-dispatch resource ceilings for runaway mandatory work. Sized above the
-/// largest legitimate single-dispatch burst (a Scute Swarm landfall copies every
-/// Scute in one resolution — tested boards reach ~2,936 permanents) yet far
-/// below the WASM linear-memory exhaustion threshold (hundreds of thousands of
-/// objects).
-const MAX_EVENT_GROWTH: usize = 50_000;
-const MAX_OBJECT_GROWTH: usize = 16_000;
-
-/// The engine's one runaway authority: whether work done in one dispatch grew
-/// the event stream or the board past what the engine settles in a dispatch.
-/// The auto-pass drive checks it between resolutions; work that runs inside a
-/// single resolution (a repeated payment) checks it between its own steps.
-pub(crate) fn runaway_growth_exceeded(events_grown: usize, objects_grown: usize) -> bool {
-    events_grown > MAX_EVENT_GROWTH || objects_grown > MAX_OBJECT_GROWTH
-}
-
 /// CR 732.2: settle a runaway mandatory cascade gracefully. Pauses resolution,
 /// returns priority to the active player, and emits a non-fatal `ResolutionHalted`
 /// log event so the UI/log explains why the cascade stopped. Reached three ways:
@@ -11931,27 +11921,14 @@ fn emit_resolution_halt(state: &mut GameState, result: &mut ActionResult) {
     let mut involved: Vec<ObjectId> = state.stack.iter().map(|e| e.source_id).collect();
     involved.sort_unstable_by_key(|id| id.0);
     involved.dedup();
-    result.waiting_for = halt_resolution(state, &mut result.events, involved);
-}
+    result.events.push(GameEvent::ResolutionHalted { involved });
 
-/// CR 732.2: the one halt contract for work past the runaway ceiling
-/// ([`runaway_growth_exceeded`]): resolution is paused, `ResolutionHalted`
-/// names the sources involved, and priority returns to the active player. The
-/// work left stays where it is — a cascade's entries on the stack, a repeated
-/// payment's owed instructions under its owner — and continues when every
-/// player passes in succession.
-pub(crate) fn halt_resolution(
-    state: &mut GameState,
-    events: &mut Vec<GameEvent>,
-    involved: Vec<ObjectId>,
-) -> WaitingFor {
-    events.push(GameEvent::ResolutionHalted { involved });
     priority::reset_priority(state);
-    let waiting_for = WaitingFor::Priority {
+    let wf = WaitingFor::Priority {
         player: state.active_player,
     };
-    state.waiting_for = waiting_for.clone();
-    waiting_for
+    state.waiting_for = wf.clone();
+    result.waiting_for = wf;
 }
 
 /// CR 707.10c / CR 601.2c: advance the copy target walk after a pick — the

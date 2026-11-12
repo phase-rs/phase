@@ -2121,18 +2121,14 @@ struct RepeatedDrawUnlessPayment {
 ///   performed, the identity one that shows the fixed point included, so
 ///   replaying it reproduces the state;
 /// - a replacement that ends the game (Laboratory Maniac, CR 104.1);
-/// - a pause on a replacement choice, which parks the instructions still owed;
-/// - the engine's runaway ceilings ([`super::engine::runaway_growth_exceeded`]),
-///   the same per-dispatch bound the auto-pass drive halts on, with every
-///   instruction counted as at least one unit of work. Every bounded payment
-///   (a library's cards, a game end, a fixed point) settles far below them;
-///   only a replacement that changes the game on every draw of an enormous
-///   count (Hullbreacher's Treasure) reaches them. The payment is then halted
-///   under the one halt contract ([`super::engine::halt_resolution`]): the
-///   instructions still owed stay parked under this owner, never settled as
-///   paid (CR 702.24a: partial payments aren't allowed), priority returns to
-///   the active player, and when every player passes in succession the
-///   payment resumes ([`resume_halted_draw_payment`]).
+/// - a pause on a replacement choice, which parks the exact owed cursor under
+///   this owner ([`park_owed_instructions`]).
+///
+/// No other limit applies inside the payment: no instruction is refused, none
+/// is left unperformed, and no player receives priority until the payment
+/// ends (CR 117.2e; CR 702.24a: partial payments aren't allowed). A
+/// replacement that changes the game on every draw (Notion Thief,
+/// Hullbreacher's Treasure) is performed once per owed instruction.
 fn pay_repeated_draw_unless_cost(
     state: &mut GameState,
     payment: RepeatedDrawUnlessPayment,
@@ -2141,16 +2137,12 @@ fn pay_repeated_draw_unless_cost(
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
     let mut owed = owed.get();
-    let events_baseline = events.len();
-    let objects_baseline = state.objects.len();
-    let mut performed = 0usize;
     // The game before the current instruction, kept while the previous one
     // emitted nothing a trigger can key on: only such an instruction can be a
     // fixed point.
     let mut quiet_before = Some(state.clone());
     while owed > 0 {
         owed -= 1;
-        performed += 1;
         let instruction_start = events.len();
         match costs::resume_ability_cost_for_resolution(
             state,
@@ -2191,19 +2183,6 @@ fn pay_repeated_draw_unless_cost(
         {
             break;
         }
-        // Every instruction is at least one unit of work, so instructions
-        // that change the game without growing the event stream or the board
-        // are bounded by the same ceiling.
-        if owed > 0
-            && super::engine::runaway_growth_exceeded(
-                events.len().saturating_sub(events_baseline).max(performed),
-                state.objects.len().saturating_sub(objects_baseline),
-            )
-        {
-            let source = payment.pending_effect.source_id;
-            park_owed_instructions(state, payment, owed, payment_event_start, events);
-            return Ok(super::engine::halt_resolution(state, events, vec![source]));
-        }
         quiet_before = quiet.then(|| state.clone());
     }
     finish_successful_unless_payment(
@@ -2217,7 +2196,7 @@ fn pay_repeated_draw_unless_cost(
 
 /// Park the instructions still owed under the counted owner
 /// ([`PendingCostMoveResume::CounterAdditionUnlessPayment`]), as a pause on a
-/// replacement choice or a runaway halt leaves them.
+/// replacement choice leaves them.
 fn park_owed_instructions(
     state: &mut GameState,
     payment: RepeatedDrawUnlessPayment,
@@ -2255,59 +2234,6 @@ fn park_owed_instructions(
             })
         }),
     });
-}
-
-/// CR 732.2 + CR 702.24a: a repeated draw payment halted by the runaway
-/// ceiling: its instructions still owed are parked and no replacement prompt
-/// is open. When every player passes in succession with an empty stack, the
-/// payment resumes ([`resume_halted_draw_payment`]).
-pub(crate) fn draw_payment_is_halted(state: &GameState) -> bool {
-    state.pending_replacement.is_none()
-        && matches!(
-            &state.pending_cost_move_resume,
-            Some(PendingCostMoveResume::CounterAdditionUnlessPayment {
-                cost,
-                unpaid_suffix: Some(suffix),
-                ..
-            }) if costs::cost_includes_draw(cost)
-                && matches!(suffix.remainder, UnpaidCostRemainder::Repeated(_))
-        )
-}
-
-/// CR 702.24a: resume a halted repeated draw payment for its next dispatch.
-/// Every instruction it still owes is performed, under the same bounds.
-pub(crate) fn resume_halted_draw_payment(
-    state: &mut GameState,
-    events: &mut Vec<GameEvent>,
-) -> Result<WaitingFor, EngineError> {
-    let Some(PendingCostMoveResume::CounterAdditionUnlessPayment {
-        cost,
-        pending_effect,
-        trigger_event,
-        effect_description,
-        remaining,
-        unpaid_suffix: Some(suffix),
-    }) = state.pending_cost_move_resume.take()
-    else {
-        unreachable!("a halted draw payment parks its owed instructions");
-    };
-    let UnpaidCostRemainder::Repeated(owed) = suffix.remainder else {
-        unreachable!("a halted draw payment owes repeated instructions");
-    };
-    pay_repeated_draw_unless_cost(
-        state,
-        RepeatedDrawUnlessPayment {
-            payer: suffix.payer,
-            cost,
-            pending_effect,
-            trigger_event,
-            effect_description,
-            remaining,
-        },
-        owed,
-        None,
-        events,
-    )
 }
 
 /// CR 603.2c: whether the action ended at a prompt inside an unless payment of

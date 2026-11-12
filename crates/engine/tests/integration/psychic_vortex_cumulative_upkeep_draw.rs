@@ -2262,11 +2262,11 @@ fn laboratory_maniac_wins_a_payment_past_a_thousand_instructions() {
 }
 
 /// A mandatory replacement of its controller's draw with a gain of 1 life
-/// ("If you would draw a card, you gain 1 life instead"). Synthetic: the nearest printed card is Words of Worship ("The
-/// next time you would draw a card this turn, you gain 5 life instead"), a
-/// one-shot shield; no printed card replaces every draw with life. Each
-/// replaced draw changes the game without growing the board, so a payment of
-/// an enormous count reaches the engine's runaway event ceiling in seconds.
+/// ("If you would draw a card, you gain 1 life instead"). Synthetic: the
+/// nearest printed card is Words of Worship ("The next time you would draw a
+/// card this turn, you gain 5 life instead"), a one-shot shield; no printed
+/// card replaces every draw with life. Each replaced draw changes the game
+/// without growing the board.
 fn install_every_draw_gains_life(runner: &mut GameRunner, holder: ObjectId) {
     let replacement = ReplacementDefinition::new(ReplacementEvent::Draw)
         .draw_scope(DrawReplacementScope::IndividualDraw)
@@ -2286,23 +2286,14 @@ fn install_every_draw_gains_life(runner: &mut GameRunner, holder: ObjectId) {
     object.replacement_definitions.push(replacement);
 }
 
-fn halts(events: &[GameEvent], vortex: ObjectId) -> usize {
-    events
-        .iter()
-        .filter(|event| {
-            matches!(event, GameEvent::ResolutionHalted { involved } if involved.contains(&vortex))
-        })
-        .count()
-}
-
-/// CR 732.2 + CR 702.24a: a count no single dispatch can perform is halted by
-/// the engine's runaway ceiling, never refused and never settled as paid:
-/// the instructions still owed stay parked, `ResolutionHalted` names Psychic
-/// Vortex, and priority returns to the active player. When both players pass,
-/// the payment resumes, and every age counter is paid before the upkeep
+/// CR 702.24a + CR 117.2e: a payment whose replacement changes the game on
+/// every draw is performed for every age counter inside its resolution, past
+/// the 50,000-event ceiling the auto-pass drive applies between resolutions
+/// (three events per instruction). The payment is neither refused, halted nor
+/// settled partly paid, and no player receives priority before the upkeep
 /// resolves.
 #[test]
-fn a_payment_past_the_runaway_ceiling_halts_and_resumes_until_paid() {
+fn a_payment_past_the_auto_pass_event_ceiling_completes_in_its_resolution() {
     const AGE: u32 = 16_668;
     let (mut runner, vortex, holder) = vortex_board(AGE - 1, &STAGED_LIBRARY, |scenario| {
         scenario
@@ -2317,43 +2308,22 @@ fn a_payment_past_the_runaway_ceiling_halts_and_resumes_until_paid() {
     let paid = runner
         .act(GameAction::PayUnlessCost { pay: true })
         .expect("paying is never refused");
-    assert_eq!(halts(&paid.events, vortex), 1, "the payment halts once");
     assert!(
-        !upkeep_ability_resolved(&paid.events, vortex),
-        "the upkeep is not paid yet"
+        paid.events.len() > 50_000,
+        "reach guard: the payment's events pass the auto-pass ceiling: {}",
+        paid.events.len()
     );
     assert!(
-        matches!(runner.state().waiting_for, WaitingFor::Priority { player } if player == P0),
-        "priority returns to the active player: {:?}",
-        runner.state().waiting_for
+        !paid
+            .events
+            .iter()
+            .any(|event| matches!(event, GameEvent::ResolutionHalted { .. })),
+        "the payment is not halted"
     );
-    let performed = (runner.life(P0) - life_before) as u32;
-    assert_eq!(performed, 16_667, "the ceiling stops the first dispatch");
-    assert_eq!(
-        parked_unpaid_suffix(&runner),
-        owed_instructions(AGE - performed),
-        "every instruction not performed is still owed"
-    );
-    let mut events = Vec::new();
-    let mut passes = 0;
-    while runner.state().pending_cost_move_resume.is_some() {
-        events.extend(
-            runner
-                .act(GameAction::PassPriority)
-                .expect("passing priority resumes the payment")
-                .events,
-        );
-        passes += 1;
-        assert!(
-            passes <= 2,
-            "the payment resumes once every player has passed"
-        );
-    }
-    assert_eq!(halts(&events, vortex), 0, "the rest fits in one dispatch");
     assert_eq!(
         (runner.life(P0) - life_before) as u32,
         AGE,
-        "every age counter is paid"
+        "every age counter is paid in this action"
     );
     assert_eq!(
         ZoneSizes::of(&runner, P0),
@@ -2361,7 +2331,7 @@ fn a_payment_past_the_runaway_ceiling_halts_and_resumes_until_paid() {
         "every draw was replaced"
     );
     assert!(
-        upkeep_ability_resolved(&events, vortex),
+        upkeep_ability_resolved(&paid.events, vortex),
         "the upkeep is paid"
     );
     assert_eq!(zone_of(&runner, vortex), Zone::Battlefield);

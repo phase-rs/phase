@@ -1392,17 +1392,14 @@ pub enum GameEvent {
     GameOver {
         winner: Option<PlayerId>,
     },
-    /// CR 732.2: Mandatory work hit the engine's per-dispatch resource ceiling
-    /// without settling — an auto-resolution cascade (a net-progress loop the
-    /// engine cannot shortcut; CR 732.2 resolves these by a player-declared
-    /// iteration count the engine can't infer), or a repeated payment's
-    /// instructions (CR 702.24a). Resolution is paused and priority returned to
-    /// the active player; the remaining work (the stack, or the payment's owed
-    /// instructions) continues when every player passes in succession. NOT a
-    /// draw: distinct from CR 104.4b, which requires a *repeating* state (a true
-    /// loop is detected separately and ends the game). `involved` carries the
-    /// halted work's distinct source ids for diagnostics only — never read by
-    /// game logic.
+    /// CR 732.2: A mandatory auto-resolution sequence hit the engine's resource
+    /// ceiling without settling — a net-progress loop the engine cannot
+    /// shortcut (CR 732.2 resolves these by a player-declared iteration count
+    /// the engine can't infer). Resolution is paused and priority returned to
+    /// the active player. NOT a draw: distinct from CR 104.4b, which requires a
+    /// *repeating* state (a true loop is detected separately and ends the game).
+    /// `involved` carries the in-flight cascade's distinct stack-source ids for
+    /// diagnostics only — never read by game logic.
     ResolutionHalted {
         involved: Vec<ObjectId>,
     },
