@@ -2649,21 +2649,32 @@ pub(crate) fn concession_set_codes(session: &DraftSession) -> Vec<&str> {
 /// an ineligible designation is refused before the reducer mutates and before
 /// the draft acknowledges or advances; it reads the session's own
 /// `min_deck_size`, the same minimum match admission measures Yorion against.
-/// A submission without a companion has nothing to check.
+/// A submission without a companion has nothing to check. The submitted
+/// `commanders` are the Commander-deck context (CR 903.11a).
 pub fn check_submission_companion(
     session: &DraftSession,
     db: Option<&engine::database::CardDatabase>,
     main_deck: &[String],
+    commanders: &[String],
     companion: Option<&str>,
 ) -> Result<(), DraftError> {
     let Some(companion) = companion else {
         return Ok(());
     };
-    validate_companion_eligibility(db, main_deck, companion, session.config.min_deck_size).map_err(
-        |error| DraftError::ValidationFailed {
-            errors: vec![error],
-        },
+    // CR 903.3: a kind whose decks require commanders builds Commander decks,
+    // so admission measures the companion with the commanders in context.
+    let uses_commander = session.kind.procedure().commanders_required > 0;
+    validate_companion_eligibility(
+        db,
+        main_deck,
+        commanders,
+        uses_commander,
+        companion,
+        session.config.min_deck_size,
     )
+    .map_err(|error| DraftError::ValidationFailed {
+        errors: vec![error],
+    })
 }
 
 fn apply_submit_deck(

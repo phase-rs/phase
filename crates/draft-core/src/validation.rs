@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 // Deep-path import by design: `engine::game::mod` re-exports `deck_validation`'s
 // public surface, but this phase must not edit that file.
 use engine::database::CardDatabase;
-use engine::game::deck_validation::{limited_companion_eligibility, GrantableCommanderFiller};
+use engine::game::deck_validation::{companion_eligibility_for_deck, GrantableCommanderFiller};
 
 use crate::types::DeckAddableCards;
 
@@ -102,17 +102,21 @@ pub enum LimitedDeckError {
     CompanionUnverifiable { name: String },
 }
 
-/// CR 702.139a/b: the engine's Limited companion-eligibility check applied to a
-/// draft submission, so the draft never acknowledges a designation that match
-/// admission (`evaluate_deck_format_gate`) would refuse. Reuses
-/// [`limited_companion_eligibility`] -- the same authority the generic gate
-/// calls -- measured against the session's own `min_deck_size`.
+/// CR 702.139a/b + CR 903.11a: the engine's companion-eligibility check applied
+/// to a draft submission, so the draft never acknowledges a designation that
+/// match admission (`evaluate_deck_format_gate`) would refuse. Reuses
+/// [`companion_eligibility_for_deck`] -- the same authority both the Limited and
+/// the Commander-family gates call -- with the submitted commanders as context
+/// when the draft's decks are Commander decks, measured against the session's
+/// own `min_deck_size`.
 ///
 /// `db` is `None` only where no card database is loaded; a designation then
 /// fails closed, because it cannot be verified.
 pub fn validate_companion_eligibility(
     db: Option<&CardDatabase>,
     main_deck: &[String],
+    commanders: &[String],
+    uses_commander: bool,
     companion: &str,
     min_deck_size: usize,
 ) -> Result<(), LimitedDeckError> {
@@ -121,7 +125,14 @@ pub fn validate_companion_eligibility(
             name: companion.to_string(),
         });
     };
-    match limited_companion_eligibility(db, main_deck, companion, min_deck_size) {
+    match companion_eligibility_for_deck(
+        db,
+        main_deck,
+        commanders,
+        uses_commander,
+        companion,
+        min_deck_size,
+    ) {
         Some(true) => Ok(()),
         Some(false) | None => Err(LimitedDeckError::IneligibleCompanion {
             name: companion.to_string(),

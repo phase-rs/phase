@@ -1182,6 +1182,7 @@ pub fn submit_deck(
 fn check_companion_before_submit(
     session: &DraftSession,
     main_deck: &[String],
+    commanders: &[String],
     companion: Option<&str>,
 ) -> Result<(), String> {
     CARD_DB
@@ -1190,6 +1191,7 @@ fn check_companion_before_submit(
                 session,
                 cell.borrow().as_ref(),
                 main_deck,
+                commanders,
                 companion,
             )
         })
@@ -1215,7 +1217,7 @@ fn submit_deck_inner(
     let companion = companion_designation(companion);
 
     with_draft_mut_inner(|session| {
-        check_companion_before_submit(session, &main_deck, companion.as_deref())?;
+        check_companion_before_submit(session, &main_deck, &commanders, companion.as_deref())?;
         session::apply(
             session,
             DraftAction::SubmitDeck {
@@ -1456,7 +1458,7 @@ fn submit_deck_for_seat_inner(
     let companion = companion_designation(companion);
 
     with_draft_mut_inner(|session| {
-        check_companion_before_submit(session, &main_deck, companion.as_deref())?;
+        check_companion_before_submit(session, &main_deck, &commanders, companion.as_deref())?;
         session::apply(
             session,
             DraftAction::SubmitDeck {
@@ -6069,6 +6071,57 @@ mod create_multiplayer_draft_tests {
 
     /// A designation cannot be verified without a card database, so it is not
     /// admitted rather than trusted.
+    /// CR 903.11a: a Commander Draft submission is measured like Commander
+    /// admission -- the companion must fit the designated commander's color
+    /// identity. Here that is the ONLY failing condition (the companion's own
+    /// condition and the deck are fine), so only the commander context refuses it.
+    #[test]
+    fn commander_draft_submission_checks_the_companion_against_the_commander_identity() {
+        use engine::types::card::CardFace;
+        use engine::types::keywords::{CompanionCondition, Keyword};
+        use engine::types::mana::ManaColor;
+        let install = |companion_identity: ManaColor| {
+            let mut faces: std::collections::BTreeMap<String, serde_json::Value> =
+                Default::default();
+            let mut add = |face: CardFace| {
+                faces.insert(
+                    face.name.to_lowercase(),
+                    serde_json::to_value(&face).unwrap(),
+                );
+            };
+            add(CardFace {
+                name: "Seat 0 Card 0".to_string(),
+                color_identity: vec![ManaColor::White],
+                ..CardFace::default()
+            });
+            add(CardFace {
+                name: "Seat 0 Card 60".to_string(),
+                color_identity: vec![companion_identity],
+                keywords: vec![Keyword::Companion(CompanionCondition::MinManaValue(0))],
+                ..CardFace::default()
+            });
+            let db = CardDatabase::from_json_str(&serde_json::to_string(&faces).unwrap()).unwrap();
+            CARD_DB.with(|cell| *cell.borrow_mut() = Some(db));
+        };
+        clear_state();
+        granting_commander_pod(0, 61);
+        let deck = seat_deck(0, 60);
+        let commanders = json(&["Seat 0 Card 0".to_string()]);
+        let companion = "Seat 0 Card 60";
+
+        install(ManaColor::Blue);
+        let error = submit_deck_inner(&json(&deck), &commanders, Some(companion))
+            .expect_err("a blue companion is outside a white commander's identity");
+        assert!(error.contains("not a legal companion"), "{error}");
+        assert_eq!(submitted_companion(0), None);
+
+        install(ManaColor::White);
+        submit_deck_inner(&json(&deck), &commanders, Some(companion))
+            .expect("a companion inside the commander's identity is admitted");
+        assert_eq!(submitted_companion(0), Some(Some(companion.to_string())));
+        clear_state();
+    }
+
     #[test]
     fn submission_refuses_a_companion_it_cannot_verify() {
         clear_state();

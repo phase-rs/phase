@@ -833,28 +833,35 @@ fn printed_in_any_set(db: &CardDatabase, name: &str, sets: &[SetCode]) -> bool {
     })
 }
 
-/// CR 702.139a/b: whether `companion_name` is a legal companion for a Limited
-/// starting deck of `main_deck`, measured against `min_deck_size` (Yorion-class
-/// conditions read the format's own minimum). The single authority for Limited
-/// companion eligibility: the generic deck gate (`evaluate_limited`) and a
-/// draft session's submission check both call it, so an admitted draft deck can
-/// never be refused at match admission. `None` when the companion card does not
-/// resolve in `db` (the caller decides whether that is an unknown-card refusal).
-pub fn limited_companion_eligibility(
+/// CR 702.139a/b + CR 903.11a: whether `companion_name` is a legal companion for
+/// a starting deck of `main_deck`, measured against `min_deck_size` (Yorion-class
+/// conditions read the format's own minimum). With `uses_commander` the starting
+/// deck includes `commanders` and the companion must also clear the Commander
+/// rules for cards brought in from outside the game (name and color identity).
+///
+/// The single authority for companion eligibility at deck admission: the generic
+/// Limited gate, the Commander-family gate and a draft session's submission
+/// check all call it, so a draft deck that is acknowledged can never be refused
+/// at match admission. `None` when the companion card does not resolve in `db`
+/// (the caller decides whether that is an unknown-card refusal).
+pub fn companion_eligibility_for_deck(
     db: &CardDatabase,
     main_deck: &[String],
+    commanders: &[String],
+    uses_commander: bool,
     companion_name: &str,
     min_deck_size: usize,
 ) -> Option<bool> {
     let face = db.get_face_by_name(companion_name)?;
     let companion = DeckEntry::from_resolved_face(db, face, 1);
     let main = deck_entries_for_names(db, main_deck);
-    let starting = companion_starting_deck(&main, &[], false);
+    let commanders = deck_entries_for_names(db, commanders);
+    let starting = companion_starting_deck(&main, &commanders, uses_commander);
     Some(is_eligible_companion_with_min_deck_size(
         &companion,
         &starting,
-        &[],
-        false,
+        &commanders,
+        uses_commander,
         min_deck_size,
     ))
 }
@@ -881,8 +888,14 @@ fn evaluate_limited(
         // CR 702.139b: Yorion-class conditions measure the starting deck
         // against this format's own minimum.
         let min_deck_size = request.companion_min_deck_size(format_rules);
-        if limited_companion_eligibility(db, &request.main_deck, companion_name, min_deck_size)
-            == Some(false)
+        if companion_eligibility_for_deck(
+            db,
+            &request.main_deck,
+            &[],
+            false,
+            companion_name,
+            min_deck_size,
+        ) == Some(false)
         {
             reasons.push(format!(
                 "{companion_name}: not a legal companion for this starting deck"
@@ -1700,26 +1713,20 @@ fn validate_commander_companion(
     }
 
     let companion_name = &request.companion[0];
-    let Some(face) = db.get_face_by_name(companion_name) else {
-        return;
-    };
-    let companion = DeckEntry::from_resolved_face(db, face, 1);
-    let main = deck_entries_for_names(db, &request.main_deck);
-    let commanders = deck_entries_for_names(db, &request.commander);
     // Reads the STORED `uses_commander` field rather than the bare
     // `GameFormat::uses_commander()` method: `format_rules` may be a
     // `Resolved` custom config for which the bare method would return `Err`
     // (see `SelectedFormat`) — the stored field is always available.
-    let uses_commander = format_rules.uses_commander;
     let min_deck_size = request.companion_min_deck_size(format_rules);
-    let starting = companion_starting_deck(&main, &commanders, uses_commander);
-    if !is_eligible_companion_with_min_deck_size(
-        &companion,
-        &starting,
-        &commanders,
-        uses_commander,
+    if companion_eligibility_for_deck(
+        db,
+        &request.main_deck,
+        &request.commander,
+        format_rules.uses_commander,
+        companion_name,
         min_deck_size,
-    ) {
+    ) == Some(false)
+    {
         reasons.push(format!(
             "{companion_name}: not a legal companion for this starting deck"
         ));
