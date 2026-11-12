@@ -6696,7 +6696,7 @@ describe("WebSocketAdapter — acquired socket ownership", () => {
       }
     });
 
-    it("keeps the adopted candidate, with its bootstrap applied, when a listener throws while it is dispatched", async () => {
+    it("keeps the adopted candidate, with its snapshot committed and its binding accepted, when a listener throws while it is dispatched", async () => {
       const { adapter, raw, candidate, events, codec } = await sentCandidate();
       let armed = true;
       const failure = new Error("reconnected listener failed");
@@ -6718,7 +6718,10 @@ describe("WebSocketAdapter — acquired socket ownership", () => {
         // The throw does not undo the adoption: the candidate stays open and
         // carries the next command, as it would on live delivery.
         expect(candidate.close).not.toHaveBeenCalled();
-        // The bootstrap was committed before any listener ran.
+        // The snapshot was committed before any listener ran. The rest of that
+        // frame's handling (stateChanged, playerIdentity, sessionChanged) is
+        // abandoned by the throw, as on live gzip/codec delivery: the next
+        // StateUpdate publishes the board.
         expect((await adapter.getSnapshot()).state.turn_number).toBe(5);
         // Its codec binding is accepted: a later rejected Delta costs one
         // resync on a healthy stream, not a terminal bootstrap rejection.
@@ -6744,7 +6747,9 @@ describe("WebSocketAdapter — acquired socket ownership", () => {
         try {
           // A bootstrap-shaped frame reaches the incumbent inside the interval
           // (for example a game-start broadcast before the server handled the
-          // candidate's Reconnect).
+          // candidate's Reconnect). Only GameStarted is a frame this server
+          // sends to a started game's seat; GameCreated and StateWithheld are
+          // synthetic here, exercising the gate each arm shares.
           if (type === "GameStarted") {
             deliverCodec(raw, "Full", codecGameStarted(7, 7));
           } else if (type === "GameCreated") {

@@ -4105,6 +4105,9 @@ describe("ServerDraftAdapter — negotiated StateCodecV1", () => {
       vi.useFakeTimers();
       const { adapter, ws, candidate, command, reconnecting } = await sentCandidate();
       try {
+        // Synthetic: for a seat in a match this server answers a reattach with
+        // DraftMatchStart, GameStarted and DraftStateUpdate (main.rs:2795-2815);
+        // a lone DraftStateUpdate is the pre-match answer (:2644).
         // A slow but valid bootstrap: twice the 5 s handshake bound, inside this one.
         expect(SETUP_CONFIRMATION_TIMEOUT_MS).toBeGreaterThan(10_000);
         await vi.advanceTimersByTimeAsync(10_000);
@@ -4288,6 +4291,8 @@ describe("ServerDraftAdapter — negotiated StateCodecV1", () => {
       vi.useFakeTimers();
       const { adapter, ws, candidate, reconnecting } = await sentCandidate();
       try {
+        // The answer below is a lone DraftStateUpdate, synthetic for a seat in
+        // a match (see the previous test); the gate is what this test pins.
         const sentBefore = ws.send.mock.calls.length;
         const notSent = {
           code: "ACTION_NOT_SENT",
