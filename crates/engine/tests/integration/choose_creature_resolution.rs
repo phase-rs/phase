@@ -1823,3 +1823,165 @@ fn sakashimas_will_second_mode_chooses_the_original_at_resolution() {
     );
     assert_eq!(runner.state().objects[&spell].zone, Zone::Graveyard);
 }
+
+// ---------------------------------------------------------------------------
+// Turbocharged Escape, Goliath Hatchery and Ascent of the Worthy: three printed
+// cards whose bare "choose a <object> you control" now resolves as the effect is
+// applied (CR 608.2d). Each also prints an instruction the parser leaves
+// unimplemented, so each stays unsupported; these rows pin only the choice: it
+// is not announced, it offers only the controller's own objects (one with shroud
+// included), and answering it lets the resolution finish. Each card is loaded
+// from the committed card-data fixture; the permanents are test bodies.
+// ---------------------------------------------------------------------------
+
+/// Answer the resolution-time creature/permanent choice with `pick`, asserting the
+/// offered set first.
+fn answer_resolution_choice(
+    runner: &mut GameRunner,
+    source: ObjectId,
+    offered: &[ObjectId],
+    pick: ObjectId,
+    what: &str,
+) {
+    pass_priority_to_prompt(runner, what);
+    let WaitingFor::ChooseFromZoneChoice {
+        player,
+        cards,
+        count,
+        source_id,
+        ..
+    } = &runner.state().waiting_for
+    else {
+        panic!(
+            "{what}: expected the resolution choice: {:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert_eq!(*player, P0, "{what}");
+    assert_eq!(*source_id, source, "{what}");
+    assert_eq!(*count, 1, "{what}");
+    assert_eq!(id_set(cards), id_set(offered), "{what}: the offered set");
+    assert!(offered.contains(&pick), "{what}: the answer is offered");
+    runner
+        .act(GameAction::SelectCards { cards: vec![pick] })
+        .unwrap();
+}
+
+#[test]
+fn turbocharged_escape_offers_the_casters_vehicles_at_resolution() {
+    let db = load_db().expect("the committed card-data fixture carries Turbocharged Escape");
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let vehicle = scenario
+        .add_artifact_from_oracle(P0, "Own Vehicle", "")
+        .with_subtypes(vec!["Vehicle"])
+        .id();
+    let shroud_vehicle = scenario
+        .add_artifact_from_oracle(P0, "Shroud Vehicle", "")
+        .with_subtypes(vec!["Vehicle"])
+        .with_keyword(Keyword::Shroud)
+        .id();
+    scenario
+        .add_artifact_from_oracle(P1, "Opposing Vehicle", "")
+        .with_subtypes(vec!["Vehicle"]);
+    let victim = scenario.add_creature(P0, "Non-Vehicle creature", 2, 2).id();
+    for _ in 0..5 {
+        scenario.add_basic_land(P0, ManaColor::White);
+    }
+    let spell = scenario.add_real_card(P0, "Turbocharged Escape", Zone::Hand, db);
+    let mut runner = scenario.build();
+    engine::game::rehydrate_game_from_card_db(runner.state_mut(), db);
+    let card_id = runner.state().objects[&spell].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: spell,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .unwrap();
+    // CR 115.10a: nothing is announced while casting.
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+        "{:?}",
+        runner.state().waiting_for
+    );
+    answer_resolution_choice(
+        &mut runner,
+        spell,
+        &[vehicle, shroud_vehicle],
+        shroud_vehicle,
+        "Turbocharged Escape",
+    );
+    assert_eq!(runner.state().objects[&victim].zone, Zone::Graveyard);
+    assert_resolution_settled(&runner, "Turbocharged Escape");
+}
+
+#[test]
+fn goliath_hatchery_upkeep_trigger_offers_the_controllers_creatures_at_resolution() {
+    let db = load_db().expect("the committed card-data fixture carries Goliath Hatchery");
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::Untap);
+    let hatchery = scenario.add_real_card(P0, "Goliath Hatchery", Zone::Battlefield, db);
+    let shroud = scenario
+        .add_creature(P0, "Shroud creature", 2, 2)
+        .with_keyword(Keyword::Shroud)
+        .id();
+    let other = scenario.add_creature(P0, "Other creature", 1, 1).id();
+    scenario.add_creature(P1, "Opposing creature", 3, 3);
+    let mut runner = scenario.build();
+    engine::game::rehydrate_game_from_card_db(runner.state_mut(), db);
+    // Corrupted: an opponent has three or more poison counters.
+    runner.state_mut().players[P1.0 as usize].poison_counters = 3;
+    for _ in 0..16 {
+        if !matches!(runner.state().waiting_for, WaitingFor::Priority { .. }) {
+            break;
+        }
+        if runner.state().phase == Phase::Upkeep && !runner.state().stack.is_empty() {
+            break;
+        }
+        runner.act(GameAction::PassPriority).unwrap();
+    }
+    assert_eq!(runner.state().phase, Phase::Upkeep, "reached P0's upkeep");
+    assert_eq!(
+        runner.state().stack.len(),
+        1,
+        "the corrupted trigger is on the stack"
+    );
+    answer_resolution_choice(
+        &mut runner,
+        hatchery,
+        &[shroud, other],
+        shroud,
+        "Goliath Hatchery",
+    );
+}
+
+#[test]
+fn ascent_of_the_worthy_first_chapter_offers_the_controllers_creatures_at_resolution() {
+    let db = load_db().expect("the committed card-data fixture carries Ascent of the Worthy");
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::Upkeep);
+    let saga = scenario.add_real_card(P0, "Ascent of the Worthy", Zone::Battlefield, db);
+    scenario.with_counter(saga, CounterType::Lore, 0);
+    // The draw step precedes the precombat main phase.
+    scenario.add_card_to_library_top(P0, "Library card");
+    let shroud = scenario
+        .add_creature(P0, "Shroud creature", 2, 2)
+        .with_keyword(Keyword::Shroud)
+        .id();
+    let other = scenario.add_creature(P0, "Other creature", 1, 1).id();
+    scenario.add_creature(P1, "Opposing creature", 3, 3);
+    let mut runner = scenario.build();
+    engine::game::rehydrate_game_from_card_db(runner.state_mut(), db);
+    // CR 714.3c: a lore counter is added as the precombat main phase begins, and
+    // chapter I triggers.
+    runner.advance_to_phase(Phase::PreCombatMain);
+    answer_resolution_choice(
+        &mut runner,
+        saga,
+        &[shroud, other],
+        shroud,
+        "Ascent of the Worthy",
+    );
+}
