@@ -15581,7 +15581,7 @@ fn restore_validates_the_sacrifice_completion_by_its_variant() {
         .spent_units_for_payer_and_recipient(P0, &recipient)
         .unwrap_or_else(|| {
             panic!(
-                "reach-guard: the journal must record a settled spend for {} under this \
+                "reach-guard: the journal must record a settled spend for {:?} under this \
                  recipient, but it records spends for {:?}",
                 spell,
                 runner
@@ -15589,7 +15589,7 @@ fn restore_validates_the_sacrifice_completion_by_its_variant() {
                     .resolved_rules_journal
                     .spent_mana()
                     .iter()
-                    .map(|spent| spent.recipient)
+                    .map(|spent| format!("{:?}", spent.recipient))
                     .collect::<Vec<_>>()
             )
         })
