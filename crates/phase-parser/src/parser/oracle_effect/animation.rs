@@ -1100,45 +1100,72 @@ mod test_den_bugbear {
             "a creature subtype still implies a creature"
         );
 
-        let parsed = parse_oracle_text(
-            "At the beginning of combat on your turn, until end of turn, noncreature artifacts you control become 3/3 Vehicles in addition to their other types and gain flying, haste, and crew 1.",
-            "New New York",
-            &[],
-            &["Plane".into()],
-            &[],
-        );
-        let trigger = parsed.triggers.first().expect("the combat trigger");
-        let Some(execute) = trigger.execute.as_ref() else {
-            panic!("the trigger carries its animation");
-        };
-        let Effect::GenericEffect {
-            static_abilities, ..
-        } = execute.effect.as_ref()
-        else {
-            panic!("expected an animation effect, got {:?}", execute.effect);
-        };
-        let modifications: Vec<_> = static_abilities
-            .iter()
-            .flat_map(|s| &s.modifications)
-            .collect();
-        assert!(
-            modifications.contains(&&ContinuousModification::AddSubtype {
-                subtype: "Vehicle".into()
-            }),
-            "the objects become Vehicles: {modifications:?}"
-        );
-        assert!(
-            !modifications.iter().any(|m| matches!(
-                m,
-                ContinuousModification::AddType {
-                    core_type: CoreType::Creature
-                }
-            )),
-            "a Vehicle is not a creature until crewed: {modifications:?}"
-        );
-        assert!(modifications
-            .iter()
-            .any(|m| matches!(m, ContinuousModification::SetPower { value: 3 })));
+        // The plural form (New New York) and the singular form with a Vehicle
+        // exclusion in the subject (Ghirapur) are different grammar branches.
+        for (name, line, power, toughness, crew) in [
+            (
+                "New New York",
+                "At the beginning of combat on your turn, until end of turn, noncreature artifacts you control become 3/3 Vehicles in addition to their other types and gain flying, haste, and crew 1.",
+                3,
+                3,
+                1,
+            ),
+            (
+                "Ghirapur",
+                "At the beginning of combat on your turn, until end of turn, each noncreature, non-Vehicle artifact you control becomes a 5/3 Vehicle in addition to its other types and gains trample, haste, and crew 2.",
+                5,
+                3,
+                2,
+            ),
+        ] {
+            let parsed = parse_oracle_text(line, name, &[], &["Plane".into()], &[]);
+            let trigger = parsed.triggers.first().expect("the combat trigger");
+            let Some(execute) = trigger.execute.as_ref() else {
+                panic!("{name}: the trigger carries its animation");
+            };
+            let Effect::GenericEffect {
+                static_abilities, ..
+            } = execute.effect.as_ref()
+            else {
+                panic!("{name}: expected an animation effect, got {:?}", execute.effect);
+            };
+            let modifications: Vec<_> = static_abilities
+                .iter()
+                .flat_map(|s| &s.modifications)
+                .collect();
+            assert!(
+                modifications.contains(&&ContinuousModification::AddSubtype {
+                    subtype: "Vehicle".into()
+                }),
+                "{name}: the objects become Vehicles: {modifications:?}"
+            );
+            assert!(
+                !modifications.iter().any(|m| matches!(
+                    m,
+                    ContinuousModification::AddType {
+                        core_type: CoreType::Creature
+                    }
+                )),
+                "{name}: a Vehicle is not a creature until crewed: {modifications:?}"
+            );
+            assert!(
+                modifications.contains(&&ContinuousModification::SetPower { value: power }),
+                "{name}: {modifications:?}"
+            );
+            assert!(
+                modifications.contains(&&ContinuousModification::SetToughness { value: toughness }),
+                "{name}: {modifications:?}"
+            );
+            assert!(
+                modifications.iter().any(|m| matches!(
+                    m,
+                    ContinuousModification::AddKeyword {
+                        keyword: Keyword::Crew { power: got, .. }
+                    } if *got == crew
+                )),
+                "{name}: crew {crew}: {modifications:?}"
+            );
+        }
     }
 
     #[test]
