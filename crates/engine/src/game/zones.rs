@@ -2798,7 +2798,7 @@ impl LibraryReorderOperation {
     ///
     /// CR 701.24a + CR 701.24e: A multi-card placement randomizes knowledge even
     /// when the chosen arrangement matches the input order (identity permutation).
-    /// Retire reveals for any non-empty set of members that were in the library
+    /// Retire reveals for any set of two or more members that were in the library
     /// before and after the operation.
     pub(crate) fn finish(self, state: &mut GameState) {
         for (player, before) in self.libraries {
@@ -2809,7 +2809,10 @@ impl LibraryReorderOperation {
                 .copied()
                 .filter(|id| before.contains(id) && after.contains(id))
                 .collect();
-            if !reordered.is_empty() {
+            // A lone member is settled by `reorder_within_library` (retired only
+            // if it actually moved), so an in-place singleton placement keeps
+            // any independent stack-bound reveal lease on it.
+            if reordered.len() > 1 {
                 retire_reordered_library_reveals(state, &reordered);
             }
         }
