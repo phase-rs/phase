@@ -1406,6 +1406,67 @@ fn clone_legion_beside(
     })
 }
 
+#[test]
+fn clone_legion_copy_choice_excludes_artifact_animated_by_a_co_entrant() {
+    let mut scenario = board();
+    let bello = "Bello, Bard of the Brambles";
+    scenario
+        .add_creature_from_oracle(
+            P1,
+            bello,
+            3,
+            3,
+            "During your turn, each non-Equipment artifact and non-Aura enchantment you control with mana value 4 or greater is a 4/4 Elemental creature in addition to its other types and has indestructible, haste, and \"Whenever this creature deals combat damage to a player, draw a card.\"",
+        )
+        .as_legendary()
+        .with_subtypes(vec!["Raccoon", "Bard"]);
+    // This copy flushes the live layers between the Bello and Gargantuan entries.
+    scenario
+        .add_creature_from_oracle(P1, TRISKELION_NAME, 1, 1, TRISKELION)
+        .as_artifact_creature()
+        .with_subtypes(vec!["Construct"])
+        .with_mana_cost(ManaCost::generic(6));
+    add_donor(&mut scenario, P1, GARGANTUAN_DONOR);
+    let dynamo = scenario
+        .add_artifact_from_oracle(P0, "Thran Dynamo", "{T}: Add {C}{C}{C}.")
+        .with_mana_cost(ManaCost::generic(4))
+        .id();
+    let spell = free_spell(&mut scenario, "Clone Legion", false, CLONE_LEGION);
+    let mut runner = scenario.build();
+    runner.cast(spell).target_player(P1).commit();
+    let answered = drive_carried(
+        &mut runner,
+        PauseCarry::Live,
+        &Script {
+            copy_targets: vec![CopyPick::card(TRISKELION_NAME, P1)],
+            ..Script::default()
+        },
+        |runner, prompt| {
+            if let Prompt::CopyTarget { .. } = prompt {
+                assert_co_entrant_parked(runner, bello, "Bello donor eligibility");
+                assert!(
+                    runner.state().objects[&dynamo]
+                        .card_types
+                        .core_types
+                        .contains(&CoreType::Creature),
+                    "Dynamo is animated on the live board at the copy prompt"
+                );
+            }
+        },
+    );
+    let offers = copy_offers(&answered.prompts);
+    assert_eq!(offers.len(), 1, "Gargantuan offers a copy choice");
+    assert!(offers[0].contains(&CopyPick::card(bello, P1)));
+    assert!(offers[0].contains(&CopyPick::card(TRISKELION_NAME, P1)));
+    assert!(
+        !offers[0].contains(&CopyPick::card("Thran Dynamo", P0)),
+        "Dynamo is ineligible on the board before Bello enters, got {:?}",
+        offers[0]
+    );
+    assert_settled(&runner, "Bello donor eligibility");
+    assert_eq!(battlefield_tokens(&runner, TRISKELION_NAME).len(), 2);
+}
+
 /// G1: Clone Legion over P1's [Margle, Quicksilver Gargantuan]. The Gargantuan copy
 /// accepts its copy offer and copies P0's Triskelion. The Margle copy co-enters, so the
 /// copied "enters with three +1/+1 counters" applies (CR 614.12 + CR 707.5), and the
