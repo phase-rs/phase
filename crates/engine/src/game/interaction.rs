@@ -353,7 +353,7 @@ fn human_response_model(waiting_for: &WaitingFor, semantic_owner: PlayerId) -> H
         | WaitingFor::MiracleReveal { .. }
         | WaitingFor::OpponentMayChoice { .. }
         | WaitingFor::UnlessPayment { .. }
-        | WaitingFor::UnlessPaymentChooseCost { .. }
+        | WaitingFor::UnlessPaymentChooseCost { .. } => HumanResponseModel::ExactCandidates(AuditedExactCandidates),
         | WaitingFor::ChooseRoomDoor { .. }
         | WaitingFor::ChooseDungeon { .. }
         | WaitingFor::ChooseDungeonRoom { .. }
