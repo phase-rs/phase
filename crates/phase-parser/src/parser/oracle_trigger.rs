@@ -54,7 +54,6 @@ use super::oracle_nom::primitives::{
     split_sentence_units,
 };
 use super::oracle_nom::quantity::parse_using_mana_produced_by_self;
-use super::oracle_nom::target::parse_chosen_object_reference;
 use super::oracle_nom::target::parse_type_phrase as parse_type_phrase_nom;
 use super::oracle_nom::target::CostChannel;
 use super::oracle_nom::target::{controller_phrase_among, ControllerPhrase};
@@ -14283,7 +14282,9 @@ fn trigger_condition_objects(
         None
         | Some(AttackTargetFilter::Player)
         | Some(AttackTargetFilter::Owner)
-        | Some(AttackTargetFilter::Monarch) => true,
+        | Some(AttackTargetFilter::Monarch)
+        // CR 508.6: a player the source already attacked this turn — a player.
+        | Some(AttackTargetFilter::PlayerAttackedBySourceThisTurn) => true,
         Some(
             AttackTargetFilter::Planeswalker
             | AttackTargetFilter::PlayerOrPlaneswalker
