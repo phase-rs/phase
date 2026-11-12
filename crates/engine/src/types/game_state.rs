@@ -19982,7 +19982,18 @@ impl GameState {
                     // held. Evaluating through the projection that omits both would refuse an
                     // untouched save whose filter names a zone ("target creature card from a
                     // graveyard") or reads a token leaf.
-                    if !crate::game::filter::matches_target_filter_on_recorded_announcement(
+                    //
+                    // CR 508.1k + CR 601.2c: only a DEFINITE failure contradicts the
+                    // declaration. The announcement records no combat role — an `LKISnapshot`
+                    // snapshots none, and CR 613.1 re-derives creature state continuously, so
+                    // the record is the only surviving authority and it says nothing about
+                    // attacking or blocking. Answer `None` (UNRECORDED) therefore means this
+                    // guard has nothing to check, not that the target failed its slot: an
+                    // honest Kill Shot ("Destroy target attacking creature.") announced at an
+                    // attacker would otherwise be refused on restore because the projected
+                    // record's zeroed `ZoneChangeCombatStatus` reads as "nonattacking". A
+                    // missing recorded fact is not a failed predicate.
+                    if crate::game::filter::matches_target_filter_on_recorded_announcement(
                         state,
                         *fact_id,
                         lki,
@@ -19990,7 +20001,8 @@ impl GameState {
                         &context,
                         zone.zone(),
                         token.bit(),
-                    ) {
+                    ) == Some(false)
+                    {
                         return Err(PersistedRestoreError::ContradictoryAnnouncedTargetFacts {
                             spell_object_id: pending.object_id,
                             reason:

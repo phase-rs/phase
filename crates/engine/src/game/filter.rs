@@ -6235,6 +6235,17 @@ pub fn matches_target_filter_on_damage_record_source(
 /// a zone ("target creature card from a graveyard") or reading a token leaf is judged
 /// against silence and refuses an honest record. The announcement that produced the fact
 /// stated both, so they are the projection a restore boundary must use.
+///
+/// Three-valued, because the answer belongs to the reader (the same contract as
+/// [`zone_change_filter_answer_with_epoch`]). `Some(true)` / `Some(false)` are the
+/// record's definite answers. `None` is UNRECORDED: the filter asks for an axis the
+/// announcement never captured, so the save neither proves nor contradicts it. Today
+/// that axis is combat role — an `LKISnapshot` snapshots no attacking/blocking state
+/// (CR 508.1k, CR 509.1g), and the projected record's zeroed `ZoneChangeCombatStatus`
+/// is the record type's required value rather than an observation. A reader asking
+/// "does this filter hold?" collapses `None` to no match; the restore guard
+/// (`PersistedGameState`'s announced-target check) refuses only a definite
+/// `Some(false)`, because a missing recorded fact is not a failed predicate.
 pub fn matches_target_filter_on_recorded_announcement(
     state: &GameState,
     object_id: ObjectId,
@@ -6243,8 +6254,8 @@ pub fn matches_target_filter_on_recorded_announcement(
     ctx: &FilterContext<'_>,
     announced_zone: Option<Zone>,
     captured_token: Option<bool>,
-) -> bool {
-    matches_target_filter_on_lki_snapshot_with_incarnation(
+) -> Option<bool> {
+    lki_snapshot_filter_answer(
         state,
         object_id,
         lki,
@@ -6753,6 +6764,10 @@ struct LkiProjection {
     captured_token: Option<bool>,
 }
 
+/// The two-valued door over [`lki_snapshot_filter_answer`]: the caller asked
+/// whether the filter HOLDS of the projected snapshot, and a leaf the capture
+/// cannot answer does not hold. Readers that must distinguish "does not hold"
+/// from "not recorded" call the three-valued function instead.
 fn matches_target_filter_on_lki_snapshot_with_incarnation(
     state: &GameState,
     object_id: ObjectId,
@@ -6761,6 +6776,20 @@ fn matches_target_filter_on_lki_snapshot_with_incarnation(
     ctx: &FilterContext<'_>,
     projection: LkiProjection,
 ) -> bool {
+    lki_snapshot_filter_answer(state, object_id, lki, filter, ctx, projection)
+        .is_some_and(|holds| holds)
+}
+
+/// The three-valued body: `None` is UNRECORDED, and only the answering entry
+/// point decides what that means for its reader.
+fn lki_snapshot_filter_answer(
+    state: &GameState,
+    object_id: ObjectId,
+    lki: &LKISnapshot,
+    filter: &TargetFilter,
+    ctx: &FilterContext<'_>,
+    projection: LkiProjection,
+) -> Option<bool> {
     // CR 115.9 + CR 400.7: how to project this snapshot is one statement, so it
     // travels as one value rather than three trailing arguments that every caller
     // must spell out in order.
@@ -6851,11 +6880,11 @@ fn matches_target_filter_on_lki_snapshot_with_incarnation(
         ),
     };
     // CR 115.9 + CR 608.2h: three-valued, because a leaf this capture cannot
-    // answer must neither report a match nor be inverted into one. UNKNOWN
-    // settles to no match at this boundary — the caller asked whether the filter
-    // holds of the selection, and an unprovable leaf does not hold.
+    // answer must neither report a match nor be inverted into one. The
+    // two-valued door above settles UNKNOWN to no match; a reader that must tell
+    // "does not hold" from "not recorded" (the restore guard's contradiction
+    // check) receives the answer itself.
     zone_change_filter_answer_with_epoch(state, &record, record.from_zone, filter, ctx, epoch)
-        .is_some_and(|holds| holds)
 }
 
 /// CR 608.2k + CR 608.2h: Evaluate a target filter against an ability's
@@ -8310,27 +8339,37 @@ fn zone_change_filter_answer_with_epoch(
                 ctx.triggering_object,
                 ctx.granting_object,
             );
-            // Every property is definite, so the record walk decides the
-            // remaining axes (types, controller) and combines them the same way
-            // it always has. An unanswerable property poisons the conjunction:
-            // conservative in one direction only, because UNKNOWN never becomes a
-            // match and no other axis can turn it into one.
-            kleene_and(
+            // CR 205.1 + CR 115.9: the property axis and the REMAINING axes
+            // (types, controller) are one conjunction, and each is answered the
+            // way its own evidence allows. The property axis is answered
+            // three-valued; the remaining axes are definite, so they are read
+            // from the record walk with the properties removed.
+            //
+            // An unanswerable property must not swallow a contradiction on
+            // another axis. Returning UNKNOWN alone would do exactly that — a
+            // recorded NONCREATURE would slip through a "creature that was
+            // attacking" filter on the strength of the unrecorded combat leaf.
+            // Conjoining keeps the definite failure definite and leaves UNKNOWN
+            // only when every recorded axis is satisfied.
+            let properties = kleene_and(
                 typed
                     .properties
                     .iter()
                     .map(|prop| epoch_property_answer(prop, epoch, state, record, &source_ctx)),
-            )
-            .map(|_| {
-                zone_change_filter_inner_with_epoch(
-                    state,
-                    record,
-                    licensed,
-                    filter,
-                    ctx,
-                    Some(epoch),
-                )
-            })
+            );
+            let axes_only = TargetFilter::Typed(TypedFilter {
+                properties: Vec::new(),
+                ..typed.clone()
+            });
+            let axes = zone_change_filter_inner_with_epoch(
+                state,
+                record,
+                licensed,
+                &axes_only,
+                ctx,
+                Some(epoch),
+            );
+            kleene_and([properties, Some(axes)])
         }
         _ => Some(zone_change_filter_inner_with_epoch(
             state,
@@ -8343,13 +8382,25 @@ fn zone_change_filter_answer_with_epoch(
     }
 }
 
-/// Whether `prop` asks for a fact only the captured epoch can answer — directly,
-/// or through the composites the record walk recurses into.
+/// Whether `prop` is answered by the CAPTURE rather than by the record walk —
+/// directly, or through the composites the record walk recurses into. These are
+/// the leaves whose truth belongs to what the epoch captured: the tap/token facts
+/// an `LKISnapshot` states, and combat role, which it never states at all.
 fn epoch_answerable_property(prop: &FilterProp) -> bool {
     match prop {
-        FilterProp::Token | FilterProp::NonToken | FilterProp::Tapped | FilterProp::Untapped => {
-            true
-        }
+        FilterProp::Token
+        | FilterProp::NonToken
+        | FilterProp::Tapped
+        | FilterProp::Untapped
+        // CR 508.1k + CR 509.1g + CR 506.5: combat role. An `LKISnapshot` never
+        // captures it, so the projected record's zeroed `ZoneChangeCombatStatus`
+        // is the record type's required value, not an observation; the leaf is
+        // answered by [`CapturedEpoch`], which states none.
+        | FilterProp::Attacking { .. }
+        | FilterProp::Blocking
+        | FilterProp::BlockStatus { .. }
+        | FilterProp::AttackingAlone
+        | FilterProp::BlockingAlone => true,
         FilterProp::AnyOf { props } => props.iter().any(epoch_answerable_property),
         FilterProp::Not { prop } => epoch_answerable_property(prop),
         _ => false,
@@ -8381,6 +8432,23 @@ fn epoch_property_answer(
         // CR 110.5 + CR 110.5d: tap status, only for a permanent.
         FilterProp::Tapped => epoch.tap_status(),
         FilterProp::Untapped => epoch.tap_status().map(|tapped| !tapped),
+        // CR 508.1k + CR 509.1g + CR 509.1h + CR 506.5 + CR 115.9: combat role.
+        //
+        // `LKISnapshot` carries no combat role, so the record this epoch projects
+        // states `ZoneChangeCombatStatus::default()` only because the field must
+        // hold SOMETHING — nothing observed that the subject was not attacking.
+        // Reading that zero bit here would report a fact the capture never stated
+        // as a FAILED predicate: a Kill Shot announced at an attacker would read
+        // "nonattacking" on restore and refuse an untouched save. The epoch
+        // therefore answers UNKNOWN, and the entry point that answers a caller
+        // decides what UNKNOWN means (see
+        // [`matches_target_filter_on_recorded_announcement`], where the restore
+        // guard treats it as no check).
+        FilterProp::Attacking { .. }
+        | FilterProp::Blocking
+        | FilterProp::BlockStatus { .. }
+        | FilterProp::AttackingAlone
+        | FilterProp::BlockingAlone => None,
         // Every other leaf is a definite answer from the capture.
         _ => Some(zone_change_record_matches_property(
             prop,
@@ -24936,6 +25004,102 @@ mod tests {
         assert!(
             history(FilterProp::Untapped),
             "the selection was untapped, so 'was untapped' holds"
+        );
+    }
+
+    /// CR 508.1k + CR 509.1g + CR 115.9: an `LKISnapshot` records no combat role,
+    /// so a recorded announcement answers a combat predicate as UNRECORDED
+    /// (`None`) — never as a failed predicate, which would refuse an honest Kill
+    /// Shot announced at an attacker, and never as a match either, which would
+    /// admit the same save for a target that was not attacking. Negation keeps
+    /// the unknown, so "nonattacking" is not reported as a match on evidence the
+    /// announcement never carried.
+    ///
+    /// The axes the announcement DID capture stay definite, and an unrecorded
+    /// property cannot mask a contradiction among them: the same filter whose
+    /// combat leaf is unrecorded still refuses a recorded NONCREATURE.
+    ///
+    /// Revert-probe: answering the combat leaves from the projected record's
+    /// zeroed `ZoneChangeCombatStatus` (the pre-fix record walk) returns
+    /// `Some(false)`/`Some(true)` for `Attacking`/`Not(Attacking)` where this test
+    /// requires `None` in both directions.
+    #[test]
+    fn recorded_announcement_answers_combat_role_as_unrecorded() {
+        let mut state = setup();
+        let source = add_creature(&mut state, PlayerId(0), "Kill Shot");
+        let target = add_creature(&mut state, PlayerId(1), "Raider");
+        let ctx = FilterContext::from_source(&state, source);
+
+        // CR 601.2c: the announcement's own captures — the zone it was announced
+        // in and the token bit it then held. Neither is combat role.
+        let announcement = |lki: &LKISnapshot, filter: &TargetFilter| {
+            super::matches_target_filter_on_recorded_announcement(
+                &state,
+                target,
+                lki,
+                filter,
+                &ctx,
+                Some(Zone::Battlefield),
+                Some(false),
+            )
+        };
+        let lki = epoch_snapshot(&[], false);
+
+        // The combat leaves: UNRECORDED, and their negations too.
+        let attacking = || prop_filter(FilterProp::Attacking { defender: None });
+        let nonattacking = || {
+            prop_filter(FilterProp::Not {
+                prop: Box::new(FilterProp::Attacking { defender: None }),
+            })
+        };
+        assert_eq!(
+            announcement(&lki, &attacking()),
+            None,
+            "the snapshot records no combat role, so 'attacking' is unrecorded, not false"
+        );
+        assert_eq!(
+            announcement(&lki, &nonattacking()),
+            None,
+            "and 'nonattacking' is unrecorded too — never a match on absent evidence"
+        );
+        for prop in [
+            FilterProp::Blocking,
+            FilterProp::BlockingAlone,
+            FilterProp::AttackingAlone,
+            FilterProp::BlockStatus {
+                status: AttackerBlockStatus::Blocked,
+            },
+        ] {
+            assert_eq!(
+                announcement(&lki, &prop_filter(prop.clone())),
+                None,
+                "{prop:?} is combat role, which the announcement never records"
+            );
+        }
+
+        // The axes the announcement DID capture are still definite.
+        assert_eq!(
+            announcement(&lki, &prop_filter(FilterProp::NonToken)),
+            Some(true),
+            "CR 111.1: the captured token bit says nontoken"
+        );
+        assert_eq!(
+            announcement(&lki, &TargetFilter::Typed(TypedFilter::creature())),
+            Some(true),
+            "the snapshot's captured card type says creature"
+        );
+        let mut noncreature = epoch_snapshot(&[], false);
+        noncreature.card_types.clear();
+        assert_eq!(
+            announcement(
+                &noncreature,
+                &TargetFilter::Typed(
+                    TypedFilter::creature()
+                        .properties(vec![FilterProp::Attacking { defender: None },])
+                ),
+            ),
+            Some(false),
+            "an unrecorded combat leaf must not mask a recorded NONCREATURE contradiction"
         );
     }
 

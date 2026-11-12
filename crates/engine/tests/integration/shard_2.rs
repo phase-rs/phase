@@ -56,6 +56,7 @@ mod angels_grace_2hg;
 mod anger_milled_into_graveyard;
 mod announce_locked_x_runtime;
 mod announced_counter_recipient_set;
+mod announced_target_combat_unknown;
 mod announced_target_set_placement;
 mod announced_target_token_capture;
 mod announced_x_discard_cost;
