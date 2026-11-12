@@ -3330,6 +3330,8 @@ mod tests {
             next_pairing_round: 1,
             tournament_format: TournamentFormat::Swiss,
             pod_policy: PodPolicy::Competitive,
+            post_draft_play: DraftKind::Sealed.procedure().post_draft_play,
+            deck_submission_open: false,
             pairings: Vec::new(),
             match_config: DraftKind::Sealed.match_config(),
             // Sealed has no shared stack and no Winston play/draw election, so
@@ -3352,6 +3354,7 @@ mod tests {
                 assert_eq!(v.pick_number, 2);
                 assert_eq!(v.pick_selection_mode, PickSelectionMode::Direct);
                 assert_eq!(v.launch_capability, DraftLaunchCapability::None);
+                assert_eq!(v.post_draft_play, PostDraftPlay::TournamentPairings);
                 assert_eq!(v.commanders_required, 0);
                 assert_eq!(v.timer_remaining_ms, Some(5000));
                 assert_eq!(v.pool_groups, view.pool_groups);

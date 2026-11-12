@@ -38,7 +38,7 @@ jobs:
     # retain a bounded job while leaving room for the remaining lint gates.
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # Full history so the parser-combinator gate can diff against origin/main.
           fetch-depth: 0
@@ -222,12 +222,13 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - name: Free runner disk for Rust test linking
-        # Build the workspace's test binaries once. Keep the Rust caches intact
-        # and reclaim only unused hosted-image payloads before setup-rust-toolchain
-        # restores/saves Cargo state.
+      - &free_runner_disk_cleanup
+        name: Free runner disk for Rust test linking and extraction
+        # Keep Rust caches intact and reclaim only unused hosted-image payloads
+        # before linking or extracting the test archive, and before
+        # setup-rust-toolchain restores/saves Cargo state.
         run: |
           echo "Disk before cleanup:"
           df -h /
@@ -305,15 +306,17 @@ jobs:
     name: Rust tests (shard ${{ matrix.shard }}/4)
     needs: rust-test-build
     runs-on: ubuntu-latest
-    # Archive downloads can consume over 10 minutes before tests begin.
-    # Keep a bounded job with time for each shard to finish its tests.
-    timeout-minutes: 30
+    # A shard hit the 30-minute ceiling after over 10 minutes of archive setup;
+    # allow 45 minutes for setup, extraction, and test execution.
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
         shard: [1, 2, 3, 4, 5]
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - *free_runner_disk_cleanup
 
       # Some snapshot tests query Cargo metadata at runtime. This makes Cargo
       # available but does not build test binaries; those come from the archive.
@@ -364,7 +367,7 @@ jobs:
     # the failure case.
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # Parse-diff reads both parents of GitHub's synthetic PR merge commit.
           fetch-depth: 2
@@ -398,7 +401,7 @@ jobs:
         # because the download is file-existence-gated. Same-week runs reuse the
         # exact-key hit.
         id: mtgjson-cache
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: data/mtgjson/AtomicCards.json
           key: mtgjson-atomic-${{ steps.cache-keys.outputs.week }}
@@ -447,7 +450,7 @@ jobs:
         # before deriving the key so the gitignored MTGJSON input participates
         # in it.
         id: cardgen-cache
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             data/card-data.json
@@ -472,7 +475,7 @@ jobs:
         # green for the next push. This cache is written by card-data-gate alone,
         # so a hit cannot lie about a gate.
         id: gates-cache
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             data/coverage-data.json
@@ -770,7 +773,7 @@ jobs:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1.17.0
         with:
@@ -789,7 +792,7 @@ jobs:
         # card-data-gate's `mtgjson-atomic-` key (this job never fetches
         # AtomicCards). Exact weekly key, NO restore-keys: a new week misses and
         # re-fetches fresh set data; same-week runs reuse the exact-key hit.
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             data/mtgjson/SetList.json
@@ -819,7 +822,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1.17.0
         with:
@@ -837,7 +840,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1.17.0
         with:
@@ -882,7 +885,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Validate Gradle wrapper
         uses: gradle/actions/wrapper-validation@9c971963bec38e04b3d30dcc455b5382be2fdbfb # v6.3.0
@@ -1031,7 +1034,7 @@ jobs:
     # Cache-hit npm ci runs have exceeded five minutes; leave room for the measured slow tail.
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
         with:
@@ -1054,7 +1057,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # The tests never touch git; don't leave the token in .git/config.
           persist-credentials: false
@@ -1077,7 +1080,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
 
@@ -1141,7 +1144,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 40
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 

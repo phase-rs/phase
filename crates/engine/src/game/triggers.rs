@@ -63,7 +63,9 @@ use super::speed::{
 use super::stack;
 
 // Re-export so existing paths stay valid.
-pub use super::trigger_matchers::{build_trigger_registry, trigger_matcher, trigger_registry};
+pub use super::trigger_matchers::{
+    attack_trigger_matches_attack, build_trigger_registry, trigger_matcher, trigger_registry,
+};
 
 /// Function signature for trigger matchers: returns true if event matches the trigger.
 pub type TriggerMatcher = fn(
@@ -7484,7 +7486,7 @@ fn drop_auto_inert_noop_trigger(state: &mut GameState, ctx: &PendingTriggerConte
     if !pending.ability.optional {
         return false;
     }
-    if pending.ability.sub_ability.is_some() {
+    if pending.ability.sub_ability.is_some() || pending.ability.coin_branches.is_some() {
         return false;
     }
     let Some(origin) = pending.may_trigger_origin.clone() else {
@@ -7511,6 +7513,9 @@ fn pending_trigger_has_no_legal_resolution_targets(
     ctx: &PendingTriggerContext,
 ) -> bool {
     let pending = &ctx.pending;
+    if pending.ability.coin_branches.is_some() {
+        return false;
+    }
     let context_snapshot = push_trigger_event_context(
         state,
         pending.trigger_event.as_ref(),
@@ -9767,6 +9772,10 @@ pub(crate) fn seed_batched_attack_parent_targets(
     if attacker_ids.is_empty() {
         return;
     }
+    // CR 608.2b: a validated-empty announcement cannot be reseeded by an event.
+    if ability.has_authoritative_empty_binding() {
+        return;
+    }
     if !effect_uses_parent_target(&ability.effect) || !ability.targets.is_empty() {
         return;
     }
@@ -9787,6 +9796,11 @@ pub(crate) fn seed_batched_attack_parent_targets(
 /// `current_trigger_event`. CR 603.6 specifically authorizes zone-change
 /// abilities to find and affect the object after it changes zones.
 fn parent_target_seeding_blocked(ability: &ResolvedAbility) -> bool {
+    // CR 608.2b: neither event subjects nor attached hosts replace an
+    // unavailable announcement, at stack placement or resolution fallback.
+    if ability.has_authoritative_empty_binding() {
+        return true;
+    }
     // CR 115.1: event-context seeding is not a spell or ability that may change
     // a chosen target, so it never overwrites one, even when the chosen target
     // is the trigger's own source.
@@ -10763,25 +10777,15 @@ pub(crate) enum PendingTriggeredManaClass {
     Ordinary(Box<PendingTriggerContext>),
 }
 
-/// True iff any reachable `sub_ability` / `else_ability` link satisfies `pred`.
+/// True iff any reachable live child link satisfies `pred`.
 pub(crate) fn any_reachable_link(
     ability: &ResolvedAbility,
     pred: &dyn Fn(&ResolvedAbility) -> bool,
 ) -> bool {
-    if pred(ability) {
-        return true;
-    }
-    if let Some(sub) = ability.sub_ability.as_deref() {
-        if any_reachable_link(sub, pred) {
-            return true;
-        }
-    }
-    if let Some(else_branch) = ability.else_ability.as_deref() {
-        if any_reachable_link(else_branch, pred) {
-            return true;
-        }
-    }
-    false
+    pred(ability)
+        || ability
+            .child_links()
+            .any(|(_, child)| any_reachable_link(child, pred))
 }
 
 /// True iff any reachable link carries an `unless_pay` modifier
@@ -14371,8 +14375,12 @@ fn quantity_ref_binding_diverges(qty: &QuantityRef) -> bool {
         | QuantityRef::PlayerCounter { .. }
         | QuantityRef::SelfManaValue
         | QuantityRef::Devotion { .. }
+        // Turtle Team-Up: global command-zone pile census — binds identically
+        // on both legs (not resolution-scoped like the linked-exile family).
+        | QuantityRef::DeployedBossCount
         | QuantityRef::BasicLandTypeCount { .. }
         | QuantityRef::CrimesCommittedThisTurn
+        | QuantityRef::EnergyPaidOrLostThisTurn
         | QuantityRef::BendTypesThisTurn
         | QuantityRef::TurnsTaken
         | QuantityRef::ChosenNumber
@@ -19465,13 +19473,13 @@ pub mod tests {
         CommanderOwnership, Comparator, ContinuousModification, ControllerRef, DamageChannel,
         DamageKindFilter, DelayedTriggerCondition, DelayedTriggerKind, DelayedTriggerLifetime,
         DiscardSelfScope, Duration, EachDamageRecipient, Effect, FilterProp, GuessSubject,
-        KickerVariant, ModalChoice, MultiTargetSpec, NumberQuality, Parity, PlayerFilter,
-        PlayerScope, PreventionAmount, PreventionScope, PtStat, PtValue, PtValueScope,
-        QuantityExpr, QuantityRef, ReplacementDefinition, ReplacementMode, ResolvedAbility,
-        SearchSelectionConstraint, SharedQuality, SharedQualityRelation, SpentColor,
-        StaticCondition, StaticDefinition, TargetFilter, TargetRef, TargetSelectionMode,
-        TriggerCondition, TriggerConstraint, TriggerDefinition, TriggerGrantInstanceRef,
-        TypeFilter, TypedFilter,
+        KickerVariant, ModalChoice, MultiTargetSpec, NumberQuality, ParentTargetMissingReason,
+        Parity, PlayerFilter, PlayerScope, PreventionAmount, PreventionScope, PtStat, PtValue,
+        PtValueScope, QuantityExpr, QuantityRef, ReplacementDefinition, ReplacementMode,
+        ResolvedAbility, SearchSelectionConstraint, SharedQuality, SharedQualityRelation,
+        SpentColor, StaticCondition, StaticDefinition, TargetFilter, TargetReadOrigin, TargetRef,
+        TargetSelectionMode, TriggerCondition, TriggerConstraint, TriggerDefinition,
+        TriggerGrantInstanceRef, TypeFilter, TypedFilter,
     };
     use crate::types::actions::GameAction;
     use crate::types::card::LayoutKind;
@@ -21170,6 +21178,86 @@ pub mod tests {
             Some(state.waiting_for.clone()),
             "the orphaned trigger's prompt must be surfaced, not silently dropped"
         );
+    }
+
+    // Real cards: no printed card exhibits this shape (Oracle regexes: attack trigger + counter on
+    // it (Gleam of Battle), attack trigger + search/reveal/look + counter on it (explore cards
+    // Glowcap Lantern, Subterranean Schooner), mill trigger + counter on it (Grolnok, the Omnivore,
+    // which has an Unimplemented clause). None combines an empty producer with event seeding).
+    // Shape: A 'put a +1/+1 counter on it' instruction under a Milled or attackers-declared trigger
+    // is not seeded with the event object exactly when its parent binding is authoritatively empty
+    // (dig, search, reveal, exile-top, illegal announcement). Nearest printed card: Gleam of Battle
+    // ("Whenever a creature you control attacks, put a +1/+1 counter on it.") -- Gleam of Battle
+    // seeds 'it' from the attack event; it has no producer or announcement whose empty result could
+    // block that seeding.
+    #[test]
+    fn unavailable_announcements_block_only_their_own_event_and_attack_reseeding() {
+        let state = GameState::default();
+        let event = GameEvent::Milled {
+            player_id: PlayerId(0),
+            object_id: ObjectId(42),
+            to: Zone::Graveyard,
+        };
+        let attack = GameEvent::AttackersDeclared {
+            attacker_ids: vec![ObjectId(42)],
+            defending_player: PlayerId(1),
+            attacks: vec![],
+            declaration_records: vec![],
+        };
+        for reason in [
+            None,
+            Some(ParentTargetMissingReason::Dig),
+            Some(ParentTargetMissingReason::ChooseFromZone),
+            Some(ParentTargetMissingReason::RevealHandChoice),
+            Some(ParentTargetMissingReason::ExileTop),
+            Some(ParentTargetMissingReason::RevealUntil),
+            Some(ParentTargetMissingReason::SearchLibrary),
+            Some(ParentTargetMissingReason::IllegalAnnouncement {
+                origin: TargetReadOrigin::OwnAnnouncement,
+            }),
+            Some(ParentTargetMissingReason::IllegalAnnouncement {
+                origin: TargetReadOrigin::ParentAnnouncement,
+            }),
+        ] {
+            for timing in [
+                EventContextSeedTiming::StackPush,
+                EventContextSeedTiming::ResolutionFallback,
+            ] {
+                let mut ability = ResolvedAbility::new(
+                    Effect::PutCounter {
+                        counter_type: crate::types::counter::CounterType::Plus1Plus1,
+                        count: QuantityExpr::Fixed { value: 1 },
+                        target: TargetFilter::ParentTarget,
+                    },
+                    vec![],
+                    ObjectId(99),
+                    PlayerId(0),
+                );
+                ability.parent_target_missing_reason = reason;
+                let blocked = ability.has_authoritative_empty_binding();
+                seed_event_context_parent_targets(&state, &mut ability, Some(&event), timing);
+                assert_eq!(
+                    ability.targets,
+                    if blocked {
+                        vec![]
+                    } else {
+                        vec![TargetRef::Object(ObjectId(42))]
+                    },
+                    "event reason={reason:?} timing={timing:?}"
+                );
+                ability.set_unpinned_targets(vec![]);
+                seed_batched_attack_parent_targets(&mut ability, Some(&attack));
+                assert_eq!(
+                    ability.targets,
+                    if blocked {
+                        vec![]
+                    } else {
+                        vec![TargetRef::Object(ObjectId(42))]
+                    },
+                    "attack reason={reason:?}"
+                );
+            }
+        }
     }
 
     /// V15 — CR 701.17c: the placement-time half of the "that card" anaphor.
@@ -31327,6 +31415,7 @@ pub mod tests {
                         AbilityDefinition::new(
                             AbilityKind::Database,
                             Effect::ChangeZone {
+                                library_shuffle: Default::default(),
                                 origin: Some(Zone::Battlefield),
                                 destination: Zone::Exile,
                                 target: TargetFilter::Typed(
@@ -31944,6 +32033,7 @@ pub mod tests {
             let mut execute = AbilityDefinition::new(
                 AbilityKind::Database,
                 Effect::ChangeZone {
+                    library_shuffle: Default::default(),
                     origin: None,
                     destination: Zone::Exile,
                     target: TargetFilter::Typed(TypedFilter {
@@ -32134,6 +32224,7 @@ pub mod tests {
         let mut execute = AbilityDefinition::new(
             AbilityKind::Database,
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Graveyard),
                 destination: Zone::Exile,
                 target: TargetFilter::Typed(TypedFilter {
@@ -32340,6 +32431,7 @@ pub mod tests {
             let mut execute = AbilityDefinition::new(
                 AbilityKind::Database,
                 Effect::ChangeZone {
+                    library_shuffle: Default::default(),
                     origin: None,
                     destination: Zone::Exile,
                     target: TargetFilter::Typed(TypedFilter {
@@ -32460,6 +32552,7 @@ pub mod tests {
                         AbilityDefinition::new(
                             AbilityKind::Database,
                             Effect::ChangeZone {
+                                library_shuffle: Default::default(),
                                 origin: Some(Zone::Battlefield),
                                 destination: Zone::Exile,
                                 target: TargetFilter::Typed(
@@ -32537,6 +32630,7 @@ pub mod tests {
                     .execute(AbilityDefinition::new(
                         AbilityKind::Database,
                         Effect::ChangeZone {
+                            library_shuffle: Default::default(),
                             origin: Some(Zone::Battlefield),
                             destination: Zone::Exile,
                             target: TargetFilter::Typed(
@@ -32598,6 +32692,7 @@ pub mod tests {
                     .execute(AbilityDefinition::new(
                         AbilityKind::Database,
                         Effect::ChangeZone {
+                            library_shuffle: Default::default(),
                             origin: None,
                             destination: Zone::Exile,
                             target: TargetFilter::Typed(
@@ -32788,6 +32883,7 @@ pub mod tests {
             trigger.execute = Some(Box::new(crate::types::ability::AbilityDefinition::new(
                 AbilityKind::Spell,
                 Effect::ChangeZone {
+                    library_shuffle: Default::default(),
                     origin: Some(Zone::Graveyard),
                     destination: Zone::Battlefield,
                     target: TargetFilter::SelfRef,
@@ -32948,6 +33044,7 @@ pub mod tests {
             trigger.execute = Some(Box::new(AbilityDefinition::new(
                 AbilityKind::Spell,
                 Effect::ChangeZone {
+                    library_shuffle: Default::default(),
                     origin: Some(Zone::Graveyard),
                     destination: Zone::Battlefield,
                     target: TargetFilter::SelfRef,
@@ -33233,6 +33330,7 @@ pub mod tests {
                             AbilityDefinition::new(
                                 AbilityKind::Spell,
                                 Effect::ChangeZone {
+                                    library_shuffle: Default::default(),
                                     origin: None,
                                     destination: Zone::Exile,
                                     target: TargetFilter::Any,
@@ -37239,6 +37337,7 @@ pub mod tests {
         // CR 115.1: "Put a land from your hand" doesn't target — selection at resolution.
 
         let effect = Effect::ChangeZone {
+            library_shuffle: Default::default(),
             origin: Some(Zone::Hand),
             destination: Zone::Battlefield,
             target: TargetFilter::Typed(
@@ -37269,6 +37368,7 @@ pub mod tests {
         // "Exile target creature" should still extract the target filter
 
         let effect = Effect::ChangeZone {
+            library_shuffle: Default::default(),
             origin: None,
             destination: Zone::Exile,
             target: TargetFilter::Typed(TypedFilter::creature()),
@@ -51408,6 +51508,7 @@ pub mod tests {
                     .execute(AbilityDefinition::new(
                         AbilityKind::Database,
                         Effect::ChangeZone {
+                            library_shuffle: Default::default(),
                             origin: None,
                             destination: Zone::Exile,
                             target: TargetFilter::Any,
@@ -52736,6 +52837,7 @@ pub mod tests {
             LogicalZoneProductionCarrier::ChangeZone => {
                 let ability = ResolvedAbility::new(
                     Effect::ChangeZone {
+                        library_shuffle: Default::default(),
                         origin: None,
                         destination,
                         target: TargetFilter::Any,
@@ -52820,6 +52922,7 @@ pub mod tests {
                         .execute(AbilityDefinition::new(
                             AbilityKind::Database,
                             Effect::ChangeZone {
+                                library_shuffle: Default::default(),
                                 origin: None,
                                 destination: redirected_destination,
                                 target: TargetFilter::SelfRef,
@@ -55567,6 +55670,7 @@ pub mod tests {
                         .execute(AbilityDefinition::new(
                             AbilityKind::Database,
                             Effect::ChangeZone {
+                                library_shuffle: Default::default(),
                                 origin: None,
                                 destination: Zone::Exile,
                                 target: TargetFilter::SelfRef,
@@ -55807,6 +55911,7 @@ pub mod tests {
                 ],
             };
             let execute_effect = Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Graveyard),
                 destination: Zone::Battlefield,
                 target: TargetFilter::Typed(TypedFilter {
@@ -55936,6 +56041,7 @@ pub mod tests {
                 ],
             };
             let execute_effect = Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Graveyard),
                 destination: Zone::Battlefield,
                 target: TargetFilter::Typed(TypedFilter {

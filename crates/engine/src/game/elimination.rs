@@ -483,36 +483,7 @@ pub(crate) fn eliminate_players(
                 crate::game::lifecycle::DelayedTerminalDisposition::Eliminated,
             );
         }
-        // Terminal: drop trigger scaffolding the client would otherwise show as
-        // a stuck stack / ordering prompt.
-        let mut terminal_firings = state
-            .pending_trigger_order
-            .take()
-            .into_iter()
-            .flat_map(|order| order.groups)
-            .flat_map(|group| group.triggers)
-            .map(|context| context.firing())
-            .collect::<Vec<_>>();
-        terminal_firings.extend(
-            std::mem::take(&mut state.deferred_triggers)
-                .into_iter()
-                .map(|context| context.firing()),
-        );
-        terminal_firings.extend(state.pending_trigger_firing.take());
-        crate::game::triggers::release_pending_trigger_construction(state);
-        // CR 117.3c: The construction priority recipient is scheduling state for
-        // a batch that no longer exists. Leaving it installed would durably
-        // serialize a departed player into a terminal `GameOver` snapshot — the
-        // exact leak the surrounding comment already calls out for the reused
-        // singleton engine. The terminal arm needs no re-point, because there is
-        // no later construction to route.
-        state.pending_trigger_construction_priority_recipient = None;
-        for firing in terminal_firings {
-            crate::game::lifecycle::record_delayed_terminal(
-                firing,
-                crate::game::lifecycle::DelayedTerminalDisposition::Eliminated,
-            );
-        }
+        retire_finished_game_triggers(state);
         // CR 104.1: the game is over; no owner arrangement is owed to a finished game.
         state.pending_mass_library_order_choice = None;
         // CR 104.1: the game is over; no player-scope sacrifice is owed to a finished game.
@@ -790,6 +761,11 @@ pub(crate) fn eliminate_players(
 /// list, the mulligan flow advances (closing the declare round or finishing) —
 /// bottoming is now resolved per-entry at the declare point, so there is no
 /// separate batch bottoms phase left to advance to.
+///
+/// This is also the pregame-reconciliation seam for the prompts that precede
+/// mulligans: a departed companion chooser (CR 103.2b) is resumed at the walk
+/// cursor by `advance_companion_reveal`, and a departed agenda chooser (CR
+/// 103.2e) resumes at the agenda step.
 fn prune_mulligan_pending(state: &mut GameState, events: &mut Vec<GameEvent>) {
     let alive: HashSet<PlayerId> = state
         .prepaid_mulligan_bottoms
@@ -831,6 +807,22 @@ fn prune_mulligan_pending(state: &mut GameState, events: &mut Vec<GameEvent>) {
                 free_first_mulligan,
                 events,
             );
+        }
+        // CR 702.139a + CR 800.4a: a player who leaves answers no companion
+        // reveal. Resume the seat-order walk (CR 103.2b) from that chooser's
+        // cursor: later living seats still get their offers, and the agenda
+        // step (CR 103.2e) still follows. Restarting the walk with
+        // `check_all_companion_reveals` would re-offer a companion a living
+        // player already declined.
+        WaitingFor::CompanionReveal { player, .. } if !players::is_alive(state, player) => {
+            state.waiting_for = super::companion::advance_companion_reveal(state, player, events);
+        }
+        // CR 800.4a: a player who leaves answers no agenda prompt; the pregame
+        // procedure carries on for the players who remain.
+        WaitingFor::SecretAgendaChoice { player, .. } if !players::is_alive(state, player) => {
+            // CR 103.2b precedes the CR 103.2e agenda step, so a departure here
+            // resumes at the agenda step; the companion walk is already done.
+            state.waiting_for = super::conspiracy::agenda_choices_or_mulligan(state, events);
         }
         WaitingFor::OpeningHandBottomCards { pending, reason } => {
             let alive: Vec<_> = pending
@@ -1725,6 +1717,9 @@ fn do_eliminate(
     // is not a state-based action", and no replacement effect applies to a
     // player leaving the game, so the consult is skipped while the
     // unconditional primitive guards still run (PLAN §3).
+    // CR 702.106e: first reveal the leaving player's face-down conspiracies to
+    // all players, while they are still in the command zone.
+    super::conspiracy::reveal_face_down_conspiracies(state, player, events);
     exile_owned_objects_on_player_left_game(state, player, events);
     crate::game::planechase::finish_player_left_game_handoff(state, planar_handoff, events);
 
@@ -2081,11 +2076,33 @@ fn check_game_over(state: &mut GameState, events: &mut Vec<GameEvent>) {
         .collect();
 
     if let Some(archenemy) = super::topology::archenemy(state) {
-        let archenemy_alive = living.contains(&archenemy);
+        // CR 104.2a win check. Horde Magic (casual variant): the Horde seat has
+        // no life total and can never be eliminated by the ordinary
+        // life/poison SBAs, so "archenemy alive" is replaced by the Horde-loss
+        // condition — the Horde is defeated when its library is empty AND it
+        // controls no creature. All other formats keep the generic living-set
+        // check.
+        let archenemy_alive =
+            if state.format_config.format == crate::types::format::GameFormat::Horde {
+                !super::horde::horde_is_defeated(state)
+            } else {
+                living.contains(&archenemy)
+            };
+        // CR 104.2a heroes = the living non-Horde seats. For a two-Horde-force
+        // Horde game (LOTR Two Towers) BOTH Horde seats must be excluded, not just
+        // the one archenemy — a second Horde seat has no life total and is never
+        // eliminated, so counting it as a living hero would keep the survivors from
+        // ever winning. Single-Horde and Archenemy reduce to `pid != archenemy`.
         let living_heroes: Vec<PlayerId> = living
             .iter()
             .copied()
-            .filter(|&pid| pid != archenemy)
+            .filter(|&pid| {
+                if state.format_config.format == crate::types::format::GameFormat::Horde {
+                    !super::horde::is_horde_seat(state, pid)
+                } else {
+                    pid != archenemy
+                }
+            })
             .collect();
         let winner = if archenemy_alive && living_heroes.is_empty() {
             Some(archenemy)
@@ -2098,6 +2115,12 @@ fn check_game_over(state: &mut GameState, events: &mut Vec<GameEvent>) {
         };
         end_game(state, winner, events);
     } else if super::topology::has_two_headed_giant_shared_resources(state) {
+        // Horde note: a Horde game never reaches this `else if` — the
+        // `if let Some(archenemy)` branch above evaluates FIRST and always
+        // matches (Horde maps to `OneVsMany`, so `topology::archenemy`
+        // returns the Horde seat). This branch therefore stays the pure
+        // Two-Headed Giant team-win path; Horde win/loss is fully handled on
+        // the archenemy path above.
         let mut living_teams = std::collections::BTreeSet::new();
         for &pid in &living {
             living_teams.insert(super::topology::team_dedup_key(state, pid));
@@ -2136,6 +2159,9 @@ pub(super) fn end_game(
     events: &mut Vec<GameEvent>,
 ) {
     state.game_end = Some(GameEnd { winner });
+    // CR 702.106e: at the end of the game, every face-down conspiracy card is
+    // revealed to all players.
+    super::conspiracy::reveal_face_down_conspiracies_at_game_end(state, events);
     events.push(GameEvent::GameOver { winner });
     state.waiting_for = WaitingFor::GameOver { winner };
 
@@ -2154,6 +2180,152 @@ pub(super) fn end_game(
 /// (restored from [`GameState::game_end`] without a second `GameEvent::GameOver`).
 pub(super) fn ensure_game_over_if_terminal(state: &mut GameState, events: &mut Vec<GameEvent>) {
     check_game_over(state, events);
+}
+
+/// CR 104.1 + CR 117.2e: while a resolution's carrier is installed no player has priority, so
+/// everything parked outside the resolution stack at that moment was, by rule, started by that
+/// resolution: its own instructions and payments (CR 608.2c), a spell it instructed a player to
+/// cast (CR 608.2g) with that cast's cost roots, payment prompt and reversal record, mana abilities
+/// activated while paying (CR 605.3a) and the triggered mana abilities they raised (CR 605.4a), the
+/// CR 616.1 replacement choices any of those moves raised, and the sessions it opened (a library
+/// search, CR 701.23a; a private look, CR 701.20e; a reveal, CR 701.20a). None of it is resumed in
+/// a finished game, so it is dropped with the resolution. Nothing is settled, published or
+/// reversed: the completed part of a paused cost already happened, the abilities it triggered would
+/// only be put on the stack the next time a player would receive priority (CR 603.3), which a
+/// finished game never reaches, and nothing moves (an instructed spell's announcement stays on the
+/// stack with its card where it was, as every other spell of a finished game stays where it is).
+/// Where the engine keeps a provisional priority window under a live carrier (a departure from
+/// CR 502.4 / CR 514.3, or a Resolve All session), a root a player opened from that window is
+/// dropped too: CR 104.1 owes it nothing either.
+///
+/// Without a carrier there is no resolution to own the parked work: a carrier-less frame
+/// (a triggered mana ability, CR 605.4a; a beginning-of-game action, CR 103.6) belongs to the
+/// process around it, so nothing is dropped here.
+fn retire_parked_resolution_work(state: &mut GameState) {
+    if state.resolving_stack_entry.is_none() {
+        return;
+    }
+    state.pending_cast = None;
+    state.pending_cost_move_resume = None;
+    state.pending_deferred_life_cost_resume = None;
+    state.pending_discard_for_cost = None;
+    state.pending_triggered_mana_resume = None;
+    state.spell_cast_reversal = None;
+    state.pending_replacement = None;
+    state.replacement_may_cost_paused = false;
+    super::replacement::abandon_post_replacement_continuation(state);
+    state.pending_liminal_entry_resume = None;
+    // CR 104.1 + CR 614.12a: abandon the uncommitted projections and their
+    // remaining batches; already-entered objects stay in their actual zones.
+    state.liminal_entries.clear();
+    state.payment_transaction = None;
+    state.payment_transaction_replay = false;
+    state.payment_transaction_just_handled = false;
+    state.pending_player_scope_unless_payment = None;
+    state.pending_player_scope_sacrifice_choice = None;
+    state.pending_mass_library_order_choice = None;
+    state.pending_discard_batch = None;
+    state.pending_single_discard = None;
+    state.pending_damage_post_loss = None;
+    state.pending_exile_from_top_until = None;
+    state.pending_scoped_library_search = None;
+    state.pending_library_search_delivery = None;
+    state.pending_search_found_batch = None;
+    state.pending_die_roll_instruction = None;
+    state.pending_resolution_completion = None;
+    state.entering_aura_authority = None;
+    // The sessions the resolution opened end with it: a library search and the
+    // control of its decision (CR 701.23a), a private look (CR 701.20e), and a
+    // reveal (CR 701.20a). Static reveals are re-derived on the next derive pass.
+    state.active_library_searches = Default::default();
+    state.active_search_decision_controls = Default::default();
+    state.private_look_ids.clear();
+    state.private_look_player = None;
+    state.revealed_cards.clear();
+}
+
+/// CR 104.1 + CR 603.3: a finished game never gives priority to publish queued
+/// triggers. Retire their existing firing identities through the same authority
+/// whether the game ended through elimination or during a resolution.
+fn retire_finished_game_triggers(state: &mut GameState) {
+    // Terminal: drop trigger scaffolding the client would otherwise show as
+    // a stuck stack / ordering prompt.
+    let mut terminal_firings = state
+        .pending_trigger_order
+        .take()
+        .into_iter()
+        .flat_map(|order| order.groups)
+        .flat_map(|group| group.triggers)
+        .map(|context| context.firing())
+        .collect::<Vec<_>>();
+    terminal_firings.extend(
+        std::mem::take(&mut state.deferred_triggers)
+            .into_iter()
+            .map(|context| context.firing()),
+    );
+    terminal_firings.extend(state.pending_trigger_firing.take());
+    crate::game::triggers::release_pending_trigger_construction(state);
+    // CR 117.3c: The construction priority recipient is scheduling state for
+    // a batch that no longer exists. Leaving it installed would durably
+    // serialize a departed player into a terminal `GameOver` snapshot — the
+    // terminal snapshot. No re-point is needed: there is no later construction
+    // to route.
+    state.pending_trigger_construction_priority_recipient = None;
+    for firing in terminal_firings {
+        crate::game::lifecycle::record_delayed_terminal(
+            firing,
+            crate::game::lifecycle::DelayedTerminalDisposition::Eliminated,
+        );
+    }
+}
+
+/// CR 104.1: a game ends immediately, so a resolution still under way when it ended —
+/// paused on a player's choice (a "you may", a cipher offer, a keep choice ...) — owes
+/// nothing more: every frame it parked and its carrier are retired, the carrier with the
+/// `Eliminated` disposition the game-over arm of `eliminate_players` gives the rest of a
+/// finished game's scaffolding (CR 104.1: the CR 608.2n final part a spell still owes is not
+/// performed either). Work the resolution parked outside the stack
+/// (`retire_parked_resolution_work`) goes first, then its frames, then its carrier.
+///
+/// Called only at the action boundary (`engine::settle_finished_game`, which every boundary
+/// that reconciles a terminal result reaches), after every resolver has unwound. `end_game`
+/// is not the place: a resolution reaches it mid-chain (CR 104.3e / CR 104.2b effects, the
+/// CR 104.4b draw inside a repeat) while its caller still owns its frames, and the same chain
+/// can park a further prompt after it. `game_end` is the authority, not `waiting_for`: a
+/// best-of-three match may already have replaced `GameOver` with its sideboarding prompt.
+pub(super) fn retire_finished_game_resolution(state: &mut GameState) {
+    if state.game_end.is_none() {
+        return;
+    }
+    // A resolving spell may already have completed its final part. Its queued
+    // triggers still belong to the ended game even after that carrier is gone.
+    retire_finished_game_triggers(state);
+    // CR 104.1: no later priority window can present queued miracle reveals,
+    // remaining paradigm offers, or Gotcha offers, even without a live carrier.
+    state.pending_miracle_offers.clear();
+    state.pending_paradigm_remaining_offers = None;
+    state.un_actions.pending_offers.clear();
+    state.un_actions.gotcha_offers.clear();
+    let resolution_live =
+        state.resolving_stack_entry.is_some() || !state.resolution_stack.is_empty();
+    if !resolution_live {
+        return;
+    }
+    // The parked work goes with its carrier: a parked frame can name a return-result
+    // occurrence that the carrier's retirement clears, so neither may outlive the other.
+    retire_parked_resolution_work(state);
+    // Frames first, so the carrier abandonment below finds no continuation left to clear
+    // instead of a direct-choice frame it cannot address.
+    state.resolution_stack.abandon_all_frames();
+    crate::game::stack::abandon_active_resolution_carrier(
+        state,
+        crate::game::lifecycle::DelayedTerminalDisposition::Eliminated,
+    );
+    // CR 104.1: the abandonment keeps an owed spell's carrier; a finished game retires it too.
+    crate::game::stack::finish_resolving_stack_entry(
+        state,
+        crate::game::lifecycle::DelayedTerminalDisposition::Eliminated,
+    );
 }
 
 #[cfg(test)]

@@ -10,7 +10,7 @@
  * participates in an 8-seat draft pod instead of a game.
  */
 
-import type { DraftPlayerView, SeatPublicView, SharedStackPileDecision } from "./draft-adapter";
+import { draftViewPresentation, type DraftPlayerView, type SeatPublicView, type SharedStackPileDecision } from "./draft-adapter";
 import {
   P2PDraftGuest,
   type DraftGuestConnection,
@@ -34,6 +34,7 @@ export type DraftPodGuestStatus =
   | "connecting"
   | "lobby"
   | "drafting"
+  | "review"
   | "deckbuilding"
   | "matchInProgress"
   | "complete"
@@ -119,6 +120,7 @@ export class DraftPodGuestAdapter {
   private _draftCode: string | null = null;
   private _currentView: DraftPlayerView | null = null;
   private recoveryFailure: DraftGuestRecoveryFailure | null = null;
+  private disposed = false;
 
   onEvent(listener: DraftPodGuestEventListener): () => void {
     this.listeners.push(listener);
@@ -163,6 +165,12 @@ export class DraftPodGuestAdapter {
     try {
       // 1. Join the PeerJS room
       const { joinResult, reconnectAttemptLimit } = await this.openRoom(config);
+      // A dispose while the room opened ended this attempt: its room sends
+      // nothing, so a guest that left never takes a seat or saves a recovery.
+      if (this.disposed) {
+        joinResult.destroyPeer();
+        throw abortError();
+      }
       this.joinResult = joinResult;
 
       // The code route and the IndexedDB capability are both bound to this
@@ -414,27 +422,29 @@ export class DraftPodGuestAdapter {
   }
 
   private updateStatusFromView(view: DraftPlayerView): void {
-    switch (view.status) {
-      case "Drafting":
+    switch (draftViewPresentation(view).podPhase) {
+      case "drafting":
         if (this._status !== "drafting") this.setStatus("drafting");
         break;
-      case "Deckbuilding":
+      case "review":
+        if (this._status !== "review") this.setStatus("review");
+        break;
+      case "deckbuilding":
         if (this._status !== "deckbuilding") this.setStatus("deckbuilding");
         break;
-      case "Pairing":
-      case "RoundComplete":
+      case "pairing":
+      case "roundComplete":
         break;
-      case "MatchInProgress":
+      case "matchInProgress":
         if (this._status !== "matchInProgress") this.setStatus("matchInProgress");
         break;
-      case "Complete":
+      case "complete":
         if (this._status !== "complete") this.setStatus("complete");
         break;
-      case "Lobby":
+      case "lobby":
         if (this._status !== "lobby") this.setStatus("lobby");
         break;
-      case "Paused":
-      case "Abandoned":
+      case "error":
         break;
     }
   }
@@ -510,12 +520,14 @@ export class DraftPodGuestAdapter {
    * explicit participant leave is allowed to revoke durable guest recovery.
    */
   async dispose({ preserveRecovery = true }: { preserveRecovery?: boolean } = {}): Promise<void> {
+    this.disposed = true;
     if (this.guest) {
       if (preserveRecovery) {
         this.guest.dispose();
-      } else if (this.guest.isRecoveryRevoked) {
-        // Terminal host events already removed the capability, so there is
-        // no live participant session left to acknowledge another leave.
+      } else if (this.guest.isRecoveryRevoked || this.guest.hasNoLeaveSession) {
+        // Terminal host events already removed the capability, or no session
+        // can carry a leave to the host: nothing can acknowledge one, so the
+        // transport ends here and a capability still held stays recoverable.
         this.guest.dispose();
       } else {
         await this.guest.leave();

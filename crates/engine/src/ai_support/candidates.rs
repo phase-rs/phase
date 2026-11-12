@@ -1022,8 +1022,22 @@ pub fn candidate_actions_broad_with_probe(
         } => mana_payment_actions(state, *player, *convoke_mode),
         // CR 605.3a + CR 733.1: activate a mana ability toward the pending one's
         // mana cost, or withdraw the pending activation.
-        WaitingFor::ManaAbilityManaPayment { player, .. } => {
+        WaitingFor::ManaAbilityManaPayment {
+            player,
+            pending_mana_ability,
+        } => {
             let mut actions = mana_tap_actions(state, *player);
+            // CR 601.2h via CR 602.2b: a manual payment is confirmed by passing,
+            // as `mana_payment_actions` does for a spell. Pins are never offered.
+            if crate::game::casting::payment_mode_pays_mana_manually(
+                pending_mana_ability.payment_mode,
+            ) {
+                actions.push(candidate(
+                    GameAction::PassPriority,
+                    TacticalClass::Pass,
+                    Some(*player),
+                ));
+            }
             actions.push(candidate(
                 GameAction::CancelCast,
                 TacticalClass::Pass,
@@ -1295,7 +1309,8 @@ pub fn candidate_actions_broad_with_probe(
         // them in any order (CR 401.4). `bounded_select_card_permutations` yields
         // bounded permutations (identity, reverse, and variants up to output cap).
         WaitingFor::RippleBottomOrder { player, cards, .. }
-        | WaitingFor::RevealUntilBottomOrder { player, cards, .. } => {
+        | WaitingFor::RevealUntilBottomOrder { player, cards, .. }
+        | WaitingFor::DigBottomOrder { player, cards, .. } => {
             bounded_select_card_permutations(*player, cards)
         }
         WaitingFor::ArrangePlanarDeckTopChoice {
@@ -2243,6 +2258,23 @@ pub fn candidate_actions_broad_with_probe(
             }
             actions
         }
+        // Turtle Team-Up hero-choice: the same SelectCards combinations as a
+        // discard (all valid sizes when up_to). No unless-filter shape.
+        WaitingFor::HeroEventChoice {
+            player,
+            count,
+            cards,
+            up_to,
+            min,
+            ..
+        } => {
+            let sizes = if *up_to {
+                (*min..=*count).collect()
+            } else {
+                vec![*count]
+            };
+            bounded_select_card_candidates(*player, cards, sizes)
+        }
         WaitingFor::OptionalCostChoice { player, .. } => vec![
             candidate(
                 GameAction::DecideOptionalCost { pay: true },
@@ -3154,6 +3186,27 @@ pub fn candidate_actions_broad_with_probe(
                 )
             })
             .collect(),
+        // CR 702.106a / CR 702.106f: Secret agenda names are one atomic answer.
+        WaitingFor::SecretAgendaChoice {
+            player, name_count, ..
+        } => {
+            let mut seen = HashSet::new();
+            let names: Vec<String> = card_name_choice_candidates(state, *player, None)
+                .into_iter()
+                .chain(state.all_card_names.iter().cloned())
+                .filter(|name| seen.insert(name.to_lowercase()))
+                .take(usize::from(*name_count))
+                .collect();
+            if names.len() == usize::from(*name_count) {
+                vec![candidate(
+                    GameAction::ChooseSecretAgendaNames { names },
+                    TacticalClass::Selection,
+                    Some(*player),
+                )]
+            } else {
+                Vec::new()
+            }
+        }
         // CR 702.139a: Companion reveal candidates
         WaitingFor::CompanionReveal {
             player,
@@ -5037,6 +5090,21 @@ pub(crate) fn priority_actions_with_probe(
             // Vindicator stay unofferable until the client can announce an X for
             // a special action.
             Some(crate::game::morph::TurnFaceUpOffer::RequiresChosenX) | None => {}
+        }
+    }
+
+    // CR 702.106c / CR 116.2j / CR 905.4a: turning a face-down hidden agenda conspiracy in
+    // the command zone face up is a special action available any time its
+    // controller has priority.
+    for &object_id in &state.command_zone {
+        if let Some(crate::game::morph::TurnFaceUpOffer::Ready) =
+            crate::game::morph::turn_face_up_offer(state, player, object_id)
+        {
+            actions.push(candidate(
+                GameAction::TurnFaceUp { object_id, x: 0 },
+                TacticalClass::Ability,
+                Some(player),
+            ));
         }
     }
 
@@ -10560,6 +10628,7 @@ mod tests {
         let mut ability = AbilityDefinition::new(
             AbilityKind::Activated,
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Graveyard),
                 destination: Zone::Battlefield,
                 target: TargetFilter::SelfRef,

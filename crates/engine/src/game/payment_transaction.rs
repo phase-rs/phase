@@ -1023,6 +1023,7 @@ mod tests {
         );
         let root = ResolvedAbility::new(
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Hand),
                 destination: Zone::Graveyard,
                 target: TargetFilter::Any,
