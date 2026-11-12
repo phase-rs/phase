@@ -444,8 +444,11 @@ pub struct ProtectionStartSnapshot {
 /// CR 702.16p: the protection effect a start snapshot belongs to, held on the
 /// object that has the static: the grant occurrence, its protection
 /// modification, and the exact host incarnation the effect started applying
-/// to. None of it names a slot, so the snapshot survives other grants starting
-/// or ending, and a host that re-enters (CR 400.7) starts a new one.
+/// to. A granted static is named by its producer, not the slot it is
+/// installed in, and a source's own static keeps its index because installed
+/// grants follow every own static (`ProtectionGrantOccurrence::Static`). So
+/// the snapshot survives other grants starting or ending, and a host that
+/// re-enters (CR 400.7) starts a new one.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct ProtectionStartKey {
     pub occurrence: crate::types::layers::ProtectionGrantOccurrence,
@@ -848,9 +851,10 @@ pub struct GameObject {
     /// CR 702.16 + CR 613.1f: provenance of the protection abilities in
     /// `keywords` after the last layer pass. Layer-derived and reset with
     /// `keywords` through the `GameObject` keyword methods. A `Protection(q)`
-    /// in `keywords` with no entry for `q` came only from writers that run
-    /// before layer 6 (printed, copy layer, stickers), and none of those
-    /// carries a rider.
+    /// in `keywords` with no entry for `q` came from a writer that runs before
+    /// layer 6 and records none (printed, copy layer, stickers); none of those
+    /// carries a rider. Retained abilities (layer 1,
+    /// `RetainAllOtherAbilitiesFromSource`) record a rider-less entry.
     /// Not serialized: every layer flush rebuilds it. A decode starts with
     /// layers dirty (`GameState::layers_dirty` defaults to `Full`), and every
     /// production restore finalizes through

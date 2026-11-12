@@ -2338,10 +2338,11 @@ pub(crate) fn refresh_protection_start_attachment_snapshots(state: &mut GameStat
     }
 
     for &source_id in &state.battlefield {
-        let Some(source) = state.objects.get_mut(&source_id) else {
-            continue;
-        };
-        if source.protection_start_snapshots.is_empty() {
+        if state
+            .objects
+            .get(&source_id)
+            .is_none_or(|source| source.protection_start_snapshots.is_empty())
+        {
             continue;
         }
         let active_keys: HashSet<&ProtectionStartKey> = active_by_source
@@ -2350,9 +2351,11 @@ pub(crate) fn refresh_protection_start_attachment_snapshots(state: &mut GameStat
             .flatten()
             .map(|grant| &grant.key)
             .collect();
-        source
-            .protection_start_snapshots
-            .retain(|key, _| active_keys.contains(key));
+        if let Some(source) = state.objects.get_mut(&source_id) {
+            source
+                .protection_start_snapshots
+                .retain(|key, _| active_keys.contains(key));
+        }
     }
 
     for (source_id, grants) in active_by_source {
@@ -2370,8 +2373,9 @@ pub(crate) fn refresh_protection_start_attachment_snapshots(state: &mut GameStat
             // static is on, read after this pass's control-changing effects
             // (layer 2), not the controller the effect was gathered with.
             // Only a battlefield source holds a snapshot: the prune above
-            // visits battlefield sources only, and the merge base snapshotted
-            // battlefield statics only.
+            // visits battlefield sources only, and leaving the battlefield
+            // clears the map (CR 400.7), so a snapshot on any other source
+            // would never be pruned.
             let Some(controller) = state
                 .objects
                 .get(&source_id)
@@ -5648,7 +5652,14 @@ mod tests {
         );
         evaluate_protection_layers(&mut state);
 
-        let plain_source = spawn_grant_source(&mut state, "Mother of Runes", 32);
+        // Synthetic: a rider-less static protection grant, as Akroma's Memorial's
+        // ("Creatures you control have … protection from black and from red.")
+        // is, but from white and to this host only.
+        let plain_source = spawn_grant_source(
+            &mut state,
+            "Synthetic rider-less source (Akroma's Memorial analogue)",
+            32,
+        );
         apply_protection_grant(
             &mut state,
             plain_source,
