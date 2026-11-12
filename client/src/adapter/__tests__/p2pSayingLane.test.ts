@@ -77,6 +77,7 @@ type HostInternals = {
   expireSayPhrase: (paymentId: number, timerGen?: number) => Promise<void>;
   listeners?: Set<unknown>;
   sayExpiryTimerGeneration?: number;
+  gameRunState: string;
 };
 
 type HostGuestMessageInternals = {
