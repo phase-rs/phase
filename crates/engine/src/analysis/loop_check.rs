@@ -130,8 +130,8 @@ pub struct LoopCertificate {
     pub rising: Vec<ResourceAxis>,
     /// The classified win condition, derived from `unbounded`, or read from the reasons recorded
     /// in the winning repetition the confirmer performed (a counted offer, or a threshold offer
-    /// whose performance wins); `None` when that take does not end the game with its proposer the
-    /// winner.
+    /// whose performance wins); for a counted offer, `None` when its take does not end the game with
+    /// its proposer the winner.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub win_kind: Option<WinKind>,
     /// CR 732.2a: the count whose take `win_kind` is the outcome of, for an outcome a smaller

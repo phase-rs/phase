@@ -3599,7 +3599,7 @@ fn counted_ending(
 
 /// CR 104.2a + CR 732.2a: the win a performed repetition `holder` won names, read from the reasons
 /// its `events` record for the holder's opponents (CR 102.3): one reason names its own win, several
-/// or none name none.
+/// or none name `ImmediateWin`.
 fn recorded_win_kind(holder: PlayerId, state: &GameState, events: &[GameEvent]) -> WinKind {
     let reasons: BTreeSet<LossReason> = events
         .iter()
