@@ -577,7 +577,7 @@ fn cast_after_restore_and_read_cascade(state: GameState, spell: ObjectId) -> (bo
 /// survive it, plus the pooled pips the boundary kept.
 ///
 /// This is the other half of the pip key: the payment reads the ledger
-/// (`mana_payment::pooled_mana_producer_snapshot`), and the boundary carries it
+/// (`mana_payment::pooled_mana_producer_row`), and the boundary carries it
 /// forward (`mana_payment::retain_pooled_mana_producer_snapshots`, whose carry arm
 /// matches a carried row to a unit by that unit's pip). A row keyed to a pip no
 /// pool holds must be dropped by both.
@@ -1021,7 +1021,7 @@ fn the_loop_comparison_drops_a_spent_pips_row_with_no_phase_boundary() {
     // CR 106.3 + CR 118.3a: a row is a fact about ONE unit, and these two rows describe
     // one tenure — the same source, the same epoch, the same last-known information —
     // so ONLY the pip says which of the two live units a row belongs to. Payment
-    // resolves the fact by that pip (`mana_payment::pooled_mana_producer_snapshot`), so
+    // resolves the fact by that pip (`mana_payment::pooled_mana_producer_row`), so
     // a position that attaches a row to the other unit is a different position: a
     // coloured cost recovers the producer from the unit that holds the row and not from
     // the one that does not. Moving one row between the two LIVE pips, with the total

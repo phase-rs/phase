@@ -24931,7 +24931,7 @@ impl<'a> ProducerFactReader<'a> {
 /// still IS the pinned incarnation, otherwise the epoch's exit last-known
 /// information (`exit_lki_for_incarnation`) does, then the producer fact a
 /// floating unit carries across a step/phase boundary
-/// (`mana_payment::pooled_mana_producer_snapshot`, read through the batch index
+/// (`mana_payment::pooled_mana_producer_row`, read through the batch index
 /// the caller holds — built lazily by this very call, so the two answers above
 /// cost no indexing at all), and only then is the fact unprovable. A unit that
 /// predates the pin (legacy payload, synthetic pool fixture) keeps the historical

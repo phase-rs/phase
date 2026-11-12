@@ -1476,7 +1476,7 @@ pub struct PooledManaProducerSnapshot {
 // CR 106.3 + CR 118.3a + CR 104.4b: a fact belongs to ONE pooled unit, so equality
 // compares the unit the fact is attached to as well as the fact — `pip_id`, the
 // same ownership key every reader of this ledger uses
-// (`mana_payment::pooled_mana_producer_snapshot`, `GameState::pip_recorded_producer_epochs`).
+// (`mana_payment::pooled_mana_producer_row`, `GameState::pip_recorded_producer_epochs`).
 // Comparing the fact alone equated two positions that differ only in WHICH unit of a
 // departed source owns the row, and they are not the same position: payment resolves
 // the fact by pip, so a coloured cost recovers the producer from the unit that holds
@@ -39874,7 +39874,7 @@ impl GameState {
         // it is loop-material position without being a per-cycle accumulator.
         //
         // The key is the UNIT's pip, the same ownership key every reader of this
-        // ledger uses (`mana_payment::pooled_mana_producer_snapshot`,
+        // ledger uses (`mana_payment::pooled_mana_producer_row`,
         // `GameState::pip_recorded_producer_epochs`): a row exists exactly while the
         // unit it describes is still floating. Pruning by `(source, incarnation)`
         // kept every row of a tenure whose producer still appeared SOMEWHERE in a
