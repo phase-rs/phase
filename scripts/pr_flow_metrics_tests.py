@@ -801,6 +801,15 @@ class LogFieldTests(Harness):
         )["held"]
         self.assertEqual((held["spells"], held["censored"], held["hours"]["total"]), (1, 0, 1.0))
 
+    def test_queue_exit_survives_a_state_neutral_event_on_a_new_head(self) -> None:
+        queue = self.log_block(
+            [pr_node(1)], event(1, "approved_enqueued", "2026-10-27T00:00:00Z", H[1], outcome="approved_enqueued"),
+            event(1, "observation", "2026-10-27T01:00:00Z", H[2]),
+            event(1, "held", "2026-10-27T02:00:00Z", H[2], outcome="held"),
+            event(1, "approved_enqueued", "2026-10-27T05:00:00Z", H[2], outcome="approved_enqueued"),
+        )["queue_exit"]
+        self.assertEqual((queue["exits"], queue["returned"], queue["return_hours"]["total"]), (1, 1, 4.0))
+
     def test_assignee_intervals_are_clipped_to_the_open_interval(self) -> None:
         assigned = connection([assignment("AssignedEvent", "carol", "2026-10-27T00:00:00Z")])
         gate = self.log_block(

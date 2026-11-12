@@ -2007,8 +2007,10 @@ def artifact_profile(
         unchecked_line = f"- [ ] {label}"
         boxes = [line.strip() for line in verification_lines]
         if final_review_unresolved and label == FINAL_REVIEW_CHECKBOX_LABEL:
-            # Counted as the one expected box when it is unchecked and never checked.
-            checked_required[label] = boxes.count(unchecked_line) - boxes.count(checked_line)
+            # Counted as the one expected box only when unchecked exactly once and never checked.
+            checked_required[label] = int(
+                boxes.count(unchecked_line) == 1 and checked_line not in boxes
+            )
             continue
         checked_required[label] = boxes.count(checked_line)
         if unchecked_line in boxes:
@@ -2692,8 +2694,17 @@ def recommend_from_packet(packet: dict[str, Any]) -> dict[str, Any]:
     # `local_block` reads only the newest event; the first block recorded for this
     # head keeps a later non-blocking event from erasing it, until GitHub shows an
     # approval or a dismissed review on this head.
-    block_cleared_on_github = review_decision == "APPROVED" or any(
-        review.get("state") == "DISMISSED" and review.get("commit") == head
+    # The approval must postdate every logged event on the head, or it predates the block.
+    block_cleared_on_github = any(
+        review.get("commit") == head
+        and (
+            review.get("state") == "DISMISSED"
+            or (
+                review_decision == "APPROVED"
+                and review.get("state") == "APPROVED"
+                and timestamp_after(review.get("submittedAt"), local_event_timestamp)
+            )
+        )
         for review in pr.get("reviews", [])
     )
     current_head_blocked = (

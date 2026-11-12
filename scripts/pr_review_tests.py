@@ -781,6 +781,16 @@ class PrReviewTests(unittest.TestCase):
                 "approve_ready_for_handler",
             ),
             ("logged block, warning, then dismissal", [block, warning], dismissed, False, "review"),
+            (
+                "approval older than the logged block",
+                [block, {"event_type": "review"}],
+                {
+                    "reviewDecision": "APPROVED",
+                    "reviews": [{**changes_requested, "state": "APPROVED"}],
+                },
+                False,
+                "blocked",
+            ),
             ("block, warning, parse-diff update", [block, warning], {}, True, "blocked"),
             (
                 "block, warning, incomplete comment history",
@@ -3133,6 +3143,11 @@ class PrReviewTests(unittest.TestCase):
         cases = (
             ("box unchecked", unresolved_line.replace(f"- [x] {box}", f"- [ ] {box}"), []),
             ("box still checked", unresolved_line, ["invalid_required_verification_checkboxes"]),
+            (
+                "box unchecked twice and checked once",
+                unresolved_line.replace(f"- [x] {box}", f"- [ ] {box}\n- [ ] {box}\n- [x] {box}"),
+                ["invalid_required_verification_checkboxes"],
+            ),
             (
                 "box missing",
                 unresolved_line.replace(f"- [x] {box}\n", ""),

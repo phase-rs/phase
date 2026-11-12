@@ -674,6 +674,7 @@ def spells_for(timed: list[tuple[datetime, dict[str, Any]]], close: datetime | N
     """
     spells: list[dict[str, Any]] = []
     current: dict[str, Any] | None = None
+    ended_by_head: dict[str, Any] | None = None  # closed by a state-neutral event; its next state is still unknown
     for t, event in timed:
         if close and t > close:
             break
@@ -681,10 +682,12 @@ def spells_for(timed: list[tuple[datetime, dict[str, Any]]], close: datetime | N
         head = event.get("head_sha")
         if state is None and not (current and head and head != current["head"]):
             continue
+        if state is not None and ended_by_head:
+            ended_by_head["next"], ended_by_head = state, None
         if current and (state != current["state"] or head != current["head"]):
             current["end"], current["next"] = t, state
             spells.append(current)
-            current = None
+            ended_by_head, current = (current if state is None else None), None
         if current is None and state not in (None, "terminal"):
             current = {"state": state, "head": event.get("head_sha"), "start": t, "next": None}
     if current:
