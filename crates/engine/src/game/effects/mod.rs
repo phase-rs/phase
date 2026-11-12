@@ -19228,16 +19228,6 @@ fn resolve_after_scope_with_created_seats(
     outcome
 }
 
-/// CR 608.2: is this node a per-seat leg of a `player_scope` clause — one whose
-/// acting controller the driver rebound to the seat (`bind_scoped_seat`), so it
-/// differs from the ability's original controller? A node resolving for its own
-/// controller (Court of Locthwain's linked-exile permission) is not one.
-fn is_rebound_player_scope_seat(ability: &ResolvedAbility) -> bool {
-    ability
-        .original_controller
-        .is_some_and(|original| original != ability.controller)
-}
-
 /// CR 608.2c + CR 400.1: can this effect move objects between zones, so that
 /// its own result is what a later "this way" gate reads? Reuses the producer
 /// action table ([`this_way_cause_for_effect`] +
@@ -22848,6 +22838,15 @@ fn resolve_chain_body(
         // is always the last one: it is the seat in progress.
         let collects_seat_results = scoped_template.effect.is_token_creator();
         let mut seat_results: Vec<SeatCreatedTokens> = Vec::new();
+        // CR 608.2c: "this way" names the earlier instruction that moved the
+        // cards. A clause whose effect cannot move objects (Xathrid Demon's
+        // "each opponent loses life ...") produced no zone-change result of its
+        // own, so each generated seat leg's empty span must not replace the
+        // moving instruction's ledger for the fallback that follows. Only this
+        // driver generates the legs, so the ledger is restored here, after the
+        // fan-out; every other non-moving node keeps the ordinary reset (Court
+        // of Locthwain's linked-exile permission, CR 406.6).
+        let ledger_before_fan_out = state.last_zone_changed_ids.clone();
         for (i, pid) in matching_players.iter().enumerate() {
             // CR 608.2c + CR 101.3: Each scoped iteration is a fresh
             // sub-resolution of the scoped template — read the whole
@@ -23009,6 +23008,9 @@ fn resolve_chain_body(
                 paused = true;
                 break;
             }
+        }
+        if !effect_moves_objects(&scoped_template.effect) {
+            state.last_zone_changed_ids = ledger_before_fan_out;
         }
         let batches = publish_player_scope_clause_results(
             state,
@@ -24581,15 +24583,6 @@ fn resolve_chain_body(
     // so it leaves the moving instruction's ledger in place for the head.
     if !permission_node_keeps_ledger_for_this_way_head(ability)
         && !(zone_changed_ids.is_empty() && gated_run_keeps_ledger_for_this_way_head(ability))
-        // CR 608.2c: a per-seat leg of a player-scope clause whose effect cannot move objects
-        // (Xathrid Demon's "each opponent loses life ...") is not the
-        // instruction "this way" names, so it leaves the moving instruction's
-        // ledger for the fallback that follows it. Every other non-moving node
-        // keeps the reset: a linked-exile cast permission (Court of Locthwain,
-        // CR 406.6) relies on it to leave older linked cards castable.
-        && (!zone_changed_ids.is_empty()
-            || !is_rebound_player_scope_seat(ability)
-            || effect_moves_objects(&ability.effect))
     {
         state.last_zone_changed_ids = zone_changed_ids;
     }

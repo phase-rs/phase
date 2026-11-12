@@ -15,6 +15,7 @@
 //!     graveyard.
 
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
+use engine::types::ability::PlayerFilter;
 use engine::types::actions::GameAction;
 use engine::types::game_state::WaitingFor;
 use engine::types::identifiers::ObjectId;
@@ -37,6 +38,15 @@ const START_LIFE: i32 = 20;
 /// the stack. Returns the runner after that trigger resolved, the Demon, and the
 /// fodder creature if any.
 fn p1_upkeep(with_fodder: bool) -> (GameRunner, ObjectId, Option<ObjectId>) {
+    p1_upkeep_with(false, with_fodder)
+}
+
+/// `include_controller` widens the life-loss clause's scope from "each opponent"
+/// to "each player" after parsing, so the controller's own seat leg runs too.
+fn p1_upkeep_with(
+    include_controller: bool,
+    with_fodder: bool,
+) -> (GameRunner, ObjectId, Option<ObjectId>) {
     let mut scenario = GameScenario::new_n_player(3, 1707);
     scenario.at_phase(Phase::End);
     let demon = scenario
@@ -53,6 +63,22 @@ fn p1_upkeep(with_fodder: bool) -> (GameRunner, ObjectId, Option<ObjectId>) {
         scenario.add_spell_to_library_top(PlayerId(seat), "Library Filler", false);
     }
     let mut runner = scenario.build();
+    if include_controller {
+        let object = runner
+            .state_mut()
+            .objects
+            .get_mut(&demon)
+            .expect("demon exists");
+        for entry in std::sync::Arc::make_mut(&mut object.trigger_definitions.0) {
+            let clause = entry
+                .definition
+                .execute
+                .as_mut()
+                .and_then(|execute| execute.sub_ability.as_mut())
+                .expect("the life-loss clause follows the sacrifice");
+            clause.player_scope = Some(PlayerFilter::All);
+        }
+    }
     for _ in 0..16 {
         if runner.state().phase == Phase::Upkeep {
             break;
@@ -123,4 +149,28 @@ fn no_other_creature_taps_the_demon_and_costs_seven() {
     for opponent in [P0, P2] {
         assert_eq!(runner.life(opponent), START_LIFE, "opponents lose nothing");
     }
+}
+
+/// No printed card pairs a sacrifice with a non-moving "each player" clause, so
+/// this is Xathrid Demon with its life-loss clause widened to every player after
+/// parsing (`p1_upkeep_with`). The controller's own seat leg (original controller
+/// == acting controller) must leave the sacrifice's ledger alone too (CR 608.2c).
+#[test]
+fn each_player_clause_including_the_controller_seat_keeps_the_sacrifice_result() {
+    let (runner, demon, fodder) = p1_upkeep_with(true, true);
+    let fodder = fodder.expect("fodder staged");
+    assert_eq!(runner.state().objects[&fodder].zone, Zone::Graveyard);
+    assert!(
+        !runner.state().objects[&demon].tapped,
+        "CR 608.2c: the controller's own seat leg must not erase the sacrifice"
+    );
+    for opponent in [P0, P2] {
+        assert_eq!(runner.life(opponent), START_LIFE - FODDER_POWER);
+    }
+    // The 7-life fallback must not have run for the controller (their own leg's
+    // amount is outside this ledger test's scope).
+    assert!(
+        runner.life(P1) > START_LIFE - 7,
+        "no 7 life fallback after a performed sacrifice"
+    );
 }
