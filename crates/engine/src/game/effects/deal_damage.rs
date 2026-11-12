@@ -1427,10 +1427,23 @@ fn run_damage_batch(
     portions: Vec<BatchPortion>,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
+    // CR 104.1: "A game ends immediately when a player wins": a batch resumed after the game
+    // ended has nothing left to replace, deal or complete.
+    if state.game_end.is_some() {
+        return Ok(());
+    }
     let boundary = state.resolution_stack.capture_child_boundary();
-    let mut portions = portions.into_iter();
+    let mut portions = in_apnap_order(state, portions).into_iter();
     // Phase B: replacement (CR 120.4b + CR 614 + CR 615).
     while let Some(portion) = portions.next() {
+        // CR 800.4a: damage to a player who left the game, or to an object that is gone, is not
+        // dealt; the batch goes on for the rest.
+        if portion
+            .raw()
+            .is_some_and(|raw| !recipient_present(state, &raw.target))
+        {
+            continue;
+        }
         let awaiting = portion.raw();
         let (ctx, proposed) = match portion {
             BatchPortion::Gated { ctx, event } => (ctx, event),
@@ -1448,12 +1461,22 @@ fn run_damage_batch(
                 (ctx, proposed)
             }
         };
-        match replacement::replace_event(state, proposed, events) {
+        let result = replacement::replace_event(state, proposed, events);
+        // CR 104.1: a replacement that ended the game (Nefarious Lich's "If you can't, you lose
+        // the game") ends the batch: nothing later is replaced or dealt.
+        if state.game_end.is_some() {
+            return Ok(());
+        }
+        match result {
             ReplacementResult::Execute(event) => replaced.push((ctx, event)),
             ReplacementResult::Prevented => {
                 // CR 615.5: a prevention rider resolves immediately afterward.
                 if state.has_post_replacement_drain() {
                     crate::game::replacement::drain_damage_rider(state, events);
+                }
+                // CR 104.1: so does a rider that ended it.
+                if state.game_end.is_some() {
+                    return Ok(());
                 }
                 // CR 608.2c + CR 616.1: a rider that left its prompt standing holds the rest of
                 // the batch behind its answer.
@@ -1483,10 +1506,18 @@ fn run_damage_batch(
     // Phase C: delivery (CR 120.4c). A delivery that waits on a choice (a lifelink gain's
     // replacements) parks the survivors after it; the parked batch still owns the completion.
     for (index, (ctx, event)) in replaced.iter().enumerate() {
-        if matches!(
-            apply_damage_after_replacement(state, ctx, event.clone(), false, events),
-            DamageResult::NeedsChoice
-        ) {
+        if let ProposedEvent::Damage { target, .. } = event {
+            if !recipient_present(state, target) {
+                continue;
+            }
+        }
+        let delivered = apply_damage_after_replacement(state, ctx, event.clone(), false, events);
+        // CR 104.1: a delivery that ended the game (lifelink's gain drawing from an empty library
+        // under Nefarious Lich and Laboratory Maniac) ends the batch.
+        if state.game_end.is_some() {
+            return Ok(());
+        }
+        if matches!(delivered, DamageResult::NeedsChoice) {
             park_damage_batch(
                 state,
                 ability,
@@ -1499,12 +1530,47 @@ fn run_damage_batch(
             return Ok(());
         }
     }
+    if state.game_end.is_some() {
+        return Ok(());
+    }
     events.push(GameEvent::EffectResolved {
         kind,
         source_id: ability.source_id,
         subject: None,
     });
     Ok(())
+}
+
+/// CR 800.4a: whether a damage recipient is still in the game: a player who hasn't left, or an
+/// object still on the battlefield.
+fn recipient_present(state: &GameState, target: &TargetRef) -> bool {
+    match target {
+        TargetRef::Player(player) => crate::game::players::is_alive(state, *player),
+        TargetRef::Object(id) => state
+            .objects
+            .get(id)
+            .is_some_and(|object| object.zone == crate::types::zones::Zone::Battlefield),
+    }
+}
+
+/// CR 616.1 + CR 101.4: a batch's portions in APNAP order of the player each one affects (a
+/// player recipient, or an object recipient's controller), so simultaneous replacement choices
+/// are asked in that order ("If two or more players have to make these choices at the same
+/// time, choices are made in APNAP order"). Stable: portions affecting one player keep their
+/// order.
+fn in_apnap_order(state: &GameState, mut portions: Vec<BatchPortion>) -> Vec<BatchPortion> {
+    let order = crate::game::players::apnap_order(state);
+    let rank = |portion: &BatchPortion| {
+        let affected = portion.raw().and_then(|raw| match raw.target {
+            TargetRef::Player(player) => Some(player),
+            TargetRef::Object(id) => state.objects.get(&id).map(|object| object.controller),
+        });
+        affected
+            .and_then(|player| order.iter().position(|seat| *seat == player))
+            .unwrap_or(usize::MAX)
+    };
+    portions.sort_by_key(rank);
+    portions
 }
 
 /// CR 608.2c: park the rest of a paused two-phase batch as one `Effect::ResumeDamageBatch`

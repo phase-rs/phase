@@ -1327,6 +1327,167 @@ fn cast_rakdos_charm_damage_mode(runner: &mut GameRunner, charm: ObjectId) -> Ve
     events
 }
 
+/// CR 104.1: a loss during replacement discards even an earlier cached survivor.
+/// Exercises run_damage_batch's post-replacement/post-rider terminal guards.
+#[test]
+fn a_batch_stops_cached_damage_when_a_replacement_ends_the_game() {
+    let mut scenario = scenario();
+    let cached =
+        super::unpreventable_damage_prevention_effects::faithmender_and_leyline(&mut scenario);
+    let lich = nefarious_lich(&mut scenario, 0);
+    scenario.add_creature(P1, "Hill Giant", 3, 3);
+    let charm = instant(&mut scenario, "Rakdos Charm", RAKDOS_CHARM);
+    let mut runner = scenario.build();
+    assert!(player(&runner, P1).graveyard.is_empty());
+    let mut events = cast_rakdos_charm_damage_mode(&mut runner, charm);
+    answer_batch_prompts(&mut runner, &mut events, |_, _| None);
+
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::GameOver { winner: Some(P0) }
+    ));
+    assert!(events
+        .iter()
+        .any(|e| matches!(e, GameEvent::PlayerEliminated { player_id } if *player_id == P1)));
+    assert!(events.iter().any(
+        |e| matches!(e, GameEvent::ReplacementApplied { source_id, .. } if *source_id == lich)
+    ));
+    let over = events
+        .iter()
+        .position(|e| matches!(e, GameEvent::GameOver { winner: Some(P0) }))
+        .expect("P0 won during replacement");
+    assert!(!events[over + 1..]
+        .iter()
+        .any(|e| matches!(e, GameEvent::DamageDealt { .. })));
+    assert!(!events
+        .iter()
+        .any(|e| matches!(e, GameEvent::DamageDealt { source_id, .. } if *source_id == cached)));
+    assert!(completions(&events, EffectKind::EachSourceDealsDamage, charm).is_empty());
+    assert_eq!(life(&runner, P0), 20);
+}
+
+/// CR 104.1 + CR 120.3f: lifelink can end the game during the first delivery.
+/// Exercises run_damage_batch's terminal guard immediately after delivery.
+#[test]
+fn a_batch_stops_its_second_source_when_lifelink_wins_the_game() {
+    let mut scenario = scenario();
+    let vampire = super::unpreventable_damage_prevention_effects::creature_with_keywords(
+        &mut scenario, P0, "Vampire of the Dire Moon", (1, 1),
+        &["Deathtouch", "Lifelink"],
+        "Deathtouch (Any amount of damage this deals to a creature is enough to destroy it.)\nLifelink (Damage dealt by this creature also causes you to gain that much life.)",
+    );
+    let second = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
+    let target = scenario.add_creature(P1, "Wall", 0, 20).id();
+    let lich = scenario
+        .add_enchantment_from_oracle(P0, "Nefarious Lich", NEFARIOUS_LICH)
+        .id();
+    let maniac = scenario.add_creature_from_oracle(P0, "Laboratory Maniac", 2, 2,
+        "If you would draw a card while your library has no cards in it, you win the game instead.").id();
+    let spell = sorcery(&mut scenario, "Allies at Last", ALLIES_AT_LAST);
+    let mut runner = scenario.build();
+    assert!(player(&runner, P0).library.is_empty());
+    let mut events = cast(
+        &mut runner,
+        spell,
+        vec![
+            object_target(vampire),
+            object_target(second),
+            object_target(target),
+        ],
+    );
+    answer_batch_prompts(&mut runner, &mut events, |_, _| None);
+
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::GameOver { winner: Some(P0) }
+    ));
+    let over = events
+        .iter()
+        .position(|e| matches!(e, GameEvent::GameOver { winner: Some(P0) }))
+        .expect("P0 won during lifelink");
+    assert!(events[..over].iter().any(|e| matches!(e, GameEvent::DamageDealt { source_id, amount: 1, .. } if *source_id == vampire)));
+    for (source, kind) in [(lich, "GainLife"), (maniac, "Draw")] {
+        assert!(events[..over].iter().any(|e| matches!(e, GameEvent::ReplacementApplied { source_id, event_type } if *source_id == source && event_type == kind)));
+    }
+    assert!(!events
+        .iter()
+        .any(|e| matches!(e, GameEvent::DamageDealt { source_id, .. } if *source_id == second)));
+    assert!(!events[over + 1..]
+        .iter()
+        .any(|e| matches!(e, GameEvent::DamageDealt { .. })));
+    assert!(completions(&events, EffectKind::EachDealsDamageEqualToPower, spell).is_empty());
+}
+
+/// CR 800.4a: a departing recipient is skipped while the other players' batch continues.
+/// Exercises recipient_present with a second portion addressed to the departed player.
+#[test]
+fn a_batch_continues_for_survivors_after_one_of_three_players_loses() {
+    let mut scenario = GameScenario::new_n_player(3, 11);
+    scenario.at_phase(Phase::PreCombatMain);
+    let cached =
+        super::unpreventable_damage_prevention_effects::faithmender_and_leyline(&mut scenario);
+    nefarious_lich(&mut scenario, 0);
+    scenario.add_creature(P1, "Hill Giant", 3, 3);
+    let departed = scenario.add_creature(P1, "Grey Ogre", 2, 2).id();
+    let survivor = scenario.add_creature(P2, "Runeclaw Bear", 2, 2).id();
+    let charm = instant(&mut scenario, "Rakdos Charm", RAKDOS_CHARM);
+    let mut runner = scenario.build();
+    let mut events = cast_rakdos_charm_damage_mode(&mut runner, charm);
+    let prompts = answer_batch_prompts(&mut runner, &mut events, |_, _| None);
+    assert_eq!(prompts, vec![("order", P0, 1)]);
+
+    let lost = events
+        .iter()
+        .position(|e| matches!(e, GameEvent::PlayerEliminated { player_id } if *player_id == P1))
+        .expect("P1 lost inside replacement");
+    assert!(!engine::game::players::is_alive(runner.state(), P1));
+    assert!(runner.state().game_end.is_none());
+    assert!(!events
+        .iter()
+        .any(|e| matches!(e, GameEvent::GameOver { .. })));
+    for (source, recipient) in [(cached, P0), (survivor, P2)] {
+        assert!(events[lost + 1..].iter().any(|e| matches!(e, GameEvent::DamageDealt { source_id, target: TargetRef::Player(player), amount: 1, .. } if *source_id == source && *player == recipient)));
+    }
+    assert_eq!(life(&runner, P2), 19);
+    assert!(!events[lost + 1..].iter().any(|e| matches!(e, GameEvent::DamageDealt { source_id, target, .. } if *source_id == departed || *target == player_target(P1))));
+    assert_completes_once_after_its_damage(&events, EffectKind::EachSourceDealsDamage, charm);
+    assert_at_rest(&runner);
+}
+
+/// CR 616.1: affected players choose in APNAP order, regardless of source insertion order.
+/// Exercises in_apnap_order at the shared batch boundary.
+#[test]
+fn a_creature_damage_batch_asks_the_active_player_before_the_first_source_owner() {
+    let mut scenario = scenario();
+    scenario.add_creature(P0, "Grizzly Bears", 2, 2);
+    scenario.add_creature(P1, "Hill Giant", 3, 3);
+    let p0_bubble = force_bubble(&mut scenario, P0);
+    let p1_bubble = force_bubble(&mut scenario, P1);
+    for player in [P0, P1] {
+        scenario.add_enchantment_from_oracle(player, "Delaying Shield", DELAYING_SHIELD);
+    }
+    let charm = scenario
+        .add_spell_to_hand_from_oracle(P1, "Rakdos Charm", true, RAKDOS_CHARM)
+        .id();
+    let mut runner = scenario.build();
+    runner.state_mut().active_player = P1;
+    runner.state_mut().priority_player = P1;
+    runner.state_mut().waiting_for = WaitingFor::Priority { player: P1 };
+    let mut events = cast_rakdos_charm_damage_mode(&mut runner, charm);
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::ReplacementChoice { player: P1, .. }
+    ));
+    let prompts = answer_batch_prompts(&mut runner, &mut events, |player, _| {
+        Some(if player == P1 { p1_bubble } else { p0_bubble })
+    });
+    assert_eq!(prompts, vec![("order", P1, 0), ("order", P0, 0)]);
+    assert_eq!(counters(&runner, p0_bubble, &depletion()), 1);
+    assert_eq!(counters(&runner, p1_bubble, &depletion()), 1);
+    assert_completes_once_after_its_damage(&events, EffectKind::EachSourceDealsDamage, charm);
+    assert_at_rest(&runner);
+}
+
 /// Rakdos Charm with two lifelink survivors under Rhox Faithmender and Leyline of Hope: each
 /// survivor's gain asks P0 an order (CR 616.1), in delivery (CR 120.4c). The instruction
 /// completes once, after the second answer; with only the last survivor asking, once after its
