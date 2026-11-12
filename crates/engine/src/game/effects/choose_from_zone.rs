@@ -830,6 +830,7 @@ pub(crate) fn resolve_random_in_chain(
         }
         super::publish_fresh_tracked_set(state, picked.clone());
         ability.targets = picked.iter().map(|&id| TargetRef::Object(id)).collect();
+        ability.declared_player_target_slots.clear();
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::ChooseFromZone,
             source_id: ability.source_id,
@@ -4584,6 +4585,7 @@ mod tests {
                 *zone_owner = ZoneOwner::TargetedPlayer;
             }
             ability.targets = targets;
+            ability.declared_player_target_slots.clear();
             ability
         };
         let earlier_set = || {

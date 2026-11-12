@@ -14,10 +14,10 @@ use crate::types::ability::{
     payer_is_declared_target, quantity_slot_filter_selects_players, relative_controller_kind,
     AbilityCondition, AbilityDefinition, AbilityKind, AdditionalCost, AttachSelection,
     AttachmentReferent, ChosenTargetSlots, ControllerRef, DamageReplacementTargetRole,
-    EachDamageRecipient, Effect, EffectError, EffectKind, EffectScope, FilterProp, ModalChoice,
-    ModalSelectionCondition, ModalSelectionConstraint, MultiTargetSpec, ObjectScope,
-    ParentTargetMissingReason, PlayerFilter, PreventionAmount, PtValue, QuantityExpr, QuantityRef,
-    ResolvedAbility, SpellContext, SubAbilityLink, TargetChoiceTiming, TargetFilter,
+    DeclaredPlayerTargetSlot, EachDamageRecipient, Effect, EffectError, EffectKind, EffectScope,
+    FilterProp, ModalChoice, ModalSelectionCondition, ModalSelectionConstraint, MultiTargetSpec,
+    ObjectScope, ParentTargetMissingReason, PlayerFilter, PreventionAmount, PtValue, QuantityExpr,
+    QuantityRef, ResolvedAbility, SpellContext, SubAbilityLink, TargetChoiceTiming, TargetFilter,
     TargetReadOrigin, TargetRef, TypeFilter, TypedFilter,
 };
 #[cfg(test)]
@@ -3257,6 +3257,11 @@ pub(crate) fn illegal_declared_target_slots(
 /// normal initial legality check.
 pub(crate) fn clear_illegal_local_target_slots(ability: &mut ResolvedAbility) {
     ability.illegal_local_target_slots.clear();
+    // CR 115.1: this route skips the validation that would preserve declared
+    // role identity, so the stored-occurrence map from an earlier resolution is
+    // stale. The uncompacted targets still preserve announced order, which the
+    // companion fallback reads.
+    ability.declared_player_target_slots.clear();
     if matches!(
         ability.parent_target_missing_reason,
         Some(ParentTargetMissingReason::IllegalAnnouncement {
@@ -3901,6 +3906,36 @@ fn declared_illegal_local_positions(
         .collect()
 }
 
+/// CR 115.1: The pre-compaction positions of `announced` that hold a player.
+/// Read before resolution validation projects `targets`, so a dropped player
+/// occurrence still contributes its declared role identity.
+fn declared_player_positions(announced: &ResolvedAbility) -> Vec<usize> {
+    announced
+        .targets
+        .iter()
+        .enumerate()
+        .filter_map(|(position, target)| matches!(target, TargetRef::Player(_)).then_some(position))
+        .collect()
+}
+
+/// CR 115.1 + CR 608.2b: Record every announced player occurrence and the
+/// stored index it keeps after legality compaction. `stored_by_declared` is
+/// aligned with the announced target vector; `None` marks an occurrence
+/// validation dropped.
+fn stamp_declared_player_target_slots(
+    validated: &mut ResolvedAbility,
+    declared_positions: &[usize],
+    stored_by_declared: &[Option<usize>],
+) {
+    validated.declared_player_target_slots = declared_positions
+        .iter()
+        .map(|&declared_position| DeclaredPlayerTargetSlot {
+            declared_position,
+            stored_position: stored_by_declared.get(declared_position).copied().flatten(),
+        })
+        .collect();
+}
+
 type Occurrence = (TargetRef, Option<ObjectIncarnationRef>);
 
 /// CR 608.2b: one node's resolution-validation result.
@@ -4003,6 +4038,7 @@ fn validate_targets_in_chain_inner(
     // (`OccurrenceVerdict`, aligned with `validated.targets`); storage, the
     // declared view and the fizzle stamp are each derived from the verdicts.
     let occurrence_count = validated.targets.len();
+    let announced_player_positions = declared_player_positions(&validated);
     let node_validation = if is_per_opponent_target_fanout(&validated) {
         NodeValidation::Verdicts(validate_per_opponent_target_fanout_targets(
             state, &validated,
@@ -4695,6 +4731,11 @@ fn validate_targets_in_chain_inner(
     // (stored domain, `declared_to_stored`).
     let verdicts = match node_validation {
         NodeValidation::Verdicts(verdicts) => {
+            let stored_by_declared: Vec<Option<usize>> =
+                super::target_occurrences::declared_to_stored(&verdicts)
+                    .into_iter()
+                    .map(|stored| stored.map(|super::target_occurrences::StoredIndex(index)| index))
+                    .collect();
             validated.retain_target_occurrences(&verdicts);
             // The storage projection crosses domains only through
             // `declared_to_stored`: each stored occurrence is its declared
@@ -4712,6 +4753,11 @@ fn validate_targets_in_chain_inner(
                     );
                 }
             }
+            stamp_declared_player_target_slots(
+                &mut validated,
+                &announced_player_positions,
+                &stored_by_declared,
+            );
             verdicts
         }
         NodeValidation::Rebuilt { verdicts, stored } => {
@@ -4719,11 +4765,27 @@ fn validate_targets_in_chain_inner(
             // node, so it is inserted unrecorded.
             let own: Vec<usize> = stored.iter().filter_map(|(own, _)| *own).collect();
             validated.project_target_occurrences(&own);
+            // The rebuilt storage order is the final order: own occurrences
+            // are projected in place, then each ancestor occurrence is
+            // inserted at its stored index.
+            let mut stored_by_declared = vec![None; occurrence_count];
+            for (stored_index, (own, _)) in stored.iter().enumerate() {
+                if let Some(declared) = own {
+                    if let Some(slot) = stored_by_declared.get_mut(*declared) {
+                        *slot = Some(stored_index);
+                    }
+                }
+            }
             for (index, (own, (target, pin))) in stored.into_iter().enumerate() {
                 if own.is_none() {
                     validated.insert_target(index, target, pin);
                 }
             }
+            stamp_declared_player_target_slots(
+                &mut validated,
+                &announced_player_positions,
+                &stored_by_declared,
+            );
             verdicts
         }
     };
@@ -7375,6 +7437,22 @@ fn filter_has_object_player_anchor(filter: &TargetFilter) -> bool {
     }
 }
 
+/// CR 115.1 + CR 608.2b: True when the mixed primary role was announced as a
+/// player, even if resolution validation has since dropped that occurrence.
+/// The companion anchor alone does not select the player role; a declared
+/// player at any later announced position does.
+pub(crate) fn mixed_primary_player_role_selected(
+    ability: &ResolvedAbility,
+    target: &TargetFilter,
+) -> bool {
+    filter_selects_players(target)
+        && ability_needs_companion_target_player_slot(ability)
+        && ability
+            .declared_player_target_slots
+            .iter()
+            .any(|slot| slot.declared_position != 0)
+}
+
 /// Resolve a player-scoped `TargetFilter` to the concrete set of player ids it
 /// affects, for an effect whose targets live on `ability`.
 ///
@@ -7427,6 +7505,28 @@ pub(crate) fn collect_player_targets(
     // well as their creatures). The player-anaphor filters above are exempt
     // because their arms already resolved the exact slot before this point.
     if filter_selects_players(target) {
+        // CR 115.1 + CR 608.2b: when resolution validation compacted the
+        // announced targets, stored order alone no longer identifies the
+        // companion anchor. The declared-player map keeps that identity even
+        // when the companion or the primary occurrence was dropped: only a
+        // player declared for a position after the anchor is the selected
+        // player role.
+        if filter_has_object_player_anchor(target)
+            && ability_needs_companion_target_player_slot(ability)
+            && !ability.declared_player_target_slots.is_empty()
+        {
+            return ability
+                .declared_player_target_slots
+                .iter()
+                .filter(|slot| slot.declared_position != 0)
+                .filter_map(|slot| slot.stored_position)
+                .filter_map(|position| ability.targets.get(position))
+                .filter_map(|target| match target {
+                    TargetRef::Player(pid) => Some(*pid),
+                    TargetRef::Object(_) => None,
+                })
+                .collect();
+        }
         let mut from_targets: Vec<PlayerId> = ability
             .targets
             .iter()
@@ -7435,9 +7535,10 @@ pub(crate) fn collect_player_targets(
                 TargetRef::Object(_) => None,
             })
             .collect();
-        // CR 115.1: the companion player slot is announced before the mixed
-        // primary slot. Drop that leading anchor; a player declared for the
-        // primary mixed slot remains as the selected player role.
+        // Fallback for an ability not stamped by resolution validation (a
+        // hand-built test node or a legacy wire frame): the companion player
+        // slot is announced before the mixed primary slot, so drop the leading
+        // anchor.
         if filter_has_object_player_anchor(target)
             && ability_needs_companion_target_player_slot(ability)
             && !from_targets.is_empty()
@@ -16843,6 +16944,154 @@ mod tests {
         assert!(
             collect_player_targets(&state, &ability, &owned_by_target_player).is_empty(),
             "an object-scoped Owned{{TargetPlayer}} filter must not expand to all players"
+        );
+    }
+
+    /// CR 115.1 + CR 608.2b: validation may drop the companion player anchor
+    /// while the player declared for the mixed primary slot remains legal. The
+    /// stored target vector no longer carries the anchor's identity, so the
+    /// declared-player map must keep the primary player as the selected role.
+    #[test]
+    fn validated_mixed_role_keeps_primary_player_when_companion_is_dropped() {
+        use crate::types::ability::{StaticDefinition, TypedFilter};
+        use crate::types::format::FormatConfig;
+        use crate::types::statics::StaticMode;
+
+        let mut state = GameState::new(FormatConfig::standard(), 3, 42);
+        // P2 has player hexproof from opponents, so its companion slot is
+        // illegal while P0 remains a legal primary-player declaration.
+        let grantor = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(2),
+            "Player Hexproof Source".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&grantor).unwrap().static_definitions =
+            vec![
+                StaticDefinition::new(StaticMode::Hexproof).affected(TargetFilter::Typed(
+                    TypedFilter::default().controller(ControllerRef::You),
+                )),
+            ]
+            .into();
+        crate::game::layers::flush_layers(&mut state);
+
+        let anchored_or = TargetFilter::Or {
+            filters: vec![
+                TargetFilter::Player,
+                TargetFilter::Typed(
+                    TypedFilter::creature().controller(ControllerRef::TargetPlayer),
+                ),
+            ],
+        };
+        let declared = ResolvedAbility::new(
+            Effect::PhaseOut {
+                target: anchored_or.clone(),
+            },
+            vec![
+                TargetRef::Player(PlayerId(2)),
+                TargetRef::Player(PlayerId(0)),
+            ],
+            ObjectId(1),
+            PlayerId(0),
+        );
+        let validated = validate_targets_in_chain(&state, &declared);
+        assert_eq!(
+            validated.targets,
+            vec![TargetRef::Player(PlayerId(0))],
+            "the illegal companion anchor is compacted away"
+        );
+        assert_eq!(
+            validated.declared_player_target_slots,
+            vec![
+                DeclaredPlayerTargetSlot {
+                    declared_position: 0,
+                    stored_position: None,
+                },
+                DeclaredPlayerTargetSlot {
+                    declared_position: 1,
+                    stored_position: Some(0),
+                },
+            ]
+        );
+        assert_eq!(
+            collect_player_targets(&state, &validated, &anchored_or),
+            vec![PlayerId(0)],
+            "the surviving primary player role must not be mistaken for the dropped anchor"
+        );
+    }
+
+    /// CR 115.1 + CR 608.2b: the mirror case — only the companion anchor
+    /// survives, while the declared primary player is illegal. The player role
+    /// is still the announced selection, so the object leg must not sweep.
+    #[test]
+    fn validated_mixed_role_keeps_primary_role_when_only_companion_survives() {
+        use crate::types::ability::{StaticDefinition, TypedFilter};
+        use crate::types::format::FormatConfig;
+        use crate::types::statics::StaticMode;
+
+        let mut state = GameState::new(FormatConfig::standard(), 3, 42);
+        let grantor = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(2),
+            "Player Hexproof Source".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&grantor).unwrap().static_definitions =
+            vec![
+                StaticDefinition::new(StaticMode::Hexproof).affected(TargetFilter::Typed(
+                    TypedFilter::default().controller(ControllerRef::You),
+                )),
+            ]
+            .into();
+        crate::game::layers::flush_layers(&mut state);
+
+        let anchored_or = TargetFilter::Or {
+            filters: vec![
+                TargetFilter::Player,
+                TargetFilter::Typed(
+                    TypedFilter::creature().controller(ControllerRef::TargetPlayer),
+                ),
+            ],
+        };
+        let declared = ResolvedAbility::new(
+            Effect::PhaseOut {
+                target: anchored_or.clone(),
+            },
+            vec![
+                TargetRef::Player(PlayerId(0)),
+                TargetRef::Player(PlayerId(2)),
+            ],
+            ObjectId(1),
+            PlayerId(0),
+        );
+        let validated = validate_targets_in_chain(&state, &declared);
+        assert_eq!(
+            validated.targets,
+            vec![TargetRef::Player(PlayerId(0))],
+            "only the companion anchor survives storage"
+        );
+        assert_eq!(
+            validated.declared_player_target_slots,
+            vec![
+                DeclaredPlayerTargetSlot {
+                    declared_position: 0,
+                    stored_position: Some(0),
+                },
+                DeclaredPlayerTargetSlot {
+                    declared_position: 1,
+                    stored_position: None,
+                },
+            ]
+        );
+        assert!(
+            collect_player_targets(&state, &validated, &anchored_or).is_empty(),
+            "the companion anchor is not the selected player role"
+        );
+        assert!(
+            mixed_primary_player_role_selected(&validated, &anchored_or),
+            "the declared primary player role must survive even though it is illegal"
         );
     }
 

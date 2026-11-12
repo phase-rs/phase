@@ -632,6 +632,7 @@ pub(crate) fn node_modifiers_offer_choice(a: &ResolvedAbility) -> bool {
         illegal_target_slots: _, // CR 608.2b resolution legality stamp, no choice
         unjudged_target_slots: _, // CR 608.2b resolution legality stamp, no choice
         illegal_local_target_slots: _, // CR 608.2b node-local legality stamp, no choice
+        declared_player_target_slots: _, // CR 115.1 announce-time role identity, no choice
         controller: _,           // player id
         original_controller: _,  // player id
         scoped_player: _,        // player id (iteration binding)

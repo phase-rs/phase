@@ -182,7 +182,12 @@ fn player_role_excludes_object_sweep(
     target: &TargetFilter,
     player_targets: &[PlayerId],
 ) -> bool {
-    !player_targets.is_empty()
+    // CR 608.2b: an announced primary player role stays the selected role even
+    // when that player has since become illegal, so the object leg is not a
+    // substitute population (the companion anchor alone is not a selection).
+    let player_role_selected = !player_targets.is_empty()
+        || crate::game::ability_utils::mixed_primary_player_role_selected(ability, target);
+    player_role_selected
         && crate::game::ability_utils::filter_selects_players(target)
         && !ability
             .targets
@@ -208,6 +213,13 @@ pub(super) fn collect_object_targets(
         .collect();
     if !from_targets.is_empty() {
         return from_targets;
+    }
+    // CR 608.2b: an explicit object occurrence that failed resolution legality
+    // is not replaced by a mass population. "Other parts of the effect for which
+    // those targets are not illegal may still affect them"; the object leg here
+    // had a declared target and that target is gone.
+    if !ability.illegal_local_target_slots.is_empty() {
+        return Vec::new();
     }
 
     // CR 400.7: a self-reference cannot phase out a later same-ID incarnation.
@@ -255,6 +267,11 @@ fn collect_phase_in_targets(
         .collect();
     if !from_targets.is_empty() {
         return from_targets;
+    }
+    // CR 608.2b: a declared object target that failed resolution legality must
+    // not be replaced by a battlefield-wide phase-in scan of the same filter.
+    if !ability.illegal_local_target_slots.is_empty() {
+        return Vec::new();
     }
 
     // CR 702.26b: phasing-in is one of the rare effects that specifically
@@ -378,6 +395,107 @@ mod tests {
         assert!(
             state.objects[&theirs].is_phased_in(),
             "the unchosen creature leg must not be swept"
+        );
+    }
+
+    /// CR 115.1 + CR 608.2b: when the companion anchor was dropped but the
+    /// player declared for the mixed primary slot survived, that surviving
+    /// player is still the selected role — not a stray anchor to discard.
+    #[test]
+    fn phase_out_mixed_player_role_keeps_surviving_primary_player() {
+        use crate::types::ability::DeclaredPlayerTargetSlot;
+
+        let mut state = GameState::new_two_player(42);
+        let source = add_creature(&mut state, PlayerId(0), "Mixed Source");
+        let theirs = add_creature(&mut state, PlayerId(1), "Target Bear");
+        let target = TargetFilter::Or {
+            filters: vec![
+                TargetFilter::Player,
+                TargetFilter::Typed(
+                    TypedFilter::creature().controller(ControllerRef::TargetPlayer),
+                ),
+            ],
+        };
+        let mut ability = ResolvedAbility::new(
+            Effect::PhaseOut {
+                target: target.clone(),
+            },
+            vec![TargetRef::Player(PlayerId(1))],
+            source,
+            PlayerId(0),
+        );
+        ability.declared_player_target_slots = vec![
+            DeclaredPlayerTargetSlot {
+                declared_position: 0,
+                stored_position: None,
+            },
+            DeclaredPlayerTargetSlot {
+                declared_position: 1,
+                stored_position: Some(0),
+            },
+        ];
+
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert!(
+            state.players[1].is_phased_out(),
+            "the surviving primary player is the selected role"
+        );
+        assert!(
+            state.objects[&theirs].is_phased_in(),
+            "the object leg must not sweep a selected player role"
+        );
+    }
+
+    /// CR 115.1 + CR 608.2b: only the companion anchor survived, while the
+    /// declared primary player is illegal. The player role is still the
+    /// announced selection, so neither the illegal player nor the object leg
+    /// may be substituted for it.
+    #[test]
+    fn phase_out_mixed_player_role_suppresses_sweep_when_primary_player_is_illegal() {
+        use crate::types::ability::DeclaredPlayerTargetSlot;
+
+        let mut state = GameState::new_two_player(42);
+        let source = add_creature(&mut state, PlayerId(0), "Mixed Source");
+        let theirs = add_creature(&mut state, PlayerId(1), "Target Bear");
+        let target = TargetFilter::Or {
+            filters: vec![
+                TargetFilter::Player,
+                TargetFilter::Typed(
+                    TypedFilter::creature().controller(ControllerRef::TargetPlayer),
+                ),
+            ],
+        };
+        let mut ability = ResolvedAbility::new(
+            Effect::PhaseOut {
+                target: target.clone(),
+            },
+            vec![TargetRef::Player(PlayerId(0))],
+            source,
+            PlayerId(0),
+        );
+        ability.declared_player_target_slots = vec![
+            DeclaredPlayerTargetSlot {
+                declared_position: 0,
+                stored_position: Some(0),
+            },
+            DeclaredPlayerTargetSlot {
+                declared_position: 1,
+                stored_position: None,
+            },
+        ];
+
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert!(
+            state.players[0].is_phased_in(),
+            "the lone companion anchor is not an affected player"
+        );
+        assert!(
+            state.objects[&theirs].is_phased_in(),
+            "an illegal primary player role must not be replaced by an object sweep"
         );
     }
 

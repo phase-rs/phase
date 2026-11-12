@@ -3032,6 +3032,27 @@ impl ChosenTargetSlots {
     }
 }
 
+/// CR 115.1 + CR 608.2b: One player occurrence in a node's DECLARED target
+/// vector, preserved across the resolution legality projection so the announced
+/// role survives even when the occurrence itself is dropped as illegal.
+///
+/// `declared_position` is the pre-compaction index; `stored_position` is the
+/// index the same occurrence occupies in `ResolvedAbility::targets` after
+/// validation, or `None` when validation dropped it. The companion player
+/// anchor is always declared position 0; a player declared for a mixed
+/// primary slot follows it. Keeping both identities lets a resolution reader
+/// distinguish "the primary player role was selected but became illegal"
+/// (bind no object population) from "no player role was selected" (the object
+/// leg applies).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeclaredPlayerTargetSlot {
+    /// Position in the announced target vector (pre-compaction).
+    pub declared_position: usize,
+    /// Position in `ResolvedAbility::targets` after validation, or `None` when
+    /// the occurrence was dropped as illegal.
+    pub stored_position: Option<usize>,
+}
+
 /// Bound outcome instructions. Each child owns its announced targets.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResolvedCoinBranches {
@@ -3206,6 +3227,14 @@ pub struct ResolvedAbility {
     /// propagation only uses its presence to avoid refilling an emptied node.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub illegal_local_target_slots: Vec<usize>,
+    /// CR 115.1 + CR 608.2b: Every player occurrence this node announced, with
+    /// the stored index it occupies after resolution legality compaction and
+    /// `None` when validation dropped it. Written by
+    /// `validate_targets_in_chain_inner`; kept separate from `targets` so a
+    /// mixed player/object role can still be identified when the companion or
+    /// primary occurrence is no longer stored.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub declared_player_target_slots: Vec<DeclaredPlayerTargetSlot>,
     pub controller: PlayerId,
     /// CR 109.5: The controller of the spell or ability before any
     /// resolution-time player-scope iteration rebinds the acting player.
@@ -3666,6 +3695,7 @@ impl PartialEq for ResolvedAbility {
             illegal_target_slots: a_illegal_target_slots,
             unjudged_target_slots: a_unjudged_target_slots,
             illegal_local_target_slots: a_illegal_local_target_slots,
+            declared_player_target_slots: a_declared_player_target_slots,
             controller: a_controller,
             original_controller: a_original_controller,
             scoped_player: a_scoped_player,
@@ -3745,6 +3775,7 @@ impl PartialEq for ResolvedAbility {
             illegal_target_slots: b_illegal_target_slots,
             unjudged_target_slots: b_unjudged_target_slots,
             illegal_local_target_slots: b_illegal_local_target_slots,
+            declared_player_target_slots: b_declared_player_target_slots,
             controller: b_controller,
             original_controller: b_original_controller,
             scoped_player: b_scoped_player,
@@ -3825,6 +3856,7 @@ impl PartialEq for ResolvedAbility {
             && a_illegal_target_slots == b_illegal_target_slots
             && a_unjudged_target_slots == b_unjudged_target_slots
             && a_illegal_local_target_slots == b_illegal_local_target_slots
+            && a_declared_player_target_slots == b_declared_player_target_slots
             && a_controller == b_controller
             && a_original_controller == b_original_controller
             && a_scoped_player == b_scoped_player
@@ -4400,6 +4432,7 @@ impl ResolvedAbility {
             illegal_target_slots: Vec::new(),
             unjudged_target_slots: Vec::new(),
             illegal_local_target_slots: Vec::new(),
+            declared_player_target_slots: Vec::new(),
             modal: None,
             mode_abilities: Vec::new(),
             parent_target_missing_reason: None,
