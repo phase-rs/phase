@@ -444,10 +444,9 @@ fn any_stack_harmful_answerable_by_grants(
                     &reach.node.effect,
                     grants,
                     obj,
-                    state.objects.get(&entry.source_id),
+                    entry,
                     lethal,
                     &declared_targets,
-                    entry.controller,
                 )
             })
         })
@@ -466,14 +465,15 @@ fn harmful_effect_answerable_by_grants(
     effect: &Effect,
     grants: &[DefensiveGrant],
     protected: &engine::game::game_object::GameObject,
-    source: Option<&engine::game::game_object::GameObject>,
+    entry: &engine::types::game_state::StackEntry,
     lethal: Option<bool>,
     declared_targets: &[TargetRef],
-    threat_controller: PlayerId,
 ) -> bool {
     if !is_harmful(effect) {
         return false;
     }
+    let source = state.objects.get(&entry.source_id);
+    let threat_controller = entry.controller;
     grants
         .iter()
         .filter(|grant| {
