@@ -1540,6 +1540,17 @@ pub(crate) fn drain_pending_continuation(state: &mut GameState, events: &mut Vec
                 )
             });
         if let Some((source_id, links, collects)) = scoped_channels {
+            // CR 608.2c + CR 608.2f: the answered seat's moves join the clause's
+            // "this way" ledger under the same action-local bound as the
+            // created-token read above.
+            let moved = clause_zone_changed_ids(events);
+            if let Some(ledger) = state
+                .active_ability_continuation_frame_mut()
+                .and_then(|frame| frame.pending.player_scope_tail.as_mut())
+                .and_then(|scope| scope.zone_changed_this_way.as_mut())
+            {
+                extend_clause_ledger(ledger, moved);
+            }
             let linked_additions = if links {
                 linked_exile_batch_from_events(state, source_id, events)
             } else {
@@ -1687,6 +1698,11 @@ pub(crate) fn drain_pending_continuation(state: &mut GameState, events: &mut Vec
                         seats,
                     }
                 });
+                // CR 608.2c + CR 608.2f: the tail's "this way" names the whole
+                // clause — every seat's moves, not only the last answer's.
+                if let Some(ledger) = scope.zone_changed_this_way.take() {
+                    state.last_zone_changed_ids = ledger;
+                }
                 // CR 603.10 + CR 608.2c: the choice-driven instruction just completed; its entries are observed before the resumed chain runs.
                 settle_entries_before_instruction(state, events, &scope.after_scope, None);
                 chain_progress = resolve_after_scope_with_created_seats(
@@ -11730,16 +11746,29 @@ fn effect_has_iteration_bound_recipient(effect: &Effect) -> bool {
 
 /// CR 109.5 + CR 608.2c: does this chain node name the player a surrounding
 /// `player_scope` iteration is bound to? True when its condition tests the
-/// scoped player (`ScopedPlayerMatches` — "each opponent who …"), or when its
-/// effect's player/object filter references that player: the bare
-/// `ScopedPlayer` recipient ("loses 3 life", "draws a card") or a
-/// `ControllerRef::ScopedPlayer` controller/owner axis ("a creature they
-/// control", "their graveyard"). `OriginalController` ("you") is deliberately
-/// NOT a reference: it names the printed controller in every iteration.
+/// scoped player (`ScopedPlayerMatches` — "each opponent who …"), or when any
+/// filter, counted population or amount in its condition or effect refers to
+/// that player: the bare `ScopedPlayer` recipient ("loses 3 life", "draws a
+/// card"), a `ControllerRef::ScopedPlayer` controller/owner axis ("a creature
+/// they control", "their graveyard", "equal to the number of creatures they
+/// control"), or a `PlayerScope::ScopedPlayer` amount ("cards in their hand").
+/// `OriginalController` ("you") is deliberately NOT a reference: it names the
+/// printed controller in every iteration.
 ///
-/// Reads only this node; the filter traversal is `filter_contains`, the single
-/// authority for "does this filter mention X anywhere".
+/// Reads only this node, through the shared walkers: `filter_contains` for a
+/// filter leaf, `condition_reads_filter_population` /
+/// `effect_reads_filter_population` for every filter and counted population a
+/// condition or effect carries, and `QuantityExpr::any_ref` for amounts.
 fn node_references_scoped_player(node: &ResolvedAbility) -> bool {
+    fn names_scoped_player(filter: &TargetFilter) -> bool {
+        crate::types::ability::filter_contains(filter, &|leaf| {
+            matches!(leaf, TargetFilter::ScopedPlayer)
+                || filter_uses_relative_controller_scoped(leaf)
+        })
+    }
+    fn amount_reads_scoped_player(quantity: &QuantityExpr) -> bool {
+        quantity.any_ref(&mut |qty| qty.player_scope() == Some(&PlayerScope::ScopedPlayer))
+    }
     fn condition_tests_scoped_player(condition: &AbilityCondition) -> bool {
         match condition {
             AbilityCondition::ScopedPlayerMatches { .. } => true,
@@ -11747,26 +11776,27 @@ fn node_references_scoped_player(node: &ResolvedAbility) -> bool {
             AbilityCondition::And { conditions } | AbilityCondition::Or { conditions } => {
                 conditions.iter().any(condition_tests_scoped_player)
             }
+            AbilityCondition::QuantityCheck { lhs, rhs, .. } => {
+                amount_reads_scoped_player(lhs) || amount_reads_scoped_player(rhs)
+            }
+            AbilityCondition::QuantityQuality {
+                quantity,
+                quality: _,
+            } => amount_reads_scoped_player(quantity),
+            AbilityCondition::PreviousEffectAmount { rhs, .. } => amount_reads_scoped_player(rhs),
             _ => false,
         }
     }
-    let names_scoped_player = |filter: &TargetFilter| {
-        crate::types::ability::filter_contains(filter, &|leaf| {
-            matches!(leaf, TargetFilter::ScopedPlayer)
-                || filter_uses_relative_controller_scoped(leaf)
+    let mut effect_amount_reads_scoped_player = false;
+    node.effect.for_each_quantity_expr(&mut |quantity| {
+        effect_amount_reads_scoped_player |= amount_reads_scoped_player(quantity);
+    });
+    effect_amount_reads_scoped_player
+        || effect_reads_filter_population(&node.effect, &names_scoped_player)
+        || node.condition.as_ref().is_some_and(|condition| {
+            condition_tests_scoped_player(condition)
+                || condition_reads_filter_population(condition, &names_scoped_player)
         })
-    };
-    // `Effect::target_filter()` surfaces every single-recipient axis (damage,
-    // life, draw, token owner, sacrifice, zone moves) but hides a mass effect's
-    // population ("destroy all creatures they control"); `mass_population_target`
-    // is the single authority for where every mass-population effect keeps it.
-    let effect_names_scoped_player = node.effect.target_filter().is_some_and(names_scoped_player)
-        || mass_population_target(&node.effect).is_some_and(names_scoped_player);
-    effect_names_scoped_player
-        || node
-            .condition
-            .as_ref()
-            .is_some_and(condition_tests_scoped_player)
 }
 
 /// CR 608.2c: True when an effect (or its quantity/target) reads the parent's
@@ -14789,16 +14819,20 @@ fn affected_objects_from_events(
         // producer's set, so the Treasure joins "those cards".
         //
         // Two guards, both required:
-        //  * not the sole producer — when the token creation is the chain's
-        //    only producer (Force of Rage's "create two … tokens. Sacrifice
-        //    those tokens …") the tokens ARE the population;
+        //  * another producer is in the chain — an earlier one already ran
+        //    (it opened the chain set, even when it moved nothing: an empty
+        //    mill still names "those cards", and a token never joins them), or
+        //    a later one competes for the anaphor. When the token creation is
+        //    the chain's only producer (Force of Rage's "create two … tokens.
+        //    Sacrifice those tokens …") the tokens ARE the population;
         //  * the consumer reads only cards — a consumer that names the token
         //    itself (Ugin, the Ineffable's "When that token leaves the
         //    battlefield, put the exiled card into your hand") needs it in the
         //    set alongside the exiled card.
         // Either guard failing falls through to the `_ =>` harvest unchanged.
         Effect::Token { .. }
-            if !is_sole_chain_producer(state, ability)
+            if (state.chain_tracked_set_id.is_some()
+                || !is_sole_chain_producer(state, ability))
                 && tracked_set_consumer_reads_only_cards(ability) =>
         {
             Vec::new()
@@ -15589,12 +15623,84 @@ fn first_tracked_set_consumer_mode(
 /// `CreateDelayedTrigger`) is not in this class.
 fn tracked_set_consumer_reads_only_cards(producer: &ResolvedAbility) -> bool {
     first_tracked_set_consumer(producer.sub_ability.as_deref()).is_some_and(|consumer| {
-        node_counts_tracked_set(consumer)
+        node_counts_tracked_set_cards(consumer)
             || matches!(
                 consumer.effect,
                 Effect::GrantCastingPermission { .. } | Effect::CastFromZone { .. }
             )
     })
+}
+
+/// CR 108.2b: does this node count the chain tracked set as CARDS? A count
+/// reads cards when it names them: the bare "for each card <verb>ed this way"
+/// (`TrackedSetSize`, which the parser keeps for the untyped "card" noun) or a
+/// filtered count whose filter names cards (`filter_names_cards`: "nonland
+/// card", "creature card"). A filtered count that can match a token ("for each
+/// creature put onto the battlefield this way") counts objects, not cards.
+fn node_counts_tracked_set_cards(node: &ResolvedAbility) -> bool {
+    let counts_cards = |quantity: &QuantityExpr| {
+        quantity.any_ref(&mut |qty| match qty {
+            QuantityRef::TrackedSetSize => true,
+            QuantityRef::FilteredTrackedSetSize { filter, .. } => {
+                crate::game::quantity::filter_names_cards(filter)
+            }
+            _ => false,
+        })
+    };
+    let mut counts = node.repeat_for.as_ref().is_some_and(counts_cards);
+    node.effect.for_each_quantity_expr(&mut |quantity| {
+        counts |= counts_cards(quantity);
+    });
+    counts
+}
+
+#[cfg(test)]
+mod node_counts_tracked_set_cards_tests {
+    use super::node_counts_tracked_set_cards;
+    use crate::types::ability::{
+        Effect, QuantityExpr, QuantityRef, ResolvedAbility, TargetFilter, TypeFilter, TypedFilter,
+    };
+    use crate::types::identifiers::ObjectId;
+    use crate::types::player::PlayerId;
+
+    fn draw_for_each(qty: QuantityRef) -> ResolvedAbility {
+        let mut node = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+            Vec::new(),
+            ObjectId(1),
+            PlayerId(0),
+        );
+        node.repeat_for = Some(QuantityExpr::Ref { qty });
+        node
+    }
+
+    fn filtered(filter: TypedFilter) -> QuantityRef {
+        QuantityRef::FilteredTrackedSetSize {
+            filter: Box::new(TargetFilter::Typed(filter)),
+            caused_by: None,
+        }
+    }
+
+    /// CR 108.2b: "for each nonland card revealed this way" and the bare
+    /// "for each card … this way" count cards; "for each creature put onto the
+    /// battlefield this way" can count a token, so it does not.
+    #[test]
+    fn only_a_count_that_names_cards_reads_cards() {
+        let nonland_card =
+            TypedFilter::card().with_type(TypeFilter::Non(Box::new(TypeFilter::Land)));
+        assert!(node_counts_tracked_set_cards(&draw_for_each(filtered(
+            nonland_card
+        ))));
+        assert!(node_counts_tracked_set_cards(&draw_for_each(
+            QuantityRef::TrackedSetSize
+        )));
+        assert!(!node_counts_tracked_set_cards(&draw_for_each(filtered(
+            TypedFilter::creature()
+        ))));
+    }
 }
 
 /// CR 608.2c: does this node COUNT the chain tracked set — in any quantity its
@@ -18736,17 +18842,7 @@ fn publish_player_scope_clause_results(
     // a permanent this way" / ZoneChangedThisWay gates see every player's
     // sacrifice — not only the last iteration's overwrite of
     // `last_zone_changed_ids`.
-    let mut ids: Vec<ObjectId> = scoped_events
-        .iter()
-        .filter_map(|event| match event {
-            GameEvent::ZoneChanged { object_id, .. }
-            | GameEvent::PermanentSacrificed { object_id, .. } => Some(*object_id),
-            _ => None,
-        })
-        .collect();
-    ids.sort_unstable_by_key(|id| id.0);
-    ids.dedup();
-    state.last_zone_changed_ids = ids;
+    state.last_zone_changed_ids = clause_zone_changed_ids(scoped_events);
     if next_sub_needs_tracked_set(outer) {
         publish_tracked_set_for_resolution(
             state,
@@ -18886,6 +18982,43 @@ fn resolve_after_scope_with_created_seats(
     let outcome = resolve_ability_chain_step(state, after_scope, events, depth);
     state.resolving_created_token_seats = prior;
     outcome
+}
+
+/// CR 608.2c + CR 608.2f: the "this way" ledger of a `player_scope` clause's
+/// event span — every object it moved or sacrificed, deduplicated in id order.
+/// The single extraction both the completed-clause publication and the paused
+/// sidecar's ledger channel read.
+fn clause_zone_changed_ids(events: &[GameEvent]) -> Vec<ObjectId> {
+    let mut ids: Vec<ObjectId> = events
+        .iter()
+        .filter_map(|event| match event {
+            GameEvent::ZoneChanged { object_id, .. }
+            | GameEvent::PermanentSacrificed { object_id, .. } => Some(*object_id),
+            _ => None,
+        })
+        .collect();
+    ids.sort_unstable_by_key(|id| id.0);
+    ids.dedup();
+    ids
+}
+
+/// Merges `additions` into a paused clause's ledger, keeping it deduplicated
+/// in id order like [`clause_zone_changed_ids`].
+fn extend_clause_ledger(ledger: &mut Vec<ObjectId>, additions: Vec<ObjectId>) {
+    ledger.extend(additions);
+    ledger.sort_unstable_by_key(|id| id.0);
+    ledger.dedup();
+}
+
+/// CR 608.2c: does any node of a detached tail gate on the clause's "this way"
+/// ledger (`condition_depends_on_zone_change_this_way`)? Such a tail must read
+/// every seat's moves, so a paused clause carries them on its sidecar.
+fn tail_reads_zone_change_ledger(tail: &ResolvedAbility) -> bool {
+    std::iter::successors(Some(tail), |node| node.sub_ability.as_deref()).any(|node| {
+        node.condition
+            .as_ref()
+            .is_some_and(condition_depends_on_zone_change_this_way)
+    })
 }
 
 /// CR 607.2a: the linked-exile channel is live exactly when the detached tail
@@ -22255,8 +22388,15 @@ fn resolve_chain_body(
             && after_scope
                 .as_deref()
                 .is_some_and(tail_reads_created_referent);
-        let after_scope_owned_by_sidecar =
-            after_scope_needs_linked_exile || after_scope_needs_created_union;
+        // CR 608.2c + CR 608.2f: a detached tail gated on "… this way" reads the
+        // clause's whole ledger, so a paused fan-out keeps it on the sidecar,
+        // which carries every seat's moves until the last seat leg drains.
+        let after_scope_needs_zone_change_ledger = after_scope
+            .as_deref()
+            .is_some_and(tail_reads_zone_change_ledger);
+        let after_scope_owned_by_sidecar = after_scope_needs_linked_exile
+            || after_scope_needs_created_union
+            || after_scope_needs_zone_change_ledger;
 
         if should_collect_player_scope_sacrifice_choices(&scoped_template) {
             progress = start_player_scope_sacrifice_choices(
@@ -22633,6 +22773,10 @@ fn resolve_chain_body(
                 if state.active_ability_continuation().is_none() {
                     park_player_scope_queue_end(state, after_scope.as_ref().clone());
                 }
+                // Seeded with the pre-pause span the publication above just
+                // stamped.
+                let zone_changed_this_way = after_scope_needs_zone_change_ledger
+                    .then(|| state.last_zone_changed_ids.clone());
                 if let Some(frame) = state.active_ability_continuation_frame_mut() {
                     // CR 608.2f: generated APNAP nodes and their exact per-seat
                     // results are explicit pause authority. The detached tail
@@ -22642,6 +22786,7 @@ fn resolve_chain_body(
                         after_scope,
                         linked_exile_batch: batches.linked_exile,
                         created_tokens: after_scope_needs_created_union.then_some(seat_results),
+                        zone_changed_this_way,
                     });
                 }
             }
@@ -24165,6 +24310,13 @@ fn resolve_chain_body(
         .resolving_player_scope_tail
         .as_ref()
         .map(|scope| (tail_links_exile(scope), scope.created_tokens.is_some()));
+    if let Some(ledger) = state
+        .resolving_player_scope_tail
+        .as_mut()
+        .and_then(|scope| scope.zone_changed_this_way.as_mut())
+    {
+        extend_clause_ledger(ledger, clause_zone_changed_ids(&events[events_before..]));
+    }
     if let Some((links, collects)) = scope_channels {
         let created_additions = if collects {
             created_token_union_from_events(state, &events[events_before..])

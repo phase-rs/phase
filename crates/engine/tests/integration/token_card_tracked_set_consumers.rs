@@ -57,7 +57,8 @@ fn library_card(state: &mut GameState, card_id: u64, is_land: bool) -> ObjectId 
 /// CR 608.2c + CR 108.2b: a `repeat_for` count ("For each nonland card revealed
 /// this way, draw a card") reads cards. SYNTHETIC Oracle text: the shape of
 /// Culmination of Studies' clauses with a reveal producer, where nothing else
-/// masks the token. One land and one nonland card revealed: one Treasure, and
+/// masks the token. No printed card has exactly this shape; the test pins the
+/// `repeat_for` arm of the card-only classification. One land and one nonland card revealed: one Treasure, and
 /// exactly ONE card drawn. With the Treasure in the set (a nonland object) the
 /// loop would draw two.
 #[test]
@@ -235,4 +236,56 @@ fn kamachal_grants_the_exiled_card_and_not_the_treasure() {
         !has_cast_grant(state, treasures[0]),
         "the Treasure is a token, not \"that card\" — it must not receive the cast grant"
     );
+}
+
+/// CR 608.2c + CR 108.2b: an earlier producer that moved nothing still names
+/// "those cards", so a token created after it never joins them. SYNTHETIC
+/// Oracle text (no printed card has this exact order): with an empty library
+/// the mill moves no card, and the Treasure must not receive the cast grant.
+/// Deciding "an earlier producer ran" by the set being non-empty would treat
+/// the Treasure as the chain's only producer and grant it.
+#[test]
+fn an_empty_mill_still_keeps_a_later_treasure_out_of_those_cards() {
+    const TEXT: &str = "Mill two cards. Create a Treasure token. Until end of turn, you may cast a spell from among those cards.";
+    for stocked in [true, false] {
+        let mut state = GameState::new(FormatConfig::standard(), 2, 42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            P0,
+            "Mill Probe".to_string(),
+            Zone::Battlefield,
+        );
+        let milled: Vec<ObjectId> = if stocked {
+            vec![
+                library_card(&mut state, 10, false),
+                library_card(&mut state, 11, false),
+            ]
+        } else {
+            Vec::new()
+        };
+
+        let def = parse_effect_chain(TEXT, AbilityKind::Spell);
+        let ability = build_resolved_from_def(&def, source, P0);
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &ability, &mut events, 0).expect("the probe resolves");
+
+        let treasures = battlefield_tokens_named(&state, "Treasure");
+        assert_eq!(treasures.len(), 1, "reach guard: the Treasure is created");
+        for id in &milled {
+            assert_eq!(
+                state.objects[id].zone,
+                Zone::Graveyard,
+                "reach guard: milled"
+            );
+            assert!(
+                has_cast_grant(&state, *id),
+                "reach guard: a milled card is among those cards"
+            );
+        }
+        assert!(
+            !has_cast_grant(&state, treasures[0]),
+            "stocked={stocked}: the Treasure is a token, never one of those cards"
+        );
+    }
 }

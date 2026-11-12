@@ -28,6 +28,7 @@
 
 use engine::game::combat::AttackTarget;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
+use engine::types::ability::CastingPermission;
 use engine::types::identifiers::ObjectId;
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
@@ -96,6 +97,34 @@ fn assert_every_staged_card_was_milled(runner: &GameRunner, staged: &[ObjectId])
     }
 }
 
+/// Every Treasure on the battlefield.
+fn treasures(runner: &GameRunner) -> Vec<ObjectId> {
+    runner
+        .state()
+        .objects
+        .values()
+        .filter(|object| object.zone == Zone::Battlefield && object.name == "Treasure")
+        .map(|object| object.id)
+        .collect()
+}
+
+/// Whether `id` holds the Mug's "you may cast a spell from among those cards"
+/// grant (a single-use `PlayFromExile` permission over the milled batch).
+fn holds_mug_cast_grant(runner: &GameRunner, id: ObjectId) -> bool {
+    runner.state().objects[&id]
+        .casting_permissions
+        .iter()
+        .any(|permission| {
+            matches!(
+                permission,
+                CastingPermission::PlayFromExile {
+                    single_use: true,
+                    ..
+                }
+            )
+        })
+}
+
 /// CR 608.2c + CR 608.2f: every one of four players mills a land, and Locke's
 /// controller creates exactly ONE Treasure. Reverting the splitter fix keeps the
 /// gated Token inside the per-player iteration, creating a Treasure per player
@@ -110,6 +139,20 @@ fn every_player_milling_a_land_creates_exactly_one_treasure_for_lockes_controlle
         vec![P0],
         "one or more lands milled this way creates exactly one Treasure, under \
          Locke's controller — not one per player who milled a land"
+    );
+    // CR 108.2b + CR 608.2c: "those cards" is every card the mill moved — all
+    // four, from every player — and never the Treasure, which is not a card.
+    for (seat, id) in staged.iter().enumerate() {
+        assert!(
+            holds_mug_cast_grant(&runner, *id),
+            "player {seat}'s milled card is among \"those cards\""
+        );
+    }
+    let treasure = treasures(&runner);
+    assert_eq!(treasure.len(), 1, "reach guard: one Treasure was created");
+    assert!(
+        !holds_mug_cast_grant(&runner, treasure[0]),
+        "the Treasure is a token, not one of the cards milled this way"
     );
 }
 

@@ -3085,10 +3085,16 @@ pub struct PendingAttachmentRemainder {
 ///   made (replacement-made tokens included, CR 614.1a), pinned at creation
 ///   (CR 400.7). Their union is the referent of a tail that reads "the tokens";
 ///   each entry is the "it" of that seat's co-scoped second action. The last
-///   entry is the seat in progress.
+///   entry is the seat in progress;
+/// - the clause's "this way" zone-change ledger (CR 608.2c + CR 608.2f), live
+///   when `zone_changed_this_way` is `Some`: every object the clause's seats
+///   moved, across every pause, published as `last_zone_changed_ids` before
+///   `after_scope` resolves, exactly as a clause that completes without a
+///   pause publishes its whole event span.
 ///
 /// Wire keys are unchanged from the linked-exile-only sidecar; a sidecar
-/// serialized without `created_tokens` decodes as linked-exile-only.
+/// serialized without `created_tokens` decodes as linked-exile-only, and one
+/// without `zone_changed_this_way` carries no ledger channel.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct PendingPlayerScopeTail {
     pub source_id: ObjectId,
@@ -3097,6 +3103,8 @@ pub(crate) struct PendingPlayerScopeTail {
     pub linked_exile_batch: Vec<ObjectIncarnationRef>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub created_tokens: Option<Vec<SeatCreatedTokens>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub zone_changed_this_way: Option<Vec<ObjectId>>,
 }
 
 /// CR 608.2e + CR 400.7: one seat's creation result inside a player-scoped
@@ -3313,6 +3321,7 @@ mod player_scope_tail_serde_tests {
             )),
             linked_exile_batch: vec![ObjectIncarnationRef::of(ObjectId(11), 2)],
             created_tokens,
+            zone_changed_this_way: None,
         }
     }
 
@@ -57156,6 +57165,7 @@ mod restored_exact_attack_authority_tests {
                         after_scope: node.clone(),
                         linked_exile_batch: vec![],
                         created_tokens: None,
+                        zone_changed_this_way: None,
                     });
                     state.park_ability_continuation(pending);
                     state.waiting_for.clone()

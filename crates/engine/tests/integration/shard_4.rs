@@ -503,6 +503,7 @@ mod player_hexproof_shroud_grants;
 mod player_leaves_game_ltb_triggers;
 mod player_scope_created_token_union;
 mod player_scope_linked_exile_batch;
+mod player_scope_paused_this_way_gate;
 mod player_scope_sacrifice_carrier;
 mod ponder_decline_shuffle_regression;
 mod possessive_controller_object_anaphor;
