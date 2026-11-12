@@ -3,7 +3,7 @@
 //! CR 113.7a: an activated/triggered ability survives its source's departure.
 //! CR 400.7: leaving and returning creates a different object.
 
-use engine::game::effects::flip_coin;
+use engine::game::effects::{self, flip_coin};
 use engine::game::keywords::object_has_effective_keyword_kind;
 use engine::game::printed_cards::snapshot_object_face;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
@@ -11,17 +11,17 @@ use engine::game::triggers::trigger_source_context_for_latch;
 use engine::game::zones;
 use engine::types::ability::{
     AbilityCondition, AbilityDefinition, AbilityKind, CoinFlipRun, ControllerRef, DieResultBranch,
-    Effect, EffectOutcomeSignal, MultiTargetSpec, ObjectScope, PtValue, QuantityExpr, QuantityRef,
-    ReplacementDefinition, ResolvedAbility, SubAbilityLink, TargetChoiceTiming, TargetFilter,
-    TargetRef, TriggerDefinition, TypedFilter,
+    Effect, EffectKind, EffectOutcomeSignal, MultiTargetSpec, ObjectScope, PtValue, QuantityExpr,
+    QuantityRef, ReplacementDefinition, ResolvedAbility, SubAbilityLink, TargetChoiceTiming,
+    TargetFilter, TargetRef, TriggerDefinition, TypedFilter,
 };
 use engine::types::actions::GameAction;
 use engine::types::card::LayoutKind;
 use engine::types::card_type::CoreType;
 use engine::types::events::GameEvent;
 use engine::types::game_state::{
-    CastPaymentMode, GameRng, GameState, PersistedGameState, RandomDraw, StackEntry,
-    StackEntryKind, WaitingFor,
+    CastPaymentMode, GameRng, GameState, PendingContinuation, PersistedGameState, RandomDraw,
+    ResolvingTriggerContext, StackEntry, StackEntryKind, WaitingFor,
 };
 use engine::types::identifiers::ObjectId;
 use engine::types::keywords::KeywordKind;
@@ -1022,6 +1022,7 @@ fn move_definition(
     AbilityDefinition::new(
         AbilityKind::Spell,
         Effect::ChangeZone {
+            library_shuffle: Default::default(),
             origin: None,
             destination,
             target,
@@ -1867,6 +1868,7 @@ fn nothic_departed_source_draws_and_loses_life_for_its_trigger_controller() {
 
 fn self_move(origin: Zone, destination: Zone) -> Effect {
     Effect::ChangeZone {
+        library_shuffle: Default::default(),
         origin: Some(origin),
         destination,
         target: TargetFilter::SelfRef,
@@ -2175,10 +2177,17 @@ fn synthetic_thumb_legacy_v9_does_not_invent_departure_authority() {
                 .unwrap();
             value["resolution_frames"] = frames;
             value["resolution_state_version"] = serde_json::json!(9);
-            serde_json::from_value::<PersistedGameState>(value)
-                .unwrap()
-                .into_game_state()
-                .unwrap()
+            // CR 601.2c + CR 608.2b: a v9 coin frame cannot prove the outcome bindings
+            // announced at cast, so the v11 wire refuses it instead of resuming it under
+            // historical authority.
+            let error = serde_json::from_value::<PersistedGameState>(value)
+                .expect_err("a v9 coin frame is refused")
+                .to_string();
+            assert!(
+                error.contains("RESTORE_INCOMPATIBLE_COIN_BRANCH_BINDINGS:"),
+                "{error}"
+            );
+            continue;
         } else {
             serde_json::from_value::<GameState>(value).unwrap()
         };
@@ -2542,7 +2551,11 @@ fn synthetic_scoped_actor_survives_identity_transfer_without_borrowing_foreign_h
         )));
         // Represents a player-scope iteration: its actor is P1 even though
         // the triggering source's captured controller remains P0.
-        let mut flip = ResolvedAbility::new(flip_to(branch), vec![], source, P1);
+        let mut flip = engine::game::ability_utils::build_resolved_from_def(
+            &AbilityDefinition::new(AbilityKind::Spell, flip_to(branch)),
+            source,
+            P1,
+        );
         flip.set_scoped_player_recursive(P1);
         pin(&mut run.runner, coin_seed(&[true]));
         flip_coin::resolve(run.runner.state_mut(), &flip, &mut run.events).unwrap();
@@ -2970,4 +2983,289 @@ fn preroll_legacy_missing_scope_survives_all_ingresses_without_inventing_authori
         );
         assert_eq!(run.runner.state().objects[&source].zone, Zone::Battlefield);
     }
+}
+
+/// Composed split-context fixture, not a claim of printed-card ancestry.
+/// Krark's Thumb supplies the real keep prompt. Box of Free-Range Goblins
+/// ("Roll a six-sided die. Create a number of 1/1 red Goblin creature tokens equal
+/// to the result.") and Boing! ("Return target creature to its owner's hand, then
+/// roll a six-sided die. If the result is 3 or less, scry a number of cards equal
+/// to the result.") anchor the die payload. The d1 and life rows isolate publication.
+fn public_coin_keep_continuation_fixture(
+    dice: AbilityDefinition,
+) -> (GameRunner, ObjectId, ResolvingTriggerContext, i32) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.add_artifact_from_oracle(P0, "Krark's Thumb", THUMB);
+    scenario.with_cards_in_hand(P0, &["First discard", "Second discard", "Spare"]);
+    let source = scenario.add_creature(P0, "Context owner", 2, 2).id();
+    let mut state = scenario.build().state().clone();
+    let owned_event = GameEvent::DieRolled {
+        player_id: P0,
+        sides: 20,
+        result: Some(7),
+    };
+    let owned = ResolvingTriggerContext {
+        event: Some(owned_event.clone()),
+        events: vec![owned_event],
+        // A synthetic batched subject count would outrank the die result in
+        // `EventContextAmount`, so the downstream tail would read it instead
+        // of the roll total. Leave it unset here; the caller context still
+        // carries `Some(17)` to prove the restoration channels.
+        match_count: None,
+        die_result: Some(7),
+    };
+    state.current_trigger_event = owned.event.clone();
+    state.current_trigger_events = owned.events.clone();
+    state.current_trigger_match_count = owned.match_count;
+    state.die_result_this_resolution = owned.die_result;
+    let gain_two = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::GainLife {
+            amount: QuantityExpr::Fixed { value: 2 },
+            player: TargetFilter::Controller,
+        },
+    );
+    let coin = engine::game::ability_utils::build_resolved_from_def(
+        &AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::FlipCoins {
+                flips: CoinFlipRun::single(),
+                win_effect: Some(Box::new(gain_two.clone())),
+                lose_effect: Some(Box::new(gain_two)),
+                flipper: TargetFilter::Controller,
+            },
+        ),
+        source,
+        P0,
+    );
+    effects::resolve_ability_chain(&mut state, &coin, &mut vec![], 0).unwrap();
+    let WaitingFor::CoinFlipKeepChoice {
+        player,
+        results,
+        keep_count,
+    } = &state.waiting_for
+    else {
+        panic!("Krark's Thumb must create the keep prompt");
+    };
+    assert_eq!(*player, P0);
+    assert_eq!(*keep_count, 1);
+    assert_eq!(results.len(), 2);
+    let coin_frame = state.take_active_coin_flip_frame().unwrap().unwrap();
+    let mut continuation = PendingContinuation::new(
+        Box::new(engine::game::ability_utils::build_resolved_from_def(
+            &dice, source, P0,
+        )),
+        &state,
+    );
+    continuation.trigger_context = Some(owned);
+    state.park_ability_continuation(continuation);
+    state.push_coin_flip_frame(coin_frame);
+    state.resolution_stack.validate(&state.waiting_for).unwrap();
+    let caller_event = GameEvent::DieRolled {
+        player_id: P1,
+        sides: 20,
+        result: Some(19),
+    };
+    let caller = ResolvingTriggerContext {
+        event: Some(caller_event.clone()),
+        events: vec![caller_event],
+        match_count: Some(17),
+        die_result: Some(11),
+    };
+    state.current_trigger_event = caller.event.clone();
+    state.current_trigger_events = caller.events.clone();
+    state.current_trigger_match_count = caller.match_count;
+    state.die_result_this_resolution = caller.die_result;
+    let before = state.players[0].life;
+    (GameRunner::from_state(state), source, caller, before)
+}
+
+#[test]
+fn public_coin_keep_action_preserves_the_die_result_settled_by_its_continuation() {
+    let dice = d1_body(
+        1,
+        AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 1 },
+                player: TargetFilter::Controller,
+            },
+        ),
+    );
+    let (mut runner, source, caller, before) = public_coin_keep_continuation_fixture(dice);
+
+    let result = runner
+        .act(GameAction::SelectCoinFlips {
+            keep_indices: vec![0],
+        })
+        .expect("the public action accepts the real keep prompt");
+
+    let state = runner.state();
+    // CR 608.2c + CR 706.2: both instructions complete with the settled numeric result.
+    assert_eq!(state.players[0].life, before + 3);
+    assert!(result.events.iter().any(|event| matches!(
+        event,
+        GameEvent::DieRolled {
+            player_id: P0,
+            sides: 1,
+            result: Some(1)
+        }
+    )));
+    assert!(result.events.iter().any(|event| matches!(
+        event,
+        GameEvent::EffectResolved { kind: EffectKind::RollDie, source_id, .. }
+            if *source_id == source
+    )));
+    // Action ingress clears ambient 11; context replay must not replace the new 1
+    // with either that cleared caller value or the continuation's owned 7.
+    assert_eq!(state.die_result_this_resolution, Some(1));
+    assert_eq!(state.current_trigger_event, caller.event);
+    assert_eq!(state.current_trigger_events, caller.events);
+    assert_eq!(state.current_trigger_match_count, caller.match_count);
+    assert!(state.stack.is_empty());
+    assert!(state.resolution_stack.is_empty());
+    assert!(state.resolving_stack_entry.is_none());
+    assert!(matches!(
+        state.waiting_for,
+        WaitingFor::Priority { player: P0 }
+    ));
+    assert!(matches!(
+        result.waiting_for,
+        WaitingFor::Priority { player: P0 }
+    ));
+    state.resolution_stack.validate(&state.waiting_for).unwrap();
+}
+
+/// Composed continuation/context boundary, not printed-card ancestry; the printed
+/// die payload anchors are documented on `public_coin_keep_continuation_fixture`.
+#[test]
+fn public_coin_keep_continuation_publishes_each_paused_survivor_then_the_aggregate() {
+    let mut dice = d1_body(
+        2,
+        AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::DiscardCard {
+                count: 1,
+                target: TargetFilter::Controller,
+            },
+        ),
+    );
+    dice.sub_ability = Some(result_life_tail());
+    let (mut runner, source, caller, before) = public_coin_keep_continuation_fixture(dice);
+    let hand = runner.state().players[0].hand.clone();
+    assert_eq!(hand.len(), 3);
+    let mut result = runner
+        .act(GameAction::SelectCoinFlips {
+            keep_indices: vec![0],
+        })
+        .expect("the public coin response starts its parked die continuation");
+    let mut events = result.events.clone();
+
+    for (index, card) in hand.iter().take(2).enumerate() {
+        let state = runner.state();
+        let WaitingFor::DiscardChoice {
+            player,
+            count,
+            cards,
+            ..
+        } = &state.waiting_for
+        else {
+            panic!("survivor {index} must pause for its results-table discard");
+        };
+        assert_eq!(*player, P0);
+        assert_eq!(*count, 1);
+        assert!(cards.contains(card));
+        assert!(matches!(
+            result.waiting_for,
+            WaitingFor::DiscardChoice { player: P0, .. }
+        ));
+        assert_eq!(state.players[0].life, before + 2);
+        assert_eq!(state.players[0].hand.len(), hand.len() - index);
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(
+                    event,
+                    GameEvent::DieRolled {
+                        player_id: P0,
+                        sides: 1,
+                        result: Some(1),
+                    }
+                ))
+                .count(),
+            index + 1,
+            "each pause must follow a real surviving die"
+        );
+        assert!(!events.iter().any(|event| matches!(
+            event,
+            GameEvent::EffectResolved { kind: EffectKind::RollDie, source_id, .. }
+                if *source_id == source
+        )));
+        // CR 706.2 + CR 706.3a: the survivor is live before its branch finishes.
+        assert_eq!(
+            state.die_result_this_resolution,
+            Some(1),
+            "survivor {index} must survive the parked-continuation restore"
+        );
+        state.resolution_stack.validate(&state.waiting_for).unwrap();
+        result = runner
+            .act(GameAction::SelectCards { cards: vec![*card] })
+            .expect("the public discard response resumes the die instruction");
+        events.extend(result.events.iter().cloned());
+    }
+
+    let state = runner.state();
+    let rolls: Vec<_> = events
+        .iter()
+        .filter_map(|event| match event {
+            GameEvent::DieRolled {
+                player_id: P0,
+                sides: 1,
+                result: Some(value),
+            } => Some(*value),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(rolls, vec![1, 1]);
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(
+                event,
+                GameEvent::EffectResolved { kind: EffectKind::RollDie, source_id, .. }
+                    if *source_id == source
+            ))
+            .count(),
+        1,
+        "the instruction completes once, after both public discard responses"
+    );
+    // CR 608.2c + CR 706.2: the downstream instruction reads the completed sum,
+    // not the last survivor or the continuation's snapshotted 7.
+    assert_eq!(state.die_result_this_resolution, Some(2));
+    assert_eq!(state.players[0].life, before + 4);
+    assert_eq!(state.players[0].hand, vec![hand[2]].into());
+    for card in hand.iter().take(2) {
+        assert_eq!(state.objects[card].zone, Zone::Graveyard);
+        assert_eq!(
+            moves(&events, *card),
+            vec![(Some(Zone::Hand), Zone::Graveyard)]
+        );
+    }
+    assert_eq!(state.objects[&hand[2]].zone, Zone::Hand);
+    assert_eq!(state.current_trigger_event, caller.event);
+    assert_eq!(state.current_trigger_events, caller.events);
+    assert_eq!(state.current_trigger_match_count, caller.match_count);
+    assert!(state.stack.is_empty());
+    assert!(state.resolution_stack.is_empty());
+    assert!(state.resolving_stack_entry.is_none());
+    assert!(matches!(
+        state.waiting_for,
+        WaitingFor::Priority { player: P0 }
+    ));
+    assert!(matches!(
+        result.waiting_for,
+        WaitingFor::Priority { player: P0 }
+    ));
+    state.resolution_stack.validate(&state.waiting_for).unwrap();
 }

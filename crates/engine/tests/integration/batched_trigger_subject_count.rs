@@ -61,6 +61,7 @@ fn build_batched_attack_trigger() -> TriggerDefinition {
         ..AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Hand),
                 destination: Zone::Battlefield,
                 target: permanent_in_hand,

@@ -268,6 +268,48 @@ describe("GameMenu", () => {
     );
   });
 
+  it("toggles click mode directly from the menu", () => {
+    const onToggleDebugInteractionMode = vi.fn();
+    renderGameMenu({
+      showSandboxTools: true,
+      onSandboxToolsClick: vi.fn(),
+      onToggleDebugInteractionMode,
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Game menu" }));
+    const toggle = screen.getByRole("button", { name: "Click Mode K" });
+    expect(toggle).toHaveAttribute("aria-pressed", "false");
+    fireEvent.click(toggle);
+
+    expect(onToggleDebugInteractionMode).toHaveBeenCalledTimes(1);
+  });
+
+  it("shows click mode as on in the menu", () => {
+    renderGameMenu({
+      showSandboxTools: true,
+      onSandboxToolsClick: vi.fn(),
+      debugInteractionMode: true,
+      onToggleDebugInteractionMode: vi.fn(),
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Game menu" }));
+
+    expect(screen.getByRole("button", { name: "Click Mode K" })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+  });
+
+  it("offers no click mode toggle without its handler", () => {
+    renderGameMenu({ showSandboxTools: true, onSandboxToolsClick: vi.fn() });
+
+    fireEvent.click(screen.getByRole("button", { name: "Game menu" }));
+
+    // Reach guard: the Tools section rendered in this open menu.
+    expect(screen.getByRole("button", { name: "Open Sandbox Tools" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Click Mode K" })).not.toBeInTheDocument();
+  });
+
   // The takeback item's gate used to be `isOnlineMode && onRequestTakeback`,
   // which hid it for desktop solo-vs-AI (`native-ai` reaches GamePage as
   // `mode=ai`, so `isOnlineMode` is false) even though that game has a real

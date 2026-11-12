@@ -1486,13 +1486,7 @@ pub(super) fn match_changes_zone(
         // source-zone set that takes precedence over single-zone `origin` when
         // non-empty. CR 111.1: `from = None` (token creation) cannot satisfy a
         // trigger that names any specific origin zone.
-        let origin = if !trigger.origin_zones.is_empty() {
-            OriginConstraint::OneOf(trigger.origin_zones.clone())
-        } else if let Some(origin) = trigger.origin {
-            OriginConstraint::Equals(origin)
-        } else {
-            OriginConstraint::Any
-        };
+        let origin = zone_change_origin(trigger, None);
         zone_change_clause_matches(
             &origin,
             trigger.destination.as_ref(),
@@ -2270,6 +2264,43 @@ fn attack_declaration_attacker_matches(
     } else {
         id == source_event_subject_id(source_context)
     }
+}
+
+/// CR 508.3a + CR 603.2: whether declaring `attacker` as attacking `target`
+/// would match `trigger`, an attack trigger on the functioning `source` — the
+/// per-attacker checks [`matching_attack_events`] applies to each declared
+/// attacker (its attacker-side filter, then its attack-target restriction such
+/// as "attacks a player"), for a caller weighing an attack before it is
+/// declared. A player-scope subject ("whenever you attack", CR 508.3d) or the
+/// "whenever [player] is attacked" shape — a `valid_target` with no
+/// attacker-side filter, CR 508.3b — answers once per declaration rather than
+/// per attacker, so such a trigger answers false. A `valid_target` beside an
+/// attacker-side filter ("whenever this creature attacks the player with the
+/// most life") is checked per attacker like any other.
+pub fn attack_trigger_matches_attack(
+    state: &GameState,
+    source: &crate::game::game_object::GameObject,
+    trigger: &TriggerDefinition,
+    attacker: ObjectId,
+    target: crate::game::combat::AttackTarget,
+) -> bool {
+    if trigger
+        .valid_source
+        .as_ref()
+        .is_some_and(|filter| filter.is_player_scope())
+        || (trigger.valid_target.is_some()
+            && trigger.valid_card.is_none()
+            && trigger.valid_source.is_none())
+    {
+        return false;
+    }
+    let Some(defending_player) = crate::game::combat::defending_player_for_target(state, target)
+    else {
+        return false;
+    };
+    let source_context = super::triggers::trigger_source_context_for_latch(state, source);
+    attack_declaration_attacker_matches(trigger, state, attacker, &source_context)
+        && attack_target_matches(trigger, state, target, defending_player, &source_context)
 }
 
 /// CR 508.3d + CR 508.5a: expand one `AttackersDeclared` event into one
@@ -3542,6 +3573,26 @@ pub(super) fn match_milled(
     }
 }
 
+/// CR 603.10a + CR 603.6c: The trigger's source-zone constraint, folding the
+/// disjunctive `origin_zones` over the scalar `origin`. `default_origin` is the
+/// zone the trigger's verb implies when neither field is set (leaves-the-
+/// battlefield defaults to Battlefield; the exiled/changes-zone family to any).
+/// Single authority for every zone-change matcher so the fold cannot drift.
+fn zone_change_origin(
+    trigger: &TriggerDefinition,
+    default_origin: Option<Zone>,
+) -> OriginConstraint {
+    if !trigger.origin_zones.is_empty() {
+        OriginConstraint::OneOf(trigger.origin_zones.clone())
+    } else if let Some(origin) = trigger.origin {
+        OriginConstraint::Equals(origin)
+    } else if let Some(default_origin) = default_origin {
+        OriginConstraint::Equals(default_origin)
+    } else {
+        OriginConstraint::Any
+    }
+}
+
 /// Exiled: fires when a card moves to Exile zone.
 pub(super) fn match_exiled(
     event: &GameEvent,
@@ -3551,6 +3602,7 @@ pub(super) fn match_exiled(
 ) -> bool {
     if let GameEvent::ZoneChanged {
         object_id,
+        from,
         to,
         record,
         ..
@@ -3558,6 +3610,11 @@ pub(super) fn match_exiled(
     {
         // CR 800.4a: an object that left the game with its owner was not exiled.
         if *to != Zone::Exile || record.departure.left_game() {
+            return false;
+        }
+        // CR 603.6c: "is exiled from [zone]" restricts the source zone; the
+        // unconstrained form keeps `OriginConstraint::Any`.
+        if !zone_change_origin(trigger, None).matches_from(from) {
             return false;
         }
         if !valid_card_matches(trigger, state, *object_id, source_context) {
@@ -4435,13 +4492,7 @@ pub(super) fn match_leaves_battlefield(
     {
         // CR 603.10a: LeavesBattlefield is a battlefield-origin zone change.
         // Default `origin = None` to Battlefield, matching the legacy matcher.
-        let origin = if !trigger.origin_zones.is_empty() {
-            OriginConstraint::OneOf(trigger.origin_zones.clone())
-        } else if let Some(origin) = trigger.origin {
-            OriginConstraint::Equals(origin)
-        } else {
-            OriginConstraint::Equals(Zone::Battlefield)
-        };
+        let origin = zone_change_origin(trigger, Some(Zone::Battlefield));
         zone_change_clause_matches(
             &origin,
             trigger.destination.as_ref(),
