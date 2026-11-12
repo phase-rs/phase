@@ -7924,7 +7924,9 @@ mod tests {
     /// alone.
     #[test]
     fn draft_session_authority_is_conferred_never_declared() {
-        let conferred = FormatConfig::limited().with_draft_session_minimum(20).unwrap();
+        let conferred = FormatConfig::limited()
+            .with_draft_session_minimum(20)
+            .unwrap();
         assert_eq!(conferred.deck_size, DeckSizeRule::Minimum(20));
         assert_eq!(conferred.deck_size_origin, DeckSizeOrigin::DraftSession);
         // Engine-produced state still round-trips through the decoder.
@@ -7935,7 +7937,11 @@ mod tests {
         assert!(conferred.validate_for_player_count(2).is_err());
         assert!(FormatConfig::limited().validate_for_player_count(2).is_ok());
         // Only Limited's Minimum rule, with at least one card.
-        assert!(FormatConfig::standard().with_draft_session_minimum(20).is_err());
-        assert!(FormatConfig::limited().with_draft_session_minimum(0).is_err());
+        assert!(FormatConfig::standard()
+            .with_draft_session_minimum(20)
+            .is_err());
+        assert!(FormatConfig::limited()
+            .with_draft_session_minimum(0)
+            .is_err());
     }
 }
