@@ -3611,6 +3611,7 @@ mod tests {
             parse_ward_cost("{2}"),
             Some(Keyword::Ward(WardCost::Mana(ManaCost::generic(2))))
         );
+        // No printed Ward has a colored mana cost; extends Captain Howler, Sea Scourge's "Ward—{2}, Pay 2 life.".
         assert_eq!(
             parse_ward_cost("{2}{U}."),
             Some(Keyword::Ward(WardCost::Mana(ManaCost::Cost {
@@ -3652,13 +3653,37 @@ mod tests {
         for unmodeled in [
             "Collect evidence 4.",
             "Blight 2.",
-            "Splorf a blorp.",
+            // No printed Ward has this shape; extends Captain Howler, Sea Scourge's "Ward—{2}, Pay 2 life.".
             "{2}, Blight 2.",
-            "{2}, Splorf a blorp.",
+            // No printed Ward has this shape; extends The Unagi of Kyoshi Island's "Ward—Waterbend {4}.".
             "Waterbend frob.",
-            "Sacrifice a creature splorf.",
+            // No printed Ward has this shape; extends Ulamog's Dreadsire's sacrifice Ward.
+            "Sacrifice a permanent with mana value 1 or greater splorf.",
         ] {
             assert_eq!(parse_ward_cost(unmodeled), None, "{unmodeled}");
+        }
+
+        assert_eq!(
+            parse_router_keyword_line("Ward\u{2014}{2}, Pay 2 life.").and_then(|r| r.keyword),
+            Some(Keyword::Ward(WardCost::Compound(vec![
+                WardCost::Mana(ManaCost::generic(2)),
+                WardCost::PayLife(2),
+            ])))
+        );
+        assert_eq!(
+            parse_router_keyword_line("Ward\u{2014}Waterbend {4}.").and_then(|r| r.keyword),
+            Some(Keyword::Ward(WardCost::Waterbend(ManaCost::generic(4))))
+        );
+        for unread_tail in [
+            // No printed Ward has this shape; extends Captain Howler, Sea Scourge's "Ward—{2}, Pay 2 life.".
+            "Ward\u{2014}{2} splorf.",
+            // No printed Ward has this shape; extends The Unagi of Kyoshi Island's "Ward—Waterbend {4}.".
+            "Ward\u{2014}Waterbend {4} splorf.",
+        ] {
+            assert!(
+                parse_router_keyword_line(unread_tail).is_none(),
+                "{unread_tail}"
+            );
         }
     }
 
@@ -3667,6 +3692,7 @@ mod tests {
     #[test]
     fn ward_discard_router_rejects_trailing_clause() {
         assert!(parse_router_keyword_line("Ward\u{2014}Discard a card.").is_some());
+        // No printed Ward has a conditional tail; extends Forum Necroscribe's "Ward—Discard a card.".
         assert!(parse_router_keyword_line(
             "Ward\u{2014}Discard a card if you control an artifact."
         )
