@@ -11,10 +11,11 @@
 //! at quadratic work.
 //!
 //! The empty-hand rows rerun N = 1000 and 2000 with the AI holding nothing and
-//! controlling five Forests, so the decision takes the no-development shortcut
-//! (`large_board_main_phase_has_no_development_sources`) and must pass: compare
-//! each row's `min`, not their ratio, with the parent commit's; a battlefield
-//! walk nested inside the shortcut multiplies it.
+//! controlling five Forests, timing `score_candidates` alone: the bench asserts it
+//! answers with the no-development shortcut's lone pass
+//! (`large_board_main_phase_has_no_development_sources`) and no static scan, so
+//! the shortcut is the whole measured cost. Compare each row's `min` with the
+//! parent commit's; a battlefield walk nested inside the shortcut multiplies it.
 //!
 //! Build/run (measurement mode: node-bounded, no wall-clock cap, so the time
 //! reflects the work rather than the search deadline):
@@ -26,20 +27,24 @@
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use engine::game::perf_counters;
 use engine::game::zones::create_object;
+use engine::types::ability::{
+    AbilityCost, AbilityDefinition, AbilityKind, Effect, ManaContribution, ManaProduction,
+};
 use engine::types::actions::GameAction;
-use engine::types::card_type::CoreType;
+use engine::types::card_type::{CoreType, Supertype};
 use engine::types::game_state::{GameState, WaitingFor};
 use engine::types::identifiers::{CardId, ObjectId};
-use engine::types::mana::{ManaCost, ManaCostShard, ManaPipId, ManaType, ManaUnit};
+use engine::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaPipId, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 use engine::types::zones::Zone;
 use phase_ai::config::{create_config, AiDifficulty, Platform};
-use phase_ai::search::choose_action;
+use phase_ai::search::{choose_action, score_candidates};
 use rand::rngs::SmallRng;
 use rand::SeedableRng;
 
@@ -91,13 +96,29 @@ fn board(tokens: usize, hand: Hand) -> GameState {
                 "Forest".to_string(),
                 Zone::Battlefield,
             );
-            state
-                .objects
-                .get_mut(&id)
-                .unwrap()
-                .card_types
-                .core_types
-                .push(CoreType::Land);
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.card_types.core_types.push(CoreType::Land);
+            obj.card_types.supertypes.push(Supertype::Basic);
+            obj.card_types.subtypes.push("Forest".to_string());
+            obj.base_card_types = obj.card_types.clone();
+            obj.entered_battlefield_turn = Some(1);
+            obj.summoning_sick = false;
+            let tap_for_green = AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::Mana {
+                    produced: ManaProduction::Fixed {
+                        colors: vec![ManaColor::Green],
+                        contribution: ManaContribution::Base,
+                    },
+                    restrictions: vec![],
+                    grants: vec![],
+                    expiry: None,
+                    target: None,
+                },
+            )
+            .cost(AbilityCost::Tap);
+            Arc::make_mut(&mut obj.abilities).push(tap_for_green.clone());
+            Arc::make_mut(&mut obj.base_abilities).push(tap_for_green);
         }
         return state;
     }
@@ -142,37 +163,51 @@ fn board(tokens: usize, hand: Hand) -> GameState {
 fn bench_n(n: usize, hand: Hand) -> Duration {
     let state = board(n, hand);
     let objects = state.battlefield.len();
-    let route = match hand {
-        Hand::Empty => "no-dev",
-        Hand::Bears if objects >= LARGE_BOARD_OBJECTS => "fast",
-        Hand::Bears => "scored",
+    let (fastest, outcome, route) = match hand {
+        Hand::Bears => {
+            let config = create_config(AiDifficulty::Hard, Platform::Native).into_measurement(42);
+            let (fastest, action) =
+                fastest_of(|| choose_action(&state, P0, &config, &mut SmallRng::seed_from_u64(42)));
+            let route = if objects >= LARGE_BOARD_OBJECTS {
+                "fast"
+            } else {
+                "scored"
+            };
+            (fastest, format!("{action:?}"), route)
+        }
+        Hand::Empty => {
+            let config =
+                create_config(AiDifficulty::VeryEasy, Platform::Native).into_measurement(42);
+            let (fastest, scored) = fastest_of(|| score_candidates(&state, P0, &config));
+            // Only the shortcut answers with a lone pass before any static scan.
+            assert!(
+                scored == vec![(GameAction::PassPriority, 1.0)]
+                    && perf_counters::snapshot().static_full_scans == 0,
+                "no-development shortcut not taken: {scored:?}"
+            );
+            (fastest, format!("{scored:?}"), "no-dev")
+        }
     };
-    let config = create_config(AiDifficulty::Hard, Platform::Native).into_measurement(42);
-
-    perf_counters::reset();
-    let mut action = None;
-    let mut fastest = Duration::MAX;
-    for _ in 0..REPS {
-        let mut rng = SmallRng::seed_from_u64(42);
-        let rep_start = Instant::now();
-        action = choose_action(&state, P0, &config, &mut rng);
-        fastest = fastest.min(rep_start.elapsed());
-    }
     let c = perf_counters::snapshot();
-    if let Hand::Empty = hand {
-        assert_eq!(
-            action,
-            Some(GameAction::PassPriority),
-            "no-development shortcut must pass"
-        );
-    }
 
     println!(
         "N={n:5} battlefield={objects:5} route={route:6} min={fastest:>10.3?}  \
-         clones={} static_scans={} layers(full={} inc={})  -> {action:?}",
+         clones={} static_scans={} layers(full={} inc={})  -> {outcome}",
         c.state_clone_for_legality, c.static_full_scans, c.layers_full_eval, c.layers_incremental,
     );
     fastest
+}
+
+fn fastest_of<T>(mut call: impl FnMut() -> T) -> (Duration, T) {
+    perf_counters::reset();
+    let mut fastest = Duration::MAX;
+    let mut last = None;
+    for _ in 0..REPS {
+        let start = Instant::now();
+        last = Some(call());
+        fastest = fastest.min(start.elapsed());
+    }
+    (fastest, last.expect("REPS is nonzero"))
 }
 
 fn print_ratio(from: usize, to: usize, from_min: Duration, to_min: Duration) {
