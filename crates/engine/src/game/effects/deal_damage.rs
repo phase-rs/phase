@@ -12,9 +12,9 @@ use crate::game::quantity::{
 use crate::game::replacement::{self, ReplacementResult};
 use crate::types::ability::{
     names_resolution_chosen_recipient, quantity_expr_uses_recipient, DamageContextSnapshot,
-    DamageSource, EachDamageRecipient, Effect, EffectError, EffectKind, ExcessRecipient,
-    PlayerFilter, QuantityExpr, ResolvedAbility, TargetChoiceTiming, TargetDamageSourceBinding,
-    TargetFilter, TargetRef,
+    DamageKindFilter, DamageSource, EachDamageRecipient, Effect, EffectError, EffectKind,
+    ExcessRecipient, PlayerFilter, QuantityExpr, ResolvedAbility, TargetChoiceTiming,
+    TargetDamageSourceBinding, TargetFilter, TargetRef,
 };
 use crate::types::card_type::CoreType;
 use crate::types::counter::CounterType;
@@ -650,21 +650,32 @@ pub(crate) fn apply_damage_to_target(
             Ok(DamageResult::Applied(0))
         }
         ReplacementResult::NeedsChoice(player) => {
+            park_damage_context(state, ctx);
             // Only set waiting_for for non-combat damage; combat damage cannot pause mid-resolution.
             if !is_combat {
                 state.waiting_for = replacement::replacement_choice_waiting_for(player, state);
             }
-            // CR 120.4a + CR 702.15b: stash the excess-redirect rider and the
-            // deferred lifelink bonus on the parked replacement so the resume
-            // (`handle_replacement_choice`, which rebuilds the ctx from the source
-            // and cannot re-derive either) still redirects the excess and gains the
-            // combined lifelink for a paused redirect leg.
-            if let Some(pending) = state.pending_replacement.as_mut() {
-                pending.excess_recipient = ctx.excess_recipient;
-                pending.lifelink_bonus = ctx.lifelink_bonus;
-            }
             Ok(DamageResult::NeedsChoice)
         }
+    }
+}
+
+/// CR 120.4a + CR 702.15b + CR 400.7: Stash the paused source's `DamageContext`
+/// riders on the `ProposedEvent::Damage` record the replacement pipeline just
+/// parked. The resume (`handle_replacement_choice`) rebuilds the ctx from the
+/// source and cannot re-derive the excess-redirect rider, the deferred lifelink
+/// bonus, or the incarnation that dealt the damage (the rebuild would read the
+/// live, possibly new, object). Every non-combat damage park calls this before
+/// surfacing the prompt, so the capture lives in one place.
+fn park_damage_context(state: &mut GameState, ctx: &DamageContext) {
+    if let Some(pending) = state
+        .pending_replacement
+        .as_mut()
+        .filter(|pending| matches!(pending.proposed, ProposedEvent::Damage { .. }))
+    {
+        pending.excess_recipient = ctx.excess_recipient;
+        pending.lifelink_bonus = ctx.lifelink_bonus;
+        pending.source_incarnation = ctx.source_incarnation;
     }
 }
 
@@ -803,6 +814,39 @@ pub(crate) fn apply_damage_after_replacement(
                     events,
                 ) == player_counter::PlayerCounterAdditionOutcome::NeedsChoice
                 {
+                    record_player_damage_at_counter_pause(
+                        state,
+                        ctx,
+                        *player_id,
+                        actual_amount,
+                        is_combat,
+                        events,
+                    );
+                    // CR 120.3f and CR 120.3g (702.164c): lifelink and toxic
+                    // each happen in addition to the damage's other results;
+                    // CR 120.3a/b give the life loss or poison result; CR
+                    // 120.4c: the dealt damage is processed into its results,
+                    // as modified by replacement effects that interact with
+                    // them. The order below (loss or infect, toxic, record,
+                    // lifelink) is the engine's existing synchronous order,
+                    // preserved across the pause. The fact is recorded above
+                    // (CR 120.4b), so only toxic (combat) or lifelink
+                    // (non-combat) can still be owed; park them with the
+                    // occurrence when any is (CR 616.1: the answer settles the
+                    // poison result first). Nothing owed parks nothing.
+                    let toxic_poison = owed_toxic_poison(ctx, actual_amount, is_combat);
+                    let lifelink_owed = ctx.has_lifelink && actual_amount + ctx.lifelink_bonus > 0;
+                    if toxic_poison > 0 || lifelink_owed {
+                        park_player_damage_results(
+                            state,
+                            ctx,
+                            *player_id,
+                            actual_amount,
+                            is_combat,
+                            crate::types::game_state::DamagePostLossStage::LifelinkGain,
+                            toxic_poison,
+                        );
+                    }
                     return DamageResult::NeedsChoice;
                 }
             } else {
@@ -812,49 +856,47 @@ pub(crate) fn apply_damage_after_replacement(
                 {
                     // CR 616.1: the loss paused — co-applicable life-loss
                     // replacements, or the Horde damage→mill redirect parking a
-                    // mill/batch choice. The loss, the damage event, and any
-                    // lifelink for this target are deferred until the resume.
-                    // Both combat and non-combat legs stash their post-loss work
-                    // (combat-flagged for the batch remnant, which the combat
-                    // resume consumes; the shared drain skips combat stashes).
-                    // Counter-addition pauses (infect/toxic) return NeedsChoice
-                    // WITHOUT stashing, so the stash's presence after this call
-                    // identifies a loss pause.
-                    state.pending_damage_post_loss =
-                        Some(Box::new(crate::types::game_state::PendingDamagePostLoss {
-                            source_id: ctx.source_id,
-                            source_incarnation: ctx.source_incarnation,
-                            controller: ctx.controller,
-                            target: *player_id,
-                            actual_amount,
-                            has_lifelink: ctx.has_lifelink,
-                            lifelink_bonus: ctx.lifelink_bonus,
-                            stage: crate::types::game_state::DamagePostLossStage::EmitAndRecord,
-                            is_combat,
-                        }));
+                    // mill/batch choice. The damage event, the record, any toxic
+                    // (combat) and any lifelink for this target are deferred
+                    // until the resume. Both combat and non-combat legs park
+                    // their owed results (combat-flagged for the batch remnant,
+                    // which the combat resume consumes; the shared drain skips
+                    // combat stashes). An infect counter pause parks only when
+                    // a result is still owed behind it; a toxic counter pause
+                    // never parks (the combat Phase C runner relies on a fresh
+                    // stash meaning "results parked", folding the same amount).
+                    park_player_damage_results(
+                        state,
+                        ctx,
+                        *player_id,
+                        actual_amount,
+                        is_combat,
+                        crate::types::game_state::DamagePostLossStage::EmitAndRecord,
+                        owed_toxic_poison(ctx, actual_amount, is_combat),
+                    );
                     return DamageResult::NeedsChoice;
                 }
             }
-            if is_combat
-                && actual_amount > 0
-                && ctx.source_is_creature
-                && ctx.combat_damage_poison > 0
+            let toxic_poison = owed_toxic_poison(ctx, actual_amount, is_combat);
+            if toxic_poison > 0
+                && give_toxic_poison(state, ctx.controller, *player_id, toxic_poison, events)
+                    == player_counter::PlayerCounterAdditionOutcome::NeedsChoice
             {
-                // CR 120.3g + CR 702.164c + CR 614.17: Toxic adds poison counters
-                // when a creature deals combat damage to a player. Route through
-                // the player-counter replacement pipeline (prevention/doublers);
-                // the actor is the source's controller.
-                if player_counter::add_player_counter_with_replacement(
+                // The loss or infect result above already ran
+                // synchronously; only the toxic poison result is parked
+                // (owned by the pending replacement), so the fact is
+                // recorded once here. Nothing else is owed: toxic is
+                // combat-only and a combat leg owes no lifelink here, so
+                // nothing is stashed behind this pause.
+                record_player_damage_at_counter_pause(
                     state,
-                    ctx.controller,
+                    ctx,
                     *player_id,
-                    PlayerCounterKind::Poison,
-                    ctx.combat_damage_poison,
+                    actual_amount,
+                    is_combat,
                     events,
-                ) == player_counter::PlayerCounterAdditionOutcome::NeedsChoice
-                {
-                    return DamageResult::NeedsChoice;
-                }
+                );
+                return DamageResult::NeedsChoice;
             }
         }
     }
@@ -1051,13 +1093,206 @@ pub(crate) fn apply_damage_after_replacement(
     DamageResult::Applied(actual_amount)
 }
 
+/// CR 120.4b + CR 120.4c: a player leg whose poison-counter result (infect,
+/// CR 120.3b; toxic, CR 120.3g) paused on a CR 616.1 replacement ordering
+/// choice has already been DEALT — only its result is still being processed.
+/// Record the damage fact now, through the single damage-history authority,
+/// using the context captured at damage time (CR 400.7), so the choice cannot
+/// un-deal it. Nothing on the counter-answer resume path records damage, so the
+/// fact is written exactly once. Players have no excess (CR 120.10 is
+/// permanent-only), so dealt = recorded = `actual_amount`, excess 0.
+fn record_player_damage_at_counter_pause(
+    state: &mut GameState,
+    ctx: &DamageContext,
+    target: PlayerId,
+    actual_amount: u32,
+    is_combat: bool,
+    events: &mut Vec<GameEvent>,
+) {
+    emit_damage_dealt_and_record(
+        state,
+        ctx.source_id,
+        ctx.source_incarnation,
+        ctx.controller,
+        &TargetRef::Player(target),
+        actual_amount,
+        actual_amount,
+        0,
+        is_combat,
+        events,
+    );
+}
+
+/// CR 120.3g + CR 702.164c: the toxic poison count a player-damage leg owes —
+/// the source's snapshotted toxic total when a creature dealt nonzero combat
+/// damage, else 0. The single predicate shared by the synchronous toxic step
+/// and the park sites, so a parked leg owes exactly what the unpaused leg
+/// would give.
+fn owed_toxic_poison(ctx: &DamageContext, actual_amount: u32, is_combat: bool) -> u32 {
+    if is_combat && actual_amount > 0 && ctx.source_is_creature {
+        ctx.combat_damage_poison
+    } else {
+        0
+    }
+}
+
+/// CR 616.1 + CR 120.3 + CR 120.4c: can applying this combat damage survivor
+/// open a replacement choice over one of its RESULTS? A read-only mirror of
+/// the player arm of [`apply_damage_after_replacement`]: infect gives a poison
+/// `AddCounter` (CR 120.3b; actor = the source's controller), otherwise the
+/// life loss (CR 120.3a; a Horde seat's loss is redirected to a `Mill`, the
+/// event `horde::mill_from_loss` proposes), and owed toxic adds a second
+/// poison `AddCounter` (CR 120.3g). True on the same pair of causes the
+/// lifelink gain reads (`ReplacementPromptCauses::may_open_player_choice`).
+/// Objects, phased-out players and `0` amounts have no player result and
+/// answer false. Not probed: the per-card `Moved` choices a Horde mill raises
+/// later (CR 614.6, e.g. Rest in Peace with Leyline of the Void); a leg whose
+/// only prompt is one of those does not settle an earlier player's gain first.
+/// "May", not "will": the candidate authority is consulted, not the answer.
+pub(crate) fn combat_leg_may_prompt(
+    state: &GameState,
+    ctx: &DamageContext,
+    survivor: &ProposedEvent,
+) -> bool {
+    let ProposedEvent::Damage {
+        target: TargetRef::Player(player_id),
+        amount,
+        ..
+    } = survivor
+    else {
+        return false;
+    };
+    let (player_id, amount) = (*player_id, *amount);
+    if amount == 0
+        || state
+            .players
+            .iter()
+            .find(|p| p.id == player_id)
+            .is_some_and(|p| p.is_phased_out())
+    {
+        return false;
+    }
+    let may_prompt = |event: &ProposedEvent| {
+        replacement::proposed_event_prompt_cause(state, event, replacement::replacement_registry())
+            .may_open_player_choice()
+    };
+    // The same event `player_counter::add_player_counter_with_replacement`
+    // proposes for infect and toxic; that builder is fused with its mutation,
+    // so the read-only shape is rebuilt here.
+    let poison = |count: u32| ProposedEvent::AddCounter {
+        placement: crate::types::proposed_event::CounterPlacement::Player {
+            actor: ctx.controller,
+            player_id,
+            counter_kind: PlayerCounterKind::Poison,
+        },
+        count,
+        applied: HashSet::new(),
+    };
+    let result_may_prompt = if ctx.has_infect {
+        may_prompt(&poison(amount))
+    } else {
+        super::life::life_loss_may_prompt(state, player_id, amount)
+            || (crate::game::horde::player_has_no_life_total(state, player_id)
+                && may_prompt(&ProposedEvent::Mill {
+                    player_id,
+                    count: amount,
+                    destination: crate::types::zones::Zone::Graveyard,
+                    applied: HashSet::new(),
+                }))
+    };
+    let toxic = owed_toxic_poison(ctx, amount, true);
+    result_may_prompt || (toxic > 0 && may_prompt(&poison(toxic)))
+}
+
+/// CR 120.3g + CR 702.164c + CR 614.17: toxic gives the damaged player poison
+/// counters in addition to the damage's other results. Routed through the
+/// player-counter replacement pipeline (prevention/doublers); the actor is the
+/// source's controller. Shared by the synchronous path and the parked-results
+/// settle.
+fn give_toxic_poison(
+    state: &mut GameState,
+    controller: PlayerId,
+    target: PlayerId,
+    count: u32,
+    events: &mut Vec<GameEvent>,
+) -> player_counter::PlayerCounterAdditionOutcome {
+    player_counter::add_player_counter_with_replacement(
+        state,
+        controller,
+        target,
+        PlayerCounterKind::Poison,
+        count,
+        events,
+    )
+}
+
+/// CR 616.1 + CR 400.7: park the results a player-damage leg still owes after
+/// one of its results paused, with the context captured at damage time (see
+/// [`crate::types::game_state::PendingDamagePostLoss`]). Exactly one leg can be
+/// paused at a time, so the slot must be empty.
+fn park_player_damage_results(
+    state: &mut GameState,
+    ctx: &DamageContext,
+    target: PlayerId,
+    actual_amount: u32,
+    is_combat: bool,
+    stage: crate::types::game_state::DamagePostLossStage,
+    toxic_poison: u32,
+) {
+    debug_assert!(
+        state.pending_damage_post_loss.is_none(),
+        "a player-damage leg parked its results over another parked leg"
+    );
+    state.pending_damage_post_loss =
+        Some(Box::new(crate::types::game_state::PendingDamagePostLoss {
+            source_id: ctx.source_id,
+            source_incarnation: ctx.source_incarnation,
+            controller: ctx.controller,
+            target,
+            actual_amount,
+            has_lifelink: ctx.has_lifelink,
+            lifelink_bonus: ctx.lifelink_bonus,
+            stage,
+            is_combat,
+            toxic_poison,
+        }));
+}
+
+/// CR 120.1: the parked leg's `DamageDealt` event and record. Players have no
+/// excess and the excess-redirect rider is creature-only, so the dealt,
+/// recorded, and excess figures are the post-replacement amount, that same
+/// amount, and zero.
+fn emit_parked_player_damage(
+    state: &mut GameState,
+    stashed: &crate::types::game_state::PendingDamagePostLoss,
+    events: &mut Vec<GameEvent>,
+) {
+    emit_damage_dealt_and_record(
+        state,
+        stashed.source_id,
+        stashed.source_incarnation,
+        stashed.controller,
+        &TargetRef::Player(stashed.target),
+        stashed.actual_amount,
+        stashed.actual_amount,
+        0,
+        stashed.is_combat,
+        events,
+    );
+}
+
 /// CR 120.1: push the `DamageDealt` event and record the damage for "was
 /// dealt damage by" condition queries. `dealt_amount` gates recording (a
-/// nonzero amount actually dealt per CR 120.3/120.6); `record_amount` /
+/// nonzero amount actually dealt per CR 120.3 / CR 120.4b); `record_amount` /
 /// `record_excess` are the lethal-split figures the record carries. Shared by
 /// the synchronous path, the post-loss resume drain, and the combat batch
 /// remnant resume so a paused-then-resumed leg emits and records exactly what
-/// the never-paused leg would.
+/// the never-paused leg would. This is the single damage-history authority:
+/// the per-kind latch (`GameObject::dealt_damage_kinds`) is written here too,
+/// so every path (synchronous, replacement-choice resume, post-loss drain,
+/// combat Phase C remnant) updates it identically. Both sticky stores are
+/// written only for the source incarnation captured in `source_incarnation`
+/// (CR 400.7): a source that left and returned since is a new object.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn emit_damage_dealt_and_record(
     state: &mut GameState,
@@ -1158,25 +1393,135 @@ pub(crate) fn emit_damage_dealt_and_record(
             record.source_zone = obj.zone;
         }
         state.damage_dealt_this_turn.push_back(record);
-        // CR 120.3 + CR 120.6 + CR 702.11b + CR 613.1f: Mark the source as having
+        // CR 120.3 + CR 702.11b + CR 613.1f: Mark the source as having
         // actually dealt damage (this branch is gated on `dealt_amount > 0`, i.e.
-        // a nonzero amount actually dealt per CR 120.3/120.6, not the would-be
-        // amount of CR 120.1a). Only battlefield-resident sources carry this
-        // sticky flag, since the reset in `apply_zone_exit_cleanup` is gated on a
-        // battlefield exit. When the id is NEWLY inserted, mark layers fully dirty
+        // a nonzero amount actually dealt per CR 120.3, not the would-be amount
+        // before replacement/prevention modification, CR 120.4b). Only
+        // battlefield-resident sources carry this sticky flag, since the reset in
+        // `apply_zone_exit_cleanup` is gated on a battlefield exit. When the id is NEWLY inserted, mark layers fully dirty
         // so `flush_layers` recomputes the materialized keyword set that
         // `has_hexproof` reads — otherwise the conditional hexproof grant for
         // "has hexproof if it hasn't dealt damage yet" would never drop at the
         // targeting check (a Clean `layers_dirty` no-ops `flush_layers`).
-        if state
-            .objects
-            .get(&source_id)
-            .is_some_and(|obj| obj.zone == crate::types::zones::Zone::Battlefield)
-            && state.objects_that_dealt_damage.insert(source_id)
-        {
-            state.layers_dirty.mark_full();
+        //
+        // CR 120.2a / CR 120.2b: the same battlefield guard also records the
+        // damage KIND on the source object's `dealt_damage_kinds` latch (read by
+        // the "hasn't dealt combat damage yet" gate), so a non-battlefield source
+        // leaves neither store stale. Both stores are written by the two `let`s
+        // below; the dirty flag must OR both, because `newly_any` alone misses
+        // the first combat hit after noncombat damage. `|` (not `||`) so both
+        // stores are always written. The kind latch is read before `get_mut`:
+        // `ObjectMap::get_mut` unshares a copy-on-write object, so a repeat
+        // same-kind hit (latch already set) must not take a mutable borrow.
+        //
+        // CR 400.7: both sticky stores belong to the source INCARNATION that
+        // dealt the damage. When the context captured an incarnation and the
+        // object has since left and returned (a blink while the damage
+        // ability waited on the stack), the live object is a new object that
+        // dealt nothing: neither store is written for it (the occurrence,
+        // `DamageDealt` and the record above, still carries the old
+        // incarnation). `None` (a fallback context, or a snapshot saved before
+        // the field existed) has nothing to compare and keeps the zone check.
+        let (source_is_live_incarnation, kind_pending) =
+            state.objects.get(&source_id).map_or((false, false), |obj| {
+                (
+                    obj.zone == crate::types::zones::Zone::Battlefield
+                        && source_incarnation
+                            .is_none_or(|incarnation| obj.incarnation == incarnation),
+                    obj.dealt_damage_kinds.would_record(is_combat),
+                )
+            });
+        if source_is_live_incarnation {
+            let newly_any = state.objects_that_dealt_damage.insert(source_id);
+            let newly_kind = kind_pending
+                && state
+                    .objects
+                    .get_mut(&source_id)
+                    .is_some_and(|obj| obj.dealt_damage_kinds.record(is_combat));
+            if newly_any | newly_kind {
+                state.layers_dirty.mark_full();
+            }
         }
     }
+}
+
+/// Restore-time reconstruction of `GameObject::dealt_damage_kinds` for a save
+/// written before the per-kind latch existed. Called once from
+/// `PersistedGameState::prepare_for_restore`, before printed-face reapply and
+/// the finalizing layer flush, so the restored layer-6 grant (CR 613.1f;
+/// CR 611.3a: a static's condition is read continuously) sees the recovered
+/// latch. Returns whether any latch changed.
+///
+/// Trigger (idempotence): an object on the battlefield, in
+/// `objects_that_dealt_damage` (the Any set), with an EMPTY latch. The writer
+/// above sets both stores under one guard and retirement clears both
+/// (CR 400.7), so a current-format state never matches and this is a no-op on it;
+/// the recovered latch serializes as an ordinary latch, so a second restore is
+/// a no-op too.
+///
+/// Recovery: the this-turn `damage_dealt_this_turn` records whose
+/// `source_id` is the object AND whose `source_incarnation` is
+/// `Some(obj.incarnation)` are this incarnation's damage (CR 400.7); each
+/// records its kind (CR 120.2a combat, CR 120.2b noncombat). `amount` is NOT
+/// filtered: a record exists only for a nonzero dealt amount, and its
+/// `amount` is the recorded lethal portion, which can differ from the amount
+/// dealt. A record with `source_incarnation: None` cannot be proven to belong
+/// to this incarnation and is not trusted. The history is complete only when
+/// the incarnation entered the battlefield this turn and at least one trusted
+/// record matched (records are cleared at the start of each turn, so an
+/// earlier entrant may have dealt damage of unknown kind before this turn).
+///
+/// Policy A for the unrecoverable remainder: when the history is not complete
+/// and no trusted combat record exists, the Any-set entry is attributed to
+/// combat damage. Rationale: an Any-set member is overwhelmingly a combat
+/// damage dealer; the failure direction is the less harmful one ("hasn't
+/// dealt combat damage yet" protection, e.g. hexproof per CR 702.11b, drops
+/// rather than staying undeserved for the rest of the game); it writes no new
+/// state. Pre-field saves (records without `source_incarnation`) therefore
+/// lose the exactness of the "entered this turn, noncombat only: stays
+/// hexproof" case and fall to policy A. `DamageKindFilter::Any` readers consult
+/// only the Any set, so they are unaffected.
+///
+/// The direct `GameState` serde path (`GameStateDecodeMode::DirectCurrentRaw`)
+/// is deliberately not migrated: it is limited to the current canonical
+/// representation.
+pub(crate) fn recover_legacy_dealt_damage_kinds(state: &mut GameState) -> bool {
+    let candidates: Vec<ObjectId> = state.objects_that_dealt_damage.iter().copied().collect();
+    let mut changed = false;
+    for id in candidates {
+        let Some(obj) = state.objects.get(&id) else {
+            continue;
+        };
+        if obj.zone != crate::types::zones::Zone::Battlefield || !obj.dealt_damage_kinds.is_empty()
+        {
+            continue;
+        }
+        // CR 400.7: only this incarnation's records are this object's history.
+        let incarnation = obj.incarnation;
+        let mut recovered = crate::game::game_object::DealtDamageKinds::default();
+        let mut matched = 0usize;
+        for record in state
+            .damage_dealt_this_turn
+            .iter()
+            .filter(|r| r.source_id == id && r.source_incarnation == Some(incarnation))
+        {
+            recovered.record(record.is_combat);
+            matched += 1;
+        }
+        let complete = obj.entered_battlefield_turn == Some(state.turn_number) && matched > 0;
+        if !recovered.has(DamageKindFilter::CombatOnly) && !complete {
+            // Policy A: unprovable history is attributed to combat damage.
+            recovered.record(true);
+        }
+        if let Some(obj) = state.objects.get_mut(&id) {
+            obj.dealt_damage_kinds = recovered;
+            changed = true;
+        }
+    }
+    if changed {
+        state.layers_dirty.mark_full();
+    }
+    changed
 }
 
 /// CR 702.15b / CR 120.3f: gain the lifelink life for one damage leg. Returns
@@ -1195,50 +1540,84 @@ fn gain_lifelink_for_damage_leg(
         && super::life::apply_life_gain(state, controller, lifelink_amount, events).is_err()
 }
 
-/// Outcome of [`drain_pending_damage_post_loss`].
+/// Outcome of [`settle_parked_player_damage_results`] (and
+/// [`drain_pending_damage_post_loss`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum DamagePostLossDrainOutcome {
     /// The stashed work fully settled (or nothing was stashed).
     Settled,
-    /// The lifelink gain parked on a life-gain replacement choice. Nothing is
-    /// re-stashed: the gain is owned by `state.pending_replacement` and the
-    /// LifeGain arm settles it — re-stashing would re-propose a second gain on
-    /// the next answer.
+    /// A counter or gain result parked the rest: the toxic poison or the
+    /// lifelink gain parked on a replacement choice. Nothing is re-stashed:
+    /// the parked result is owned by `state.pending_replacement` and its answer
+    /// arm settles it — re-stashing would re-propose it on the next answer.
     PausedForReplacement,
 }
 
-/// CR 120.3f + CR 120.1 + CR 616.1: run a non-combat player-damage leg's
-/// stashed post-loss work (the `DamageDealt` event, the CR 120.1 record, the
-/// lifelink gain) once its life loss fully settles. Called from the
-/// post-replacement funnel after the batch drain retires with no re-park.
-/// `EmitAndRecord` is infallible; a lifelink gain that parks hands ownership
-/// to the pending replacement (matching `PendingCombatLifelink`, whose paused
-/// source is deliberately absent from `remaining`) instead of re-stashing, so
-/// the answering drain never proposes the gain twice.
+/// CR 120.3f + CR 120.3g + CR 120.1 + CR 616.1: run a non-combat
+/// player-damage leg's parked results once the paused result settles. Called
+/// from the post-replacement funnel (and the Prevented answer) after the batch
+/// drain retires with no re-park; delegates to
+/// [`settle_parked_player_damage_results`].
 pub(crate) fn drain_pending_damage_post_loss(
     state: &mut GameState,
     events: &mut Vec<GameEvent>,
 ) -> DamagePostLossDrainOutcome {
-    use crate::types::game_state::DamagePostLossStage;
     let Some(stashed) = state.pending_damage_post_loss.take() else {
         return DamagePostLossDrainOutcome::Settled;
     };
-    if matches!(stashed.stage, DamagePostLossStage::EmitAndRecord) {
-        // Players have no excess and the excess-redirect rider is
-        // creature-only, so the dealt, recorded, and excess figures are the
-        // post-replacement amount, that same amount, and zero.
-        emit_damage_dealt_and_record(
+    settle_parked_player_damage_results(state, *stashed, events)
+}
+
+/// CR 120.3f and CR 120.3g (702.164c): lifelink and toxic each happen in
+/// addition to the damage's other results; CR 120.3a/b give the life loss or
+/// poison result; CR 120.4c: the dealt damage is processed into its results,
+/// as modified by replacement effects that interact with them. The order
+/// below (loss or infect, toxic, record, lifelink) is the engine's existing
+/// synchronous order, preserved across the pause; the loss or infect result
+/// was already settled by the answered choice (CR 616.1). The stash is
+/// already taken by the caller (the non-combat drain or the combat Phase C
+/// remnant), and the context it carries was captured at damage time
+/// (CR 400.7).
+///
+/// A toxic or lifelink result that parks on its own replacement choice hands
+/// ownership to the pending replacement (matching `PendingCombatLifelink`,
+/// whose paused source is deliberately absent from `remaining`) instead of
+/// re-stashing, so the answer never proposes it twice.
+pub(crate) fn settle_parked_player_damage_results(
+    state: &mut GameState,
+    stashed: crate::types::game_state::PendingDamagePostLoss,
+    events: &mut Vec<GameEvent>,
+) -> DamagePostLossDrainOutcome {
+    use crate::types::game_state::DamagePostLossStage;
+    debug_assert!(
+        !stashed.is_combat || !stashed.has_lifelink,
+        "combat lifelink folds per source; a combat stash never owes lifelink"
+    );
+    debug_assert!(
+        stashed.is_combat || stashed.toxic_poison == 0,
+        "toxic is combat damage only; a non-combat stash never owes toxic"
+    );
+    let record_owed = matches!(stashed.stage, DamagePostLossStage::EmitAndRecord);
+    if stashed.toxic_poison > 0
+        && give_toxic_poison(
             state,
-            stashed.source_id,
-            stashed.source_incarnation,
             stashed.controller,
-            &TargetRef::Player(stashed.target),
-            stashed.actual_amount,
-            stashed.actual_amount,
-            0,
-            false,
+            stashed.target,
+            stashed.toxic_poison,
             events,
-        );
+        ) == player_counter::PlayerCounterAdditionOutcome::NeedsChoice
+    {
+        // CR 120.4b + CR 120.4c: the damage is already dealt; only its toxic
+        // result is being processed, so write the fact now if still owed. A
+        // toxic stash is combat and owes no lifelink, so nothing follows; the
+        // pending replacement owns the poison result.
+        if record_owed {
+            emit_parked_player_damage(state, &stashed, events);
+        }
+        return DamagePostLossDrainOutcome::PausedForReplacement;
+    }
+    if record_owed {
+        emit_parked_player_damage(state, &stashed, events);
     }
     if gain_lifelink_for_damage_leg(
         state,
@@ -1248,7 +1627,7 @@ pub(crate) fn drain_pending_damage_post_loss(
         events,
     ) {
         // CR 616.1: the gaining player must choose which replacement applies
-        // first. Nothing was applied for this leg. `state.pending_replacement`
+        // first. Nothing was applied for this gain. `state.pending_replacement`
         // is left populated ON PURPOSE — it is the resume's authority, and
         // this leg is deliberately NOT re-stashed (that would gain the life
         // twice) — mirroring `drain_combat_lifelink`'s handoff.
@@ -2327,12 +2706,14 @@ fn resolve_each_target_power_damage(
                 // the recipient needs a player ordering choice — pause the batch.
                 // The paused source's own damage event lives in `pending_replacement`
                 // and resumes through `handle_replacement_choice` (which rebuilds
-                // its `DamageContext` from the event's own `source_id`). Apply the
+                // its `DamageContext` from the event's own `source_id` and restores
+                // the riders `park_damage_context` stashed). Apply the
                 // survivors already chosen this pass, then stash only the sources
                 // AFTER this one (`batch[idx + 1..]`) — each with PER-SOURCE
                 // identity so it resumes through its OWN source id's keywords/LKI,
                 // never flattened to a single source (the exact defect this batch
                 // replaces). Including `idx` would double-deal the paused source.
+                park_damage_context(state, ctx);
                 apply_batch_survivors_before_replacement_pause(state, &survivors, events);
                 state.waiting_for = replacement::replacement_choice_waiting_for(player, state);
                 let remaining = batch
@@ -3529,6 +3910,7 @@ pub fn resolve_each_source_deals_damage(
                 // (they still need replacement). The `replace_event` call already
                 // registered the pending replacement in state; we just set
                 // `waiting_for` and return.
+                park_damage_context(state, ctx);
                 phase_b_paused_at = Some(i);
                 phase_b_waiting_for_player = Some(player);
                 break;
@@ -4198,6 +4580,90 @@ mod tests {
             parent_event_seen,
             "pause-and-resume path must emit the parent effect resolution event"
         );
+    }
+
+    /// CR 400.7 + CR 616.1e: the `EachSourceDealsDamage` Phase B park stashes
+    /// the paused source's incarnation on the parked damage record (via
+    /// `park_damage_context`), and the resumed hit records that incarnation.
+    #[test]
+    fn each_source_phase_b_park_captures_the_source_incarnation() {
+        use crate::game::engine::apply_as_current;
+        use crate::types::actions::GameAction;
+        use crate::types::game_state::WaitingFor;
+
+        let mut state = GameState::new_two_player(42);
+        state.priority_player = PlayerId(0);
+        state.active_player = PlayerId(0);
+        let source = create_object(
+            &mut state,
+            CardId(20),
+            PlayerId(0),
+            "Pinger".to_string(),
+            Zone::Battlefield,
+        );
+        let recipient = create_object(
+            &mut state,
+            CardId(22),
+            PlayerId(1),
+            "Large Recipient".to_string(),
+            Zone::Battlefield,
+        );
+        for (id, power) in [(source, 2), (recipient, 0)] {
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.power = Some(power);
+            obj.base_power = Some(power);
+            obj.toughness = Some(9);
+            obj.base_toughness = Some(9);
+        }
+        install_optional_damage_replacement(&mut state);
+        let incarnation = state.objects[&source].incarnation;
+
+        let ability = ResolvedAbility::new(
+            Effect::EachSourceDealsDamage {
+                sources: TargetFilter::Typed(TypedFilter {
+                    type_filters: vec![TypeFilter::Creature],
+                    controller: Some(ControllerRef::You),
+                    properties: vec![],
+                }),
+                amount: QuantityExpr::Fixed { value: 1 },
+                recipient: EachDamageRecipient::Shared(TargetFilter::Any),
+            },
+            vec![TargetRef::Object(recipient)],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve_each_source_deals_damage(&mut state, &ability, &mut events).unwrap();
+
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::ReplacementChoice { .. }
+        ));
+        let pending = state
+            .pending_replacement
+            .as_ref()
+            .expect("reach-guard: the Phase B damage park");
+        assert!(
+            matches!(pending.proposed, ProposedEvent::Damage { source_id, .. } if source_id == source),
+            "reach-guard: the parked record is the source's damage"
+        );
+        assert_eq!(
+            pending.source_incarnation,
+            Some(incarnation),
+            "the park captured the dealing incarnation"
+        );
+
+        apply_as_current(&mut state, GameAction::ChooseReplacement { index: 0 })
+            .expect("accept the damage replacement");
+        assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+        let records: Vec<_> = state
+            .damage_dealt_this_turn
+            .iter()
+            .filter(|record| record.source_id == source)
+            .map(|record| record.source_incarnation)
+            .collect();
+        assert_eq!(records, vec![Some(incarnation)]);
     }
 
     /// CR 120.3 + CR 616.1e + CR 202.3e: Lady Loki, Agent of Chaos — when a
@@ -5162,6 +5628,608 @@ mod tests {
         );
     }
 
+    /// Writer-level fixture for the damage-history stores: a creature in `zone`
+    /// controlled by P1.
+    fn sticky_damage_source(state: &mut GameState, card: u64, zone: Zone) -> ObjectId {
+        let id = create_object(
+            state,
+            CardId(card),
+            PlayerId(1),
+            "Sticky Source".to_string(),
+            zone,
+        );
+        state
+            .objects
+            .get_mut(&id)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+        id
+    }
+
+    /// Drives the single damage-history writer through
+    /// `apply_damage_after_replacement`, which delegates to
+    /// `emit_damage_dealt_and_record`, with `amount` from `source` to P0.
+    fn deal_sticky_damage(state: &mut GameState, source: ObjectId, amount: u32, is_combat: bool) {
+        let ctx = DamageContext::from_source(state, source).expect("source ctx");
+        let event = ProposedEvent::Damage {
+            source_id: source,
+            target: TargetRef::Player(PlayerId(0)),
+            amount,
+            is_combat,
+            applied: HashSet::new(),
+        };
+        let mut events = Vec::new();
+        apply_damage_after_replacement(state, &ctx, event, is_combat, &mut events);
+    }
+
+    /// (Any, CombatOnly, NoncombatOnly) as answered by the production evaluator.
+    fn sticky_kinds(state: &GameState, id: ObjectId) -> (bool, bool, bool) {
+        use crate::game::conditions::eval_source_has_dealt_damage;
+        use crate::types::ability::DamageKindFilter;
+        (
+            eval_source_has_dealt_damage(state, id, DamageKindFilter::Any),
+            eval_source_has_dealt_damage(state, id, DamageKindFilter::CombatOnly),
+            eval_source_has_dealt_damage(state, id, DamageKindFilter::NoncombatOnly),
+        )
+    }
+
+    /// W5: the `Any` id set and the per-object kind latch are written together,
+    /// so for an object in `state.objects` they always agree.
+    fn assert_damage_stores_agree(state: &GameState, id: ObjectId) {
+        assert_eq!(
+            state.objects_that_dealt_damage.contains(&id),
+            !state.objects[&id].dealt_damage_kinds.is_empty(),
+            "Any id set and object kind latch must agree for {id:?}"
+        );
+    }
+
+    /// W1 - CR 400.7 + CR 120.2a / CR 120.2b: the battlefield guard wraps BOTH
+    /// damage-history stores. A source dealing damage from the graveyard or the
+    /// stack must leave the id set and the object latch untouched (and not
+    /// dirty layers), so when the same `ObjectId` later enters the battlefield
+    /// it is not pre-flagged (no battlefield-exit reset ever ran for it).
+    #[test]
+    fn sticky_damage_stores_ignore_non_battlefield_sources() {
+        use crate::game::layers::flush_layers;
+        use crate::game::zones::move_to_zone;
+
+        for (card, zone) in [(9101, Zone::Graveyard), (9102, Zone::Stack)] {
+            for is_combat in [false, true] {
+                let mut state = GameState::new_two_player(42);
+                let source = sticky_damage_source(&mut state, card, zone);
+                flush_layers(&mut state);
+                assert!(!state.layers_dirty.is_dirty());
+                let life_before = state.players[0].life;
+                deal_sticky_damage(&mut state, source, 2, is_combat);
+                // Reach-guard: the damage was really dealt (writer reached).
+                assert_eq!(
+                    state.players[0].life,
+                    life_before - 2,
+                    "{zone:?}/{is_combat}"
+                );
+                assert!(
+                    !state.objects_that_dealt_damage.contains(&source)
+                        && state.objects[&source].dealt_damage_kinds.is_empty(),
+                    "{zone:?}/{is_combat}: non-battlefield source must not be recorded"
+                );
+                assert_damage_stores_agree(&state, source);
+                assert!(
+                    !state.layers_dirty.is_dirty(),
+                    "{zone:?}/{is_combat}: nothing recorded, no layer dirtying"
+                );
+                let mut events = Vec::new();
+                move_to_zone(&mut state, source, Zone::Battlefield, &mut events);
+                assert_eq!(
+                    sticky_kinds(&state, source),
+                    (false, false, false),
+                    "{zone:?}/{is_combat}: entered the battlefield pre-flagged"
+                );
+            }
+        }
+
+        // Paired positive: the same call from the battlefield DOES record the
+        // source in the Any set + the matching kind latch and dirties layers.
+        for is_combat in [false, true] {
+            let mut state = GameState::new_two_player(42);
+            let source = sticky_damage_source(&mut state, 9103, Zone::Battlefield);
+            flush_layers(&mut state);
+            assert!(!state.layers_dirty.is_dirty());
+            deal_sticky_damage(&mut state, source, 2, is_combat);
+            assert_eq!(sticky_kinds(&state, source), (true, is_combat, !is_combat));
+            assert_damage_stores_agree(&state, source);
+            assert!(state.layers_dirty.is_dirty());
+        }
+    }
+
+    /// W2 - CR 120.2a + CR 613.1f: a battlefield source that already dealt
+    /// NONCOMBAT damage (so it is already in the `Any` set) and then deals its
+    /// first COMBAT damage must still dirty the layers, otherwise a "hasn't
+    /// dealt combat damage yet" hexproof grant would never drop at the next
+    /// targeting check. Discriminates the `newly_any | newly_kind` gate from the
+    /// former `if any.insert(..) { mark_full }` gate.
+    #[test]
+    fn sticky_damage_first_combat_after_noncombat_dirties_layers() {
+        use crate::game::layers::flush_layers;
+
+        let mut state = GameState::new_two_player(42);
+        let source = sticky_damage_source(&mut state, 9201, Zone::Battlefield);
+        flush_layers(&mut state);
+        deal_sticky_damage(&mut state, source, 1, false);
+        // Reach-guard: the first (noncombat) hit dirtied layers, and a flush
+        // really returns the state to Clean before the second hit.
+        assert!(state.layers_dirty.is_dirty());
+        flush_layers(&mut state);
+        assert!(!state.layers_dirty.is_dirty(), "flush must clean layers");
+        assert_eq!(sticky_kinds(&state, source), (true, false, true));
+        assert_damage_stores_agree(&state, source);
+
+        deal_sticky_damage(&mut state, source, 1, true);
+        assert!(
+            state.layers_dirty.is_dirty(),
+            "first COMBAT damage must dirty layers even though Any was already set"
+        );
+        assert_eq!(sticky_kinds(&state, source), (true, true, true));
+        assert_damage_stores_agree(&state, source);
+    }
+
+    /// W3 - CR 120.8: a zero-amount damage event deals no damage, so the writer
+    /// records nothing and does not dirty layers; a later nonzero hit in the
+    /// same fixture does.
+    #[test]
+    fn sticky_damage_zero_amount_records_nothing() {
+        use crate::game::layers::flush_layers;
+
+        let mut state = GameState::new_two_player(42);
+        let source = sticky_damage_source(&mut state, 9301, Zone::Battlefield);
+        flush_layers(&mut state);
+        for is_combat in [true, false] {
+            deal_sticky_damage(&mut state, source, 0, is_combat);
+        }
+        assert_eq!(sticky_kinds(&state, source), (false, false, false));
+        assert_damage_stores_agree(&state, source);
+        assert!(!state.layers_dirty.is_dirty());
+
+        // Paired positive: a nonzero hit from the same source is recorded.
+        deal_sticky_damage(&mut state, source, 3, true);
+        assert_eq!(sticky_kinds(&state, source), (true, true, false));
+        assert_damage_stores_agree(&state, source);
+        assert!(state.layers_dirty.is_dirty());
+    }
+
+    /// W7 - CR 120.2a / CR 120.2b + CR 120.8: the post-loss drain and the combat
+    /// Phase C remnant call `emit_damage_dealt_and_record` DIRECTLY (they never
+    /// re-enter `apply_damage_after_replacement`), so the per-kind latch must be
+    /// written by the helper itself. Combat then noncombat from a battlefield
+    /// source records each kind; the second call (Any already set, only the kind
+    /// is new) must still dirty layers. Zero amount and a graveyard source record
+    /// nothing.
+    #[test]
+    fn sticky_damage_helper_records_kind_directly() {
+        use crate::game::layers::flush_layers;
+
+        let target = TargetRef::Player(PlayerId(0));
+        let mut state = GameState::new_two_player(42);
+        let source = sticky_damage_source(&mut state, 9401, Zone::Battlefield);
+        flush_layers(&mut state);
+        let mut events = Vec::new();
+        emit_damage_dealt_and_record(
+            &mut state,
+            source,
+            None,
+            PlayerId(1),
+            &target,
+            2,
+            2,
+            0,
+            true,
+            &mut events,
+        );
+        // Reach-guards: the event was pushed and the record written.
+        assert_eq!(events.len(), 1);
+        assert_eq!(state.damage_dealt_this_turn.len(), 1);
+        assert_eq!(sticky_kinds(&state, source), (true, true, false));
+        assert_damage_stores_agree(&state, source);
+        assert!(state.layers_dirty.is_dirty());
+
+        flush_layers(&mut state);
+        assert!(!state.layers_dirty.is_dirty(), "flush must clean layers");
+        emit_damage_dealt_and_record(
+            &mut state,
+            source,
+            None,
+            PlayerId(1),
+            &target,
+            1,
+            1,
+            0,
+            false,
+            &mut events,
+        );
+        assert_eq!(events.len(), 2);
+        assert_eq!(state.damage_dealt_this_turn.len(), 2);
+        assert_eq!(sticky_kinds(&state, source), (true, true, true));
+        assert_damage_stores_agree(&state, source);
+        assert!(
+            state.layers_dirty.is_dirty(),
+            "a newly recorded kind must dirty layers even though Any was already set"
+        );
+
+        // CR 120.8: zero amount - the event is still pushed, nothing is recorded.
+        let mut state = GameState::new_two_player(42);
+        let zero = sticky_damage_source(&mut state, 9402, Zone::Battlefield);
+        flush_layers(&mut state);
+        let mut events = Vec::new();
+        for is_combat in [true, false] {
+            emit_damage_dealt_and_record(
+                &mut state,
+                zero,
+                None,
+                PlayerId(1),
+                &target,
+                0,
+                0,
+                0,
+                is_combat,
+                &mut events,
+            );
+        }
+        assert_eq!(events.len(), 2, "reach-guard: both events pushed");
+        assert!(state.damage_dealt_this_turn.is_empty());
+        assert_eq!(sticky_kinds(&state, zero), (false, false, false));
+        assert_damage_stores_agree(&state, zero);
+        assert!(!state.layers_dirty.is_dirty());
+
+        // CR 400.7: a non-battlefield source records history but no latch.
+        let mut state = GameState::new_two_player(42);
+        let gone = sticky_damage_source(&mut state, 9403, Zone::Graveyard);
+        flush_layers(&mut state);
+        let mut events = Vec::new();
+        emit_damage_dealt_and_record(
+            &mut state,
+            gone,
+            None,
+            PlayerId(1),
+            &target,
+            2,
+            2,
+            0,
+            true,
+            &mut events,
+        );
+        assert_eq!(events.len(), 1);
+        assert_eq!(
+            state.damage_dealt_this_turn.len(),
+            1,
+            "reach-guard: the record branch ran"
+        );
+        assert!(
+            !state.objects_that_dealt_damage.contains(&gone)
+                && state.objects[&gone].dealt_damage_kinds.is_empty()
+        );
+        assert!(!state.layers_dirty.is_dirty());
+    }
+
+    /// U-3 - CR 120.2a / CR 120.2b: a repeat hit of a kind the source already
+    /// latched leaves the latch unchanged, so the damage-history authority must
+    /// not take a mutable borrow of the source: `ObjectMap::get_mut` unshares a
+    /// copy-on-write object (a deep `GameObject` clone on every AI-search state
+    /// clone). A hit of a NEW kind still writes the object and dirties layers.
+    #[test]
+    fn repeat_same_kind_hit_keeps_source_object_shared() {
+        use crate::game::layers::flush_layers;
+
+        let target = TargetRef::Player(PlayerId(0));
+        let mut state = GameState::new_two_player(42);
+        let source = sticky_damage_source(&mut state, 9404, Zone::Battlefield);
+        let mut events = Vec::new();
+        emit_damage_dealt_and_record(
+            &mut state,
+            source,
+            None,
+            PlayerId(1),
+            &target,
+            2,
+            2,
+            0,
+            true,
+            &mut events,
+        );
+        flush_layers(&mut state);
+        assert_eq!(sticky_kinds(&state, source), (true, true, false));
+
+        // Repeat combat hit on a clone: the record is written, the object is not.
+        let snapshot = state.clone();
+        assert!(
+            state.objects.shares_object_with(&snapshot.objects, source),
+            "premise: a fresh clone shares the source object"
+        );
+        emit_damage_dealt_and_record(
+            &mut state,
+            source,
+            None,
+            PlayerId(1),
+            &target,
+            1,
+            1,
+            0,
+            true,
+            &mut events,
+        );
+        assert_eq!(
+            state.damage_dealt_this_turn.len(),
+            2,
+            "reach-guard: the repeat hit reached the record branch"
+        );
+        assert_eq!(sticky_kinds(&state, source), (true, true, false));
+        assert!(
+            state.objects.shares_object_with(&snapshot.objects, source),
+            "a repeat same-kind hit must not unshare the source object"
+        );
+        assert!(
+            !state.layers_dirty.is_dirty(),
+            "an unchanged latch must not dirty layers"
+        );
+
+        // A new kind (noncombat) must write the object and dirty layers.
+        emit_damage_dealt_and_record(
+            &mut state,
+            source,
+            None,
+            PlayerId(1),
+            &target,
+            1,
+            1,
+            0,
+            false,
+            &mut events,
+        );
+        assert_eq!(sticky_kinds(&state, source), (true, true, true));
+        assert!(
+            !state.objects.shares_object_with(&snapshot.objects, source),
+            "a newly recorded kind writes the source object"
+        );
+        assert!(state.layers_dirty.is_dirty());
+    }
+
+    /// W8 - CR 120.3f + CR 120.2b: the non-combat post-loss resume drain emits
+    /// and records through the shared helper, so a resumed noncombat leg latches
+    /// `noncombat` on its battlefield source exactly as the synchronous leg does.
+    /// Sibling negative: a stash already past `EmitAndRecord` records nothing.
+    #[test]
+    fn drain_pending_damage_post_loss_records_kind() {
+        use crate::types::game_state::{DamagePostLossStage, PendingDamagePostLoss};
+
+        let stash = |source: ObjectId, stage: DamagePostLossStage| {
+            Some(Box::new(PendingDamagePostLoss {
+                source_id: source,
+                source_incarnation: None,
+                controller: PlayerId(1),
+                target: PlayerId(0),
+                actual_amount: 2,
+                has_lifelink: false,
+                lifelink_bonus: 0,
+                stage,
+                // The shared drain takes the kind from the stash; combat
+                // stashes are owned by the batch remnant.
+                is_combat: false,
+                toxic_poison: 0,
+            }))
+        };
+
+        let mut state = GameState::new_two_player(42);
+        let source = sticky_damage_source(&mut state, 9501, Zone::Battlefield);
+        state.pending_damage_post_loss = stash(source, DamagePostLossStage::EmitAndRecord);
+        let mut events = Vec::new();
+        let outcome = drain_pending_damage_post_loss(&mut state, &mut events);
+        assert_eq!(outcome, DamagePostLossDrainOutcome::Settled);
+        assert!(state.pending_damage_post_loss.is_none(), "stash consumed");
+        assert_eq!(state.damage_dealt_this_turn.len(), 1);
+        assert_eq!(sticky_kinds(&state, source), (true, false, true));
+        assert_damage_stores_agree(&state, source);
+
+        // Sibling negative: past the emit stage, nothing is (re)recorded.
+        let mut state = GameState::new_two_player(42);
+        let source = sticky_damage_source(&mut state, 9502, Zone::Battlefield);
+        state.pending_damage_post_loss = stash(source, DamagePostLossStage::LifelinkGain);
+        let mut events = Vec::new();
+        let outcome = drain_pending_damage_post_loss(&mut state, &mut events);
+        assert_eq!(outcome, DamagePostLossDrainOutcome::Settled);
+        assert!(state.pending_damage_post_loss.is_none(), "stash consumed");
+        assert!(state.damage_dealt_this_turn.is_empty());
+        assert_eq!(sticky_kinds(&state, source), (false, false, false));
+        assert!(state.objects_that_dealt_damage.is_empty());
+    }
+
+    /// A production-reachable parked stash: the sticky
+    /// source (controlled by P1) dealt `actual_amount` to P0.
+    fn parked_stash(
+        source: ObjectId,
+        stage: crate::types::game_state::DamagePostLossStage,
+        is_combat: bool,
+        has_lifelink: bool,
+        toxic_poison: u32,
+    ) -> crate::types::game_state::PendingDamagePostLoss {
+        crate::types::game_state::PendingDamagePostLoss {
+            source_id: source,
+            source_incarnation: None,
+            controller: PlayerId(1),
+            target: PlayerId(0),
+            actual_amount: 3,
+            has_lifelink,
+            lifelink_bonus: 0,
+            stage,
+            is_combat,
+            toxic_poison,
+        }
+    }
+
+    /// Two mandatory, non-commuting AddCounter modifiers (double; plus one)
+    /// that apply to any player: a poison event meeting both needs a CR 616.1
+    /// ordering choice.
+    fn add_two_counter_modifiers(state: &mut GameState) {
+        use crate::types::ability::{
+            QuantityModification, ReplacementDefinition, ReplacementPlayerScope,
+        };
+        use crate::types::replacements::ReplacementEvent;
+        for (card, modification) in [
+            (9701, QuantityModification::DOUBLE),
+            (9702, QuantityModification::Plus { value: 1 }),
+        ] {
+            let id = create_object(
+                state,
+                CardId(card),
+                PlayerId(0),
+                "Counter Modifier".to_string(),
+                Zone::Battlefield,
+            );
+            let mut def = ReplacementDefinition::new(ReplacementEvent::AddCounter)
+                .quantity_modification(modification);
+            def.valid_player = Some(ReplacementPlayerScope::AnyPlayer);
+            state.objects.get_mut(&id).unwrap().replacement_definitions = vec![def].into();
+        }
+    }
+
+    /// CR 120.3g + CR 120.3f + CR 120.4c: the settle function on the
+    /// production-reachable stash shapes only (a combat stash never owes
+    /// lifelink; a non-combat stash never owes toxic).
+    #[test]
+    fn settle_parked_player_damage_results_reachable_shapes() {
+        use crate::types::game_state::DamagePostLossStage;
+
+        // (1) combat loss pause {EmitAndRecord, toxic 2}: toxic, then one
+        // combat event + record.
+        let mut state = GameState::new_two_player(42);
+        let source = sticky_damage_source(&mut state, 9601, Zone::Battlefield);
+        let mut events = Vec::new();
+        let outcome = settle_parked_player_damage_results(
+            &mut state,
+            parked_stash(source, DamagePostLossStage::EmitAndRecord, true, false, 2),
+            &mut events,
+        );
+        assert_eq!(outcome, DamagePostLossDrainOutcome::Settled);
+        assert_eq!(state.players[0].poison_counters, 2, "the owed toxic landed");
+        assert_eq!(state.damage_dealt_this_turn.len(), 1);
+        assert!(state.damage_dealt_this_turn[0].is_combat);
+        assert_eq!(
+            events
+                .iter()
+                .filter(|e| matches!(
+                    e,
+                    GameEvent::DamageDealt {
+                        is_combat: true,
+                        ..
+                    }
+                ))
+                .count(),
+            1
+        );
+        assert_eq!(sticky_kinds(&state, source), (true, true, false));
+
+        // (1, paused) the same stash with two co-applicable counter modifiers:
+        // the toxic result parks, the fact is written at that pause, and
+        // nothing is re-parked (the pending replacement owns the poison).
+        let mut state = GameState::new_two_player(42);
+        let source = sticky_damage_source(&mut state, 9602, Zone::Battlefield);
+        add_two_counter_modifiers(&mut state);
+        let mut events = Vec::new();
+        let outcome = settle_parked_player_damage_results(
+            &mut state,
+            parked_stash(source, DamagePostLossStage::EmitAndRecord, true, false, 2),
+            &mut events,
+        );
+        assert_eq!(outcome, DamagePostLossDrainOutcome::PausedForReplacement);
+        assert_eq!(state.players[0].poison_counters, 0);
+        assert_eq!(
+            state.damage_dealt_this_turn.len(),
+            1,
+            "recorded at the toxic pause"
+        );
+        assert!(
+            state.pending_damage_post_loss.is_none(),
+            "nothing re-parked"
+        );
+        assert!(matches!(
+            state.pending_replacement.as_ref().map(|p| &p.proposed),
+            Some(ProposedEvent::AddCounter { count: 2, .. })
+        ));
+
+        // (2) combat infect pause {LifelinkGain, toxic 2}: poison only; the
+        // fact was recorded at the infect pause, so nothing is re-recorded.
+        let mut state = GameState::new_two_player(42);
+        let source = sticky_damage_source(&mut state, 9603, Zone::Battlefield);
+        let mut events = Vec::new();
+        let outcome = settle_parked_player_damage_results(
+            &mut state,
+            parked_stash(source, DamagePostLossStage::LifelinkGain, true, false, 2),
+            &mut events,
+        );
+        assert_eq!(outcome, DamagePostLossDrainOutcome::Settled);
+        assert_eq!(state.players[0].poison_counters, 2);
+        assert!(state.damage_dealt_this_turn.is_empty());
+        assert!(!events
+            .iter()
+            .any(|e| matches!(e, GameEvent::DamageDealt { .. })));
+
+        // (3) non-combat infect pause {LifelinkGain, has_lifelink}: one gain
+        // for the damage dealt (CR 120.3f), no record.
+        let mut state = GameState::new_two_player(42);
+        let source = sticky_damage_source(&mut state, 9604, Zone::Battlefield);
+        let life = state.players[1].life;
+        let mut events = Vec::new();
+        let outcome = settle_parked_player_damage_results(
+            &mut state,
+            parked_stash(source, DamagePostLossStage::LifelinkGain, false, true, 0),
+            &mut events,
+        );
+        assert_eq!(outcome, DamagePostLossDrainOutcome::Settled);
+        assert_eq!(
+            state.players[1].life,
+            life + 3,
+            "lifelink gains the damage dealt"
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|e| matches!(e, GameEvent::LifeChanged { amount, .. } if *amount > 0))
+                .count(),
+            1
+        );
+        assert!(state.damage_dealt_this_turn.is_empty());
+        assert_eq!(state.players[0].poison_counters, 0);
+    }
+
+    /// Wire shape: `toxic_poison` is elided at zero, a stash JSON
+    /// without the key decodes to 0, and a nonzero count round-trips.
+    #[test]
+    fn pending_damage_post_loss_toxic_poison_wire_shape() {
+        use crate::types::game_state::{DamagePostLossStage, PendingDamagePostLoss};
+        let zero = parked_stash(
+            ObjectId(7),
+            DamagePostLossStage::EmitAndRecord,
+            false,
+            true,
+            0,
+        );
+        let json = serde_json::to_value(&zero).unwrap();
+        assert!(json.get("toxic_poison").is_none(), "zero is elided");
+        let decoded: PendingDamagePostLoss = serde_json::from_value(json).unwrap();
+        assert_eq!(decoded, zero, "a stash without the key decodes to 0");
+
+        let owed = parked_stash(
+            ObjectId(7),
+            DamagePostLossStage::LifelinkGain,
+            true,
+            false,
+            2,
+        );
+        let json = serde_json::to_value(&owed).unwrap();
+        assert_eq!(json["toxic_poison"], serde_json::json!(2));
+        let decoded: PendingDamagePostLoss = serde_json::from_value(json).unwrap();
+        assert_eq!(decoded, owed);
+    }
+
     #[test]
     fn deal_damage_to_creature() {
         let mut state = GameState::new_two_player(42);
@@ -5258,6 +6326,102 @@ mod tests {
             state.damage_dealt_this_turn[0].source_incarnation, source_incarnation,
             "damage records must retain the pre-pause source incarnation"
         );
+    }
+
+    /// CR 400.7: both sticky damage-history stores (`objects_that_dealt_damage`
+    /// and the per-kind `dealt_damage_kinds` latch) belong to the source
+    /// incarnation captured with the damage context. A source that became a
+    /// new object before the damage was applied keeps the occurrence (event and
+    /// record carry the OLD incarnation) but the new object gets neither store,
+    /// for combat and noncombat damage alike. The matching-incarnation control
+    /// writes both, and a context without a captured incarnation (fallback)
+    /// keeps the legacy zone-only behavior.
+    #[test]
+    fn sticky_damage_history_is_written_only_for_the_captured_source_incarnation() {
+        use crate::types::ability::DamageKindFilter;
+
+        // (bump the source's incarnation, use the fallback context, is_combat)
+        let cases = [
+            (false, false, false),
+            (false, false, true),
+            (true, false, false),
+            (true, false, true),
+            (true, true, false),
+        ];
+        for (bump, fallback, is_combat) in cases {
+            let mut state = GameState::new_two_player(42);
+            let source = create_object(
+                &mut state,
+                CardId(1),
+                PlayerId(0),
+                "Source".to_string(),
+                Zone::Battlefield,
+            );
+            let ctx = if fallback {
+                DamageContext::fallback(source, PlayerId(0))
+            } else {
+                DamageContext::from_source(&state, source).unwrap()
+            };
+            let old_incarnation = state.objects[&source].incarnation;
+            if bump {
+                state.objects.get_mut(&source).unwrap().incarnation += 1;
+            }
+            let event = ProposedEvent::Damage {
+                source_id: source,
+                target: TargetRef::Player(PlayerId(1)),
+                amount: 2,
+                is_combat,
+                applied: HashSet::new(),
+            };
+            let mut events = Vec::new();
+            apply_damage_after_replacement(&mut state, &ctx, event, is_combat, &mut events);
+
+            // Reach-guard: the occurrence happened in every case.
+            assert_eq!(
+                state.players[1].life, 18,
+                "case {bump} {fallback} {is_combat}"
+            );
+            assert_eq!(state.damage_dealt_this_turn.len(), 1);
+            assert_eq!(
+                events
+                    .iter()
+                    .filter(|e| matches!(e, GameEvent::DamageDealt { .. }))
+                    .count(),
+                1
+            );
+            if !fallback {
+                assert_eq!(
+                    state.damage_dealt_this_turn[0].source_incarnation,
+                    Some(old_incarnation)
+                );
+                assert!(events.iter().any(|e| matches!(
+                    e,
+                    GameEvent::DamageDealt { source_incarnation, .. }
+                        if *source_incarnation == Some(old_incarnation)
+                )));
+            }
+            let kind = if is_combat {
+                DamageKindFilter::CombatOnly
+            } else {
+                DamageKindFilter::NoncombatOnly
+            };
+            let stale = bump && !fallback;
+            assert_eq!(
+                state.objects_that_dealt_damage.contains(&source),
+                !stale,
+                "Any store, case bump={bump} fallback={fallback} combat={is_combat}"
+            );
+            assert_eq!(
+                state.objects[&source].dealt_damage_kinds.has(kind),
+                !stale,
+                "kind latch, case bump={bump} fallback={fallback} combat={is_combat}"
+            );
+            assert_eq!(
+                state.objects[&source].dealt_damage_kinds.is_empty(),
+                stale,
+                "no other kind is written for a stale incarnation"
+            );
+        }
     }
 
     /// CR 202.3d + CR 702.102b: A damage record snapshots its source's mana value

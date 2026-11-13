@@ -399,6 +399,7 @@ fn legacy_save_restores_a_search_found_prompt_as_search_found_not_ordering() {
         exile_tracking: ZoneDeliveryExileTracking::None,
         excess_recipient: None,
         lifelink_bonus: 0,
+        source_incarnation: None,
         may_cost_paid: false,
         may_cost_remaining: None,
         delivery_boundary: None,

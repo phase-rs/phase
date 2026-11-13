@@ -26,7 +26,7 @@ use crate::types::zones::Zone;
 
 use super::ability_utils::build_resolved_from_def_with_targets;
 use super::effects;
-use super::effects::deal_damage::{apply_damage_after_replacement, DamageContext};
+use super::effects::deal_damage::{apply_damage_after_replacement, DamageContext, DamageResult};
 use super::effects::destroy::apply_destroy_after_replacement;
 use super::effects::draw::{apply_draw_after_replacement, settle_draw_instruction};
 use super::effects::life::{
@@ -388,6 +388,12 @@ fn handle_replacement_choice_inner(
         .as_ref()
         .map(|pending| pending.lifelink_bonus)
         .unwrap_or(0);
+    // CR 400.7: the damage source's incarnation captured when it dealt the
+    // parked damage, read before `continue_replacement` consumes the record.
+    let parked_source_incarnation = state
+        .pending_replacement
+        .as_ref()
+        .and_then(|pending| pending.source_incarnation);
     // The player-resource policy the parked record was stamped with, captured
     // with the file's other `parked_*` reads before `continue_replacement`
     // consumes it.
@@ -723,7 +729,42 @@ fn handle_replacement_choice_inner(
                     // leg still gains the combined lifelink total.
                     ctx.excess_recipient = parked_excess_recipient;
                     ctx.lifelink_bonus = parked_lifelink_bonus;
-                    let _ = apply_damage_after_replacement(state, &ctx, damage, is_combat, events);
+                    // CR 400.7: the rebuild read the LIVE object's incarnation; a
+                    // source that left and returned since dealing the damage is a
+                    // new object, so restore the captured one. `Some` = captured
+                    // at park time (`park_damage_context`); `None` = not captured
+                    // (a record saved before the field, or a park that never
+                    // passed through the helper), so keep the rebuilt live value
+                    // exactly as before the field existed.
+                    if let Some(incarnation) = parked_source_incarnation {
+                        ctx.source_incarnation = Some(incarnation);
+                    }
+                    if matches!(
+                        apply_damage_after_replacement(state, &ctx, damage, is_combat, events),
+                        DamageResult::NeedsChoice
+                    ) {
+                        // CR 616.1 + CR 616.1f: the resumed hit raised its own
+                        // result prompt (poison counters, life loss, the
+                        // lifelink gain, or an excess-redirect leg), parked by
+                        // the nested pipeline together with any owed results.
+                        // Keep that wait: the Priority reset below and the
+                        // settled-stash drain must not run over it; the nested
+                        // answer's own tail drains the stash exactly once.
+                        debug_assert!(
+                            state.pending_replacement.is_some()
+                                || state.active_batch_delivery().is_some(),
+                            "a resumed damage NeedsChoice must leave its pause owned"
+                        );
+                        // CR 603.2 + CR 603.3b + CR 120.4b: this action ends on
+                        // a prompt, so the post-action scan never sees the
+                        // damage events dealt so far; defer their observers.
+                        super::engine_resolution_choices::defer_observer_triggers_for_paused_choice(
+                            state,
+                            events,
+                            replacement_action_event_start,
+                        );
+                        return Ok(state.waiting_for.clone());
+                    }
                 }
                 // CR 122.1: Counter addition accepted after replacement choice (e.g.,
                 // Corpsejack Menace doubler on a prompted counter-placement).
@@ -1463,32 +1504,21 @@ fn handle_replacement_choice_inner(
             }
 
             // CR 120.3f + CR 120.1 + CR 616.1: a non-combat player-damage leg
-            // whose life loss paused (Horde mill redirect or loss replacements)
-            // owes its post-loss work (the `DamageDealt` event, the CR 120.1
-            // record, the lifelink gain). The loss is fully settled once the
-            // batch drain above retires with no re-park, so drain the stashed
-            // stages here — before outer continuations, matching sync order
-            // (each damage target completes before later instructions resume).
-            // A lifelink gain that parks is owned by the pending replacement
-            // (the drain consumes the stash); propagate its prompt. A
-            // combat-flagged stash is skipped: the combat batch remnant owns
-            // it, and the outer wrapper resumes that remnant below.
-            if matches!(waiting_for, WaitingFor::Priority { .. })
-                && state
-                    .pending_damage_post_loss
-                    .as_ref()
-                    .is_some_and(|stashed| !stashed.is_combat)
-                && state.active_batch_delivery().is_none()
-            {
-                let outcome = crate::game::effects::deal_damage::drain_pending_damage_post_loss(
-                    state, events,
-                );
-                if matches!(
-                    outcome,
-                    crate::game::effects::deal_damage::DamagePostLossDrainOutcome::PausedForReplacement
-                ) {
-                    waiting_for = state.waiting_for.clone();
-                }
+            // whose life loss or infect poison result paused (Horde mill
+            // redirect, loss replacements, or poison-counter replacements)
+            // owes its remaining results (the `DamageDealt` event and CR 120.1
+            // record when still owed, the lifelink gain). The paused result is
+            // fully settled once the batch drain above retires with no
+            // re-park, so drain them here — before outer continuations,
+            // matching sync order (each damage target completes before later
+            // instructions resume). See `drain_settled_non_combat_damage_stash`.
+            if let Some(next) = drain_settled_non_combat_damage_stash(
+                state,
+                matches!(waiting_for, WaitingFor::Priority { .. }),
+                events,
+                replacement_action_event_start,
+            ) {
+                waiting_for = next;
             }
 
             // CR 614.6 + CR 616.1: settling a batch parked above its member's
@@ -1609,6 +1639,7 @@ fn handle_replacement_choice_inner(
                 // AFTER a collected simultaneous sacrifice queue: CR 101.4
                 // requires every already-announced sacrifice to finish before
                 // the original ability's later instructions resume.
+                let damage_chain = damage_parent_continuation_pending(state);
                 effects::drain_pending_continuation(state, events);
                 // CR 616.1e: The continuation may itself pause on another replacement
                 // (e.g., the second direction of fight damage hitting the same shield),
@@ -1616,6 +1647,12 @@ fn handle_replacement_choice_inner(
                 // Propagate that back so the engine surfaces the correct prompt.
                 if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
                     waiting_for = state.waiting_for.clone();
+                    defer_damage_chain_observers_at_pause(
+                        state,
+                        damage_chain,
+                        events,
+                        replacement_action_event_start,
+                    );
                 }
             }
 
@@ -1682,9 +1719,16 @@ fn handle_replacement_choice_inner(
                 && (state.active_ability_continuation().is_some()
                     || state.active_change_zone_frame().is_some())
             {
+                let damage_chain = damage_parent_continuation_pending(state);
                 effects::drain_pending_continuation(state, events);
                 if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
                     waiting_for = state.waiting_for.clone();
+                    defer_damage_chain_observers_at_pause(
+                        state,
+                        damage_chain,
+                        events,
+                        replacement_action_event_start,
+                    );
                 }
             }
 
@@ -1755,8 +1799,17 @@ fn handle_replacement_choice_inner(
                 // this call site adds none.
                 finish_spell_resolution_exposed_by_child(state, parked_affected_object_id, events);
 
+                let damage_chain = damage_parent_continuation_pending(state);
                 super::engine::resume_pending_continuation_if_priority(state, events)?;
                 waiting_for = state.waiting_for.clone();
+                if !matches!(waiting_for, WaitingFor::Priority { .. }) {
+                    defer_damage_chain_observers_at_pause(
+                        state,
+                        damage_chain,
+                        events,
+                        replacement_action_event_start,
+                    );
+                }
             }
 
             Ok(waiting_for)
@@ -1798,6 +1851,10 @@ fn handle_replacement_choice_inner(
                 if pending.lifelink_bonus == 0 {
                     pending.lifelink_bonus = parked_lifelink_bonus;
                 }
+                // CR 400.7: and the captured source incarnation.
+                if pending.source_incarnation.is_none() {
+                    pending.source_incarnation = parked_source_incarnation;
+                }
                 if let Some(provenance) = parked_sacrifice_provenance {
                     if pending.proposed.affected_object_id() == Some(provenance.object_id) {
                         pending.sacrifice_provenance = Some(provenance);
@@ -1832,6 +1889,25 @@ fn handle_replacement_choice_inner(
                     crate::types::game_state::ZoneMoveCompletion::Prevented,
                 );
                 effects::settle_replaced_forwarded_zone_delivery(state, paused.member, &[]);
+            }
+            // CR 120.3f + CR 120.4b + CR 120.4c + CR 614.6: a prevented poison
+            // (or life-loss) result replaced only that result; the damage was
+            // dealt, so a non-combat leg's parked remaining results (its
+            // record when still owed, its lifelink gain) still settle. Gated
+            // like the nested-prompt guard below: only a consumed prompt with
+            // no freshly parked one is settled. A gain that parks surfaces its
+            // own prompt (its answer finishes through the Execute funnel).
+            if let Some(next) = drain_settled_non_combat_damage_stash(
+                state,
+                state.pending_replacement.is_none()
+                    && matches!(
+                        state.waiting_for,
+                        WaitingFor::Priority { .. } | WaitingFor::ReplacementChoice { .. }
+                    ),
+                events,
+                replacement_action_event_start,
+            ) {
+                return Ok(next);
             }
             // CR 616.1f + CR 701.50a: a full-substitution applier (the Leader,
             // Super-Genius connive replacement) can park its OWN interactive
@@ -2067,6 +2143,17 @@ fn handle_replacement_choice_inner(
                     player: state.active_player,
                 };
                 crate::game::zone_pipeline::drain_pending_batch_deliveries(state, events);
+                // CR 120.3f + CR 614.6: a prevented Horde mill member whose
+                // leg parked its results: once the batch retires, the paused
+                // loss is settled and the non-combat leg's results follow.
+                if let Some(next) = drain_settled_non_combat_damage_stash(
+                    state,
+                    matches!(state.waiting_for, WaitingFor::Priority { .. }),
+                    events,
+                    replacement_action_event_start,
+                ) {
+                    return Ok(next);
+                }
                 return Ok(state.waiting_for.clone());
             }
             // CR 616.1 + CR 608.2c: any other prevented event inside a parked counter-cost
@@ -2102,6 +2189,12 @@ fn handle_replacement_choice_inner(
             // the next resume's epilogue to drain; on a pause, surface the
             // parked prompt (its resume delivers the chosen event through the
             // ZoneChange arm above).
+            //
+            // This clear is pre-existing and unconditional: after a prevented
+            // resumed damage hit it drops the active (top) continuation,
+            // including a damage effect's remaining recipients (e.g. the rest
+            // of a `DamageAll`). A damage-parent frame stacked beneath another
+            // continuation frame is not expected here.
             if state.active_ability_continuation().is_some() {
                 let _ = state
                     .clear_active_ability_continuation()
@@ -2162,6 +2255,92 @@ fn handle_replacement_choice_inner(
             super::engine::resume_pending_continuation_if_priority(state, events)?;
             Ok(state.waiting_for.clone())
         }
+    }
+}
+
+/// CR 120.4b + CR 603.2: is the active continuation the rest of a damage
+/// effect (the kinds `effects/deal_damage.rs` marks with
+/// `mark_pending_continuation_parent`)? Read BEFORE a drain, which takes the
+/// frame. Fight is deliberately not included (its re-pausing continuations
+/// keep their pre-existing collection).
+fn damage_parent_continuation_pending(state: &GameState) -> bool {
+    matches!(
+        state
+            .active_ability_continuation_frame()
+            .and_then(|frame| frame.pending.parent_kind),
+        Some(
+            EffectKind::DamageAll
+                | EffectKind::DamageEachPlayer
+                | EffectKind::EachDealsDamageEqualToPower
+                | EffectKind::EachSourceDealsDamage
+        )
+    )
+}
+
+/// CR 120.4b + CR 603.2 + CR 603.3b: a damage effect's continuation drained in
+/// this answering action and left a non-Priority wait (a later recipient's
+/// result paused), so the action ends on a prompt and the post-action trigger
+/// scan never sees the damage events dealt so far. Abilities that trigger on
+/// that damage trigger now and wait in `deferred_triggers`; the action-wide
+/// start is used (the filter skips occurrences another collector claimed,
+/// CR 603.2c). Only damage-parent continuations defer here (see
+/// [`damage_parent_continuation_pending`]).
+fn defer_damage_chain_observers_at_pause(
+    state: &mut GameState,
+    damage_chain: bool,
+    events: &mut Vec<GameEvent>,
+    action_event_start: usize,
+) {
+    if damage_chain {
+        super::engine_resolution_choices::defer_observer_triggers_for_paused_choice(
+            state,
+            events,
+            action_event_start,
+        );
+    }
+}
+
+/// CR 120.3f + CR 120.1 + CR 616.1: settle a non-combat player-damage leg's
+/// parked results (`GameState::pending_damage_post_loss`) once the result that
+/// paused it has settled: `settled` is the caller's "the answered prompt was
+/// consumed and nothing new is parked" guard. Shared by the Execute funnel and
+/// the Prevented answer (CR 614.6: a prevented poison or loss result replaced
+/// only that result; the damage was dealt, CR 120.4b/c, so its lifelink is
+/// still owed). Skipped while a batch zone move is still parked (the paused
+/// loss is not settled yet) and for a combat stash (the Phase C remnant owns
+/// it; the `handle_replacement_choice` wrapper resumes it on every Priority
+/// return). Returns the wait to adopt when the lifelink gain parked its own
+/// prompt (the pending replacement owns the gain), else `None`.
+///
+/// CR 120.4b + CR 603.2 + CR 603.3b: when the settle pauses, the answering
+/// action ends on that prompt and the post-action scan never sees the damage
+/// events it (and the action before it) emitted, so their observers are
+/// deferred from `action_event_start` (the answering action's start).
+fn drain_settled_non_combat_damage_stash(
+    state: &mut GameState,
+    settled: bool,
+    events: &mut Vec<GameEvent>,
+    action_event_start: usize,
+) -> Option<WaitingFor> {
+    if !settled
+        || !state
+            .pending_damage_post_loss
+            .as_ref()
+            .is_some_and(|stashed| !stashed.is_combat)
+        || state.active_batch_delivery().is_some()
+    {
+        return None;
+    }
+    match effects::deal_damage::drain_pending_damage_post_loss(state, events) {
+        effects::deal_damage::DamagePostLossDrainOutcome::PausedForReplacement => {
+            super::engine_resolution_choices::defer_observer_triggers_for_paused_choice(
+                state,
+                events,
+                action_event_start,
+            );
+            Some(state.waiting_for.clone())
+        }
+        effects::deal_damage::DamagePostLossDrainOutcome::Settled => None,
     }
 }
 
@@ -4840,6 +5019,175 @@ mod tests {
     use crate::types::proposed_event::{ProposedEvent, ReplacementId};
     use crate::types::replacements::ReplacementEvent;
 
+    /// CR 120.3f + CR 614.6: the shared drain helper on a non-combat
+    /// loss-pause stash (no printed card reaches its Prevented route: no
+    /// printed LifeLoss `Prevent` replacement exists). Settled: the parked
+    /// event, record and lifelink gain run once and the stash is consumed.
+    /// Each gate (not settled, combat stash) leaves the stash untouched,
+    /// paired with the settled call as its reach-guard.
+    #[test]
+    fn drain_settled_non_combat_damage_stash_gates_and_settles() {
+        use crate::types::game_state::{DamagePostLossStage, PendingDamagePostLoss};
+        let fixture = |is_combat: bool| {
+            let mut state = GameState::new_two_player(42);
+            let source = create_object(
+                &mut state,
+                CardId(9801),
+                PlayerId(1),
+                "Loss Source".to_string(),
+                Zone::Battlefield,
+            );
+            state.pending_damage_post_loss = Some(Box::new(PendingDamagePostLoss {
+                source_id: source,
+                source_incarnation: None,
+                controller: PlayerId(1),
+                target: PlayerId(0),
+                actual_amount: 2,
+                has_lifelink: !is_combat,
+                lifelink_bonus: 0,
+                stage: DamagePostLossStage::EmitAndRecord,
+                is_combat,
+                toxic_poison: 0,
+            }));
+            state
+        };
+
+        // Positive: settled non-combat stash.
+        let mut state = fixture(false);
+        assert!(state.pending_replacement.is_none());
+        let life = state.players[1].life;
+        let mut events = Vec::new();
+        assert_eq!(
+            drain_settled_non_combat_damage_stash(&mut state, true, &mut events, 0),
+            None
+        );
+        assert!(state.pending_damage_post_loss.is_none(), "stash consumed");
+        assert_eq!(
+            events
+                .iter()
+                .filter(|e| matches!(
+                    e,
+                    GameEvent::DamageDealt {
+                        is_combat: false,
+                        ..
+                    }
+                ))
+                .count(),
+            1
+        );
+        assert_eq!(state.damage_dealt_this_turn.len(), 1);
+        assert_eq!(
+            state.players[1].life,
+            life + 2,
+            "one lifelink gain (CR 120.3f)"
+        );
+
+        // Gate: the answered prompt is not settled.
+        let mut state = fixture(false);
+        let mut events = Vec::new();
+        assert_eq!(
+            drain_settled_non_combat_damage_stash(&mut state, false, &mut events, 0),
+            None
+        );
+        assert!(
+            state.pending_damage_post_loss.is_some(),
+            "not settled: untouched"
+        );
+        assert!(events.is_empty());
+
+        // Gate: a combat stash belongs to the Phase C remnant.
+        let mut state = fixture(true);
+        let mut events = Vec::new();
+        assert_eq!(
+            drain_settled_non_combat_damage_stash(&mut state, true, &mut events, 0),
+            None
+        );
+        assert!(
+            state.pending_damage_post_loss.is_some(),
+            "combat stash: untouched"
+        );
+        assert!(events.is_empty());
+        assert!(state.damage_dealt_this_turn.is_empty());
+    }
+
+    /// CR 120.4b + CR 603.2 + CR 603.3b: when the settled stash's lifelink gain
+    /// pauses on its own CR 616.1 choice, the answering action ends on that
+    /// prompt, so the helper defers the observers of the action's span (here
+    /// the stash's own `DamageDealt`, emitted by the `EmitAndRecord` stage).
+    /// Exactly one context is deferred for the one damage event. Sibling: the
+    /// same stash with no competing gain replacements settles (`None`) and
+    /// defers nothing (the post-action scan owns that action's events).
+    #[test]
+    fn drain_settled_non_combat_damage_stash_defers_observers_when_the_gain_pauses() {
+        use crate::game::scenario::{GameScenario, P0, P1};
+        use crate::types::game_state::{DamagePostLossStage, PendingDamagePostLoss};
+        const SPECTER: &str = "Flying\nWhenever Hypnotic Specter deals damage to an opponent, that player discards a card at random.";
+
+        for competing in [true, false] {
+            let mut scenario = GameScenario::new();
+            let specter = scenario
+                .add_creature(P0, "Hypnotic Specter", 2, 2)
+                .from_oracle_text_with_keywords(&["Flying"], SPECTER)
+                .id();
+            if competing {
+                scenario.add_enchantment_from_oracle(
+                    P0,
+                    "Plus One",
+                    "If you would gain life, you gain that much life plus 1 instead.",
+                );
+                scenario.add_enchantment_from_oracle(
+                    P0,
+                    "Twice",
+                    "If you would gain life, you gain twice that much life instead.",
+                );
+            }
+            scenario.add_card_to_hand(P1, "Filler");
+            let mut runner = scenario.build();
+            let state = runner.state_mut();
+            assert!(
+                !state.objects[&specter].trigger_definitions.is_empty(),
+                "reach-guard: the observer parsed"
+            );
+            state.pending_damage_post_loss = Some(Box::new(PendingDamagePostLoss {
+                source_id: specter,
+                source_incarnation: Some(state.objects[&specter].incarnation),
+                controller: P0,
+                target: P1,
+                actual_amount: 2,
+                has_lifelink: true,
+                lifelink_bonus: 0,
+                stage: DamagePostLossStage::EmitAndRecord,
+                is_combat: false,
+                toxic_poison: 0,
+            }));
+            let deferred_before = state.deferred_triggers.len();
+            let mut events = Vec::new();
+            let next = drain_settled_non_combat_damage_stash(state, true, &mut events, 0);
+            assert_eq!(
+                events
+                    .iter()
+                    .filter(|e| matches!(e, GameEvent::DamageDealt { .. }))
+                    .count(),
+                1,
+                "reach-guard: the stash emitted its damage event, competing={competing}"
+            );
+            if competing {
+                assert!(
+                    matches!(next, Some(WaitingFor::ReplacementChoice { player, .. }) if player == P0),
+                    "the gain paused on P0's choice"
+                );
+                assert_eq!(
+                    state.deferred_triggers.len(),
+                    deferred_before + 1,
+                    "the Specter observer of the one damage event is deferred once"
+                );
+            } else {
+                assert_eq!(next, None);
+                assert_eq!(state.deferred_triggers.len(), deferred_before);
+            }
+        }
+    }
+
     /// Helper: install an Optional replacement on a battlefield object so the
     /// matching proposed event pauses for a player choice.
     fn install_optional_replacement(state: &mut GameState, event: ReplacementEvent) -> ObjectId {
@@ -4922,6 +5270,7 @@ mod tests {
             exile_tracking: crate::types::game_state::ZoneDeliveryExileTracking::None,
             excess_recipient: None,
             lifelink_bonus: 0,
+            source_incarnation: None,
             may_cost_paid: false,
             may_cost_remaining: None,
             delivery_boundary: None,
@@ -5601,6 +5950,7 @@ mod tests {
             exile_tracking: crate::types::game_state::ZoneDeliveryExileTracking::None,
             excess_recipient: None,
             lifelink_bonus: 0,
+            source_incarnation: None,
             may_cost_paid: false,
             may_cost_remaining: None,
             delivery_boundary: None,

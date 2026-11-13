@@ -387,6 +387,52 @@ fn parked_board() -> (GameRunner, ObjectId) {
     (runner, lifelinker)
 }
 
+/// B7-11 — CR 510.2 + CR 616.1 + CR 101.4: the early settlement of an
+/// earlier-APNAP player's gain exists only ahead of a LATER player's result
+/// CHOICE. On T1's board P1 has no result replacements, so the leg cannot
+/// prompt and nothing is settled early: at P0's gain prompt the damage is
+/// already dealt (P1 at 17), no Phase C remnant is parked (every leg applied),
+/// and the parked batch keeps the established order — P1's loss, then the
+/// `DamageDealt`, and no gain yet. (Positive pair: the Ruric file's B7-1,
+/// whose infect leg CAN prompt, settles P0's gain first.)
+#[test]
+fn ordinary_lifelink_gain_is_not_settled_ahead_of_a_leg_that_cannot_prompt() {
+    let (runner, _) = parked_board();
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::ReplacementChoice { player, .. } if player == P0
+        ),
+        "reach guard: P0's gain prompt"
+    );
+    assert_eq!(runner.life(P1), 17, "CR 510.2: the damage is already dealt");
+    assert_eq!(runner.life(P0), 20);
+    let record = runner
+        .state()
+        .pending_combat_lifelink
+        .as_ref()
+        .expect("reach guard: the batch tail is parked");
+    assert!(
+        record.phase_c_remnant.is_none(),
+        "every leg applied before the gain paused"
+    );
+    let order: Vec<&str> = record
+        .batch_events
+        .iter()
+        .filter_map(|event| match event {
+            GameEvent::LifeChanged {
+                player_id, amount, ..
+            } if *player_id == P1 && *amount < 0 => Some("Loss(P1)"),
+            GameEvent::LifeChanged { amount, .. } if *amount > 0 => Some("Gain"),
+            GameEvent::DamageDealt {
+                is_combat: true, ..
+            } => Some("DamageDealt"),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(order, vec!["Loss(P1)", "DamageDealt"]);
+}
+
 // ---------------------------------------------------------------------------
 // T1 / T2 — the ordering discriminator
 // ---------------------------------------------------------------------------

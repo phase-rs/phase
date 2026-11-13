@@ -248,6 +248,28 @@ fn proposed_life_gain(
     })
 }
 
+/// CR 616.1: can the replacement pipeline open a player choice on this life
+/// gain? Read-only. False when the gain never reaches the pipeline ("can't gain
+/// life", CR 119.7; amount 0) and for a lone mandatory modifier; true for an
+/// optional candidate or two or more competing candidates whose order is
+/// material (`ReplacementPromptCauses::may_open_player_choice`).
+pub(crate) fn life_gain_may_prompt(state: &GameState, player_id: PlayerId, amount: u32) -> bool {
+    proposed_life_gain(state, player_id, amount)
+        .is_some_and(|event| proposed_event_may_prompt(state, &event))
+}
+
+/// CR 616.1: the life-loss twin of [`life_gain_may_prompt`] (CR 119.8: a
+/// player who can't lose life never reaches the pipeline).
+pub(crate) fn life_loss_may_prompt(state: &GameState, player_id: PlayerId, amount: u32) -> bool {
+    proposed_life_loss(state, player_id, amount)
+        .is_some_and(|event| proposed_event_may_prompt(state, &event))
+}
+
+fn proposed_event_may_prompt(state: &GameState, event: &ProposedEvent) -> bool {
+    replacement::proposed_event_prompt_cause(state, event, replacement::replacement_registry())
+        .may_open_player_choice()
+}
+
 /// The proposed `LifeLoss` event for an entry, or `None` when the change is
 /// vacuous or suppressed before the replacement pipeline.
 fn proposed_life_loss(
@@ -1315,6 +1337,126 @@ mod tests {
             )),
         );
         id
+    }
+
+    /// CR 616.1: `life_gain_may_prompt` / `life_loss_may_prompt` answer "can
+    /// this event's own replacement pipeline open a player choice". No
+    /// replacement: false. A lone mandatory "+1" modifier: false (it only
+    /// carries `MandatoryBodyContinuation`, which never prompts; this row is
+    /// what proves the gate is not that cause). "+1" with "twice": true
+    /// (ordering material). An optional replacement: true. The loss twin uses
+    /// Bloodletter of Aclazotz (a lone mandatory doubler on P1's loss during
+    /// P0's turn: false) and a typed optional loss replacement (true).
+    /// "Can't gain/lose life" (CR 119.7 / CR 119.8) and amount 0 never reach
+    /// the pipeline: false, each paired with the same board's positive row as
+    /// its reach-guard.
+    #[test]
+    fn life_change_may_prompt_reads_the_replacement_candidates() {
+        use crate::game::scenario::{GameScenario, P0, P1};
+        use crate::types::ability::{ReplacementDefinition, ReplacementMode};
+        use crate::types::replacements::ReplacementEvent;
+
+        const PLUS_ONE: &str = "If you would gain life, you gain that much life plus 1 instead.";
+        const TWICE: &str = "If you would gain life, you gain twice that much life instead.";
+        const BLOODLETTER: &str = "Flying\nIf an opponent would lose life during your turn, they lose twice that much life instead.";
+
+        fn add_optional(state: &mut GameState, event: ReplacementEvent) {
+            let id = create_object(
+                state,
+                CardId(951),
+                P0,
+                "Optional Replacement".to_string(),
+                Zone::Battlefield,
+            );
+            state
+                .objects
+                .get_mut(&id)
+                .unwrap()
+                .replacement_definitions
+                .push(
+                    ReplacementDefinition::new(event)
+                        .mode(ReplacementMode::Optional { decline: None })
+                        .description("Optional Replacement".to_string()),
+                );
+        }
+
+        let board = |gain_texts: &[&str], bloodletter: bool, optional: &[ReplacementEvent]| {
+            let mut scenario = GameScenario::new();
+            for text in gain_texts {
+                scenario.add_enchantment_from_oracle(P0, "Modifier", text);
+            }
+            if bloodletter {
+                scenario
+                    .add_creature(P0, "Bloodletter of Aclazotz", 2, 4)
+                    .from_oracle_text_with_keywords(&["Flying"], BLOODLETTER);
+            }
+            for event in optional {
+                add_optional(&mut scenario.state, event.clone());
+            }
+            let mut runner = scenario.build();
+            runner.state_mut().active_player = P0;
+            runner
+        };
+
+        let none = board(&[], false, &[]);
+        assert!(!life_gain_may_prompt(none.state(), P0, 2));
+        assert!(!life_loss_may_prompt(none.state(), P1, 2));
+
+        let lone = board(&[PLUS_ONE], true, &[]);
+        assert_eq!(
+            lone.state()
+                .objects
+                .values()
+                .filter(|obj| !obj.replacement_definitions.is_empty())
+                .count(),
+            2,
+            "reach-guard: both lone modifiers parsed into replacements"
+        );
+        assert!(!life_gain_may_prompt(lone.state(), P0, 2), "lone +1 gain");
+        assert!(!life_loss_may_prompt(lone.state(), P1, 2), "lone x2 loss");
+
+        let competing = board(&[PLUS_ONE, TWICE], true, &[ReplacementEvent::LoseLife]);
+        assert!(
+            life_gain_may_prompt(competing.state(), P0, 2),
+            "+1 and x2 gain"
+        );
+        assert!(
+            !life_gain_may_prompt(competing.state(), P0, 0),
+            "amount 0 gain"
+        );
+        assert!(
+            life_loss_may_prompt(competing.state(), P0, 2),
+            "optional loss (its controller's)"
+        );
+        assert!(
+            !life_loss_may_prompt(competing.state(), P0, 0),
+            "amount 0 loss"
+        );
+
+        // CR 119.7 / CR 119.8: "can't gain/lose life" short-circuits before
+        // the pipeline even with the choice-capable replacements present.
+        let mut locked = competing.state().clone();
+        add_life_lock_permanent(
+            &mut locked,
+            P0,
+            StaticMode::CantGainLife,
+            ControllerRef::You,
+        );
+        add_life_lock_permanent(
+            &mut locked,
+            P0,
+            StaticMode::CantLoseLife,
+            ControllerRef::You,
+        );
+        assert!(!life_gain_may_prompt(&locked, P0, 2), "can't gain life");
+        assert!(!life_loss_may_prompt(&locked, P0, 2), "can't lose life");
+
+        // A typed optional life-gain replacement opens a choice on its own.
+        let optional = board(&[], false, &[ReplacementEvent::GainLife]);
+        assert!(
+            life_gain_may_prompt(optional.state(), P0, 2),
+            "optional gain"
+        );
     }
 
     #[test]

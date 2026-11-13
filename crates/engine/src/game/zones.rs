@@ -185,6 +185,39 @@ fn clear_exert_history_on_zone_change(
     }
 }
 
+/// CR 400.7 + CR 120.2a / CR 120.2b + CR 702.11b: the damage history a
+/// permanent accrued on the battlefield (the per-object `dealt_damage_kinds`
+/// latch and its `GameState::objects_that_dealt_damage` Any-set entry) belongs
+/// to the old object. `ObjectId` persists across the zone change, so both are
+/// retired on a battlefield departure (death/bounce/exile/flicker); otherwise
+/// a flickered "has hexproof as long as it hasn't dealt damage yet" creature
+/// would re-enter still treated as having dealt damage and never regain
+/// hexproof. Shared by `apply_zone_exit_cleanup` and
+/// `apply_resolved_zone_change`, so a replayed departure retires exactly what
+/// the live one did; on the live path the replay applier runs after the
+/// cleanup and this call is an idempotent no-op. The latch half delegates to
+/// `GameObject::retire_dealt_damage_kinds`, the single latch-reset definition.
+/// State only: no event, trigger, timestamp or incarnation allocation. Marks a
+/// full layer pass iff either store changed, since a layer condition reads them.
+fn retire_damage_history_on_zone_change(
+    state: &mut GameState,
+    object_id: ObjectId,
+    from: Zone,
+    _to: Zone,
+) {
+    if from != Zone::Battlefield {
+        return;
+    }
+    let any_retired = state.objects_that_dealt_damage.remove(&object_id);
+    let latch_retired = state
+        .objects
+        .get_mut(&object_id)
+        .is_some_and(GameObject::retire_dealt_damage_kinds);
+    if any_retired || latch_retired {
+        state.layers_dirty.mark_full();
+    }
+}
+
 /// CR 400.7: Snapshot LKI and apply all cleanup side effects when an object
 /// leaves its current zone. Shared by `move_to_zone` and `move_to_library_at_index`.
 ///
@@ -679,6 +712,7 @@ pub(crate) fn apply_zone_exit_cleanup(
     }
 
     prune_object_bound_effects_on_exit(state, object_id, from, to);
+    retire_damage_history_on_zone_change(state, object_id, from, to);
 
     // Prune host-bound transient effects and clean up mana-tap tracking
     // when a permanent leaves the battlefield.
@@ -690,12 +724,6 @@ pub(crate) fn apply_zone_exit_cleanup(
         super::effects::remove_from_combat::remove_object_from_combat(state, object_id);
         super::pairing::break_pair(state, object_id);
         crate::game::layers::mark_layers_full(state);
-        // CR 400.7 + CR 702.11b: The "has dealt damage since entering" sticky flag
-        // belongs to the old object. ObjectId persists across this zone change, so
-        // clear it on a battlefield exit (death/bounce/exile/flicker) — otherwise a
-        // flickered "has hexproof if it hasn't dealt damage yet" creature would
-        // re-enter still treated as having dealt damage and never regain hexproof.
-        state.objects_that_dealt_damage.remove(&object_id);
         super::layers::prune_host_left_effects(state, object_id);
         // CR 611.2a + CR 400.7: `prune_host_left_effects` above covers only
         // `transient_continuous_effects`. A play/cast permission whose duration
@@ -1433,6 +1461,10 @@ pub fn apply_resolved_zone_change(
     // CR 400.7: the same object-bound grant lifetime as the live cleanup
     // (issue #8795), through the shared authority.
     prune_object_bound_effects_on_exit(state, command.object.object_id, command.from, command.to);
+    // CR 400.7: replay bypasses `apply_zone_exit_cleanup`, so it must retire
+    // the departed incarnation's damage history through the same shared
+    // authority, or a replayed blink leaves a stale latch and Any-set entry.
+    retire_damage_history_on_zone_change(state, command.object.object_id, command.from, command.to);
     let object = state
         .objects
         .get_mut(&command.object.object_id)
@@ -6603,6 +6635,119 @@ mod tests {
         assert_eq!(
             replayed.resolved_rules_journal, replay_journal_before,
             "applying a recorded transition must not allocate or journal fresh replay authority"
+        );
+    }
+
+    /// A live object in `zone` carrying both damage-kind latches and an
+    /// Any-set entry, plus the recorded command for its move to `to` (produced
+    /// by the ordinary resolve-and-apply path on a throwaway clone). Returns
+    /// the untouched pre-move state for replay.
+    fn damage_history_replay_fixture(
+        zone: Zone,
+        to: Zone,
+    ) -> (GameState, ObjectId, ResolvedZoneChangeCommand) {
+        let mut pre = setup();
+        let id = create_object(
+            &mut pre,
+            CardId(10_440),
+            PlayerId(0),
+            "Damage History Source".to_string(),
+            zone,
+        );
+        {
+            let object = pre.objects.get_mut(&id).unwrap();
+            assert!(object.dealt_damage_kinds.record(true));
+            assert!(object.dealt_damage_kinds.record(false));
+        }
+        pre.objects_that_dealt_damage.insert(id);
+        let mut recorder = pre.clone();
+        let record = crate::types::game_state::ZoneChangeRecord::test_minimal(id, Some(zone), to);
+        let command =
+            resolve_and_apply_zone_change(&mut recorder, id, zone, to, PlayerId(0), None, record)
+                .expect("the recorded transition resolves");
+        (pre, id, command)
+    }
+
+    /// CR 400.7: the replay applier retires damage history only on a
+    /// battlefield departure. A Graveyard -> Exile replay touches neither
+    /// store and schedules no layer pass; a Battlefield -> Graveyard replay
+    /// retires both stores and dirties layers (paired positive: the helper is
+    /// reached on the replay path).
+    #[test]
+    fn p2_replayed_zone_command_retires_damage_history_only_from_battlefield() {
+        use crate::types::ability::DamageKindFilter;
+        use crate::types::game_state::LayersDirty;
+
+        let (pre, id, command) = damage_history_replay_fixture(Zone::Graveyard, Zone::Exile);
+        let mut replayed = pre.clone();
+        replayed.layers_dirty = LayersDirty::Clean;
+        apply_resolved_zone_change(&mut replayed, &command).expect("Graveyard -> Exile replays");
+        assert_eq!(replayed.objects[&id].zone, Zone::Exile, "reach-guard");
+        assert_eq!(
+            replayed.objects[&id].dealt_damage_kinds, pre.objects[&id].dealt_damage_kinds,
+            "a non-battlefield move keeps the latch"
+        );
+        assert!(replayed.objects_that_dealt_damage.contains(&id));
+        assert!(
+            !replayed.layers_dirty.is_dirty(),
+            "a non-battlefield move schedules no damage-history layer pass"
+        );
+
+        let (pre, id, command) = damage_history_replay_fixture(Zone::Battlefield, Zone::Graveyard);
+        assert!(
+            pre.objects[&id]
+                .dealt_damage_kinds
+                .has(DamageKindFilter::CombatOnly)
+                && pre.objects[&id]
+                    .dealt_damage_kinds
+                    .has(DamageKindFilter::NoncombatOnly),
+            "reach-guard: both latches set before the departure"
+        );
+        let mut replayed = pre.clone();
+        replayed.layers_dirty = LayersDirty::Clean;
+        apply_resolved_zone_change(&mut replayed, &command)
+            .expect("Battlefield -> Graveyard replays");
+        assert_eq!(replayed.objects[&id].zone, Zone::Graveyard, "reach-guard");
+        assert!(replayed.objects[&id].dealt_damage_kinds.is_empty());
+        assert!(!replayed.objects_that_dealt_damage.contains(&id));
+        assert!(replayed.layers_dirty.is_dirty());
+    }
+
+    /// CR 400.7 + CR 120.2a / CR 120.2b: the shared retirement helper clears
+    /// both stores through the object's single latch-reset definition and
+    /// dirties layers; a second call (the live-then-replay arrangement) is a
+    /// no-op that schedules no layer pass.
+    #[test]
+    fn p3_retire_damage_history_clears_both_stores_and_is_idempotent() {
+        use crate::types::game_state::LayersDirty;
+
+        let mut state = setup();
+        let id = create_object(
+            &mut state,
+            CardId(10_441),
+            PlayerId(0),
+            "Damage History Source".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let object = state.objects.get_mut(&id).unwrap();
+            assert!(object.dealt_damage_kinds.record(true));
+            assert!(object.dealt_damage_kinds.record(false));
+        }
+        state.objects_that_dealt_damage.insert(id);
+        state.layers_dirty = LayersDirty::Clean;
+
+        retire_damage_history_on_zone_change(&mut state, id, Zone::Battlefield, Zone::Exile);
+        assert!(state.objects[&id].dealt_damage_kinds.is_empty());
+        assert!(!state.objects_that_dealt_damage.contains(&id));
+        assert!(state.layers_dirty.is_dirty());
+
+        state.layers_dirty = LayersDirty::Clean;
+        retire_damage_history_on_zone_change(&mut state, id, Zone::Battlefield, Zone::Exile);
+        assert!(state.objects[&id].dealt_damage_kinds.is_empty());
+        assert!(
+            !state.layers_dirty.is_dirty(),
+            "a second retirement changes nothing and schedules no layer pass"
         );
     }
 

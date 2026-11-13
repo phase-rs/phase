@@ -34025,7 +34025,9 @@ fn self_has_hexproof_if_it_hasnt_dealt_damage_palladia_mors() {
     assert_eq!(
         def.condition,
         Some(StaticCondition::Not {
-            condition: Box::new(StaticCondition::SourceHasDealtDamage),
+            condition: Box::new(StaticCondition::SourceHasDealtDamage {
+                kind: DamageKindFilter::Any,
+            }),
         }),
         "hexproof must be gated on Not(SourceHasDealtDamage), got {:?}",
         def.condition
@@ -34050,7 +34052,9 @@ fn self_has_hexproof_if_it_hasnt_dealt_damage_karakyk_guardian() {
     assert_eq!(
         def.condition,
         Some(StaticCondition::Not {
-            condition: Box::new(StaticCondition::SourceHasDealtDamage),
+            condition: Box::new(StaticCondition::SourceHasDealtDamage {
+                kind: DamageKindFilter::Any,
+            }),
         })
     );
 }
@@ -34094,7 +34098,9 @@ fn palladia_mors_and_karakyk_guardian_conditional_hexproof_full_card_flip() {
         assert_eq!(
             hexproof.condition,
             Some(StaticCondition::Not {
-                condition: Box::new(StaticCondition::SourceHasDealtDamage),
+                condition: Box::new(StaticCondition::SourceHasDealtDamage {
+                    kind: DamageKindFilter::Any,
+                }),
             }),
             "{name}: hexproof must be gated on Not(SourceHasDealtDamage)"
         );
@@ -34135,7 +34141,9 @@ fn ratonhnhaketon_hasnt_dealt_damage_gates_hexproof_and_cant_be_blocked() {
     assert_eq!(defs.len(), 2, "expected hexproof grant plus evasion static");
 
     let expected_condition = Some(StaticCondition::Not {
-        condition: Box::new(StaticCondition::SourceHasDealtDamage),
+        condition: Box::new(StaticCondition::SourceHasDealtDamage {
+            kind: DamageKindFilter::Any,
+        }),
     });
 
     let hexproof = defs
@@ -34156,6 +34164,891 @@ fn ratonhnhaketon_hasnt_dealt_damage_gates_hexproof_and_cant_be_blocked() {
         .expect("missing conditional can't-be-blocked static");
     assert_eq!(evasion.affected, Some(TargetFilter::SelfRef));
     assert_eq!(evasion.condition, expected_condition);
+}
+
+/// CR 702.11b + CR 613.1f + CR 120.2a: Ruric Thar, Magecrusher's "~ has hexproof
+/// as long as they haven't dealt combat damage yet" — the plural bound pronoun
+/// is rewritten on the SelfRef path and the combat qualifier is typed, so the
+/// grant is gated on `Not(SourceHasDealtDamage { kind: CombatOnly })` instead of
+/// an `Unrecognized` gate (which evaluated permissively, i.e. permanent
+/// hexproof).
+#[test]
+fn ruric_thar_hexproof_as_long_as_they_havent_dealt_combat_damage_yet() {
+    let def = parse_static_line("~ has hexproof as long as they haven't dealt combat damage yet.")
+        .expect("static def");
+    assert_eq!(def.mode, StaticMode::Continuous);
+    assert_eq!(def.affected, Some(TargetFilter::SelfRef));
+    assert_eq!(
+        def.modifications,
+        vec![ContinuousModification::AddKeyword {
+            keyword: Keyword::Hexproof
+        }]
+    );
+    assert_eq!(
+        def.condition,
+        Some(StaticCondition::Not {
+            condition: Box::new(StaticCondition::SourceHasDealtDamage {
+                kind: DamageKindFilter::CombatOnly,
+            }),
+        }),
+        "hexproof must be gated on Not(SourceHasDealtDamage{{CombatOnly}}), got {:?}",
+        def.condition
+    );
+}
+
+/// CR 702.11b + CR 613.1f + CR 120.2a: FULL-CARD flip for Ruric Thar,
+/// Magecrusher from its verbatim Oracle text: the can't-be-countered static and
+/// the combat-gated hexproof grant, no `Unrecognized` gate, no `Unimplemented`
+/// residual and no swallowed-clause diagnostic.
+#[test]
+fn ruric_thar_magecrusher_conditional_hexproof_full_card_flip() {
+    use crate::parser::oracle::parse_oracle_text;
+    use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
+    use crate::types::ability::Effect;
+
+    let name = "Ruric Thar, Magecrusher";
+    let text = "This spell can't be countered.\nReach, vigilance, trample\nRuric Thar has hexproof as long as they haven't dealt combat damage yet. (They can't be the target of spells or abilities your opponents control.)";
+    let parsed = parse_oracle_text(
+        text,
+        name,
+        &[
+            "Reach".to_string(),
+            "Trample".to_string(),
+            "Vigilance".to_string(),
+        ],
+        &["Legendary".to_string(), "Creature".to_string()],
+        &["Ogre".to_string(), "Warrior".to_string()],
+    );
+    assert!(
+        parsed
+            .statics
+            .iter()
+            .any(|d| d.mode == StaticMode::CantBeCountered),
+        "missing can't-be-countered static: {:?}",
+        parsed.statics
+    );
+    let hexproof = parsed
+        .statics
+        .iter()
+        .find(|d| {
+            d.modifications
+                .contains(&ContinuousModification::AddKeyword {
+                    keyword: Keyword::Hexproof,
+                })
+        })
+        .expect("missing hexproof static");
+    assert_eq!(hexproof.affected, Some(TargetFilter::SelfRef));
+    assert_eq!(
+        hexproof.condition,
+        Some(StaticCondition::Not {
+            condition: Box::new(StaticCondition::SourceHasDealtDamage {
+                kind: DamageKindFilter::CombatOnly,
+            }),
+        })
+    );
+    for kw in [Keyword::Reach, Keyword::Vigilance, Keyword::Trample] {
+        assert!(
+            parsed.extracted_keywords.contains(&kw),
+            "missing keyword {kw:?}: {:?}",
+            parsed.extracted_keywords
+        );
+    }
+    for def in &parsed.statics {
+        assert!(
+            !matches!(def.condition, Some(StaticCondition::Unrecognized { .. })),
+            "static carries an Unrecognized gate: {def:?}"
+        );
+        for m in &def.modifications {
+            if let ContinuousModification::GrantAbility { definition } = m {
+                assert!(
+                    !matches!(definition.effect.as_ref(), Effect::Unimplemented { .. }),
+                    "static carries an Unimplemented residual: {def:?}"
+                );
+            }
+        }
+    }
+    let swallowed: Vec<_> = parsed
+        .parse_warnings
+        .iter()
+        .filter(|w| matches!(w, OracleDiagnostic::SwallowedClause { .. }))
+        .collect();
+    assert!(
+        swallowed.is_empty(),
+        "unexpected swallowed-clause diagnostics: {swallowed:?}"
+    );
+}
+
+/// CR 702.11b + CR 613.1f: Oyaminartok, Polar Werebear's "has hexproof if it
+/// hasn't dealt damage yet" (no damage-class qualifier) stays gated on the
+/// `Any` kind — the byte-identical sibling of Palladia-Mors / Karakyk Guardian.
+#[test]
+fn oyaminartok_hexproof_if_it_hasnt_dealt_damage_yet_stays_any_kind() {
+    let def =
+        parse_static_line("~ has hexproof if it hasn't dealt damage yet.").expect("static def");
+    assert_eq!(def.affected, Some(TargetFilter::SelfRef));
+    assert_eq!(
+        def.condition,
+        Some(StaticCondition::Not {
+            condition: Box::new(StaticCondition::SourceHasDealtDamage {
+                kind: DamageKindFilter::Any,
+            }),
+        })
+    );
+    // The serialized gate keeps the pre-parameterization shape (no `kind`).
+    let json = serde_json::to_value(def.condition.as_ref().unwrap()).unwrap();
+    assert_eq!(
+        json,
+        serde_json::json!({"type": "Not", "condition": {"type": "SourceHasDealtDamage"}})
+    );
+}
+
+/// Hostile attached subject: the plural "they" rewrite arm is gated on a
+/// SelfRef-affected static, so an attached-subject "they" gate is not bound to
+/// the source and stays `Unrecognized`.
+#[test]
+fn attached_subject_they_havent_dealt_combat_damage_stays_unrecognized() {
+    let def = parse_static_line(
+        "Enchanted creature has hexproof as long as they haven't dealt combat damage yet.",
+    )
+    .expect("static def");
+    assert_ne!(def.affected, Some(TargetFilter::SelfRef));
+    assert!(
+        matches!(def.condition, Some(StaticCondition::Unrecognized { .. })),
+        "attached-subject `they` must not bind to the source, got {:?}",
+        def.condition
+    );
+    // Positive reach-guard: the same phrase on a SelfRef static is typed.
+    let self_def =
+        parse_static_line("~ has hexproof as long as they haven't dealt combat damage yet.")
+            .expect("self static def");
+    assert!(matches!(
+        self_def.condition,
+        Some(StaticCondition::Not { ref condition })
+            if **condition == StaticCondition::SourceHasDealtDamage {
+                kind: DamageKindFilter::CombatOnly,
+            }
+    ));
+}
+
+/// CR 611.3a + CR 120.2a + CR 120.2b: Ruric Thar's self-referential form binds
+/// the damage-class gate to the static's own source — `affected: SelfRef`
+/// with `Not(SourceHasDealtDamage { kind })` for both qualifiers, and the
+/// verbatim named-subject line through the full Oracle pipeline.
+#[test]
+fn ruric_thar_self_form_binds_qualified_damage_gate_to_itself() {
+    use crate::parser::oracle::parse_oracle_text;
+
+    for (text, kind) in [
+        (
+            "~ has hexproof as long as they haven't dealt combat damage yet.",
+            DamageKindFilter::CombatOnly,
+        ),
+        (
+            "~ has hexproof as long as they haven\u{2019}t dealt noncombat damage yet.",
+            DamageKindFilter::NoncombatOnly,
+        ),
+    ] {
+        let def = parse_static_line(text).expect("self static def");
+        assert_eq!(def.affected, Some(TargetFilter::SelfRef), "{text}");
+        assert_eq!(
+            def.modifications,
+            vec![ContinuousModification::AddKeyword {
+                keyword: Keyword::Hexproof
+            }],
+            "{text}"
+        );
+        assert_eq!(
+            def.condition,
+            Some(StaticCondition::Not {
+                condition: Box::new(StaticCondition::SourceHasDealtDamage { kind }),
+            }),
+            "{text}"
+        );
+    }
+
+    let parsed = parse_oracle_text(
+        "Ruric Thar has hexproof as long as they haven't dealt combat damage yet.",
+        "Ruric Thar, Magecrusher",
+        &[],
+        &["Legendary".to_string(), "Creature".to_string()],
+        &["Ogre".to_string(), "Warrior".to_string()],
+    );
+    let hexproof = parsed
+        .statics
+        .iter()
+        .find(|d| {
+            d.modifications
+                .contains(&ContinuousModification::AddKeyword {
+                    keyword: Keyword::Hexproof,
+                })
+        })
+        .expect("missing hexproof static");
+    assert_eq!(hexproof.affected, Some(TargetFilter::SelfRef));
+    assert_eq!(
+        hexproof.condition,
+        Some(StaticCondition::Not {
+            condition: Box::new(StaticCondition::SourceHasDealtDamage {
+                kind: DamageKindFilter::CombatOnly,
+            }),
+        })
+    );
+}
+
+/// CR 611.3a: on an attached / typed-subject static the anaphoric "it" names
+/// the enchanted / equipped / affected creature, not the source, so a
+/// damage-class-qualified "it hasn't dealt (non)combat damage yet" must not be
+/// typed as the source's `SourceHasDealtDamage` (which would read the Aura's or
+/// Equipment's damage history). Continuous grants keep an honest `Unrecognized`
+/// gate; the restriction arms (whose `affected` is hardcoded `SelfRef`) leave
+/// the gate unparsed and surface a swallowed-clause diagnostic.
+#[test]
+fn attached_subject_it_hasnt_dealt_qualified_damage_yet_stays_unrecognized() {
+    use crate::parser::oracle::parse_oracle_text;
+    use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
+
+    let is_source_damage_gate = |c: &Option<StaticCondition>| {
+        matches!(
+            c,
+            Some(StaticCondition::Not { condition })
+                if matches!(**condition, StaticCondition::SourceHasDealtDamage { .. })
+        )
+    };
+
+    for subject in [
+        "Enchanted creature has",
+        "Equipped creature has",
+        "Creatures you control have",
+    ] {
+        for qualifier in ["combat", "noncombat"] {
+            let text =
+                format!("{subject} hexproof as long as it hasn't dealt {qualifier} damage yet.");
+            let def = parse_static_line(&text).expect("static def");
+            // Reach-guard: the grant and the typed subject were recognised.
+            assert_eq!(def.mode, StaticMode::Continuous, "{text}");
+            assert!(
+                matches!(def.affected, Some(TargetFilter::Typed(_))),
+                "{text}: {:?}",
+                def.affected
+            );
+            assert_eq!(
+                def.modifications,
+                vec![ContinuousModification::AddKeyword {
+                    keyword: Keyword::Hexproof
+                }],
+                "{text}"
+            );
+            assert_eq!(
+                def.condition,
+                Some(StaticCondition::Unrecognized {
+                    text: format!("it hasn't dealt {qualifier} damage yet"),
+                }),
+                "{text}"
+            );
+        }
+    }
+
+    for (restriction, mode) in [
+        ("can't block as long as", StaticMode::CantBlock),
+        ("can't block if", StaticMode::CantBlock),
+        ("can't attack if", StaticMode::CantAttack),
+        ("can't attack as long as", StaticMode::CantAttack),
+    ] {
+        for qualifier in ["combat", "noncombat"] {
+            let line =
+                format!("Enchanted creature {restriction} it hasn't dealt {qualifier} damage yet.");
+            let def = parse_static_line(&line).expect("restriction def");
+            // Reach-guard: the restriction itself was recognised.
+            assert_eq!(def.mode, mode, "{line}");
+            // The contract is only that the gate is not a source-damage gate;
+            // `None` is today's honest shape for an unparsed restriction gate and
+            // is deliberately not pinned here.
+            assert!(
+                !is_source_damage_gate(&def.condition),
+                "{line}: `it` must not bind to the source, got {:?}",
+                def.condition
+            );
+            // Coverage-honesty reach-guard: the unparsed gate stays visible
+            // through the full pipeline as a swallowed-clause diagnostic.
+            let parsed = parse_oracle_text(
+                &format!("Enchant creature\n{line}"),
+                "Attached Probe",
+                &[],
+                &["Enchantment".to_string()],
+                &["Aura".to_string()],
+            );
+            assert!(
+                parsed
+                    .parse_warnings
+                    .iter()
+                    .any(|w| matches!(w, OracleDiagnostic::SwallowedClause { .. })),
+                "{line}: expected a swallowed-clause diagnostic, got {:?}",
+                parsed.parse_warnings
+            );
+            assert!(
+                parsed
+                    .statics
+                    .iter()
+                    .all(|d| !is_source_damage_gate(&d.condition)),
+                "{line}: {:?}",
+                parsed.statics
+            );
+        }
+    }
+
+    // Positive reach-guard: Ruric's self-referential form is typed in the same
+    // pipeline.
+    let self_def =
+        parse_static_line("~ has hexproof as long as they haven't dealt combat damage yet.")
+            .expect("self static def");
+    assert_eq!(self_def.affected, Some(TargetFilter::SelfRef));
+    assert!(is_source_damage_gate(&self_def.condition));
+}
+
+/// True when `condition` (anywhere under `Not` wrappers) is the source's
+/// `SourceHasDealtDamage` gate.
+#[cfg(test)]
+fn contains_source_damage_gate(condition: &Option<StaticCondition>) -> bool {
+    fn walk(c: &StaticCondition) -> bool {
+        match c {
+            StaticCondition::SourceHasDealtDamage { .. } => true,
+            StaticCondition::Not { condition } => walk(condition),
+            _ => false,
+        }
+    }
+    condition.as_ref().is_some_and(walk)
+}
+
+/// CR 611.3a + CR 120.2a / CR 120.2b: the plural "they haven't dealt … damage
+/// yet" pronoun names the static's source only when the printed subject is the
+/// source itself. On an attached / typed / pronoun subject it names the
+/// enchanted / equipped / affected objects, so it must NOT become the source's
+/// `SourceHasDealtDamage` gate — even on the arms that hardcode
+/// `affected: SelfRef` (the CantBlock / CantAttack / CantAttackOrBlock
+/// restriction arms, the CantBeBlocked fallback, and the legacy "~ has/gets …"
+/// fallback whose subject check is only a negative list). The self half pins
+/// the source-named forms to the exact typed gate. A compound subject that
+/// merely starts with the source ("~ and enchanted creature", "~ together
+/// with …") is not source-named either; its rows, paired with the source-only
+/// forms, live in
+/// `compound_source_prefixed_subject_keeps_they_gate_unbound_and_source_only_binds`.
+#[test]
+fn attached_subject_they_hasnt_dealt_damage_yet_stays_unrecognized() {
+    use crate::parser::oracle::parse_oracle_text;
+    use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
+
+    let restrictions = [
+        ("can't block", StaticMode::CantBlock),
+        ("can't attack", StaticMode::CantAttack),
+        ("can't attack or block", StaticMode::CantAttackOrBlock),
+    ];
+    let kinds = [
+        ("combat ", DamageKindFilter::CombatOnly),
+        ("noncombat ", DamageKindFilter::NoncombatOnly),
+        ("", DamageKindFilter::Any),
+    ];
+    let assert_not_bound = |line: &str, mode: &StaticMode| {
+        let def = parse_static_line(line).expect("static def");
+        // Reach-guard: the static itself was recognised, so a missing gate is
+        // not an upstream decline.
+        assert_eq!(&def.mode, mode, "{line}");
+        assert!(
+            !contains_source_damage_gate(&def.condition),
+            "{line}: `they` must not bind to the source, got {:?}",
+            def.condition
+        );
+        // Whole pipeline (attached Aura source vs enchanted recipient): no
+        // static carries the source-damage gate.
+        let parsed = parse_oracle_text(
+            &format!("Enchant creature\n{line}"),
+            "Attached Probe",
+            &[],
+            &["Enchantment".to_string()],
+            &["Aura".to_string()],
+        );
+        assert!(
+            parsed
+                .statics
+                .iter()
+                .all(|d| !contains_source_damage_gate(&d.condition)),
+            "{line}: {:?}",
+            parsed.statics
+        );
+        if def.condition.is_none() {
+            // Coverage-honesty reach-guard for the restriction arms: the
+            // unparsed gate surfaces as a swallowed clause.
+            assert!(
+                parsed
+                    .parse_warnings
+                    .iter()
+                    .any(|w| matches!(w, OracleDiagnostic::SwallowedClause { .. })),
+                "{line}: expected a swallowed-clause diagnostic, got {:?}",
+                parsed.parse_warnings
+            );
+        }
+    };
+
+    // Restriction arms (hardcoded SelfRef) x marker x kind x non-source subject.
+    for subject in [
+        "Enchanted creature",
+        "Equipped creature",
+        "Creatures you control",
+    ] {
+        for (restriction, mode) in &restrictions {
+            for marker in ["as long as", "if"] {
+                for (kind, _) in &kinds {
+                    let line = format!(
+                        "{subject} {restriction} {marker} they haven't dealt {kind}damage yet."
+                    );
+                    assert_not_bound(&line, mode);
+                }
+            }
+        }
+    }
+    // The CantBeBlocked fallback arm (hardcoded SelfRef).
+    for marker in ["as long as", "if", "unless"] {
+        let line = format!(
+            "Creatures you control can't be blocked {marker} they haven't dealt combat damage yet."
+        );
+        assert_not_bound(&line, &StaticMode::CantBeBlocked);
+    }
+    // The legacy "~ has/gets …" continuous-grant fallback (hardcoded SelfRef
+    // behind a negative subject list) and the bare "It" subject.
+    for subject in [
+        "Enchanted artifact",
+        "Enchanted Equipment",
+        "Enchanted Forest",
+        "Equipped Vehicle",
+        "Each artifact",
+        "Enchanted Wall",
+        "It",
+    ] {
+        for grant in ["has hexproof", "has haste"] {
+            for marker in ["as long as", "unless"] {
+                let line =
+                    format!("{subject} {grant} {marker} they haven't dealt combat damage yet.");
+                assert_not_bound(&line, &StaticMode::Continuous);
+            }
+        }
+    }
+    // The MaxUntapPerType entry point: its printed subject is the players, so
+    // the plural "they" is theirs, not the source's — the gate stays an
+    // honest unrecognized condition. Paired with the source-named form of an
+    // equivalent restriction, which still types the source's gate.
+    let line = "Players can't untap more than two lands during their untap steps as long as they haven't dealt combat damage yet.";
+    let def = parse_static_line(line).expect("max-untap static def");
+    // Reach-guard: the cap itself was recognised.
+    assert_eq!(
+        def.mode,
+        StaticMode::MaxUntapPerType {
+            filter: TargetFilter::Typed(TypedFilter::land()),
+            max: 2,
+        },
+        "{line}"
+    );
+    assert_eq!(def.affected, None, "{line}");
+    assert!(!contains_source_damage_gate(&def.condition), "{line}");
+    assert_eq!(
+        def.condition,
+        Some(StaticCondition::Unrecognized {
+            text: "they haven't dealt combat damage yet".to_string(),
+        }),
+        "{line}"
+    );
+    let self_line = "~ can't attack as long as they haven't dealt combat damage yet.";
+    let self_def = parse_static_line(self_line).expect("self static def");
+    assert_eq!(self_def.mode, StaticMode::CantAttack, "{self_line}");
+    assert_eq!(
+        self_def.affected,
+        Some(TargetFilter::SelfRef),
+        "{self_line}"
+    );
+    assert!(
+        contains_source_damage_gate(&self_def.condition),
+        "{self_line}"
+    );
+
+    // Self half: a source-named subject binds the gate to itself, exactly.
+    for subject in ["~", "This creature"] {
+        for (restriction, mode) in &restrictions {
+            for marker in ["as long as", "if"] {
+                for (kind, filter) in &kinds {
+                    let line = format!(
+                        "{subject} {restriction} {marker} they haven't dealt {kind}damage yet."
+                    );
+                    let def = parse_static_line(&line).expect("self static def");
+                    assert_eq!(&def.mode, mode, "{line}");
+                    assert_eq!(def.affected, Some(TargetFilter::SelfRef), "{line}");
+                    assert_eq!(
+                        def.condition,
+                        Some(StaticCondition::Not {
+                            condition: Box::new(StaticCondition::SourceHasDealtDamage {
+                                kind: *filter,
+                            }),
+                        }),
+                        "{line}"
+                    );
+                }
+            }
+        }
+    }
+    let combat_gate = StaticCondition::Not {
+        condition: Box::new(StaticCondition::SourceHasDealtDamage {
+            kind: DamageKindFilter::CombatOnly,
+        }),
+    };
+    for (marker, expected) in [
+        ("as long as", combat_gate.clone()),
+        ("if", combat_gate.clone()),
+        (
+            "unless",
+            StaticCondition::Not {
+                condition: Box::new(combat_gate.clone()),
+            },
+        ),
+    ] {
+        let line = format!("~ can't be blocked {marker} they haven't dealt combat damage yet.");
+        let def = parse_static_line(&line).expect("self static def");
+        assert_eq!(def.mode, StaticMode::CantBeBlocked, "{line}");
+        assert_eq!(def.affected, Some(TargetFilter::SelfRef), "{line}");
+        assert_eq!(def.condition, Some(expected), "{line}");
+    }
+    for subject in ["This Aura", "This Equipment"] {
+        let line =
+            format!("{subject} has hexproof as long as they haven't dealt combat damage yet.");
+        let def = parse_static_line(&line).expect("self static def");
+        assert_eq!(def.mode, StaticMode::Continuous, "{line}");
+        assert_eq!(def.affected, Some(TargetFilter::SelfRef), "{line}");
+        assert_eq!(def.condition, Some(combat_gate.clone()), "{line}");
+    }
+}
+
+/// CR 611.3a: `printed_subject` is the one classifier of a host line's printed
+/// subject — source-named only for `~` and the source's own "this <type>"
+/// vocabulary.
+#[test]
+fn printed_subject_classifies_source_named_and_other_subjects() {
+    let classify = |line: &str| {
+        let lower = line.to_lowercase();
+        printed_subject(&TextPair::new(line, &lower))
+    };
+    for subject in [
+        "~",
+        "This creature",
+        "This Aura",
+        "This Equipment",
+        "This permanent",
+        "This land",
+    ] {
+        let line = format!("{subject} has hexproof as long as they haven't dealt damage yet.");
+        assert_eq!(classify(&line), PrintedSubject::SourceNamed, "{line}");
+    }
+    for subject in [
+        "Enchanted creature",
+        "Equipped creature",
+        "Creatures you control",
+        "Other creatures you control",
+        "Each creature",
+        "All creatures",
+        "Target creature",
+        "Enchanted artifact",
+        "Each artifact",
+        "It",
+        "~'s power",
+        // A self-reference followed by a subject connective is a compound
+        // subject, not the source alone.
+        "~ and enchanted creature",
+        "This creature and enchanted creature",
+        "~ or enchanted creature",
+        "~ and/or enchanted creature",
+        "~ and creatures you control",
+        "This creature and each other creature",
+        "~, enchanted creature and creatures you control",
+        "~ together with enchanted creature",
+        "~ as well as enchanted creature",
+        "~ plus enchanted creature",
+        "~ along with enchanted creature",
+        "Enchanted creature and ~",
+        "Equipped creature and ~",
+    ] {
+        let line = format!("{subject} has hexproof as long as they haven't dealt damage yet.");
+        assert_eq!(classify(&line), PrintedSubject::Other, "{line}");
+    }
+    // A coordinator inside the predicate is not adjacent to the
+    // self-reference, so the subject is still the source alone.
+    for predicate in ["~ can't attack or block", "~ has flying and haste"] {
+        let line = format!("{predicate} as long as they haven't dealt damage yet.");
+        assert_eq!(classify(&line), PrintedSubject::SourceNamed, "{line}");
+    }
+}
+
+/// CR 611.3a: a static "applies at any given moment to whatever its text
+/// indicates", so the plural "they haven't dealt … damage yet" gate may become
+/// the source's `SourceHasDealtDamage` only when the printed subject is the
+/// complete source. A compound subject that merely starts with the source
+/// ("~ and enchanted creature", "~ together with …") names more than the source,
+/// so the gate stays unbound (strict failure) on every family that hardcodes
+/// `affected: SelfRef`. Source-only and compound forms are asserted together per
+/// family; each compound row also asserts the recognised `mode` as a reach-guard.
+///
+/// The MaxUntapPerType entry point is not covered here: its printed subject is
+/// the players ("Players can't untap …") and it passes `PrintedSubject::Other`
+/// explicitly, so a source-prefixed compound subject cannot reach it.
+#[test]
+fn compound_source_prefixed_subject_keeps_they_gate_unbound_and_source_only_binds() {
+    use crate::parser::oracle::parse_oracle_text;
+    use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
+
+    let kinds = [
+        ("combat ", DamageKindFilter::CombatOnly),
+        ("noncombat ", DamageKindFilter::NoncombatOnly),
+        ("", DamageKindFilter::Any),
+    ];
+    let source_gate = |kind: DamageKindFilter| StaticCondition::Not {
+        condition: Box::new(StaticCondition::SourceHasDealtDamage { kind }),
+    };
+    let source_only = ["~", "This creature"];
+    let compound = [
+        "~ and enchanted creature",
+        "This creature and enchanted creature",
+        "~ and creatures you control",
+        "~ or enchanted creature",
+        "~ and/or enchanted creature",
+        "This creature and each other creature",
+        "~ together with enchanted creature",
+        "~ as well as enchanted creature",
+        "~ plus enchanted creature",
+        "~ along with enchanted creature",
+    ];
+    // Whole pipeline on an Aura and on a creature: the unparsed gate surfaces
+    // as a swallowed clause and no static carries the source-damage gate.
+    let assert_swallowed = |line: &str| {
+        for parsed in [
+            parse_oracle_text(
+                &format!("Enchant creature\n{line}"),
+                "Compound Aura",
+                &[],
+                &["Enchantment".to_string()],
+                &["Aura".to_string()],
+            ),
+            parse_oracle_text(
+                line,
+                "Compound Beast",
+                &[],
+                &["Creature".to_string()],
+                &["Beast".to_string()],
+            ),
+        ] {
+            assert!(
+                parsed
+                    .parse_warnings
+                    .iter()
+                    .any(|w| matches!(w, OracleDiagnostic::SwallowedClause { .. })),
+                "{line}: expected a swallowed-clause diagnostic, got {:?}",
+                parsed.parse_warnings
+            );
+            assert!(
+                parsed
+                    .statics
+                    .iter()
+                    .all(|d| !contains_source_damage_gate(&d.condition)),
+                "{line}: {:?}",
+                parsed.statics
+            );
+        }
+    };
+
+    // Restriction arms (CantBlock / CantAttack / CantAttackOrBlock).
+    // NOTE: these arms collapse `affected` to SelfRef for ANY printed subject,
+    // compound ones included. That is a pre-existing defect outside this test's
+    // scope; the `affected == SelfRef` assertion on compound rows pins today's
+    // collapse so a later fix updates it deliberately.
+    for (restriction, mode) in [
+        ("can't block", StaticMode::CantBlock),
+        ("can't attack", StaticMode::CantAttack),
+        ("can't attack or block", StaticMode::CantAttackOrBlock),
+    ] {
+        for (kind, filter) in &kinds {
+            for marker in ["as long as", "if", "unless"] {
+                let expected_bound = if marker == "unless" {
+                    StaticCondition::Not {
+                        condition: Box::new(source_gate(*filter)),
+                    }
+                } else {
+                    source_gate(*filter)
+                };
+                for subject in source_only {
+                    let line = format!(
+                        "{subject} {restriction} {marker} they haven't dealt {kind}damage yet."
+                    );
+                    let def = parse_static_line(&line).expect("source-only static def");
+                    assert_eq!(def.mode, mode, "{line}");
+                    assert_eq!(def.affected, Some(TargetFilter::SelfRef), "{line}");
+                    assert_eq!(def.condition, Some(expected_bound.clone()), "{line}");
+                }
+                for subject in compound {
+                    let line = format!(
+                        "{subject} {restriction} {marker} they haven't dealt {kind}damage yet."
+                    );
+                    let def = parse_static_line(&line).expect("compound static def");
+                    // Reach-guard: the restriction arm that would bind the gate
+                    // recognised the line.
+                    assert_eq!(def.mode, mode, "{line}");
+                    assert_eq!(def.affected, Some(TargetFilter::SelfRef), "{line}");
+                    assert!(!contains_source_damage_gate(&def.condition), "{line}");
+                    if marker == "unless" {
+                        assert_eq!(
+                            def.condition,
+                            Some(StaticCondition::Not {
+                                condition: Box::new(StaticCondition::Unrecognized {
+                                    text: format!("unless they haven't dealt {kind}damage yet"),
+                                }),
+                            }),
+                            "{line}"
+                        );
+                    } else {
+                        assert_eq!(def.condition, None, "{line}");
+                        assert_swallowed(&line);
+                    }
+                }
+            }
+        }
+    }
+
+    // The CantBeBlocked fallback arm (hardcoded SelfRef).
+    for (kind, filter) in &kinds {
+        for marker in ["as long as", "if", "unless"] {
+            let expected_bound = if marker == "unless" {
+                StaticCondition::Not {
+                    condition: Box::new(source_gate(*filter)),
+                }
+            } else {
+                source_gate(*filter)
+            };
+            for subject in source_only {
+                let line = format!(
+                    "{subject} can't be blocked {marker} they haven't dealt {kind}damage yet."
+                );
+                let def = parse_static_line(&line).expect("source-only static def");
+                assert_eq!(def.mode, StaticMode::CantBeBlocked, "{line}");
+                assert_eq!(def.affected, Some(TargetFilter::SelfRef), "{line}");
+                assert_eq!(def.condition, Some(expected_bound.clone()), "{line}");
+            }
+            let unrecognized = StaticCondition::Unrecognized {
+                text: format!("{marker} they haven't dealt {kind}damage yet"),
+            };
+            let expected_unbound = if marker == "unless" {
+                StaticCondition::Not {
+                    condition: Box::new(unrecognized),
+                }
+            } else {
+                unrecognized
+            };
+            for subject in compound {
+                let line = format!(
+                    "{subject} can't be blocked {marker} they haven't dealt {kind}damage yet."
+                );
+                let def = parse_static_line(&line).expect("compound static def");
+                assert_eq!(def.mode, StaticMode::CantBeBlocked, "{line}");
+                assert!(!contains_source_damage_gate(&def.condition), "{line}");
+                assert_eq!(def.condition, Some(expected_unbound.clone()), "{line}");
+            }
+        }
+    }
+
+    // The legacy "~ has/gets …" fallback: its subject check is a negative list
+    // ("creature" / "permanent" / …), so only a co-subject without those words
+    // ("Henry") reaches it. ("~ gets … unless …" takes a different route that
+    // leaves the gate unparsed even for the source alone, so it is not a
+    // usable source-only reach-guard and is left out.)
+    for (grant, marker) in [
+        ("has hexproof", "as long as"),
+        ("has hexproof", "unless"),
+        ("gets +1/+1", "as long as"),
+    ] {
+        for (kind, filter) in &kinds {
+            let line = format!("~ {grant} {marker} they haven't dealt {kind}damage yet.");
+            let def = parse_static_line(&line).expect("source-only static def");
+            assert_eq!(def.mode, StaticMode::Continuous, "{line}");
+            assert_eq!(def.affected, Some(TargetFilter::SelfRef), "{line}");
+            let expected_bound = if marker == "unless" {
+                StaticCondition::Not {
+                    condition: Box::new(source_gate(*filter)),
+                }
+            } else {
+                source_gate(*filter)
+            };
+            assert_eq!(def.condition, Some(expected_bound), "{line}");
+
+            let unrecognized = StaticCondition::Unrecognized {
+                text: if marker == "unless" {
+                    format!("unless they haven't dealt {kind}damage yet")
+                } else {
+                    format!("they haven't dealt {kind}damage yet")
+                },
+            };
+            let expected_unbound = if marker == "unless" {
+                StaticCondition::Not {
+                    condition: Box::new(unrecognized),
+                }
+            } else {
+                unrecognized
+            };
+            for subject in [
+                "~ and Henry",
+                "~ or Henry",
+                "~ and/or Henry",
+                "~ together with Henry",
+                "~ as well as Henry",
+                "~ plus Henry",
+                "~ along with Henry",
+            ] {
+                let line =
+                    format!("{subject} {grant} {marker} they haven't dealt {kind}damage yet.");
+                let def = parse_static_line(&line).expect("compound static def");
+                assert_eq!(def.mode, StaticMode::Continuous, "{line}");
+                // Pins today's SelfRef collapse of the compound subject.
+                assert_eq!(def.affected, Some(TargetFilter::SelfRef), "{line}");
+                assert!(!contains_source_damage_gate(&def.condition), "{line}");
+                assert_eq!(def.condition, Some(expected_unbound.clone()), "{line}");
+            }
+        }
+    }
+
+    // Singular-`it` control: the singular arms do not depend on the printed
+    // subject, so this unit leaves them alone.
+    for line in [
+        "~ and enchanted creature can't attack or block as long as it hasn't dealt damage yet.",
+        "~ and Henry has hexproof as long as it hasn't dealt damage yet.",
+    ] {
+        let def = parse_static_line(line).expect("singular static def");
+        assert_eq!(
+            def.condition,
+            Some(source_gate(DamageKindFilter::Any)),
+            "{line}"
+        );
+    }
+
+    // Predicate-conjunction control: a coordinator inside the predicate does
+    // not make the subject compound.
+    for (line, mode) in [
+        (
+            "~ can't attack or block as long as they haven't dealt combat damage yet.",
+            StaticMode::CantAttackOrBlock,
+        ),
+        (
+            "~ has flying and haste as long as they haven't dealt combat damage yet.",
+            StaticMode::Continuous,
+        ),
+    ] {
+        let def = parse_static_line(line).expect("source-only static def");
+        assert_eq!(def.mode, mode, "{line}");
+        assert_eq!(def.affected, Some(TargetFilter::SelfRef), "{line}");
+        assert_eq!(
+            def.condition,
+            Some(source_gate(DamageKindFilter::CombatOnly)),
+            "{line}"
+        );
+    }
 }
 
 #[test]
