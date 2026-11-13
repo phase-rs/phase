@@ -4791,7 +4791,10 @@ pub(crate) fn collect_logical_zone_trigger_segment(
             to,
             ..
         } => state
-            .first_departure_zone_change_record
+            .players
+            .iter()
+            .filter_map(|player| player.left_at_zone_change_record)
+            .min()
             .is_some_and(|boundary| {
                 state
                     .zone_changes_this_turn

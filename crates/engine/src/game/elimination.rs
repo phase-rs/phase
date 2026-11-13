@@ -402,9 +402,13 @@ pub(crate) fn eliminate_players(
     // ability reads its source as it was immediately before that event, so an
     // observer a leaving player stole triggers under that player and is retired
     // with them (CR 800.4d) rather than handed to its owner.
-    if !leaving_set.is_empty() {
-        state
-            .first_departure_zone_change_record
+    for player in state
+        .players
+        .iter_mut()
+        .filter(|player| leaving_set.contains(&player.id))
+    {
+        player
+            .left_at_zone_change_record
             .get_or_insert(first_record);
     }
     let mut looked_back_observers = (!leaving_set.is_empty())

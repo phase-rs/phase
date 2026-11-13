@@ -2026,8 +2026,10 @@ pub fn start_next_turn(state: &mut GameState, events: &mut Vec<GameEvent>) {
     state.players_who_sacrificed_artifact_this_turn.clear();
     state.sacrificed_permanents_this_turn.clear();
     state.zone_changes_this_turn.clear();
-    // CR 800.4a: indexes the records cleared above.
-    state.first_departure_zone_change_record = None;
+    // CR 800.4a: each player's departure index points into the records cleared above.
+    for player in &mut state.players {
+        player.left_at_zone_change_record = None;
+    }
     // CR 603.10: keyed by the ledger index cleared above.
     state.battlefield_entry_observations.clear();
     state.batched_zone_change_trigger_fired.clear();
