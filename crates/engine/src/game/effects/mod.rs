@@ -11870,31 +11870,6 @@ fn effect_consumes_parent_object_referent(effect: &Effect) -> bool {
     amount_is_anaphoric || target_is_anaphoric
 }
 
-/// CR 608.2c + CR 108.3: under the owner-library-shuffle population the
-/// shuffling owner is the parent target's owner; a clause whose acting player
-/// names that owner continues the owner's instruction. CR 601.2a: a cast it
-/// performs is that owner's.
-///
-/// `RevealTop` and `ChooseOneOf` get explicit arms because `Effect::target_filter`
-/// returns `None` for them; every other acting-player slot (`Draw.target`,
-/// `Mill.target`, and the `Dig` / `ExileTop` / `GainLife` / `Discover` player)
-/// is surfaced by that accessor.
-fn effect_acts_for_shuffled_owner(effect: &Effect) -> bool {
-    match effect {
-        Effect::ChooseOneOf { chooser, .. } => {
-            matches!(chooser, PlayerFilter::ParentObjectTargetOwner)
-        }
-        Effect::RevealTop { player, .. } => matches!(
-            player,
-            TargetFilter::ScopedPlayer | TargetFilter::ParentTargetOwner
-        ),
-        other => matches!(
-            other.target_filter(),
-            Some(TargetFilter::ScopedPlayer | TargetFilter::ParentTargetOwner)
-        ),
-    }
-}
-
 fn quantity_expr_references_demonstrative(qty: &QuantityExpr) -> bool {
     match qty {
         QuantityExpr::Fixed { .. } => false,
@@ -12059,24 +12034,11 @@ fn detach_after_player_scope_local_chain(
     let next_is_local_continuation = next.sub_link == SubAbilityLink::ContinuationStep
         && is_player_scope_local_continuation(&node.effect, &next.effect, scope)
         && !next_is_scoped_search_shuffle_tail;
-    // CR 608.2c + CR 108.3: under the owner-library-shuffle population a clause
-    // that carries no scope of its own and whose acting player names the
-    // shuffled owner ("then draws two cards", "Then that player discovers X",
-    // "then faces a villainous choice", "then exiles the top card of their
-    // library") continues that owner's instruction, so it resolves inside the
-    // owner's iteration with the owner as the acting controller (CR 601.2a).
-    // The keep does not depend on the sub-link: "Then that player ..." is a
-    // sequential sibling. A clause naming the caster (`Controller`) or another
-    // population detaches as the unscoped tail.
-    let next_is_owner_continuation = is_owner_library_shuffle_scope(scope)
-        && next.player_scope.is_none()
-        && effect_acts_for_shuffled_owner(&next.effect);
     if next_is_performed_gated
         || next_is_zone_change_this_way_gated
         || next_is_co_scoped_anaphoric_consumer
         || next_is_optional_clause_continuation
         || next_is_local_continuation
-        || next_is_owner_continuation
     {
         // CR 608.2c: co-scoped continuations kept inside the scoped template
         // inherit the outer iteration — redundant `player_scope` on the child
@@ -12085,16 +12047,7 @@ fn detach_after_player_scope_local_chain(
         if next_is_local_continuation {
             next.player_scope = None;
         }
-        // CR 608.2c + CR 701.13a: the owner's exiled top card is the "it" of that
-        // owner's following instructions; the global per-player introducer stays
-        // RevealTop-only (`effect_introduces_per_iteration_referent`).
-        let introduces_owner_referent =
-            next_is_owner_continuation && matches!(next.effect, Effect::ExileTop { .. });
-        let tail = detach_after_player_scope_local_chain(
-            &mut next,
-            scope,
-            referent_in_scope || introduces_owner_referent,
-        );
+        let tail = detach_after_player_scope_local_chain(&mut next, scope, referent_in_scope);
         node.sub_ability = Some(next);
         tail
     } else {
