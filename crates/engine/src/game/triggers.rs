@@ -9737,6 +9737,56 @@ pub(crate) fn collect_action_end_triggers_into_deferred(
     collect_triggers_into_deferred(state, &scan);
 }
 
+/// CR 603.6a + CR 603.6b + CR 611.3c + CR 603.2c: the entry event of an instruction that was
+/// held across answers is matched when the instruction completes, against the board it left,
+/// not after the later instructions of the same resolution have changed which permanents
+/// observe or suppress it. The whole event is collected once: the held entries and the entries
+/// of the same instruction in `events` (ledger rows `first_row..` below the new instruction
+/// mark). Those in `events` are claimed for ordinary collectors, so the action's own scan does
+/// not collect them again, while delayed triggers keep their view of them (CR 603.7). The
+/// triggers are queued, not put on the stack: that waits for a player to receive priority
+/// (CR 603.3b). An instruction whose entries were never held is left to the action's scan, as
+/// it is for every other resolution.
+pub(crate) fn collect_completed_held_entry_instruction(
+    state: &mut GameState,
+    events: &[GameEvent],
+    first_row: usize,
+) {
+    let held = std::mem::take(&mut state.unsettled_entry_batch_events);
+    if held.is_empty() {
+        return;
+    }
+    let completed_through = state.completed_instruction_ledger_len();
+    let held_keys: Vec<_> = held.iter().filter_map(battlefield_entry_key).collect();
+    let mut scan = held;
+    let mut claims = Vec::new();
+    for (index, event) in events.iter().enumerate() {
+        let Some(key) = battlefield_entry_key(event) else {
+            continue;
+        };
+        let (turn, row, _) = key;
+        if turn == state.turn_number
+            && (first_row..completed_through).contains(&row)
+            && !held_keys.contains(&key)
+        {
+            scan.push(event.clone());
+            claims.push(ConsumedTriggerEventOccurrence {
+                event: event.clone(),
+                occurrence: trigger_event_occurrence(events, index),
+                scope: ConsumedTriggerEventScope::OrdinaryCollectorsOnly,
+            });
+        }
+    }
+    collect_triggers_into_deferred(state, &scan);
+    resolve_and_apply_trigger_collection(
+        state,
+        ResolvedTriggerCollection::ConsumeBeforePriority {
+            occurrences: claims,
+        },
+    )
+    .expect("an entry-instruction claim must have a live journal cause");
+}
+
 /// CR 603.6a: the ledger identity of a battlefield-entry occurrence. The row
 /// index rather than full event equality, as in
 /// `zones::settle_battlefield_entry_observations`, so later record stamping
@@ -9870,7 +9920,9 @@ fn battlefield_entry_instruction_completed(state: &GameState, event: &GameEvent)
 /// `GameState::unsettled_entry_batch_events` instead of being matched. It is
 /// released, ahead of the caller's own events, to the first collector that runs
 /// once no entry is in progress, its instruction has completed, or the action
-/// has settled. That collector matches the whole event in one scan against the
+/// has settled; or, when the instruction's own boundary comes first, it is
+/// collected there, before a later instruction of the same resolution can change
+/// what observes or suppresses it ([`collect_completed_held_entry_instruction`]). That collector matches the whole event in one scan against the
 /// completed state, so batched ("one or more", CR 603.2c) definitions and
 /// firing limits see it once. Nothing is held at a pause with no entry in
 /// progress (a later instruction's own choice, or the replacement of a later

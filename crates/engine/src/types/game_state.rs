@@ -13617,15 +13617,21 @@ fn validate_restored_entry_hold(state: &GameState) -> Result<(), String> {
     for event in &state.unsettled_entry_batch_events {
         let GameEvent::ZoneChanged {
             object_id,
+            from,
             to: Zone::Battlefield,
             record,
-            ..
         } = event
         else {
             return Err(
                 "unsettled_entry_batch_events may hold only battlefield-entry events".to_string(),
             );
         };
+        // The matcher reads the event's own origin, so it must be the record's.
+        if *from != record.from_zone || record.to_zone != Zone::Battlefield {
+            return Err(
+                "unsettled_entry_batch_events entry disagrees with its own record".to_string(),
+            );
+        }
         if record.recorded_turn_number != state.turn_number {
             return Err(
                 "unsettled_entry_batch_events holds an entry from another turn".to_string(),
@@ -44750,6 +44756,16 @@ mod tests {
             error.contains("another turn") || error.contains("ledger occurrence"),
             "{error}"
         );
+
+        // An event whose own origin disagrees with its record and ledger row: the trigger
+        // matcher reads the event's origin.
+        let mut forged_origin = persisted_entry_hold_fixture(Vec::new());
+        if let GameEvent::ZoneChanged { from, .. } =
+            &mut forged_origin.unsettled_entry_batch_events[0]
+        {
+            *from = Some(Zone::Graveyard);
+        }
+        assert!(restore_error(forged_origin).contains("disagrees with its own record"));
 
         // An entry that names no ledger row.
         let mut off_ledger = persisted_entry_hold_fixture(Vec::new());

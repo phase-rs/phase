@@ -5274,18 +5274,31 @@ fn settle_entries_before_instruction(
     // (`resolving_player_scope_tail`): its seats' actions are one simultaneous event
     // (CR 101.4), completed at its `after_scope` boundary. Seat legs resumed without a sidecar
     // (a clause with no following clause that reads its result) are not distinguished here.
+    let completed_through = state.completed_instruction_ledger_len();
+    let mut instruction_completed = false;
     if !crate::game::triggers::battlefield_entry_in_progress(state)
         && state.resolving_player_scope_tail.is_none()
     {
         let ledger_len = state.zone_changes_this_turn.len();
-        if ledger_len > state.completed_instruction_ledger_len() {
+        if ledger_len > completed_through {
             state.instruction_boundary_marks.push(ledger_len);
+            instruction_completed = true;
         }
     }
     if entry_observation_deferred(state, next, completed) {
         return;
     }
     crate::game::zones::settle_battlefield_entry_observations(state, events);
+    // CR 603.6a + CR 603.6b + CR 611.3c: an entering instruction that was held across answers
+    // has completed and its entrants are observed, so its entry event is matched now, against
+    // the board it left, before `next` can change which permanents observe or suppress it.
+    if instruction_completed {
+        crate::game::triggers::collect_completed_held_entry_instruction(
+            state,
+            events,
+            completed_through,
+        );
+    }
 }
 
 /// CR 603.6a: is `effect` one of the battlefield-entering instruction kinds that the generated

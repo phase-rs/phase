@@ -3207,6 +3207,137 @@ mod feldon_tokens {
         assert_eq!(runner.life(P0) - life, 4);
     }
 
+    const BLOT_OUT_THE_SKY: &str = "Create X tapped 2/1 white and black Inkling creature tokens with flying. If X is 6 or more, destroy all noncreature, nonland permanents.";
+    const TORPOR_ORB: &str = "Creatures entering don't cause abilities to trigger.";
+    const BRANCHING_EVOLUTION_TEXT: &str = "If one or more +1/+1 counters would be put on a creature you control, twice that many +1/+1 counters are put on that creature instead.";
+
+    /// Blot Out the Sky with X = 6 under Metallic Mimic (naming Inkling, so each Inkling enters
+    /// with a counter), Hardened Scales and Branching Evolution (a CR 616.1 order for each
+    /// token), with Soul Warden on the battlefield and, optionally, Torpor Orb. The spell's
+    /// second instruction destroys Orb, Scales and Evolution after the tokens entered.
+    /// Returns Soul Warden's life gain and whether Torpor Orb survived. The game is optionally
+    /// saved and restored at the first pause.
+    fn blot_out_the_sky_life(torpor_orb: bool, persist: bool) -> (i32, bool) {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PostCombatMain);
+        scenario.with_library_top(P0, &["Plains", "Island", "Swamp", "Mountain"]);
+        scenario.with_mana_pool(
+            P0,
+            (0..8)
+                .map(|index| {
+                    ManaUnit::new(
+                        if index == 1 {
+                            ManaType::Black
+                        } else {
+                            ManaType::White
+                        },
+                        ObjectId(0),
+                        false,
+                        vec![],
+                    )
+                })
+                .collect(),
+        );
+        let scales = scenario
+            .add_enchantment_from_oracle(P0, "Hardened Scales", SCALES)
+            .id();
+        scenario.add_enchantment_from_oracle(P0, "Branching Evolution", BRANCHING_EVOLUTION_TEXT);
+        let mimic = scenario
+            .add_creature_from_oracle(P0, "Metallic Mimic", 2, 1, METALLIC_MIMIC)
+            .as_artifact_creature()
+            .with_subtypes(vec!["Shapeshifter"])
+            .id();
+        scenario.add_creature_from_oracle(P0, "Soul Warden", 1, 1, SOUL_WARDEN);
+        let orb = torpor_orb.then(|| {
+            scenario
+                .add_artifact_from_oracle(P0, "Torpor Orb", TORPOR_ORB)
+                .id()
+        });
+        let mut blot =
+            scenario.add_spell_to_hand_from_oracle(P0, "Blot Out the Sky", false, BLOT_OUT_THE_SKY);
+        blot.with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::X, ManaCostShard::White, ManaCostShard::Black],
+            generic: 0,
+        });
+        let blot = blot.id();
+        let mut runner = scenario.build();
+        // Board setup: Metallic Mimic is already on the battlefield, so its as-enters choice
+        // (Inkling) is written as the value it recorded then.
+        runner
+            .state_mut()
+            .objects
+            .get_mut(&mimic)
+            .unwrap()
+            .chosen_attributes = vec![ChosenAttribute::CreatureType("Inkling".to_string())];
+        let life = runner.life(P0);
+        runner.cast(blot).x(6).resolve();
+        let mut orders = 0;
+        for _ in 0..40 {
+            match &runner.state().waiting_for {
+                WaitingFor::ReplacementChoice { candidates, .. } => {
+                    let index = candidates
+                        .iter()
+                        .position(|candidate| candidate.source_id == scales)
+                        .expect("Hardened Scales is offered");
+                    orders += 1;
+                    if persist && orders == 1 {
+                        runner = restore(runner);
+                    }
+                    runner.act(GameAction::ChooseReplacement { index }).unwrap();
+                }
+                WaitingFor::OrderTriggers { triggers, .. } => {
+                    let order = (0..triggers.len()).collect();
+                    runner.act(GameAction::OrderTriggers { order }).unwrap();
+                }
+                WaitingFor::Priority { .. } if runner.state().stack.is_empty() => break,
+                WaitingFor::Priority { .. } => {
+                    runner.act(GameAction::PassPriority).unwrap();
+                }
+                other => panic!("unexpected prompt: {other:?}"),
+            }
+        }
+        // Reach guard: six Inklings entered, each after its own counter order, and the spell's
+        // second instruction destroyed the noncreature, nonland permanents.
+        let inklings = runner
+            .state()
+            .objects
+            .values()
+            .filter(|object| {
+                object.is_token && object.zone == Zone::Battlefield && object.name == "Inkling"
+            })
+            .count();
+        assert_eq!(inklings, 6);
+        assert!(orders >= 5, "the tokens' counters were ordered: {orders}");
+        assert_eq!(runner.state().objects[&scales].zone, Zone::Graveyard);
+        let orb_alive =
+            orb.is_some_and(|orb| runner.state().objects[&orb].zone == Zone::Battlefield);
+        assert!(
+            !orb_alive,
+            "Torpor Orb was destroyed by the spell's second instruction"
+        );
+        (runner.life(P0) - life, orb_alive)
+    }
+
+    /// CR 603.2 + CR 603.6a: Torpor Orb ("Creatures entering don't cause abilities to
+    /// trigger.") is on the battlefield when the six Inklings enter, so Soul Warden triggers for
+    /// none of them, although the spell's second instruction destroys Orb before anything is
+    /// scanned for the first five entrants, which wait for the sixth.
+    #[test]
+    fn a_later_instruction_does_not_change_what_the_held_entries_are_matched_against() {
+        for persist in [false, true] {
+            assert_eq!(
+                blot_out_the_sky_life(false, persist).0,
+                6,
+                "positive control: without Orb Soul Warden sees all six Inklings (restore: {persist})"
+            );
+            assert_eq!(
+                blot_out_the_sky_life(true, persist).0,
+                0,
+                "Orb was there when they entered (restore: {persist})"
+            );
+        }
+    }
+
     /// The captured game at the pause between two co-entrants of the four-token
     /// Body Double batch (Doubling Season, Parallel Lives), with `tamper` applied to the
     /// state before it is persisted. Returns the restore's verdict.
@@ -3264,6 +3395,14 @@ mod feldon_tokens {
         })
         .expect_err("a duplicated held entry is refused");
         assert!(error.contains("holds one entry twice"), "{error}");
+        let error = restore_after_tampering_at_the_pause(|state| {
+            if let GameEvent::ZoneChanged { from, .. } = &mut state.unsettled_entry_batch_events[0]
+            {
+                *from = Some(Zone::Graveyard);
+            }
+        })
+        .expect_err("a held entry whose origin disagrees with its record is refused");
+        assert!(error.contains("disagrees with its own record"), "{error}");
     }
 
     #[test]
