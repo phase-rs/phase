@@ -5470,15 +5470,26 @@ fn stack_pin_liveness(state: &mut GameState) -> Vec<Vec<bool>> {
 /// other comparators keep the stack, where the ranked pin itself separates a live carrier
 /// from a stale one (the stack-growth cover's buried arm sets aside only the entries below
 /// the replay floor, which the period does not resolve). A frame pair whose stacks hold no
-/// superseded pin is not judged here, as before; a superseded pin held at the same place in
-/// both frames (a Clue that sacrificed itself to pay for its own ability, say) is the same
-/// position and is not refused. The comparison is positional, entry by entry from the bottom:
-/// stacks of different depth or order that hold a superseded pin are refused even where every
-/// shared entry agrees, which can only miss a cover.
+/// superseded pin is not judged here, as before; a superseded pin held in both frames (a Clue
+/// that sacrificed itself to pay for its own ability, or a trigger whose source left, say) is
+/// the same position and is not refused.
+///
+/// Stacks of the same depth are compared entry by entry from the bottom. Stacks of different
+/// depth (a growth cover's frames) are compared by the set of liveness patterns their entries
+/// hold, so a grown copy of an entry already present does not count as a difference, while an
+/// entry whose pins are live in one frame and superseded in the other, with no counterpart in
+/// the other frame, does.
 fn stack_pins_superseded_apart(prior: &mut GameState, current: &mut GameState) -> bool {
     let (prior, current) = (stack_pin_liveness(prior), stack_pin_liveness(current));
     let superseded = |frame: &[Vec<bool>]| frame.iter().flatten().any(|live| !live);
-    (superseded(&prior) || superseded(&current)) && prior != current
+    if !(superseded(&prior) || superseded(&current)) {
+        return false;
+    }
+    if prior.len() == current.len() {
+        return prior != current;
+    }
+    let patterns = |frame: Vec<Vec<bool>>| frame.into_iter().collect::<BTreeSet<_>>();
+    patterns(prior) != patterns(current)
 }
 
 /// A condition of [`loop_states_cover_modulo_fodder_growth`] that refused a frame pair, in the
@@ -10887,6 +10898,38 @@ mod tests {
         assert!(
             !loop_states_cover_modulo_object_growth(&stale_prior, &live_current),
             "stale then live"
+        );
+    }
+
+    /// CR 400.7: the stack-pin veto of the two stack-dropping covers over frames of different
+    /// depth, which a growth cover's frames are. A trigger whose source left holds a superseded
+    /// source stamp by design: the same entry once in the prior stack and twice in the current
+    /// one is the same position and is not refused, while the entry live in the prior stack and
+    /// superseded in the current one still is.
+    #[test]
+    fn loop_stack_pin_veto_tolerates_a_grown_stack_of_the_same_entry() {
+        let framed = |live: u64, pin: u64, entries: usize| {
+            let mut frame = pinned_frame(PinCarrier::FiredDestroy, live, pin);
+            let entry = frame.stack[0].clone();
+            for _ in 1..entries {
+                frame.stack.push_back(entry.clone());
+            }
+            frame
+        };
+        let (mut stale_one, mut stale_two) = (framed(8, 5, 1), framed(8, 5, 2));
+        assert!(
+            !stack_pins_superseded_apart(&mut stale_one, &mut stale_two),
+            "the same superseded entry, grown by one copy"
+        );
+        let (mut live_one, mut stale_two) = (framed(8, 8, 1), framed(8, 5, 2));
+        assert!(
+            stack_pins_superseded_apart(&mut live_one, &mut stale_two),
+            "live in the prior stack, superseded in the grown one"
+        );
+        let (mut stale_one, mut stale_one_again) = (framed(8, 5, 1), framed(8, 5, 1));
+        assert!(
+            !stack_pins_superseded_apart(&mut stale_one, &mut stale_one_again),
+            "reach guard: equal depth, the same superseded entry"
         );
     }
 

@@ -35857,17 +35857,17 @@ impl GameState {
         self.for_each_loop_ability_carrier_mut(&mut |_, ability| {
             ability.for_each_creation_lookback_event_mut(&mut |event| record_event(event));
         });
-        // CR 608.2h + CR 400.7: the exact departure snapshot each ability's own pins select.
-        // A source stamp is one of them: an activated ability whose cost moved its source
-        // reads "this artifact" from the snapshot of the incarnation it announced
-        // (`quantity::source_intensity`, `AbilityCondition::SourceMatchesFilter`), not from the
-        // latest history of the object. The pins are the ones loop normalization ranks
-        // ([`ResolvedAbility::for_each_loop_pin_mut`]), so a retained row keeps the rank its
-        // stamp has.
+        // CR 608.2h + CR 400.7: the exact departure snapshot an activated ability's announced
+        // source epoch selects. An activation whose cost moved its source reads "this artifact"
+        // from the snapshot of the incarnation it announced (`quantity::source_intensity`,
+        // `AbilityCondition::SourceMatchesFilter`), not from the latest history of the object,
+        // so that row stays in the comparand beside the event-named ones. Only that stamp: a
+        // triggered ability reads its source through the trigger's own event, retained above,
+        // and keeping a row for every other pin would put history into the position.
         self.for_each_loop_ability_carrier_mut(&mut |source_id, ability| {
-            ability.for_each_loop_pin_mut(source_id, &mut |object_id, incarnation| {
-                referenced_lki.insert(ObjectIncarnationRef::of(object_id, *incarnation));
-            });
+            if let Some(incarnation) = ability.announced_source_incarnation {
+                referenced_lki.insert(ObjectIncarnationRef::of(source_id, incarnation));
+            }
         });
 
         // CR 608.2c: the departure snapshots the frame's live tracked-set
@@ -53801,46 +53801,38 @@ mod tests {
         assert!(unranked.is_empty(), "not ranked: {unranked:#?}");
     }
 
-    /// CR 608.2h + CR 602.2a: an ability that announced its source at one incarnation and
-    /// paid with it reads "this artifact" from that incarnation's departure snapshot. Drix
+    /// CR 608.2h + CR 602.2a: an activated ability that announced its source at one incarnation
+    /// and paid with it reads "this artifact" from that incarnation's departure snapshot. Drix
     /// Interlacer ("{T}, Sacrifice this artifact: Draw X cards, where X is half this artifact's
     /// intensity, rounded down.") is the printed shape; this fixture is synthetic: a draw
-    /// ability on the stack whose source stamp (the announced epoch, then the as-placed
-    /// one) names incarnation 5 of an object now at 8, beside a departure snapshot of
-    /// incarnation 5. Two frames with the same stamp and the same latest last-known
-    /// information but different selected snapshots are different positions; the same
-    /// snapshot in both is the same position.
+    /// ability on the stack whose announced epoch names incarnation 5 of an object now at 8,
+    /// beside a departure snapshot of incarnation 5. Two frames with the same stamp and the same
+    /// latest last-known information but different selected snapshots are different positions;
+    /// the same snapshot in both is the same position.
     #[test]
     fn normalization_keeps_the_departure_snapshot_a_source_stamp_selects() {
-        for stamp in ["announced_source_incarnation", "source_incarnation"] {
-            let frame = |intensity: u32| {
-                let (mut state, x) = records_naming(8, &[]);
-                let mut ability = draw_one(x);
-                match stamp {
-                    "announced_source_incarnation" => {
-                        ability.announced_source_incarnation = Some(5)
-                    }
-                    _ => ability.source_incarnation = Some(5),
-                }
-                carry_ability(&mut state, AbilityCarrier::StackActivated, x, ability);
-                let mut departed = state.objects[&x].snapshot_public_characteristics();
-                departed.intensity = intensity;
-                state
-                    .lki_by_incarnation
-                    .entry(x)
-                    .or_default()
-                    .insert(5, departed);
-                state
-            };
-            assert!(
-                normalized_equal(&frame(2), &frame(2)),
-                "{stamp}: reach guard, the same selected snapshot is the same position"
-            );
-            assert!(
-                !normalized_equal(&frame(2), &frame(4)),
-                "{stamp}: the snapshot the stamp selects differs, so the positions differ"
-            );
-        }
+        let frame = |intensity: u32| {
+            let (mut state, x) = records_naming(8, &[]);
+            let mut ability = draw_one(x);
+            ability.announced_source_incarnation = Some(5);
+            carry_ability(&mut state, AbilityCarrier::StackActivated, x, ability);
+            let mut departed = state.objects[&x].snapshot_public_characteristics();
+            departed.intensity = intensity;
+            state
+                .lki_by_incarnation
+                .entry(x)
+                .or_default()
+                .insert(5, departed);
+            state
+        };
+        assert!(
+            normalized_equal(&frame(2), &frame(2)),
+            "reach guard: the same selected snapshot is the same position"
+        );
+        assert!(
+            !normalized_equal(&frame(2), &frame(4)),
+            "the snapshot the announced epoch selects differs, so the positions differ"
+        );
     }
 
     /// Every ranked carrier keeps the merge direction: a pin left at a superseded
