@@ -1963,55 +1963,11 @@ fn reconcile_parked_unless_payment_after_departure(
     result: &mut ActionResult,
     scan_from: usize,
 ) -> Result<bool, EngineError> {
-    if departure.is_none()
-        || state.payment_transaction.is_some()
-        || !matches!(
-            state.pending_cost_move_resume,
-            Some(PendingCostMoveResume::CounterAdditionUnlessPayment { .. })
-        )
-    {
+    if departure.is_none() {
         return Ok(false);
     }
-    // CR 104.3a + CR 118.12: the reconciliation is all or nothing. When it
-    // fails (a settled replacement's result the engine cannot represent, as
-    // Words of Worship's gain at the life limit once the departed player's
-    // competing effect is gone), nothing of it is kept, and the payment is
-    // retired on the departed board instead of being left parked on a prompt
-    // whose every answer fails the same way: the departure stands, and the
-    // game returns to a priority window a player can act in.
-    let departed = state.clone();
-    let published = result.events.len();
-    let moved = advance_parked_unless_payment_after_departure(state, result, scan_from);
-    if moved.is_err() || boundary_life_change_failure(state).is_some() {
-        tracing::debug!(
-            error = ?moved.err(),
-            "a parked unless payment could not be reconciled after a concession; it is retired"
-        );
-        *state = departed;
-        result.events.truncate(published);
-        engine_payment_choices::retire_unreconcilable_parked_unless_payment(state);
-        result.waiting_for = state.waiting_for.clone();
-        return Ok(true);
-    }
-    moved
-}
-
-/// The reconciliation proper; see [`reconcile_parked_unless_payment_after_departure`].
-fn advance_parked_unless_payment_after_departure(
-    state: &mut GameState,
-    result: &mut ActionResult,
-    scan_from: usize,
-) -> Result<bool, EngineError> {
-    let stale_prompt = engine_payment_choices::draw_payment_is_parked(state)
-        && state
-            .pending_replacement
-            .as_ref()
-            .is_some_and(|pending| replacement::parked_prompt_is_stale(state, pending));
-    match &result.waiting_for {
-        // The prompt is still open for a surviving chooser, or its chooser left
-        // and the departure handed priority on while keeping the record
-        // (`engine_payment_choices::departed_draw_settles_with_parked_payment`).
-        WaitingFor::ReplacementChoice { .. } | WaitingFor::Priority { .. } if stale_prompt => {
+    match parked_unless_payment_repair(state, &result.waiting_for) {
+        Some(ParkedPaymentRepair::StalePrompt) => {
             sync_waiting_for(state, &result.waiting_for);
             // No answer is read: the replacement authority settles a draw that
             // can't happen with no replacement, and re-proposes any other stale
@@ -2021,9 +1977,7 @@ fn advance_parked_unless_payment_after_departure(
                 engine_replacement::handle_replacement_choice(state, 0, &mut result.events)?;
             state.waiting_for = result.waiting_for.clone();
         }
-        WaitingFor::Priority { .. }
-            if engine_payment_choices::parked_unless_payment_lost_its_prompt(state) =>
-        {
+        Some(ParkedPaymentRepair::LostPrompt) => {
             sync_waiting_for(state, &result.waiting_for);
             engine_payment_choices::set_active_priority(state);
             // CR 121.6b + CR 614.11a: a surviving draw sequence the departed
@@ -2035,7 +1989,7 @@ fn advance_parked_unless_payment_after_departure(
             }
             result.waiting_for = state.waiting_for.clone();
         }
-        _ => return Ok(false),
+        None => return Ok(false),
     }
     if !matches!(result.waiting_for, WaitingFor::Priority { .. })
         && engine_payment_choices::paused_in_draw_payment(state)
@@ -2044,6 +1998,52 @@ fn advance_parked_unless_payment_after_departure(
         triggers::collect_paused_exit_triggers(state, &result.events, scan_from);
     }
     Ok(true)
+}
+
+/// What a departure left to repair on a parked unless payment.
+enum ParkedPaymentRepair {
+    /// CR 616.1: the payment's replacement prompt no longer describes its
+    /// event. It is still open for a surviving chooser, or its chooser left
+    /// and the departure handed priority on while keeping the record
+    /// (`engine_payment_choices::departed_draw_settles_with_parked_payment`).
+    StalePrompt,
+    /// CR 117.2e: the prompt left with its chooser and the owner is parked
+    /// under a priority window.
+    LostPrompt,
+}
+
+/// The one reading of whether a parked unless payment needs the concession's
+/// reconciliation: by the reconciliation itself, and by the departure fallback
+/// (`reject_or_publish_departure`), which retires a payment still in need of
+/// it.
+fn parked_unless_payment_repair(
+    state: &GameState,
+    waiting_for: &WaitingFor,
+) -> Option<ParkedPaymentRepair> {
+    if state.payment_transaction.is_some()
+        || !matches!(
+            state.pending_cost_move_resume,
+            Some(PendingCostMoveResume::CounterAdditionUnlessPayment { .. })
+        )
+    {
+        return None;
+    }
+    let stale_prompt = engine_payment_choices::draw_payment_is_parked(state)
+        && state
+            .pending_replacement
+            .as_ref()
+            .is_some_and(|pending| replacement::parked_prompt_is_stale(state, pending));
+    match waiting_for {
+        WaitingFor::ReplacementChoice { .. } | WaitingFor::Priority { .. } if stale_prompt => {
+            Some(ParkedPaymentRepair::StalePrompt)
+        }
+        WaitingFor::Priority { .. }
+            if engine_payment_choices::parked_unless_payment_lost_its_prompt(state) =>
+        {
+            Some(ParkedPaymentRepair::LostPrompt)
+        }
+        _ => None,
+    }
 }
 
 /// The action boundary's convergence pass: the ordinary post-action pipeline,
@@ -2558,6 +2558,19 @@ fn reject_or_publish_departure(
     }
     // CR 104.2a: a concession that left one player ends the game here too.
     settle_finished_game(state, &mut result);
+    // CR 104.3a + CR 118.12 + CR 616.1: the follow-up that reconciles a parked
+    // unless payment with the departure is discarded with everything else, so
+    // a payment that needed it is retired here, as part of the departure that
+    // is published. Left parked, its prompt would name the departed player's
+    // effect, and the answers that failed the follow-up (Words of Worship's
+    // gain at the life limit once the competing Hullbreacher is gone) would
+    // fail again at every attempt.
+    if state.game_end.is_none()
+        && parked_unless_payment_repair(state, &result.waiting_for).is_some()
+    {
+        engine_payment_choices::retire_unreconcilable_parked_unless_payment(state);
+        result.waiting_for = state.waiting_for.clone();
+    }
     bump_state_revision(state);
     sync_waiting_for(state, &result.waiting_for);
     mark_public_state_from_events(state, &result.events);
