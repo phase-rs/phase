@@ -47065,7 +47065,7 @@ fn owner_anchor_does_not_leak_into_following_search_or_shuffle() {
 /// in this PR. The shared anchor applier must leave a subjectless Draw on its
 /// controller; only RevealUntil resolves Owner (through the live-or-LKI seam).
 #[test]
-fn owner_anchor_does_not_bind_a_draw_continuation() {
+fn owner_anchor_binds_draw_through_the_shared_resolver() {
     let mut draw = Effect::Draw {
         count: QuantityExpr::Fixed { value: 1 },
         target: TargetFilter::Controller,
@@ -47075,9 +47075,9 @@ fn owner_anchor_does_not_bind_a_draw_continuation() {
         draw,
         Effect::Draw {
             count: QuantityExpr::Fixed { value: 1 },
-            target: TargetFilter::Controller,
+            target: TargetFilter::Owner,
         },
-        "the owner anchor must not reach Draw's unresolvable Owner reference"
+        "the owner anchor binds Draw now that the shared resolver supports Owner"
     );
 
     // Full parser chain: the carried subject is injected at the shared seam,
@@ -47087,17 +47087,19 @@ fn owner_anchor_does_not_bind_a_draw_continuation() {
         AbilityKind::Activated,
     );
     let mut node = Some(&def);
+    let mut found = false;
     while let Some(def) = node {
         if let Effect::Draw { target, .. } = &*def.effect {
+            found = true;
             assert_eq!(
                 *target,
-                TargetFilter::Controller,
-                "the carried owner subject must not reach Draw"
+                TargetFilter::Owner,
+                "the carried owner subject binds Draw through the shared resolver"
             );
-            return;
         }
         node = def.sub_ability.as_deref();
     }
+    assert!(found, "reach guard: the carried Draw continuation parsed");
 }
 
 /// CR 109.5 + CR 608.2c: a subjectless conjugated continuation can inherit a
