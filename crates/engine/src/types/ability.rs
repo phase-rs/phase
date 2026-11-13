@@ -5845,6 +5845,20 @@ impl ResolvedAbility {
         }
     }
 
+    /// CR 603.3c: carry `source`'s player binding onto this chain as the same kind of binding: a
+    /// phase trigger's turn-player binding stays one (`SpellContext::phase_turn_player`), any
+    /// other stays an instruction's.
+    pub fn carry_player_binding_recursive(&mut self, source: &ResolvedAbility) {
+        let Some(player) = source.scoped_player else {
+            return;
+        };
+        if source.context.phase_turn_player == Some(player) {
+            self.set_phase_turn_player_recursive(player);
+        } else {
+            self.set_scoped_player_recursive(player);
+        }
+    }
+
     /// CR 614.5 + CR 616.1f: Carry replacement application identity through a
     /// post-replacement continuation and any branch/sub-chain it resolves.
     pub fn set_replacement_applied_recursive(&mut self, applied: HashSet<AppliedReplacementKey>) {

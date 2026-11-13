@@ -5316,17 +5316,30 @@ fn settle_entries_at_boundary(
     }
 }
 
-/// CR 608.2c + CR 603.6a: a plain counted repeat ("Populate X times", "Investigate X times") is X
-/// successive instances of its instruction, each its own entry event, so the next occurrence is an
-/// instruction boundary: the entries of the one before it are observed and collected before it
-/// runs. A member- or kind-driven loop ("for each …") is one instruction applied across its
-/// members and is not split here.
+/// CR 608.2c + CR 603.6a: a repeated keyword action ("Populate X times", "Investigate twice",
+/// "Incubate 2 twice") is performed that many times in succession, each performance its own
+/// entry event, so the next occurrence is an instruction boundary: the entries of the one before
+/// it are observed and collected before it runs. Every other repeated entering effect is a
+/// quantity expansion of one instruction ("For each nonland card discarded this way, create a
+/// 1/1 red Elemental creature token" is one simultaneous creation) and is not split.
 fn settle_entries_before_repeat_occurrence(
     state: &mut GameState,
     events: &[GameEvent],
     occurrence: &ResolvedAbility,
 ) {
-    if effect_enters_battlefield(&occurrence.effect) {
+    if matches!(
+        occurrence.effect,
+        // CR 701.36a (populate), CR 701.16a (investigate), CR 701.53a (incubate),
+        // CR 701.62a (manifest dread), CR 701.40a (manifest), CR 701.58a (cloak),
+        // CR 701.47a (amass): each is one action that puts a permanent onto the battlefield.
+        Effect::Populate
+            | Effect::Investigate
+            | Effect::Incubate { .. }
+            | Effect::ManifestDread
+            | Effect::Manifest { .. }
+            | Effect::Cloak { .. }
+            | Effect::Amass { .. }
+    ) {
         settle_entries_at_boundary(state, events, occurrence, None);
     }
 }

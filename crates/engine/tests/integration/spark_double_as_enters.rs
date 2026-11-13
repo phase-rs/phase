@@ -3338,6 +3338,263 @@ mod feldon_tokens {
         }
     }
 
+    const SEASONED_PYROMANCER: &str = "When this creature enters, discard two cards, then draw two cards. For each nonland card discarded this way, create a 1/1 red Elemental creature token.\n{3}{R}{R}, Exile this card from your graveyard: Create two 1/1 red Elemental creature tokens.";
+    const MISTER_FANTASTIC: &str =
+        "Reach\nWhenever one or more tokens you control enter, you may draw a card.";
+
+    /// CR 603.6a + CR 603.2c: Seasoned Pyromancer's "For each nonland card discarded this way,
+    /// create a 1/1 red Elemental creature token" is one creation instruction, although the engine
+    /// runs it as a repeat. With Metallic Mimic (Elemental), Hardened Scales and Branching
+    /// Evolution each Elemental stops on its counter order; the two entries are still one event:
+    /// Mister Fantastic's "one or more tokens" triggers once, and Altar of the Brood once for each
+    /// entrant (the Pyromancer itself and the two Elementals: three mills).
+    #[test]
+    fn a_for_each_token_creation_stays_one_entry_event_across_its_pauses() {
+        for persist in [false, true] {
+            let mut scenario = GameScenario::new();
+            scenario.at_phase(Phase::PreCombatMain);
+            scenario.with_library_top(P0, &["Plains", "Island", "Swamp", "Mountain"]);
+            scenario.with_library_top(
+                P1,
+                &["Plains", "Island", "Swamp", "Mountain", "Forest", "Plains"],
+            );
+            scenario.with_mana_pool(
+                P0,
+                (0..3)
+                    .map(|_| ManaUnit::new(ManaType::Red, ObjectId(0), false, vec![]))
+                    .collect(),
+            );
+            let scales = scenario
+                .add_enchantment_from_oracle(P0, "Hardened Scales", SCALES)
+                .id();
+            scenario.add_enchantment_from_oracle(
+                P0,
+                "Branching Evolution",
+                BRANCHING_EVOLUTION_TEXT,
+            );
+            let mimic = scenario
+                .add_creature_from_oracle(P0, "Metallic Mimic", 2, 1, METALLIC_MIMIC)
+                .as_artifact_creature()
+                .with_subtypes(vec!["Shapeshifter"])
+                .id();
+            let fantastic = scenario
+                .add_creature_from_oracle(
+                    P0,
+                    "Mister Fantastic, Reed Richards",
+                    2,
+                    4,
+                    MISTER_FANTASTIC,
+                )
+                .as_legendary()
+                .id();
+            scenario.add_artifact_from_oracle(P0, "Altar of the Brood", ALTAR_OF_THE_BROOD);
+            let discards: Vec<ObjectId> = (0..2)
+                .map(|_| {
+                    scenario
+                        .add_spell_to_hand_from_oracle(
+                            P0,
+                            "Raise the Alarm",
+                            true,
+                            "Create two 1/1 white Soldier creature tokens.",
+                        )
+                        .id()
+                })
+                .collect();
+            let mut pyromancer = scenario.add_creature_to_hand_from_oracle(
+                P0,
+                "Seasoned Pyromancer",
+                2,
+                2,
+                SEASONED_PYROMANCER,
+            );
+            pyromancer.with_mana_cost(ManaCost::Cost {
+                shards: vec![ManaCostShard::Red, ManaCostShard::Red],
+                generic: 1,
+            });
+            let pyromancer = pyromancer.id();
+            let mut runner = scenario.build();
+            runner
+                .state_mut()
+                .objects
+                .get_mut(&mimic)
+                .unwrap()
+                .chosen_attributes = vec![ChosenAttribute::CreatureType("Elemental".to_string())];
+            let library = runner.state().players[1].library.len();
+            let card_id = runner.state().objects[&pyromancer].card_id;
+            runner
+                .act(GameAction::CastSpell {
+                    object_id: pyromancer,
+                    card_id,
+                    targets: vec![],
+                    payment_mode: CastPaymentMode::Auto,
+                })
+                .expect("cast Seasoned Pyromancer");
+            let (mut orders, mut fantastic_triggers) = (0, 0);
+            for _ in 0..60 {
+                if persist && !matches!(runner.state().waiting_for, WaitingFor::Priority { .. }) {
+                    runner = restore(runner);
+                }
+                match &runner.state().waiting_for {
+                    WaitingFor::ReplacementChoice { candidates, .. } => {
+                        let index = candidates
+                            .iter()
+                            .position(|candidate| candidate.source_id == scales)
+                            .expect("Hardened Scales is offered");
+                        orders += 1;
+                        runner.act(GameAction::ChooseReplacement { index }).unwrap();
+                    }
+                    WaitingFor::DiscardChoice { .. } => {
+                        runner
+                            .act(GameAction::SelectCards {
+                                cards: discards.clone(),
+                            })
+                            .unwrap();
+                    }
+                    WaitingFor::OptionalEffectChoice { source_id, .. } => {
+                        assert_eq!(*source_id, fantastic);
+                        fantastic_triggers += 1;
+                        runner
+                            .act(GameAction::DecideOptionalEffect { accept: false })
+                            .unwrap();
+                    }
+                    WaitingFor::OrderTriggers { triggers, .. } => {
+                        let order = (0..triggers.len()).collect();
+                        runner.act(GameAction::OrderTriggers { order }).unwrap();
+                    }
+                    WaitingFor::Priority { .. } if runner.state().stack.is_empty() => break,
+                    WaitingFor::Priority { .. } => {
+                        runner.act(GameAction::PassPriority).unwrap();
+                    }
+                    other => panic!("unexpected prompt: {other:?}"),
+                }
+            }
+            assert!(runner.state().deferred_triggers.is_empty());
+            let elementals = runner
+                .state()
+                .objects
+                .values()
+                .filter(|object| {
+                    object.is_token
+                        && object.zone == Zone::Battlefield
+                        && object.name == "Elemental"
+                })
+                .count();
+            assert_eq!(elementals, 2, "restore: {persist}");
+            assert_eq!(
+                orders, 2,
+                "one counter order per Elemental (restore: {persist})"
+            );
+            assert_eq!(
+                fantastic_triggers, 1,
+                "one \"one or more tokens\" event (restore: {persist})"
+            );
+            assert_eq!(
+                library - runner.state().players[1].library.len(),
+                3,
+                "the Pyromancer and each Elemental (restore: {persist})"
+            );
+        }
+    }
+
+    const BLACK_MARKET_CONNECTIONS: &str = "At the beginning of your first main phase, choose one or more —\n• Sell Contraband — Create a Treasure token. You lose 1 life.\n• Buy Information — Draw a card. You lose 2 life.\n• Hire a Mercenary — Create a 3/2 colorless Shapeshifter creature token with changeling. You lose 3 life. (It is every creature type.)";
+    const RIGHTEOUS_VALKYRIE: &str = "Flying\nWhenever another Angel or Cleric you control enters, you gain life equal to that creature's toughness.\nAs long as you have at least 7 life more than your starting life total, creatures you control get +2/+2.";
+    const WHERE_ANCIENTS_TREAD: &str = "Whenever a creature you control with power 5 or greater enters, you may have this enchantment deal 5 damage to any target.";
+
+    /// Black Market Connections' "Hire a Mercenary" mode ("Create a 3/2 colorless Shapeshifter
+    /// creature token with changeling. You lose 3 life.") chosen at the beginning of the first
+    /// main phase, with Righteous Valkyrie ("As long as you have at least 7 life more than your
+    /// starting life total, creatures you control get +2/+2.") and Where Ancients Tread, starting
+    /// at `life`. Returns the number of Where Ancients Tread triggers.
+    fn hired_mercenary_ancients_triggers(life: i32, persist: bool) -> usize {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::Draw);
+        scenario.with_library_top(P0, &["Plains", "Island", "Swamp", "Mountain"]);
+        scenario.with_library_top(P1, &["Plains", "Island", "Swamp", "Mountain"]);
+        scenario.with_life(P0, life);
+        scenario.add_enchantment_from_oracle(
+            P0,
+            "Black Market Connections",
+            BLACK_MARKET_CONNECTIONS,
+        );
+        scenario
+            .add_creature_from_oracle(P0, "Righteous Valkyrie", 4, 4, RIGHTEOUS_VALKYRIE)
+            .with_subtypes(vec!["Angel", "Cleric"]);
+        scenario.add_enchantment_from_oracle(P0, "Where Ancients Tread", WHERE_ANCIENTS_TREAD);
+        let mut runner = scenario.build();
+        let mut triggers = 0;
+        let mut mode_choices = 0;
+        for _ in 0..40 {
+            if persist && !matches!(runner.state().waiting_for, WaitingFor::Priority { .. }) {
+                runner = restore(runner);
+            }
+            match &runner.state().waiting_for {
+                WaitingFor::AbilityModeChoice { .. } => {
+                    mode_choices += 1;
+                    runner
+                        .act(GameAction::SelectModes { indices: vec![2] })
+                        .unwrap();
+                }
+                WaitingFor::TriggerTargetSelection { .. } => {
+                    triggers += 1;
+                    runner
+                        .act(GameAction::ChooseTarget {
+                            target: Some(TargetRef::Player(P1)),
+                        })
+                        .unwrap();
+                }
+                WaitingFor::OptionalEffectChoice { .. } => {
+                    runner
+                        .act(GameAction::DecideOptionalEffect { accept: true })
+                        .unwrap();
+                }
+                WaitingFor::OrderTriggers { triggers, .. } => {
+                    let order = (0..triggers.len()).collect();
+                    runner.act(GameAction::OrderTriggers { order }).unwrap();
+                }
+                WaitingFor::Priority { .. }
+                    if runner.state().stack.is_empty() && mode_choices == 1 =>
+                {
+                    break
+                }
+                WaitingFor::Priority { .. } => {
+                    runner.act(GameAction::PassPriority).unwrap();
+                }
+                other => panic!("unexpected prompt: {other:?}"),
+            }
+        }
+        assert_eq!(mode_choices, 1, "the modes were chosen once");
+        assert_eq!(runner.state().phase, Phase::PreCombatMain);
+        let mercenary = runner
+            .state()
+            .objects
+            .values()
+            .find(|object| object.is_token && object.name == "Shapeshifter")
+            .expect("the Mercenary entered");
+        assert_eq!(mercenary.zone, Zone::Battlefield);
+        triggers
+    }
+
+    /// CR 603.3c + CR 603.6a + CR 608.2c: the modes chosen for a phase trigger keep its binding to
+    /// the turn player as the phase's own, so the mode's token instruction is a boundary. At 29
+    /// life the Mercenary enters as a 5/4 under Righteous Valkyrie and the mode's "You lose 3
+    /// life" then turns the bonus off: Where Ancients Tread sees the 5/4 that entered. Control:
+    /// at 20 life it enters as a 3/2.
+    #[test]
+    fn a_modal_phase_triggers_later_instruction_does_not_change_what_its_entry_matches() {
+        for persist in [false, true] {
+            assert_eq!(
+                hired_mercenary_ancients_triggers(29, persist),
+                1,
+                "the Mercenary entered as a 5/4 (restore: {persist})"
+            );
+            assert_eq!(
+                hired_mercenary_ancients_triggers(20, persist),
+                0,
+                "control: the Mercenary entered as a 3/2 (restore: {persist})"
+            );
+        }
+    }
+
     const FULL_FLOWERING: &str = "Populate X times. (To populate, create a token that's a copy of a creature token you control. Do this X times.)";
     const PHYREXIAN_METAMORPH: &str = "You may have this creature enter as a copy of any artifact or creature on the battlefield, except it's an artifact in addition to its other types.";
     const SERRATED_ARROWS: &str = "This artifact enters with three arrowhead counters on it.\nAt the beginning of your upkeep, if there are no arrowhead counters on this artifact, sacrifice it.\n{T}, Remove an arrowhead counter from this artifact: Put a -1/-1 counter on target creature.";

@@ -2146,7 +2146,7 @@ pub(crate) fn exact_battlefield_departure_row(
 impl GameState {
     /// CR 608.2c + CR 603.6a: which instruction recorded the ledger row at `ledger_index`: the
     /// number of instruction boundaries at or below it. Rows with the same value were recorded
-    /// between the same two boundaries (one instruction, or one occurrence of a counted repeat),
+    /// between the same two boundaries (one instruction, or one performance of a repeated keyword action),
     /// so a battlefield entry among them is treated as part of the same simultaneous entry
     /// event as the others (every permanent, newcomers included, is checked against it).
     pub(crate) fn instruction_of_zone_change(&self, ledger_index: usize) -> usize {
@@ -25576,10 +25576,10 @@ declare_game_state! {
     /// (`triggers::battlefield_entry_in_progress`: a rider chain run inside an entry has
     /// boundaries of its own) and no paused player-scope clause is between seat legs resuming
     /// under its sidecar (`resolving_player_scope_tail`: CR 101.4 makes its seats' actions one
-    /// event). A plain counted repeat of an entering instruction ("Populate X times") is X
-    /// successive instructions, so each occurrence after the first is a boundary too
-    /// (`effects::settle_entries_before_repeat_occurrence`); a "for each" loop is one
-    /// instruction. The marks cut the ledger into instructions: rows between two marks were
+    /// event). A repeated keyword action ("Populate X times", "Investigate twice") is
+    /// performed that many times in succession, so each occurrence after the first is a
+    /// boundary too (`effects::settle_entries_before_repeat_occurrence`); any other repeated
+    /// entering effect ("for each …, create …") is one instruction. The marks cut the ledger into instructions: rows between two marks were
     /// recorded by one instruction, so every battlefield entry among them is treated as one
     /// simultaneous entry event
     /// ([`GameState::instruction_of_zone_change`]), and every entry below the last mark is a
