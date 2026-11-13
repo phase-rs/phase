@@ -1786,7 +1786,8 @@ pub fn validate_poison_counter_threshold(config: &FormatConfig) -> Result<(), St
 /// variant life totals, CR 806's rule-free Free-for-All deck construction,
 /// and the seat count no CR fixes (CR 100.1a / CR 100.1b / CR 800.1 fix only
 /// that a game begins with two players or with more than two). Re-derive the
-/// authoritative config with `FormatConfig::for_format` and check every one
+/// authoritative config with `FormatConfig::for_format` (for a Horde,
+/// `FormatConfig::horde` of its declared ruleset) and check every one
 /// of this struct's fields against it under one of six verdicts:
 ///
 /// - Locked: must equal the registry value exactly.
@@ -1823,17 +1824,14 @@ pub fn validate_poison_counter_threshold(config: &FormatConfig) -> Result<(), St
 /// blanket equality because no Custom payload has ever been accepted at this
 /// boundary and there are therefore no legacy Custom payloads to keep
 /// compatible with. This function is the built-in half of the same idea.
-/// The `uses_commander` a built-in config must carry: a Horde reads its
-/// survivors' deck format, every other built-in reads its `GameFormat`.
-fn derived_built_in_uses_commander(config: &FormatConfig) -> Result<bool, String> {
-    match (config.format, &config.horde_ruleset) {
-        (GameFormat::Horde, Some(ruleset)) => Ok(ruleset.survivor_deck_format.uses_commander()),
-        (format, _) => format.uses_commander().map_err(|e| e.0),
-    }
-}
-
 fn built_in_axes_no_looser_than_rules(config: &FormatConfig) -> Result<(), String> {
-    let rules = FormatConfig::for_format(config.format).map_err(|e| e.0)?;
+    // A Horde's survivors' deck format decides its deck and commander axes, so
+    // it is held to the config its declared ruleset builds, not the registry's
+    // single Horde default.
+    let rules = match (config.format, &config.horde_ruleset) {
+        (GameFormat::Horde, Some(ruleset)) => FormatConfig::horde(ruleset.clone()),
+        (format, _) => FormatConfig::for_format(format).map_err(|e| e.0)?,
+    };
 
     // format: Locked — discharged by construction. `config.format` is the
     // very key `for_format` was looked up by, so equality is tautological.
@@ -2109,7 +2107,7 @@ fn built_in_axes_no_looser_than_rules(config: &FormatConfig) -> Result<(), Strin
 
     // uses_commander: Derived from format — independent of the threshold
     // (CR 903.12h: Brawl stays a Commander variant without CR 704.6c).
-    let derived_uses_commander = derived_built_in_uses_commander(config)?;
+    let derived_uses_commander = rules.uses_commander;
     if config.uses_commander != derived_uses_commander {
         return Err(format!(
             "FormatConfig.uses_commander is {}, but {} derives {} — uses_commander must always \
@@ -5467,11 +5465,15 @@ mod tests {
         assert!(round_trip(&commander).is_err());
     }
 
-    /// The Derived `uses_commander` row accepts every config the engine builds:
-    /// each registry default and each challenge deck's Horde config, whose
-    /// survivors decide it.
+    /// The built-in validator accepts every config the engine builds: each
+    /// registry default and each challenge deck's Horde config, whose
+    /// survivors decide its deck and commander axes.
     #[test]
-    fn derived_uses_commander_matches_every_engine_built_config() {
+    fn every_engine_built_config_round_trips() {
+        let round_trip = |config: &FormatConfig| {
+            serde_json::from_value::<FormatConfig>(serde_json::to_value(config).unwrap())
+                .map_err(|e| e.to_string())
+        };
         let configs: Vec<FormatConfig> = ChallengeDeck::ALL
             .iter()
             .map(|deck| FormatConfig::horde(deck.default_ruleset()))
@@ -5489,13 +5491,43 @@ mod tests {
         );
         for config in configs {
             assert_eq!(
-                derived_built_in_uses_commander(&config),
-                Ok(config.uses_commander),
+                round_trip(&config).as_ref(),
+                Ok(&config),
                 "{:?} {:?}",
                 config.format,
                 config.horde_ruleset.as_ref().map(|r| r.challenge_deck),
             );
         }
+    }
+
+    /// A Horde payload is held to the config its own declared ruleset builds,
+    /// so each axis looser than that config is refused on that axis.
+    #[test]
+    fn horde_payload_looser_than_its_declared_ruleset_is_rejected() {
+        let rejection = |config: &FormatConfig| {
+            serde_json::from_value::<FormatConfig>(serde_json::to_value(config).unwrap())
+                .unwrap_err()
+                .to_string()
+        };
+        let sauron = FormatConfig::horde(ChallengeDeck::SauronHorde.default_ruleset());
+        assert!(
+            sauron.uses_commander,
+            "reach-guard: Sauron seats Commander survivors"
+        );
+
+        // Every deck/commander axis copied from the Cyberman config, keeping the Sauron ruleset.
+        let mut cyberman_axes = FormatConfig::horde(ChallengeDeck::CybermanHorde.default_ruleset());
+        cyberman_axes.horde_ruleset = sauron.horde_ruleset.clone();
+        cyberman_axes.uses_commander = true;
+        assert!(rejection(&cyberman_axes).contains("FormatConfig.deck_size"));
+
+        let mut no_threshold = sauron.clone();
+        no_threshold.commander_damage_threshold = None;
+        assert!(rejection(&no_threshold).contains("FormatConfig.commander_damage_threshold"));
+
+        let mut unlimited_copies = sauron.clone();
+        unlimited_copies.default_deck_copy_limit = DeckCopyLimit::Unlimited;
+        assert!(rejection(&unlimited_copies).contains("FormatConfig.default_deck_copy_limit"));
     }
 
     #[test]
