@@ -10287,11 +10287,13 @@ mod tests {
         assert_eq!(assess_candidate(&ctx), GateDecision::Reject);
     }
 
-    /// P0 at 2 life casts a real Giant Growth with Gev, Scaled Scorch ("Ward—Pay
-    /// 2 life.") and Grizzly Bears on the battlefield. Returns whether the gate
-    /// keeps each target and whether the chooser picks Gev on seeds 0..4.
+    /// P0 casts a real Giant Growth with Gev, Scaled Scorch ("Ward—Pay 2 life.")
+    /// and Grizzly Bears on the battlefield, with `life` as both its seat's and
+    /// its team's life total. Returns whether the gate keeps each target and
+    /// whether the chooser picks Gev on seeds 0..4.
     fn ward_pump_target_verdict(
         format: Option<engine::types::format::FormatConfig>,
+        life: i32,
         gev_controller: PlayerId,
         bears_controller: PlayerId,
     ) -> (bool, bool, Vec<bool>) {
@@ -10308,10 +10310,14 @@ mod tests {
             scenario.add_real_card(bears_controller, "Grizzly Bears", Zone::Battlefield, db);
         let growth = scenario.add_real_card(P0, "Giant Growth", Zone::Hand, db);
         scenario.with_mana_pool(P0, pooled_mana(ManaType::Green, 1));
-        scenario.with_life(P0, 2);
         let mut runner = scenario.build();
         {
             let state = runner.state_mut();
+            // Zero every teammate seat so the team's shared life equals P0's seat.
+            for mate in engine::game::players::teammates(state, P0) {
+                state.players[mate.0 as usize].life = 0;
+            }
+            state.players[0].life = life;
             state.active_player = P0;
             state.priority_player = P0;
             state.waiting_for = WaitingFor::Priority { player: P0 };
@@ -10330,7 +10336,8 @@ mod tests {
             state.waiting_for,
             WaitingFor::TargetSelection { .. }
         ));
-        assert_eq!(state.players[0].life, 2);
+        assert_eq!(state.players[0].life, life);
+        assert_eq!(engine::game::players::team_life_total(&state, P0), life);
         assert!(state.objects[&gev]
             .keywords
             .contains(&Keyword::Ward(WardCost::PayLife(2))));
@@ -10380,30 +10387,45 @@ mod tests {
     /// warded creature is a free pump target even when it cannot pay the cost.
     #[test]
     fn keeps_own_warded_target_it_cannot_pay_for() {
-        let (gev_kept, bears_kept, gev_picks) = ward_pump_target_verdict(None, P0, P1);
+        let (gev_kept, bears_kept, gev_picks) = ward_pump_target_verdict(None, 2, P0, P1);
         assert!(gev_kept);
         assert!(bears_kept);
         assert_eq!(gev_picks, [true; 4]);
     }
 
     /// CR 702.21a + CR 102.3: a 2HG teammate is not an opponent, so the
-    /// teammate's warded creature is a free pump target.
+    /// teammate's warded creature is a free pump target even though the team's
+    /// shared life (CR 119.4a) cannot pay 2.
     #[test]
     fn keeps_teammates_warded_target_it_cannot_pay_for() {
         let format = engine::types::format::FormatConfig::two_headed_giant();
         let table = GameState::new(format.clone(), 4, 7);
         assert!(!engine::game::players::is_opponent(&table, PlayerId(1), P0));
         let (gev_kept, bears_kept, gev_picks) =
-            ward_pump_target_verdict(Some(format), PlayerId(1), PlayerId(2));
+            ward_pump_target_verdict(Some(format), 1, PlayerId(1), PlayerId(2));
         assert!(gev_kept);
         assert!(bears_kept);
         assert_eq!(gev_picks, [true; 4]);
     }
 
+    /// CR 702.21a + CR 119.4a: an opposing 2HG team's ward still rejects the
+    /// target when the AI's team's shared life cannot pay 2.
+    #[test]
+    fn rejects_opposing_teams_warded_target_its_team_cannot_pay_for() {
+        let format = engine::types::format::FormatConfig::two_headed_giant();
+        let table = GameState::new(format.clone(), 4, 7);
+        assert!(engine::game::players::is_opponent(&table, PlayerId(2), P0));
+        let (gev_kept, bears_kept, gev_picks) =
+            ward_pump_target_verdict(Some(format), 1, PlayerId(2), PlayerId(3));
+        assert!(!gev_kept);
+        assert!(bears_kept);
+        assert_eq!(gev_picks, [false; 4]);
+    }
+
     /// CR 702.21a: an opponent's unpayable ward still rejects the target.
     #[test]
     fn still_rejects_opponents_warded_target_it_cannot_pay_for() {
-        let (gev_kept, bears_kept, gev_picks) = ward_pump_target_verdict(None, P1, P0);
+        let (gev_kept, bears_kept, gev_picks) = ward_pump_target_verdict(None, 2, P1, P0);
         assert!(!gev_kept);
         assert!(bears_kept);
         assert_eq!(gev_picks, [false; 4]);
