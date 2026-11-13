@@ -60262,7 +60262,8 @@ mod tests {
     ///
     /// NOTE the negative slice: it is the event trail the resolver ACTUALLY
     /// emits on a no-op (a lone `EffectResolved { ExchangeControl }`), not an
-    /// empty slice. An empty slice is never produced in production.
+    /// empty slice. An empty slice is never produced in production, and using one would let a
+    /// regression that keys on `EffectResolved` pass here.
     #[test]
     fn exchange_control_performed_tracks_controller_changed_event() {
         let exchange = exchange_control_effect();
