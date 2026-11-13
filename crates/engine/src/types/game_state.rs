@@ -35749,6 +35749,7 @@ impl GameState {
                     (!history.is_empty()).then_some((object_id, history))
                 })
                 .collect();
+        clone.retain_observable_fighters();
         clone.canonicalize_loop_identities();
         clone
     }
@@ -35842,6 +35843,27 @@ impl GameState {
                 (!history.is_empty()).then_some((object_id, history))
             })
             .collect();
+    }
+
+    /// CR 701.14a + CR 400.7: a fight entry is read only for the live object at the incarnation
+    /// that fought, or through a carried zone-change record's departing identity; any other
+    /// entry is spent history, not position.
+    fn retain_observable_fighters(&mut self) {
+        let mut recorded = HashSet::new();
+        self.for_each_trigger_event_carrier_mut(&mut |event| {
+            if let GameEvent::ZoneChanged { record, .. } = event {
+                if let Some(context) = record.trigger_source_context() {
+                    recorded.insert(context.identity.reference);
+                }
+            }
+        });
+        let objects = &self.objects;
+        self.creatures_fought_this_turn.retain(|fighter| {
+            recorded.contains(fighter)
+                || objects
+                    .get(&fighter.object_id)
+                    .is_some_and(|object| ObjectIncarnationRef::from_object(object) == *fighter)
+        });
     }
 
     /// CR 104.4b + CR 608.2h: keeps only the `departed_stack_spells` records a spell-cast
@@ -35965,7 +35987,8 @@ impl GameState {
     /// `lki_copiable_values_by_incarnation` keys, the incarnations trigger
     /// events name (`ZoneChanged` entries and every incarnation inside their
     /// records, stamped `PermanentTapped` taps), the may-trigger origins and
-    /// stored answers, the turn and combat block-history pairs (CR 509.1g), and
+    /// stored answers, the turn and combat block-history pairs (CR 509.1g), the
+    /// kept fight entries (CR 701.14a), and
     /// the live incarnation of every object those or a tracked-set origin
     /// (CR 608.2c) name. Ranks count down from the
     /// highest member, so the live incarnation anchors them: two positions
@@ -36422,6 +36445,12 @@ impl GameState {
                 },
             );
         }
+        for fighter in self.creatures_fought_this_turn.iter() {
+            present
+                .entry(fighter.object_id)
+                .or_default()
+                .push(fighter.incarnation);
+        }
         for (object_id, generations) in grants.iter_mut() {
             if let Some(object) = self.objects.get(object_id) {
                 generations.extend(
@@ -36591,6 +36620,13 @@ impl GameState {
                 &mut combat.creature_blocked_attackers_this_combat,
             ));
         }
+        self.creatures_fought_this_turn = std::mem::take(&mut self.creatures_fought_this_turn)
+            .into_iter()
+            .map(|fighter| {
+                let incarnation = canonical(fighter.object_id, fighter.incarnation);
+                ObjectIncarnationRef::of(fighter.object_id, incarnation)
+            })
+            .collect();
         // CR 613.1f + CR 104.4b: a grant generation, relative to the recipient's current grants, is position too.
         may_trigger_origins(self, &mut |definition_ref| {
             definition_ref.for_each_incarnation_mut(&mut |object_id, incarnation| {
@@ -50005,6 +50041,45 @@ mod tests {
         assert!(
             normalized_equal(&stale, &stale.clone()),
             "control: identical twins"
+        );
+    }
+
+    /// An object live at `live` whose fight entry, at `fought`, sits beside a carried record
+    /// naming `named`.
+    fn fight_ledger_naming(live: u64, named: u64, fought: u64) -> GameState {
+        let (mut state, x) = records_naming(live, &[named]);
+        state
+            .creatures_fought_this_turn
+            .insert(ObjectIncarnationRef::of(x, fought));
+        state
+    }
+
+    /// CR 701.14a + CR 400.7: a fight entry the carried record names is ranked with it, so a
+    /// later mint compares equal, while an entry naming the live object stays distinct.
+    #[test]
+    fn normalize_for_loop_ranks_fight_ledger_incarnations() {
+        let early = fight_ledger_naming(3, 2, 2);
+        let late = fight_ledger_naming(8, 7, 7);
+        assert_ne!(early, late, "reach guard: the raw positions differ");
+        assert!(normalized_equal(&early, &late));
+        assert!(!normalized_equal(&early, &fight_ledger_naming(3, 2, 3)));
+        let normalized = early.normalize_for_loop();
+        let StackEntryKind::TriggeredAbility {
+            trigger_event: Some(GameEvent::ZoneChanged { record, .. }),
+            ..
+        } = &normalized.stack[0].kind
+        else {
+            unreachable!("the fixture's trigger carries a zone change");
+        };
+        let named = record
+            .trigger_source_context
+            .as_ref()
+            .unwrap()
+            .identity
+            .reference;
+        assert_eq!(
+            normalized.creatures_fought_this_turn,
+            HashSet::from([named])
         );
     }
 

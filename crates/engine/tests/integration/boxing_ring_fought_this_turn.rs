@@ -2,15 +2,20 @@
 //! turn" (CR 602.5 + CR 701.14a/b): the per-turn fight ledger and
 //! `FilterProp::FoughtThisTurn`.
 
-use engine::game::engine::EngineError;
+use engine::analysis::resource::loop_states_equal_modulo_resources;
+use engine::game::engine::{apply, EngineError};
 use engine::game::game_object::ObjectIncarnationRefExt;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
+use engine::game::scenario_db::GameScenarioDbExt;
 use engine::types::ability::TargetRef;
 use engine::types::actions::GameAction;
-use engine::types::game_state::{CastPaymentMode, WaitingFor};
+use engine::types::game_state::{CastPaymentMode, GameState, WaitingFor};
 use engine::types::identifiers::{ObjectId, ObjectIncarnationRef};
+use engine::types::mana::ManaColor;
 use engine::types::phase::Phase;
 use engine::types::zones::Zone;
+
+use crate::support::shared_card_db;
 
 const BOXING_RING: &str = "Whenever a creature you control enters, it fights up to one target creature you don't control with the same mana value.\n{T}: Create a Treasure token. Activate only if you control a creature that fought this turn.";
 const PREY_UPON: &str = "Target creature you control fights target creature you don't control. (Each deals damage equal to its power to the other.)";
@@ -290,4 +295,101 @@ fn an_ineligible_fighter_records_nothing() {
     assert_eq!(state.objects[&theirs].zone, Zone::Battlefield);
     assert_eq!(state.objects[&theirs].damage_marked, 0);
     assert!(state.stack.is_empty());
+}
+
+/// `frame` without `fighter`'s fight entry.
+fn without(frame: &GameState, fighter: ObjectIncarnationRef) -> GameState {
+    let mut state = frame.clone();
+    assert!(state.creatures_fought_this_turn.remove(&fighter));
+    state
+}
+
+/// CR 602.5: whether Boxing Ring's activation may begin in `frame`.
+fn ring_allowed(frame: &GameState, ring: ObjectId) -> bool {
+    let mut state = frame.clone();
+    match apply(
+        &mut state,
+        P0,
+        GameAction::ActivateAbility {
+            source_id: ring,
+            ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
+        },
+    ) {
+        Ok(_) => true,
+        Err(EngineError::ActionNotAllowed(m))
+            if m.starts_with("Activation restriction not satisfied") =>
+        {
+            false
+        }
+        Err(e) => panic!("{e:?}"),
+    }
+}
+
+/// CR 701.14a + CR 400.7 + CR 602.5: a sacrificed fighter is a new object Boxing Ring can no
+/// longer see, so its entry is not loop position unless a carried trigger still names it, while
+/// a live fighter's entry is.
+#[test]
+fn spent_fight_history_is_not_position_but_an_observable_fighter_is() {
+    let db = shared_card_db().expect("the card fixture");
+    let mut s = GameScenario::new();
+    s.at_phase(Phase::PreCombatMain);
+    let ring = s
+        .add_artifact_from_oracle(P0, "Boxing Ring", BOXING_RING)
+        .id();
+    let bears = s.add_real_card(P0, "Grizzly Bears", Zone::Battlefield, db);
+    let memnite = s.add_real_card(P0, "Memnite", Zone::Battlefield, db);
+    let altar = s.add_real_card(P0, "Ashnod's Altar", Zone::Battlefield, db);
+    s.add_real_card(P0, "Blood Artist", Zone::Battlefield, db);
+    let preys = [(); 2].map(|()| s.add_real_card(P0, "Prey Upon", Zone::Hand, db));
+    for _ in 0..2 {
+        s.add_basic_land(P0, ManaColor::Green);
+    }
+    let myr = s.add_real_card(P1, "Darksteel Myr", Zone::Battlefield, db);
+    s.with_library_top(P0, &["Card A", "Card B"]);
+    s.with_library_top(P1, &["Card C", "Card D"]);
+    let mut r = s.build();
+    for (prey, mine) in preys.into_iter().zip([bears, memnite]) {
+        r.cast(prey).target_objects(&[mine, myr]).resolve();
+    }
+    let observable = incarnation(&r, bears);
+    let spent = incarnation(&r, memnite);
+    assert!(r.state().creatures_fought_this_turn.contains(&spent));
+    r.act(GameAction::ActivateAbility {
+        source_id: altar,
+        ability_index: 0,
+        payment_mode: CastPaymentMode::Auto,
+    })
+    .expect("Ashnod's Altar activates");
+    for _ in 0..10 {
+        let action = match &r.state().waiting_for {
+            WaitingFor::PayCost { .. } => GameAction::SelectCards {
+                cards: vec![memnite],
+            },
+            WaitingFor::TriggerTargetSelection { .. } | WaitingFor::TargetSelection { .. } => {
+                GameAction::ChooseTarget {
+                    target: Some(TargetRef::Player(P1)),
+                }
+            }
+            _ => break,
+        };
+        r.act(action).expect("the prompt is answered");
+    }
+    assert!(!r.state().stack.is_empty(), "{:?}", r.state().waiting_for);
+    let carried = r.state().clone();
+    r.advance_until_stack_empty();
+    let settled = r.state().clone();
+
+    let table = [spent, observable].map(|fighter| {
+        let state = without(&settled, fighter);
+        (
+            ring_allowed(&state, ring),
+            loop_states_equal_modulo_resources(&settled, &state),
+        )
+    });
+    assert_eq!(table, [(true, true), (false, false)]);
+    assert!(!loop_states_equal_modulo_resources(
+        &carried,
+        &without(&carried, spent)
+    ));
 }
