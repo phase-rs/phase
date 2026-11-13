@@ -3,6 +3,7 @@ import type { MatchConfig } from "./types";
 import type {
   LlmDraftOutcome,
   LlmDraftPickRequest,
+  LlmHttpRequestSpec,
 } from "../services/llm/types";
 
 /** One seat's LLM reply, handed back to the engine to resolve into a pick. */
@@ -399,6 +400,12 @@ export interface DraftProgressFields {
   pick_steps_per_pack: number;
   pack_count: number;
   pass_direction: "Left" | "Right";
+  /** The view's transport flow. Present only on a FIFO view; a legacy view omits it. */
+  flow?: "FifoAsync";
+  /** A player view's FIFO record or a spectator view's public FIFO state. */
+  fifo?: FifoPlayerView | FifoPublicView;
+  /** Every seat's public state; on a FIFO view each seat carries its own progress. */
+  seats?: readonly SeatPublicView[];
 }
 
 // @sync-with: crates/draft-core/src/view.rs
@@ -634,24 +641,102 @@ export interface LegacyDraftViewArm {
   fifo?: undefined;
 }
 
+/**
+ * A FIFO player view carries its FIFO data: the contract the core publishes.
+ * `isFifoPlayerView` stays the wire validator, and the presentation reads a
+ * received view's FIFO data only after that check passes.
+ */
 export interface FifoPlayerDraftViewArm {
   flow: "FifoAsync";
   fifo: FifoPlayerView;
 }
 
-/**
- * Compatibility input for existing fixture-facing view values.  Complete FIFO
- * views retain the arm above; consumers must still call `isFifoPlayerView`
- * before treating this partial wire shape as actionable.
- */
-export interface FifoPlayerDraftViewCompatibilityArm {
-  flow?: "FifoAsync";
-  fifo?: FifoPlayerView;
-}
-
 export interface FifoSpectatorDraftViewArm {
   flow: "FifoAsync";
   fifo: FifoPublicView;
+}
+
+/**
+ * The owner draft-wasm issues to the local FIFO runtime's session on a local
+ * start or import. Only an engine answer mints one; every local FIFO export
+ * refuses any other.
+ */
+export type LocalFifoOwner = number & { readonly __brand: "LocalFifoOwner" };
+
+/**
+ * What a local start (`start_quick_draft`, `start_quick_cube_draft`) or
+ * `import_local_fifo_session` returns: the issued owner and seat 0's view.
+ */
+export interface LocalFifoSession {
+  owner: LocalFifoOwner;
+  view: DraftPlayerView;
+}
+
+// @sync-with: crates/draft-wasm/src/lib.rs
+/**
+ * The local human's composed selection on one prompt, exactly the four fields
+ * the engine accepts. It names no seat: the seat is the owner's.
+ */
+export interface LocalFifoSelection {
+  prompt_id: FifoPromptId;
+  picked_card_instance_ids: string[];
+  burned_card_instance_ids: string[];
+  effect_card_instance_ids: string[];
+}
+
+// @sync-with: crates/draft-wasm/src/lib.rs
+/** Whether the local runtime's bot seats are LLM drafters, as declared to the engine. */
+export type LocalFifoLlmDrafting = "EngineBots" | "LlmSeats";
+
+// @sync-with: crates/draft-wasm/src/lib.rs
+/**
+ * One head an LLM seat's drafter is answering: the engine-built request, or
+ * the engine's reason it could not build one. Every held head is listed.
+ */
+export type LocalFifoLlmPickRequest =
+  | {
+      kind: "request";
+      seat: number;
+      promptId: FifoPromptId;
+      fingerprint: string;
+      optionCount: number;
+      requiredPickCount: number;
+      /** Characters of prompt the request carries (system + user). */
+      promptChars: number;
+      request: LlmHttpRequestSpec;
+    }
+  | { kind: "unbuildable"; seat: number; promptId: FifoPromptId; error: string };
+
+// @sync-with: crates/draft-wasm/src/lib.rs
+/**
+ * One LLM seat's reply, bound to the prompt its request carried. It names no
+ * seat: the seat is the prompt's. `reply` is `null` when no reply came back.
+ */
+export interface LocalFifoLlmPickResolution {
+  promptId: FifoPromptId;
+  reply: { fingerprint: string; provider: string; status: number; body: string } | null;
+}
+
+/**
+ * Which draft-wasm runtime holds the Quick route's session: the legacy
+ * runtime, or the local FIFO runtime under the owner it issued.
+ */
+export type LocalDraftRuntime =
+  | { readonly kind: "legacy" }
+  | { readonly kind: "local-fifo"; readonly owner: LocalFifoOwner };
+
+/**
+ * The session operations both Quick runtimes serve, bound to one runtime by
+ * `DraftEngineOperationLease.quickSession`. `nowMs` is read by the local FIFO
+ * runtime only.
+ */
+export interface QuickDraftSession {
+  exportSession(): string;
+  boosterPackPoolForGame(): string[] | null;
+  botDeck(botSeat: number): SuggestedDeck;
+  suggestDeck(): SuggestedDeck;
+  suggestLands(spells: string[]): Record<string, number>;
+  submitDeck(mainDeck: string[], commanders: string[], nowMs: number): DraftPlayerView;
 }
 
 export type DraftViewPodPhase =
@@ -669,6 +754,17 @@ export interface DraftViewPresentation {
   podPhase: DraftViewPodPhase;
   isReadOnly: boolean;
 }
+
+/** Where a view stands in the current round, read from what the engine publishes. */
+export type DraftProgressPresentation =
+  /** A legacy view: `pick_number`, the steps every seat has completed together. */
+  | { kind: "pod"; completedSteps: number }
+  /** A FIFO player view: the seat's own steps this round, its queued packs, and whether it holds a pack. */
+  | { kind: "seat"; completedSteps: number; queuedPacks: number; holdsHead: boolean }
+  /** A FIFO spectator view: each seat's own steps this round. */
+  | { kind: "seats"; seats: readonly { seatIndex: number; completedSteps: number }[] }
+  /** A view that claims FIFO and fails the wire check: it publishes no position. */
+  | { kind: "unavailable" };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object";
@@ -696,20 +792,28 @@ function isFifoClock(value: unknown): value is FifoClock {
   return validTarget && validState;
 }
 
-function isFifoPlayerView(view: DraftPlayerView): view is DraftPlayerViewFields & FifoPlayerDraftViewArm {
-  if (view.flow !== "FifoAsync" || !isRecord(view.fifo)) return false;
-  const fifo = view.fifo;
-  const state = fifo.state;
-  const paused = isRecord(state) ? state.paused : undefined;
+/** The public FIFO state a player view nests and a spectator view publishes directly. */
+function isFifoPublicState(value: unknown): value is FifoPublicView {
+  if (!isRecord(value)) return false;
+  const paused = value.paused;
   const validPause = paused === null || (isRecord(paused)
     && (paused.phase === "Drafting" || paused.phase === "Review")
     && typeof paused.reason === "string");
-  const validHead = fifo.head === null || (isRecord(fifo.head)
-    && isCount(fifo.head.pack_id)
-    && isCount(fifo.head.opening_seat)
-    && isCount(fifo.head.round)
-    && isCount(fifo.head.original_size));
-  const effects = fifo.effects;
+  return typeof value.session_id === "string"
+    && isCount(value.revision)
+    && validPause
+    && (value.review_clock === null || isFifoClock(value.review_clock));
+}
+
+/** A player view's FIFO record: its seat's progress, queue, head, prompt and options. */
+function isFifoPlayerData(value: unknown): value is FifoPlayerView {
+  if (!isRecord(value)) return false;
+  const validHead = value.head === null || (isRecord(value.head)
+    && isCount(value.head.pack_id)
+    && isCount(value.head.opening_seat)
+    && isCount(value.head.round)
+    && isCount(value.head.original_size));
+  const effects = value.effects;
   const validEffects = effects === null || (isRecord(effects)
     && Array.isArray(effects.card_instance_ids)
     && effects.card_instance_ids.every((id) => typeof id === "string")
@@ -717,22 +821,22 @@ function isFifoPlayerView(view: DraftPlayerView): view is DraftPlayerViewFields 
     && effects.requirements.every((entry) => isRecord(entry)
       && isCount(entry.picks)
       && isCount(entry.burns)));
-  return isRecord(state)
-    && typeof state.session_id === "string"
-    && isCount(state.revision)
-    && validPause
-    && (state.review_clock === null || isFifoClock(state.review_clock))
-    && isRecord(fifo.progress)
-    && isCount(fifo.progress.completed_steps)
-    && isCount(fifo.progress.round_completed_steps)
-    && isCount(fifo.queue_count)
+  return isFifoPublicState(value.state)
+    && isRecord(value.progress)
+    && isCount(value.progress.completed_steps)
+    && isCount(value.progress.round_completed_steps)
+    && isCount(value.queue_count)
     && validHead
-    && (fifo.prompt_id === null || isFifoPromptId(fifo.prompt_id))
-    && isRecord(fifo.requirements)
-    && isCount(fifo.requirements.picks)
-    && isCount(fifo.requirements.burns)
+    && (value.prompt_id === null || isFifoPromptId(value.prompt_id))
+    && isRecord(value.requirements)
+    && isCount(value.requirements.picks)
+    && isCount(value.requirements.burns)
     && validEffects
-    && (fifo.clock === null || isFifoClock(fifo.clock));
+    && (value.clock === null || isFifoClock(value.clock));
+}
+
+function isFifoPlayerView(view: DraftPlayerView): view is DraftPlayerViewFields & FifoPlayerDraftViewArm {
+  return view.flow === "FifoAsync" && isFifoPlayerData(view.fifo);
 }
 
 /**
@@ -771,6 +875,114 @@ export function draftViewPresentation(view: DraftPlayerView): DraftViewPresentat
     case "Abandoned":
       return { podPhase: "error", isReadOnly: true };
   }
+}
+
+/** The prompt a FIFO view publishes for its seat; `null` for every other view. */
+export function draftViewPrompt(view: DraftPlayerView): FifoPromptId | null {
+  return isFifoPlayerView(view) ? view.fifo.prompt_id : null;
+}
+
+/** The engine-issued session id of a FIFO view; `null` for every other view. */
+export function draftViewSessionId(view: DraftPlayerView): string | null {
+  return isFifoPlayerView(view) ? view.fifo.state.session_id : null;
+}
+
+/** Whether two engine prompt identities are the same prompt (both absent included). */
+export function sameDraftPrompt(left: FifoPromptId | null, right: FifoPromptId | null): boolean {
+  if (left === null || right === null) return left === right;
+  return left.session_id === right.session_id
+    && left.seat === right.seat
+    && left.generation === right.generation;
+}
+
+/**
+ * CR 905.1a + CR 905.2: the legacy reducer takes exactly two cards for its one
+ * face-up draft-effect card, Cogwork Librarian ("As you draft a card, you may
+ * draft an additional card from that booster pack."). Restored legacy sessions
+ * keep that rule; a FIFO view publishes its own count.
+ */
+// @sync-with: crates/draft-core/src/pick_pass.rs
+const LEGACY_DRAFT_EFFECT_PICKS = 2;
+
+/**
+ * The draft-effect cards a selection may use on this view, in the engine's
+ * order: a legacy view's `draft_effects`, or the pool cards a FIFO view
+ * publishes as eligible on its head. Empty when the view offers none.
+ */
+export function draftSelectionEffectCards(view: DraftPlayerView): DraftCardInstance[] {
+  if (view.flow === undefined && view.fifo === undefined) return view.draft_effects;
+  if (!isFifoPlayerView(view)) return [];
+  const effects = view.fifo.effects;
+  if (effects === null || effects.requirements.length === 0) return [];
+  return effects.card_instance_ids.flatMap((instanceId) => {
+    const card = view.pool.find((candidate) => candidate.instance_id === instanceId);
+    return card === undefined ? [] : [card];
+  });
+}
+
+/**
+ * How many cards one selection takes on this view, with no draft-effect card
+ * or with `effectCardInstanceId`. `null` when the view offers no such
+ * selection: a FIFO view that fails the wire check, or an effect card a
+ * FIFO view does not publish. A legacy view answers its reducer's two for
+ * any effect card; the engine checks the card.
+ */
+export function draftSelectionPickCount(
+  view: DraftPlayerView,
+  effectCardInstanceId: string | null,
+): number | null {
+  if (view.flow === undefined && view.fifo === undefined) {
+    return effectCardInstanceId === null
+      ? Math.max(1, view.required_pick_count)
+      : LEGACY_DRAFT_EFFECT_PICKS;
+  }
+  if (!isFifoPlayerView(view)) return null;
+  if (effectCardInstanceId === null) return view.fifo.requirements.picks;
+  const effects = view.fifo.effects;
+  if (effects === null || !effects.card_instance_ids.includes(effectCardInstanceId)) return null;
+  return effects.requirements[0]?.picks ?? null;
+}
+
+/** Whether a seat publishes its FIFO progress: a record whose two fields are counts. */
+function hasFifoProgress(seat: SeatPublicView): seat is SeatPublicView & { fifo_progress: FifoProgressView } {
+  return isRecord(seat.fifo_progress)
+    && isCount(seat.fifo_progress.completed_steps)
+    && isCount(seat.fifo_progress.round_completed_steps);
+}
+
+/**
+ * The engine's reading of where the draft stands, for the progress bar and the
+ * pack's position label. A legacy view's `pick_number` counts the steps every
+ * seat has completed together. CR 905.2a: during a draft there is no active player or
+ * system of priority, so on a FIFO view no one step number describes every
+ * seat: each seat publishes its own completed steps this round and its queue.
+ * A view that claims FIFO and cannot be read publishes no position; it never
+ * falls back to the legacy counter.
+ */
+export function draftProgressPresentation(view: DraftProgressFields): DraftProgressPresentation {
+  if (view.flow === undefined && view.fifo === undefined) {
+    return { kind: "pod", completedSteps: view.pick_number };
+  }
+  if (view.flow !== "FifoAsync") return { kind: "unavailable" };
+  if (isFifoPlayerData(view.fifo)) {
+    return {
+      kind: "seat",
+      completedSteps: view.fifo.progress.round_completed_steps,
+      queuedPacks: view.fifo.queue_count,
+      holdsHead: view.fifo.head !== null,
+    };
+  }
+  const seats: readonly SeatPublicView[] = view.seats ?? [];
+  if (isFifoPublicState(view.fifo) && seats.length > 0 && seats.every(hasFifoProgress)) {
+    return {
+      kind: "seats",
+      seats: seats.map((seat) => ({
+        seatIndex: seat.seat_index,
+        completedSteps: seat.fifo_progress.round_completed_steps,
+      })),
+    };
+  }
+  return { kind: "unavailable" };
 }
 
 export interface SpectatorDraftViewFields {
@@ -976,7 +1188,7 @@ export interface DraftPlayerViewFields {
 }
 
 export type DraftPlayerView = DraftPlayerViewFields
-  & (LegacyDraftViewArm | FifoPlayerDraftViewArm | FifoPlayerDraftViewCompatibilityArm);
+  & (LegacyDraftViewArm | FifoPlayerDraftViewArm);
 
 export type MultiplayerSeatDescriptor =
   | { type: "Human"; player_id: number; display_name: string }
@@ -1117,8 +1329,21 @@ export class DraftEngineOperationLease {
     this.wasm.set_draft_pick_enhancements(enabled);
   }
 
-  initialize(setPoolJson: string, difficulty: number, seed: number): DraftPlayerView {
-    return this.wasm.start_quick_draft(setPoolJson, difficulty, seed) as DraftPlayerView;
+  /** Start a Quick set draft on the local FIFO runtime with `drafting`, at `nowMs`. */
+  initialize(
+    setPoolJson: string,
+    difficulty: number,
+    seed: number,
+    drafting: LocalFifoLlmDrafting,
+    nowMs: number,
+  ): LocalFifoSession {
+    return this.wasm.start_quick_draft(
+      setPoolJson,
+      difficulty,
+      seed,
+      JSON.stringify(drafting),
+      BigInt(nowMs),
+    ) as LocalFifoSession;
   }
 
   filterPoolListing(listing: DraftCardInstance[], filter: PoolFilter): string[] {
@@ -1140,20 +1365,25 @@ export class DraftEngineOperationLease {
     return this.wasm.start_sealed_draft(setPoolJson, difficulty, seed) as DraftPlayerView;
   }
 
+  /** Start a Quick cube draft on the local FIFO runtime with `drafting`, at `nowMs`. */
   initializeCube(
     cubeListText: string,
     cubeName: string,
     settings: CubeDraftSettings,
     difficulty: number,
     seed: number,
-  ): DraftPlayerView {
+    drafting: LocalFifoLlmDrafting,
+    nowMs: number,
+  ): LocalFifoSession {
     return this.wasm.start_quick_cube_draft(
       cubeListText,
       cubeName,
       JSON.stringify(settings),
       difficulty,
       seed,
-    ) as DraftPlayerView;
+      JSON.stringify(drafting),
+      BigInt(nowMs),
+    ) as LocalFifoSession;
   }
 
   submitPick(cardInstanceId: string): DraftPlayerView {
@@ -1389,6 +1619,125 @@ export class DraftEngineOperationLease {
     return this.wasm.import_draft_session(json, difficulty) as DraftPlayerView;
   }
 
+  /** Restore a local FIFO draft from its export; the engine issues a new owner. */
+  importLocalFifoSession(json: string, difficulty: number): LocalFifoSession {
+    return this.wasm.import_local_fifo_session(json, difficulty) as LocalFifoSession;
+  }
+
+  /** Apply the local human's selection on its prompt at `nowMs`. */
+  localFifoSelect(owner: LocalFifoOwner, selection: LocalFifoSelection, nowMs: number): DraftPlayerView {
+    return this.wasm.local_fifo_select(owner, JSON.stringify(selection), BigInt(nowMs)) as DraftPlayerView;
+  }
+
+  /** Let the engine make the local human's selection on `promptId` at `nowMs`. */
+  localFifoAutoSelect(owner: LocalFifoOwner, promptId: FifoPromptId, nowMs: number): DraftPlayerView {
+    return this.wasm.local_fifo_auto_select(owner, JSON.stringify(promptId), BigInt(nowMs)) as DraftPlayerView;
+  }
+
+  /** The local draft's current view: seat 0's projection. */
+  localFifoView(owner: LocalFifoOwner): DraftPlayerView {
+    return this.wasm.local_fifo_view(owner) as DraftPlayerView;
+  }
+
+  /** Declare whether the bot seats are LLM drafters at `nowMs`; the engine runs the bots it leaves to itself. */
+  localFifoSetLlmDrafting(
+    owner: LocalFifoOwner,
+    drafting: LocalFifoLlmDrafting,
+    nowMs: number,
+  ): DraftPlayerView {
+    return this.wasm.local_fifo_set_llm_drafting(
+      owner,
+      JSON.stringify(drafting),
+      BigInt(nowMs),
+    ) as DraftPlayerView;
+  }
+
+  /** Engine-built LLM requests for every head an LLM seat's drafter is answering. Read-only. */
+  localFifoBuildLlmRequests(
+    owner: LocalFifoOwner,
+    endpointJson: string,
+    setNames: Record<string, string>,
+  ): LocalFifoLlmPickRequest[] {
+    return this.wasm.local_fifo_build_llm_requests(
+      owner,
+      endpointJson,
+      JSON.stringify(setNames),
+    ) as LocalFifoLlmPickRequest[];
+  }
+
+  /** Hand one LLM seat's reply to the engine at `nowMs`; the engine uses it or falls back for that seat. */
+  localFifoResolveLlmPick(
+    owner: LocalFifoOwner,
+    resolution: LocalFifoLlmPickResolution,
+    nowMs: number,
+  ): { view: DraftPlayerView; llmOutcome: LlmDraftOutcome } {
+    return this.wasm.local_fifo_resolve_llm_pick(
+      owner,
+      JSON.stringify(resolution),
+      BigInt(nowMs),
+    ) as { view: DraftPlayerView; llmOutcome: LlmDraftOutcome };
+  }
+
+  localFifoSubmitDeck(
+    owner: LocalFifoOwner,
+    mainDeck: string[],
+    commanders: string[],
+    nowMs: number,
+  ): DraftPlayerView {
+    return this.wasm.local_fifo_submit_deck(
+      owner,
+      JSON.stringify(mainDeck),
+      JSON.stringify(commanders),
+      BigInt(nowMs),
+    ) as DraftPlayerView;
+  }
+
+  localFifoSuggestDeck(owner: LocalFifoOwner): SuggestedDeck {
+    return this.wasm.local_fifo_suggest_deck(owner) as SuggestedDeck;
+  }
+
+  localFifoSuggestLands(owner: LocalFifoOwner, spells: string[]): Record<string, number> {
+    return this.wasm.local_fifo_suggest_lands(owner, JSON.stringify(spells)) as Record<string, number>;
+  }
+
+  localFifoBotDeck(owner: LocalFifoOwner, botSeat: number): SuggestedDeck {
+    return this.wasm.local_fifo_bot_deck(owner, botSeat) as SuggestedDeck;
+  }
+
+  localFifoBoosterPackPoolForGame(owner: LocalFifoOwner): string[] | null {
+    return this.wasm.local_fifo_booster_pack_pool_for_game(owner) as string[] | null;
+  }
+
+  exportLocalFifoSession(owner: LocalFifoOwner): string {
+    return this.wasm.export_local_fifo_session(owner);
+  }
+
+  /** The session operations of the runtime that holds the Quick route's session. */
+  quickSession(runtime: LocalDraftRuntime): QuickDraftSession {
+    switch (runtime.kind) {
+      case "legacy":
+        return {
+          exportSession: () => this.exportSession(),
+          boosterPackPoolForGame: () => this.boosterPackPoolForGame(),
+          botDeck: (botSeat) => this.getBotDeck(botSeat),
+          suggestDeck: () => this.suggestDeck(),
+          suggestLands: (spells) => this.suggestLands(spells),
+          submitDeck: (mainDeck, commanders) => this.submitDeck(mainDeck, commanders),
+        };
+      case "local-fifo": {
+        const owner = runtime.owner;
+        return {
+          exportSession: () => this.exportLocalFifoSession(owner),
+          boosterPackPoolForGame: () => this.localFifoBoosterPackPoolForGame(owner),
+          botDeck: (botSeat) => this.localFifoBotDeck(owner, botSeat),
+          suggestDeck: () => this.localFifoSuggestDeck(owner),
+          suggestLands: (spells) => this.localFifoSuggestLands(owner, spells),
+          submitDeck: (mainDeck, commanders, nowMs) => this.localFifoSubmitDeck(owner, mainDeck, commanders, nowMs),
+        };
+      }
+    }
+  }
+
   allPicksSubmitted(): boolean {
     return this.wasm.all_picks_submitted();
   }
@@ -1443,9 +1792,11 @@ export class DraftAdapter {
     selection: SetPackSequence,
     difficulty: number,
     seed: number,
-  ): Promise<DraftPlayerView> {
+    drafting: LocalFifoLlmDrafting,
+    nowMs: number,
+  ): Promise<LocalFifoSession> {
     return withDraftEngineOperation((lease) =>
-      lease.initialize(JSON.stringify(selection), difficulty, seed),
+      lease.initialize(JSON.stringify(selection), difficulty, seed, drafting, nowMs),
     );
   }
 
@@ -1497,9 +1848,11 @@ export class DraftAdapter {
     settings: CubeDraftSettings,
     difficulty: number,
     seed: number,
-  ): Promise<DraftPlayerView> {
+    drafting: LocalFifoLlmDrafting,
+    nowMs: number,
+  ): Promise<LocalFifoSession> {
     return withDraftEngineOperation((lease) =>
-      lease.initializeCube(cubeListText, cubeName, settings, difficulty, seed),
+      lease.initializeCube(cubeListText, cubeName, settings, difficulty, seed, drafting, nowMs),
     );
   }
 

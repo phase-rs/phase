@@ -428,6 +428,27 @@ describe("DraftPodPage ?kind= mode entry", () => {
     rendered.unmount();
     useDraftPodStore.getState().reset();
 
+    // A saved session the draft engine cannot read. Every allocation answers
+    // with a peer, so a check that admitted B would allocate and hand over; a
+    // queued one-time answer would be left for the next leg.
+    const unreadable = savedSession("legacy_review_unknown_flow");
+    const unreadableB = { ...ownerB, draftStarted: true, draftSessionJson: unreadable.text };
+    mocks.loadDraftHostSession.mockResolvedValueOnce({ type: "admitted", session: unreadableB, raw: unreadableB });
+    mocks.checkRestorableSession.mockResolvedValue(unreadable.verdict);
+    mocks.recoveryHostRoom.mockImplementation(async () => hostResult(ownerB.roomCode));
+    rendered = renderAt("/draft-pod?entry=host");
+    // Reach: the recovery settled, with a recorded failure or a new owner.
+    await waitFor(() => expect(
+      useDraftPodStore.getState().hostRecoveryFailure !== null
+        || useMultiplayerDraftStore.getState().hostPersistenceId !== ownerA.persistenceId,
+    ).toBe(true));
+    assertAOwns();
+    expect(useDraftPodStore.getState().hostRecoveryFailure?.kind).toBe("unreadable");
+    expect(await screen.findByText("This saved draft cannot be read, so it cannot be resumed.")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Try Reconnecting" })).toBeNull();
+    rendered.unmount();
+    useDraftPodStore.getState().reset();
+
     mocks.loadDraftHostSession.mockRejectedValueOnce(new Error("storage read failed"));
     rendered = renderAt("/draft-pod?entry=host");
     await waitFor(() => expect(useDraftPodStore.getState().hostRecoveryFailure?.kind).toBe("readFailure"));

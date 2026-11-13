@@ -7,9 +7,12 @@ import i18n from "i18next";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   DraftEngineOperationLease,
+  draftViewPresentation,
   withDraftEngineOperation,
   type DraftCardInstance,
   type DraftPlayerView,
+  type FifoEffectOptions,
+  type FifoSelectionRequirements,
 } from "../../adapter/draft-adapter";
 import {
   MAX_MATERIALIZED_VIRTUAL_BASICS,
@@ -59,6 +62,19 @@ const wasm = vi.hoisted(() => ({
   get_bot_deck: vi.fn(),
   export_draft_session: vi.fn(() => "session"),
   booster_pack_pool_for_game: vi.fn<() => string[] | null | undefined>(() => null),
+  import_local_fifo_session: vi.fn(),
+  local_fifo_select: vi.fn(),
+  local_fifo_auto_select: vi.fn(),
+  local_fifo_submit_deck: vi.fn(),
+  local_fifo_suggest_deck: vi.fn(),
+  local_fifo_suggest_lands: vi.fn(),
+  local_fifo_bot_deck: vi.fn(),
+  local_fifo_booster_pack_pool_for_game: vi.fn<(_owner: number) => string[] | null>(() => null),
+  export_local_fifo_session: vi.fn((_owner: number) => "fifo-export"),
+  local_fifo_set_llm_drafting: vi.fn(),
+  local_fifo_build_llm_requests: vi.fn(),
+  local_fifo_resolve_llm_pick: vi.fn(),
+  local_fifo_view: vi.fn(),
 }));
 
 const persistence = vi.hoisted(() => ({
@@ -106,11 +122,15 @@ vi.mock("../../adapter/wasm-adapter", async (importOriginal) => ({
   ...await importOriginal<typeof import("../../adapter/wasm-adapter")>(),
   getSharedAdapter: () => ({ evaluateDeckFormatGate: formatGate.evaluate }),
 }));
+vi.mock("../../services/llm/catalog", () => ({ loadProviderCatalog: vi.fn(async () => []) }));
 
 import {
   useDraftStore,
   type DraftPickOutcome,
+  type DraftResumeOutcome,
 } from "../draftStore";
+import { loadProviderCatalog } from "../../services/llm/catalog";
+import { useLlmStore } from "../llmStore";
 import {
   awaitSavedDeckLibraryIdle,
   installFifoWebLocks,
@@ -200,13 +220,51 @@ function deferred<T>() {
   return { promise, resolve, reject };
 }
 
-async function start(pool: DraftCardInstance[] = []): Promise<void> {
-  wasm.start_quick_draft.mockReturnValue(view(pool));
-  await useDraftStore.getState().startDraft("pool", "TST", "Test", 2);
+/**
+ * Arranges a drafting Quick store on the legacy runtime the one way it is
+ * still reached: by resuming a saved Quick record that declares no local FIFO
+ * session. The saved workspace is the empty one a start installs. It answers
+ * the resume's own run read with `null`, so a run another test left on the
+ * persistence mock cannot reach it, and afterwards clears the call history of
+ * every mock the resume drove, so the test's own counts see none of it.
+ */
+async function restoreLegacyQuick(options: {
+  view?: DraftPlayerView;
+  meta?: Partial<ActiveQuickDraftMeta>;
+} = {}): Promise<void> {
+  const restored = options.view ?? view();
+  const meta: ActiveQuickDraftMeta = {
+    id: "legacy-draft", setCode: "TST", setName: "Test", difficulty: 2, kind: "Quick",
+    phase: "drafting", pickCount: restored.pool.length, updatedAt: 0,
+    ...options.meta,
+  };
+  persistence.inspectActiveQuickDraftLifecycle.mockResolvedValue(meta);
+  persistence.loadDraftRun.mockResolvedValueOnce(null);
+  persistence.loadQuickDraftSession.mockResolvedValue({
+    sessionJson: "legacy-saved", mainDeck: [], landCounts: {},
+    poolSortMode: "color", poolPanelOpen: true, workspace: createDraftWorkspaceState(),
+  });
+  wasm.import_draft_session.mockReturnValue(restored);
+  const imports = wasm.import_draft_session.mock.calls.length;
+
+  expect(await useDraftStore.getState().resumeDraft()).toEqual({ status: "resumed", draftId: meta.id });
+  expect(wasm.import_draft_session.mock.calls.length).toBe(imports + 1);
+  expect(useDraftStore.getState().runtime).toEqual({ kind: "legacy" });
+
+  for (const driven of [
+    persistence.inspectActiveQuickDraftLifecycle,
+    persistence.loadDraftRun,
+    persistence.loadQuickDraftSession,
+    wasm.import_draft_session,
+    wasm.load_card_database,
+    wasm.set_draft_pick_enhancements,
+    wasm.booster_pack_pool_for_game,
+  ]) driven.mockClear();
+  persistence.inspectActiveQuickDraftLifecycle.mockResolvedValue(null);
 }
 
 async function startLaunchWithBotSeats(indices: number[]): Promise<void> {
-  await start([card("human", "Forest")]);
+  await restoreLegacyQuick({ view: view([card("human", "Forest")]) });
   useDraftStore.setState((state) => ({
     phase: "launching",
     view: { ...state.view!, seats: indices.map(botSeat) },
@@ -217,6 +275,116 @@ async function startLaunchWithBotSeats(indices: number[]): Promise<void> {
 async function settleTimers(): Promise<void> {
   await vi.runAllTimersAsync();
   await Promise.resolve();
+}
+
+const llmDraftEnabledAtLoad = useLlmStore.getState().draftEnabled;
+
+/** The engine-issued id of the local FIFO session the saved record declares. */
+const LOCAL_FIFO_SESSION_ID = "local-0123456789abcdef";
+/** Nonzero, so its arrival at the engine as a `bigint` is visible. */
+const FIFO_NOW_MS = 1_700_000_000_000;
+const INVALID_REQUEST = { status: "rejected", reason: "invalid-request" } as const;
+
+/**
+ * Cogwork Librarian (CNS #58), whose Oracle text the engine reads as its one
+ * additional-pick draft effect:
+ *   Draft this card face up.
+ *   As you draft a card, you may draft an additional card from that booster
+ *   pack. If you do, put this card into that booster pack.
+ */
+function cogworkLibrarian(): DraftCardInstance {
+  return {
+    instance_id: "cogwork",
+    name: "Cogwork Librarian",
+    set_code: "CNS",
+    collector_number: "58",
+    rarity: "common",
+    colors: [],
+    cmc: 4,
+    type_line: "Artifact Creature — Construct",
+    draft_effect: "additional_pick",
+  };
+}
+
+/**
+ * Seat 0's view of a local FIFO draft: a literal that passes the client's FIFO
+ * wire check. `promptGeneration: null` is a seat with no head and no prompt.
+ */
+function fifoView(options: {
+  pool?: DraftCardInstance[];
+  currentPack?: DraftCardInstance[];
+  promptGeneration?: number | null;
+  status?: DraftPlayerView["status"];
+  effects?: FifoEffectOptions | null;
+  requirements?: FifoSelectionRequirements;
+  kind?: DraftPlayerView["kind"];
+  sessionId?: string;
+} = {}): DraftPlayerView {
+  const sessionId = options.sessionId ?? LOCAL_FIFO_SESSION_ID;
+  const promptGeneration = options.promptGeneration === undefined ? 3 : options.promptGeneration;
+  return {
+    ...view(options.pool ?? []),
+    status: options.status ?? "Drafting",
+    kind: options.kind ?? "Quick",
+    current_pack: options.currentPack ?? [card("pk-a"), card("pk-b"), card("pk-c")],
+    current_pack_number: 0,
+    pick_number: 0,
+    flow: "FifoAsync",
+    fifo: {
+      state: { session_id: sessionId, revision: promptGeneration ?? 0, paused: null, review_clock: null },
+      progress: { completed_steps: 0, round_completed_steps: 0 },
+      queue_count: promptGeneration === null ? 0 : 1,
+      head: promptGeneration === null
+        ? null
+        : { pack_id: 0, opening_seat: 0, round: 0, original_size: 15 },
+      prompt_id: promptGeneration === null
+        ? null
+        : { session_id: sessionId, seat: 0, generation: promptGeneration },
+      requirements: options.requirements ?? { picks: 1, burns: 0 },
+      effects: options.effects ?? null,
+      clock: null,
+    },
+  } as DraftPlayerView;
+}
+
+/**
+ * Resumes a saved record that declares the local FIFO session, at the pinned
+ * time: the engine's local import answers `{ owner, view }`, and the resume's
+ * LLM drafting declaration answers that same view.
+ */
+async function resumeFifo(options: {
+  view?: DraftPlayerView;
+  owner?: number;
+  meta?: Record<string, unknown>;
+  run?: DraftRunState | null;
+  saved?: boolean;
+  importError?: Error;
+} = {}): Promise<DraftResumeOutcome> {
+  vi.setSystemTime(FIFO_NOW_MS);
+  persistence.inspectActiveQuickDraftLifecycle.mockResolvedValue({
+    id: "fifo-draft", setCode: "TST", setName: "Test", difficulty: 3, kind: "Quick",
+    phase: "drafting", pickCount: 0, updatedAt: FIFO_NOW_MS,
+    localFifoSessionId: LOCAL_FIFO_SESSION_ID,
+    ...options.meta,
+  });
+  persistence.loadDraftRun.mockResolvedValue(options.run ?? null);
+  persistence.loadQuickDraftSession.mockResolvedValue(options.saved === false ? null : {
+    sessionJson: "fifo-saved", mainDeck: [], landCounts: {},
+    poolSortMode: "color", poolPanelOpen: true, workspace: createDraftWorkspaceState(),
+  });
+  const importError = options.importError;
+  if (importError === undefined) {
+    const resumed = options.view ?? fifoView();
+    wasm.import_local_fifo_session.mockReturnValue({ owner: options.owner ?? 7, view: resumed });
+    wasm.local_fifo_set_llm_drafting.mockReturnValue(resumed);
+  } else {
+    wasm.import_local_fifo_session.mockImplementation(() => { throw importError; });
+  }
+  return useDraftStore.getState().resumeDraft();
+}
+
+function localFifoSelection(call: number): Record<string, unknown> {
+  return JSON.parse(wasm.local_fifo_select.mock.calls[call]![1] as string) as Record<string, unknown>;
 }
 
 describe("draft store workspace authority", () => {
@@ -239,6 +407,7 @@ describe("draft store workspace authority", () => {
     vi.useRealTimers();
     vi.restoreAllMocks();
     vi.unstubAllGlobals();
+    useLlmStore.setState({ draftEnabled: llmDraftEnabledAtLoad });
   });
 
   describe("localized draft failures", () => {
@@ -382,7 +551,7 @@ describe("draft store workspace authority", () => {
     // The setup screen stays mounted while a start loads, so the lifecycle
     // reset must not snap the selector back to the Medium default.
     useDraftStore.getState().setDifficulty(4);
-    wasm.start_quick_draft.mockReturnValue(view([]));
+    wasm.start_quick_draft.mockReturnValue({ owner: 11, view: fifoView() });
     wasm.load_card_database.mockReturnValue(0);
     vi.stubGlobal("fetch", vi.fn(async () => new Response("{}")));
 
@@ -390,14 +559,14 @@ describe("draft store workspace authority", () => {
     expect(useDraftStore.getState().difficulty).toBe(4);
     await starting;
     expect(useDraftStore.getState().difficulty).toBe(4);
-    expect(wasm.start_quick_draft).toHaveBeenCalledWith("pool", 4, expect.any(Number));
+    expect(wasm.start_quick_draft).toHaveBeenCalledWith("pool", 4, expect.any(Number), "\"EngineBots\"", expect.any(BigInt));
 
     useDraftStore.getState().reset();
     expect(useDraftStore.getState().difficulty).toBe(4);
   });
 
   it("forwards the draft pick enhancement preference to the engine when a draft starts", async () => {
-    wasm.start_quick_draft.mockReturnValue(view([]));
+    wasm.start_quick_draft.mockReturnValue({ owner: 11, view: fifoView() });
     wasm.load_card_database.mockReturnValue(0);
     vi.stubGlobal("fetch", vi.fn(async () => new Response("{}")));
 
@@ -417,11 +586,11 @@ describe("draft store workspace authority", () => {
       databaseLoaded = true;
       return 0;
     });
-    wasm.get_bot_deck.mockImplementationOnce(() => {
+    wasm.local_fifo_bot_deck.mockImplementationOnce(() => {
       if (!databaseLoaded) throw new Error("card database unavailable");
       return { main_deck: ["Opponent"], lands: {} };
     });
-    wasm.start_quick_draft.mockReturnValue(view([card("human", "Forest")]));
+    wasm.start_quick_draft.mockReturnValue({ owner: 11, view: fifoView({ pool: [card("human", "Forest")] }) });
 
     await useDraftStore.getState().startDraft("pool", "TST", "Test", 2);
     useDraftStore.setState({ phase: "launching" });
@@ -430,9 +599,9 @@ describe("draft store workspace authority", () => {
 
     expect(fetch).toHaveBeenCalledWith("/card-data.json");
     expect(wasm.load_card_database).toHaveBeenCalledOnce();
-    expect(wasm.get_bot_deck).toHaveBeenCalledOnce();
+    expect(wasm.local_fifo_bot_deck).toHaveBeenCalledOnce();
     expect(wasm.load_card_database.mock.invocationCallOrder[0])
-      .toBeLessThan(wasm.get_bot_deck.mock.invocationCallOrder[0]!);
+      .toBeLessThan(wasm.local_fifo_bot_deck.mock.invocationCallOrder[0]!);
     expect(persistence.publishInitialDraftMatch).toHaveBeenCalledOnce();
     expect(navigate).toHaveBeenCalledOnce();
   });
@@ -476,7 +645,7 @@ describe("draft store workspace authority", () => {
   });
 
   it("applies_pending_destination_only_after_pool_acknowledgement", async () => {
-    await start();
+    await restoreLegacyQuick();
     const result = deferred<DraftPlayerView>();
     wasm.submit_pick.mockReturnValue(result.promise);
 
@@ -501,7 +670,7 @@ describe("draft store workspace authority", () => {
     // which resolves no placement hint for any card — the path a restored Sealed
     // pool and a resumed Quick draft both take. Before `placeArrivingPoolCards`
     // was wired into this store every one of these landed in column 0.
-    await start([cardWithCmc("cheap", 1), cardWithCmc("costly", 6)]);
+    await restoreLegacyQuick({ view: view([cardWithCmc("cheap", 1), cardWithCmc("costly", 6)]) });
 
     const placements = useDraftStore.getState().workspaceState!.placements;
     expect(placements.cheap.column).toBe(1);
@@ -511,7 +680,7 @@ describe("draft store workspace authority", () => {
   it("sorts_a_hint_less_deck_pick_into_the_column_its_mana_value_means", async () => {
     // `PackDisplay.request` dispatches `pickCard` with no placement hint, so
     // `applyDestination` has only reconcile's column-0 default to fall back on.
-    await start();
+    await restoreLegacyQuick();
     wasm.submit_pick.mockReturnValue(view([cardWithCmc("picked", 6)]));
 
     await useDraftStore.getState().pickCard("picked", "deck");
@@ -522,7 +691,7 @@ describe("draft store workspace authority", () => {
   it("keeps_the_hint_column_on_a_deck_pick_that_resolved_one", async () => {
     // The arriving pass must not overrule a column someone chose — this is the
     // drag-and-drop target as well as `DraftPage.handleConfirmPick`'s resolution.
-    await start();
+    await restoreLegacyQuick();
     wasm.submit_pick.mockReturnValue(view([cardWithCmc("picked", 6)]));
 
     await useDraftStore.getState().pickCard("picked", "deck", { column: 2 });
@@ -540,7 +709,7 @@ describe("draft store workspace authority", () => {
     setArrivingCardBoardPreferences({
       sort: "cmc", columnCount: 3, rows: "one", showHeaders: true,
     });
-    await start();
+    await restoreLegacyQuick();
     wasm.submit_pick.mockReturnValue(view([cardWithCmc("picked", 6)]));
 
     await useDraftStore.getState().pickCard("picked", "deck");
@@ -571,7 +740,7 @@ describe("draft store workspace authority", () => {
     // running against the mocked engine.
     vi.resetModules();
     const { useDraftStore: freshStore } = await import("../draftStore");
-    wasm.start_quick_draft.mockReturnValue(view([cardWithCmc("costly", 6)]));
+    wasm.start_quick_draft.mockReturnValue({ owner: 11, view: fifoView({ pool: [cardWithCmc("costly", 6)] }) });
 
     await freshStore.getState().startDraft("pool", "TST", "Test", 2);
 
@@ -588,7 +757,7 @@ describe("draft store workspace authority", () => {
     // sideboard's last column, rather than leaving it in the first. A cheaper
     // card would land mid-board instead; the clamp is the overflow case, not
     // the general one.
-    await start();
+    await restoreLegacyQuick();
     wasm.submit_pick.mockReturnValue(view([cardWithCmc("picked", 6)]));
 
     await useDraftStore.getState().pickCard("picked", "sideboard");
@@ -608,7 +777,7 @@ describe("draft store workspace authority", () => {
     setArrivingCardBoardPreferences({
       sort: "cmc", columnCount: 7, rows: "two", showHeaders: true,
     });
-    await start();
+    await restoreLegacyQuick();
     wasm.submit_pick.mockReturnValue(view([cardWithCmc("picked", 6)]));
 
     await useDraftStore.getState().pickCard("picked", "deck", { column: 2 });
@@ -646,7 +815,7 @@ describe("draft store workspace authority", () => {
   });
 
   it("set_workspace_state_reconciles_projects_notifies_once_and_persists_once", async () => {
-    await start([card("one", "Shared"), card("two", "Shared")]);
+    await restoreLegacyQuick({ view: view([card("one", "Shared"), card("two", "Shared")]) });
     await settleTimers();
     vi.clearAllMocks();
     const current = useDraftStore.getState().workspaceState!;
@@ -675,7 +844,7 @@ describe("draft store workspace authority", () => {
   });
 
   it("returns_total_outcomes_with_validation_before_contention", async () => {
-    await start();
+    await restoreLegacyQuick();
     const result = deferred<DraftPlayerView>();
     wasm.submit_pick.mockReturnValue(result.promise);
     const admitted = useDraftStore.getState().pickCard("owner");
@@ -734,7 +903,7 @@ describe("draft store workspace authority", () => {
   it.each(["adapter", "draftId", "view", "workspaceState"] as const)(
     "rejects a missing %s prerequisite without invoking the adapter",
     async (field) => {
-      await start([card("existing")]);
+      await restoreLegacyQuick({ view: view([card("existing")]) });
       useDraftStore.setState({ [field]: null });
       vi.clearAllMocks();
       await expect(useDraftStore.getState().pickCard("requested"))
@@ -744,7 +913,7 @@ describe("draft store workspace authority", () => {
   );
 
   it("acknowledges_ordinary_zero_to_one_and_allows_unrelated_additions", async () => {
-    await start();
+    await restoreLegacyQuick();
     wasm.submit_pick.mockReturnValue(view([card("requested"), card("unrelated")]));
     await expect(useDraftStore.getState().pickCard("requested", "sideboard", { column: 5, row: 1 }))
       .resolves.toEqual({ status: "acknowledged" });
@@ -754,7 +923,7 @@ describe("draft store workspace authority", () => {
   });
 
   it("appends_an_acknowledged_single_pick_to_its_resolved_target_stack", async () => {
-    await start([card("target")]);
+    await restoreLegacyQuick({ view: view([card("target")]) });
     useDraftStore.getState().setWorkspacePlacement("target", {
       zone: "deck", row: 0, column: 5, order: 0,
     });
@@ -769,7 +938,7 @@ describe("draft store workspace authority", () => {
   });
 
   it("acknowledges_a_selected_card_through_confirm_pick", async () => {
-    await start();
+    await restoreLegacyQuick();
     useDraftStore.getState().selectCard("selected");
     wasm.submit_pick.mockReturnValue(view([card("selected")]));
     await expect(useDraftStore.getState().confirmPick("sideboard", { column: 2 }))
@@ -795,7 +964,7 @@ describe("draft store workspace authority", () => {
     ["pre-existing", [card("requested")], [card("requested")]],
     ["duplicate", [], [card("requested"), card("requested")]],
   ])("rejects ordinary %s acknowledgment", async (_label, before, after) => {
-    await start(before);
+    await restoreLegacyQuick({ view: view(before) });
     const original = useDraftStore.getState().workspaceState;
     wasm.submit_pick.mockReturnValue(view(after));
     await expect(useDraftStore.getState().pickCard("requested"))
@@ -808,7 +977,7 @@ describe("draft store workspace authority", () => {
   });
 
   it("passes_distinct_mutable_two_element_copy", async () => {
-    await start([card("effect")]);
+    await restoreLegacyQuick({ view: view([card("effect")]) });
     const tuple = ["first", "second"] as const;
     const leaseSpy = vi.spyOn(DraftEngineOperationLease.prototype, "submitPickWithDraftEffect");
     wasm.submit_pick_with_draft_effect.mockReturnValue(view([
@@ -832,7 +1001,7 @@ describe("draft store workspace authority", () => {
     // position relative to the switch observable: run the pass after
     // `applyDestination` instead and these two land in POOL order (`first` then
     // `second`) rather than the requested order.
-    await start([card("effect")]);
+    await restoreLegacyQuick({ view: view([card("effect")]) });
     wasm.submit_pick_with_draft_effect.mockReturnValue(view([
       { ...cardWithCmc("effect", 3) },
       { ...cardWithCmc("first", 3) },
@@ -849,7 +1018,7 @@ describe("draft store workspace authority", () => {
   });
 
   it("appends_acknowledged_draft_effect_cards_in_request_order", async () => {
-    await start([card("effect")]);
+    await restoreLegacyQuick({ view: view([card("effect")]) });
     wasm.submit_pick_with_draft_effect.mockReturnValue(view([
       card("effect"), card("first"), card("second"),
     ]));
@@ -867,7 +1036,7 @@ describe("draft store workspace authority", () => {
     ["unchanged", [card("effect")]],
     ["duplicate", [card("effect"), card("first"), card("first"), card("second")]],
   ])("rejects effect %s acknowledgment atomically", async (_label, returnedPool) => {
-    await start([card("effect")]);
+    await restoreLegacyQuick({ view: view([card("effect")]) });
     const original = useDraftStore.getState().workspaceState;
     wasm.submit_pick_with_draft_effect.mockReturnValue(view(returnedPool));
     await expect(useDraftStore.getState().pickCardWithDraftEffect("effect", ["first", "second"]))
@@ -883,7 +1052,7 @@ describe("draft store workspace authority", () => {
     // pack-keyed map does not cover — or any bare `autoPickCard("deck")` —
     // arrives with no decision of its own and must be sorted, not parked in
     // column 0.
-    await start();
+    await restoreLegacyQuick();
     wasm.auto_pick.mockReturnValue(view([cardWithCmc("added", 6)]));
 
     await expect(useDraftStore.getState().autoPickCard("deck"))
@@ -901,7 +1070,7 @@ describe("draft store workspace authority", () => {
     setArrivingCardBoardPreferences({
       sort: "cmc", columnCount: 7, rows: "two", showHeaders: true,
     });
-    await start();
+    await restoreLegacyQuick();
     wasm.auto_pick.mockReturnValue(view([
       { ...cardWithCmc("added", 6), type_line: "Creature — Bear" },
     ]));
@@ -915,7 +1084,7 @@ describe("draft store workspace authority", () => {
   });
 
   it("appends_the_acknowledged_auto_pick_to_its_resolved_target_stack", async () => {
-    await start([card("existing"), card("target")]);
+    await restoreLegacyQuick({ view: view([card("existing"), card("target")]) });
     useDraftStore.getState().setWorkspacePlacement("existing", {
       zone: "sideboard", row: 0, column: 2, order: 0,
     });
@@ -941,7 +1110,7 @@ describe("draft store workspace authority", () => {
     ["substitution", [card("replacement")]],
     ["multiple additions", [card("existing"), card("one"), card("two")]],
   ])("rejects auto-pick %s acknowledgment", async (_label, returnedPool) => {
-    await start([card("existing")]);
+    await restoreLegacyQuick({ view: view([card("existing")]) });
     const original = useDraftStore.getState().workspaceState;
     wasm.auto_pick.mockReturnValue(view(returnedPool));
     await expect(useDraftStore.getState().autoPickCard())
@@ -965,7 +1134,7 @@ describe("draft store workspace authority", () => {
       await useDraftStore.getState().autoSuggestLands();
     };
 
-    await start([card("one", "Shared"), card("two", "Shared")]);
+    await restoreLegacyQuick({ view: view([card("one", "Shared"), card("two", "Shared")]) });
     await settleTimers();
     vi.clearAllMocks();
     const baseline = useDraftStore.getState().workspaceState;
@@ -979,7 +1148,7 @@ describe("draft store workspace authority", () => {
     expect(useDraftStore.getState().workspaceState).toBe(baseline);
 
     useDraftStore.getState().reset();
-    await start([card("one", "Shared"), card("two", "Shared")]);
+    await restoreLegacyQuick({ view: view([card("one", "Shared"), card("two", "Shared")]) });
     const intentBaseline = useDraftStore.getState().workspaceState;
     useDraftStore.setState({
       pendingPickIntent: { kind: "pick", instanceIds: ["held"], destination: "deck" },
@@ -992,7 +1161,7 @@ describe("draft store workspace authority", () => {
     expect(useDraftStore.getState().workspaceState).toBe(intentBaseline);
 
     useDraftStore.getState().reset();
-    await start([card("one", "Shared"), card("two", "Shared")]);
+    await restoreLegacyQuick({ view: view([card("one", "Shared"), card("two", "Shared")]) });
     const tokenBaseline = useDraftStore.getState().workspaceState;
     const submitResult = deferred<DraftPlayerView>();
     wasm.submit_deck.mockReturnValue(submitResult.promise);
@@ -1033,7 +1202,7 @@ describe("draft store workspace authority", () => {
     family,
     rejectSuggestion,
   ) => {
-    await start([card("existing")]);
+    await restoreLegacyQuick({ view: view([card("existing")]) });
     await settleTimers();
     vi.clearAllMocks();
     const suggestionResult = deferred<unknown>();
@@ -1068,7 +1237,7 @@ describe("draft store workspace authority", () => {
     family,
     rejectSuggestion,
   ) => {
-    await start([card("existing")]);
+    await restoreLegacyQuick({ view: view([card("existing")]) });
     const suggestionResult = deferred<unknown>();
     if (family === "deck") wasm.suggest_deck.mockReturnValue(suggestionResult.promise);
     else wasm.suggest_lands.mockReturnValue(suggestionResult.promise);
@@ -1090,7 +1259,7 @@ describe("draft store workspace authority", () => {
   });
 
   it("preserves_fresh_suggestion_failures", async () => {
-    await start([card("existing")]);
+    await restoreLegacyQuick({ view: view([card("existing")]) });
     wasm.suggest_deck.mockRejectedValue(new Error("live suggestion"));
     await expect(useDraftStore.getState().autoSuggestDeck()).rejects.toThrow("live suggestion");
   });
@@ -2018,7 +2187,7 @@ describe("draft store workspace authority", () => {
       expected: ["Spell", "Plains", "Island"],
     },
   ])("submits the exact deck $label", async ({ addLands, expected }) => {
-    await start([card("spell", "Spell")]);
+    await restoreLegacyQuick({ view: view([card("spell", "Spell")]) });
     for (const land of addLands) useDraftStore.getState().addBasicLand(land);
 
     wasm.submit_deck.mockReturnValue({ ...view(), status: "Pairing" });
@@ -2028,7 +2197,7 @@ describe("draft store workspace authority", () => {
   });
 
   it("excludes sideboard virtual lands from the submitted deck", async () => {
-    await start([card("spell", "Spell")]);
+    await restoreLegacyQuick({ view: view([card("spell", "Spell")]) });
     useDraftStore.getState().addBasicLand("Plains");
     useDraftStore.getState().addBasicLand("Island");
     const workspace = useDraftStore.getState().workspaceState!;
@@ -2047,11 +2216,9 @@ describe("draft store workspace authority", () => {
   });
 
   it("projects custom addables as spells for persistence and land suggestions", async () => {
-    wasm.start_quick_draft.mockReturnValue({
-      ...view([card("spell", "Wind Drake")]),
-      addable_cards: ["Plains", "Academy Ruins"],
+    await restoreLegacyQuick({
+      view: { ...view([card("spell", "Wind Drake")]), addable_cards: ["Plains", "Academy Ruins"] },
     });
-    await useDraftStore.getState().startDraft("pool", "TST", "Test", 2);
     await settleTimers();
     vi.clearAllMocks();
 
@@ -2084,7 +2251,7 @@ describe("draft store workspace authority", () => {
   });
 
   it("admits_once_and_uses_exact_terminal_notification_counts", async () => {
-    await start();
+    await restoreLegacyQuick();
     await settleTimers();
     vi.clearAllMocks();
     const observations: Array<{ locked: boolean; pending: unknown; pool: string[] }> = [];
@@ -2111,7 +2278,7 @@ describe("draft store workspace authority", () => {
   });
 
   it("unacknowledged_has_admission_and_cleanup_only", async () => {
-    await start([card("existing")]);
+    await restoreLegacyQuick({ view: view([card("existing")]) });
     await settleTimers();
     vi.clearAllMocks();
     const original = useDraftStore.getState();
@@ -2135,7 +2302,7 @@ describe("draft store workspace authority", () => {
   });
 
   it("stale_pick_settles_without_cleanup_write_before_adapter_invocation", async () => {
-    await start();
+    await restoreLegacyQuick();
     const suggestionResult = deferred<unknown>();
     wasm.suggest_deck.mockReturnValue(suggestionResult.promise);
     const suggestion = useDraftStore.getState().autoSuggestDeck();
@@ -2153,7 +2320,7 @@ describe("draft store workspace authority", () => {
   });
 
   it("retries_after_live_rejections", async () => {
-    await start();
+    await restoreLegacyQuick();
     wasm.submit_pick
       .mockImplementationOnce(() => { throw new Error("adapter failure"); })
       .mockReturnValueOnce(view([]))
@@ -2167,11 +2334,11 @@ describe("draft store workspace authority", () => {
     expect(wasm.submit_pick).toHaveBeenCalledTimes(3);
   });
 
-  it("publishes_one_monotonic_generation_per_lifecycle_invocation", async () => {
+  it("publishes_monotonic_generations_across_lifecycle_invocations", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => ({ text: async () => "database" })));
-    wasm.start_quick_draft.mockReturnValue(view());
+    wasm.start_quick_draft.mockReturnValue({ owner: 11, view: fifoView() });
     wasm.start_sealed_draft.mockReturnValue({ ...view(), kind: "Sealed", status: "Deckbuilding" });
-    wasm.start_quick_cube_draft.mockReturnValue(view());
+    wasm.start_quick_cube_draft.mockReturnValue({ owner: 12, view: fifoView() });
     const generations: number[] = [];
     let previous = useDraftStore.getState().interactionGeneration;
     const unsubscribe = useDraftStore.subscribe((state) => {
@@ -2200,14 +2367,16 @@ describe("draft store workspace authority", () => {
       .rejects.toThrow("failed start");
     unsubscribe();
 
-    expect(generations).toHaveLength(8);
+    // One per lifecycle invocation, and one more for each started FIFO view's
+    // prompt: the Quick and cube starts each install one.
+    expect(generations).toHaveLength(10);
     expect(generations.every((generation, index) => (
       index === 0 || generation === generations[index - 1]! + 1
     ))).toBe(true);
   });
 
   it("applies an effect destination independently and excludes the effect card", async () => {
-    await start([card("effect")]);
+    await restoreLegacyQuick({ view: view([card("effect")]) });
     wasm.submit_pick_with_draft_effect.mockReturnValue(view([
       card("effect"), card("first"), card("second"),
     ]));
@@ -2222,7 +2391,7 @@ describe("draft store workspace authority", () => {
   });
 
   it("resolves contended pick families without disturbing the admitted intent", async () => {
-    await start();
+    await restoreLegacyQuick();
     const result = deferred<DraftPlayerView>();
     wasm.submit_pick.mockReturnValue(result.promise);
 
@@ -2239,7 +2408,7 @@ describe("draft store workspace authority", () => {
   });
 
   it("projects workspace and compatibility fields in one subscriber-visible commit", async () => {
-    await start([card("one", "Shared"), card("two", "Shared")]);
+    await restoreLegacyQuick({ view: view([card("one", "Shared"), card("two", "Shared")]) });
     const observations: Array<{ zone?: string; deck: string[] }> = [];
     const unsubscribe = useDraftStore.subscribe((state) => {
       observations.push({
@@ -2298,7 +2467,7 @@ describe("draft store workspace authority", () => {
   });
 
   it("adds below the shared virtual basic ceiling but no-ops once the global total is reached", async () => {
-    await start();
+    await restoreLegacyQuick();
     const names = ["Island", "Plains", "Mountain"];
     const belowCeiling = {
       ...useDraftStore.getState().workspaceState!,
@@ -2332,12 +2501,13 @@ describe("draft store workspace authority", () => {
       draftId: null, workspaceState: null, pendingPickIntent: null,
     });
 
-    await start([card("retry")]);
+    wasm.start_quick_draft.mockReturnValue({ owner: 11, view: fifoView({ pool: [card("retry")] }) });
+    await useDraftStore.getState().startDraft("pool", "TST", "Test", 2);
     expect(useDraftStore.getState().workspaceState?.placements.retry.zone).toBe("deck");
   });
 
   it("clears a matching rejected pick without changing its workspace", async () => {
-    await start([card("existing")]);
+    await restoreLegacyQuick({ view: view([card("existing")]) });
     const workspace = useDraftStore.getState().workspaceState;
     wasm.submit_pick.mockImplementation(() => {
       throw new Error("pick rejected");
@@ -2352,7 +2522,7 @@ describe("draft store workspace authority", () => {
   it.each(["success", "adapter rejection", "invalid acknowledgment"] as const)(
     "ignores stale pick %s after reset",
     async (settlement) => {
-    await start();
+    await restoreLegacyQuick();
     const result = deferred<DraftPlayerView>();
     wasm.submit_pick.mockReturnValue(result.promise);
     const pick = useDraftStore.getState().pickCard("late");
@@ -2375,7 +2545,7 @@ describe("draft store workspace authority", () => {
   });
 
   it("does not queue submit or launch behind an admitted pick", async () => {
-    await start();
+    await restoreLegacyQuick();
     const result = deferred<DraftPlayerView>();
     wasm.submit_pick.mockReturnValue(result.promise);
     const pick = useDraftStore.getState().pickCard("first");
@@ -2427,9 +2597,8 @@ describe("draft store workspace authority", () => {
 
   it.each([false, true])("durably upgrades a legacy staged launch from the engine view (next=%s)", async (next) => {
     const projected = view([card("spell")]);
-    wasm.start_quick_draft.mockReturnValue(projected);
     wasm.booster_pack_pool_for_game.mockReturnValue([]);
-    await useDraftStore.getState().startDraft("pool", "TST", "Test", 2);
+    await restoreLegacyQuick({ view: projected });
     const draftId = useDraftStore.getState().draftId!;
     const run: DraftRunState = {
       format: "run", results: [], playerDeck: ["spell"], opponentDeck: ["Opponent"], usedBotSeats: [1],
@@ -2464,14 +2633,9 @@ describe("draft store workspace authority", () => {
     }];
     if (Array.isArray(pool)) {
       vi.stubGlobal("fetch", vi.fn(async () => ({ text: async () => "database" })));
-      wasm.start_quick_cube_draft.mockReturnValue(draftView);
-      await useDraftStore.getState().startCubeDraft("cube", "Same label", {
-        pod_size: 8, pack_count: 3, cards_per_pack: 15, min_deck_size: 40,
-        addable_cards: { policy: "StandardBasics", custom: [] },
-      }, 2);
+      await restoreLegacyQuick({ view: draftView, meta: { setCode: "custom-cube", setName: "Same label" } });
     } else {
-      wasm.start_quick_draft.mockReturnValue(draftView);
-      await useDraftStore.getState().startDraft("pool", "TST", "Test", 2);
+      await restoreLegacyQuick({ view: draftView });
     }
     wasm.booster_pack_pool_for_game.mockReturnValue(pool);
     wasm.get_bot_deck.mockReturnValue({ main_deck: ["Opponent"], lands: {} });
@@ -2533,7 +2697,7 @@ describe("draft store workspace authority", () => {
     });
 
     it("saves a quick draft submission as the Quick Draft autosave", async () => {
-      await start([card("bolt", "Bolt")]);
+      await restoreLegacyQuick({ view: view([card("bolt", "Bolt")]) });
       useDraftStore.getState().setWorkspacePlacement("bolt", { zone: "deck", row: 0, column: 0, order: 0 });
       wasm.submit_deck.mockReturnValue({ ...view([card("bolt", "Bolt")]), status: "Pairing" });
 
@@ -2546,7 +2710,7 @@ describe("draft store workspace authority", () => {
     });
 
     it("keeps a drafted sideboard card in the autosave when a virtual card of the same name is in the main deck", async () => {
-      await start([card("bolt", "Bolt"), card("dplains", "Plains")]);
+      await restoreLegacyQuick({ view: view([card("bolt", "Bolt"), card("dplains", "Plains")]) });
       useDraftStore.getState().setWorkspacePlacement("bolt", { zone: "deck", row: 0, column: 0, order: 0 });
       useDraftStore.getState().setWorkspacePlacement("dplains", { zone: "sideboard", row: 0, column: 0, order: 0 });
       useDraftStore.getState().addBasicLand("Plains");
@@ -2586,11 +2750,7 @@ describe("draft store workspace authority", () => {
     it("saves a solo cube submission as the Cube Draft autosave, not the Quick Draft one", async () => {
       vi.stubGlobal("fetch", vi.fn(async () => ({ text: async () => "database" })));
       const cubeView = view([card("bolt", "Bolt")]);
-      wasm.start_quick_cube_draft.mockReturnValue(cubeView);
-      await useDraftStore.getState().startCubeDraft("cube", "Cube", {
-        pod_size: 8, pack_count: 3, cards_per_pack: 15, min_deck_size: 40,
-        addable_cards: { policy: "StandardBasics", custom: [] },
-      }, 2);
+      await restoreLegacyQuick({ view: cubeView, meta: { setCode: "custom-cube", setName: "Cube" } });
       useDraftStore.getState().setWorkspacePlacement("bolt", { zone: "deck", row: 0, column: 0, order: 0 });
       wasm.submit_deck.mockReturnValue({ ...cubeView, status: "Pairing" });
 
@@ -2602,7 +2762,7 @@ describe("draft store workspace authority", () => {
     });
 
     it("still resolves the submission when the autosave write throws", async () => {
-      await start([card("bolt", "Bolt")]);
+      await restoreLegacyQuick({ view: view([card("bolt", "Bolt")]) });
       useDraftStore.getState().setWorkspacePlacement("bolt", { zone: "deck", row: 0, column: 0, order: 0 });
       wasm.submit_deck.mockReturnValue({ ...view([card("bolt", "Bolt")]), status: "Pairing" });
       // A stub object (rather than spying `Storage.prototype.setItem`) is used
@@ -2643,7 +2803,7 @@ describe("draft store workspace authority", () => {
     });
 
     it("writes no autosave when the submission is rejected", async () => {
-      await start([card("bolt", "Bolt")]);
+      await restoreLegacyQuick({ view: view([card("bolt", "Bolt")]) });
       wasm.submit_deck.mockImplementationOnce(() => { throw new Error("engine rejected submission"); });
 
       await expect(useDraftStore.getState().submitDeck()).rejects.toThrow("engine rejected submission");
@@ -2652,7 +2812,7 @@ describe("draft store workspace authority", () => {
     });
 
     it("the submission resolves while the autosave waits for the library", async () => {
-      await start([card("bolt", "Bolt")]);
+      await restoreLegacyQuick({ view: view([card("bolt", "Bolt")]) });
       useDraftStore.getState().setWorkspacePlacement("bolt", { zone: "deck", row: 0, column: 0, order: 0 });
       wasm.submit_deck.mockReturnValue({ ...view([card("bolt", "Bolt")]), status: "Pairing" });
 
@@ -2679,7 +2839,7 @@ describe("draft store workspace authority", () => {
     });
 
     it("shows a busy toast when the autosave is skipped by a lock-wait timeout, and the submission still resolves", async () => {
-      await start([card("bolt", "Bolt")]);
+      await restoreLegacyQuick({ view: view([card("bolt", "Bolt")]) });
       useDraftStore.getState().setWorkspacePlacement("bolt", { zone: "deck", row: 0, column: 0, order: 0 });
       wasm.submit_deck.mockReturnValue({ ...view([card("bolt", "Bolt")]), status: "Pairing" });
 
@@ -2708,7 +2868,7 @@ describe("draft store workspace authority", () => {
     });
 
     it("shows no toast when the autosave commits", async () => {
-      await start([card("bolt", "Bolt")]);
+      await restoreLegacyQuick({ view: view([card("bolt", "Bolt")]) });
       useDraftStore.getState().setWorkspacePlacement("bolt", { zone: "deck", row: 0, column: 0, order: 0 });
       wasm.submit_deck.mockReturnValue({ ...view([card("bolt", "Bolt")]), status: "Pairing" });
 
@@ -2721,7 +2881,7 @@ describe("draft store workspace authority", () => {
   });
   it("rejects an ante human deck before SubmitDeck while admitting its legal sibling", async () => {
     const pool = [card("ante", "Contract from Below"), card("legal", "Forest")];
-    await start(pool);
+    await restoreLegacyQuick({ view: view(pool) });
     const reason = "Can't be in a deck or sideboard unless the game is played for ante: Contract from Below";
     formatGate.evaluate.mockResolvedValueOnce({ compatible: false, reasons: [reason] });
     await expect(useDraftStore.getState().submitDeck()).rejects.toThrow(reason);
@@ -2741,7 +2901,7 @@ describe("draft store workspace authority", () => {
   });
 
   it("fails closed on unavailable submission gates and invalidates an edited pending deck", async () => {
-    await start([card("first", "Forest")]);
+    await restoreLegacyQuick({ view: view([card("first", "Forest")]) });
     formatGate.evaluate.mockRejectedValueOnce(new Error("gate transport failed"));
     await expect(useDraftStore.getState().submitDeck()).rejects.toThrow("gate transport failed");
     expect(wasm.submit_deck).not.toHaveBeenCalled();
@@ -2757,7 +2917,7 @@ describe("draft store workspace authority", () => {
   });
 
   it("preflights both exact Bo1 seats before initial publication and rejects an invalid opponent", async () => {
-    await start([card("human", "Forest")]);
+    await restoreLegacyQuick({ view: view([card("human", "Forest")]) });
     useDraftStore.setState({ phase: "launching" });
     wasm.get_bot_deck.mockReturnValue({ main_deck: ["Opponent"], lands: {} });
     persistence.loadDraftRun.mockResolvedValue(null);
@@ -2783,7 +2943,7 @@ describe("draft store workspace authority", () => {
     expect(navigate).toHaveBeenCalledWith(expect.stringContaining("match=bo1"));
 
     useDraftStore.getState().reset();
-    await start([card("human", "Forest")]);
+    await restoreLegacyQuick({ view: view([card("human", "Forest")]) });
     useDraftStore.setState({ phase: "launching" });
     wasm.get_bot_deck.mockReturnValue({ main_deck: ["Opponent"], lands: {} });
     persistence.loadDraftRun.mockResolvedValue(null);
@@ -2980,8 +3140,7 @@ describe("draft store workspace authority", () => {
 
   it("keeps a selected Bo3 first match unpublished and saves the choice before immediate resume", async () => {
     const pool = [card("human", "Forest")];
-    wasm.start_quick_draft.mockReturnValue({ ...view(pool), match_config: { match_type: "Bo3" } });
-    await useDraftStore.getState().startDraft("pool", "TST", "Test", 2);
+    await restoreLegacyQuick({ view: { ...view(pool), match_config: { match_type: "Bo3" } } });
     useDraftStore.setState({ phase: "launching" });
     wasm.get_bot_deck.mockReturnValue({ main_deck: ["Opponent"], lands: {} });
     persistence.loadDraftRun.mockResolvedValue(null);
@@ -3020,8 +3179,7 @@ describe("draft store workspace authority", () => {
 
   it("saves an immediate Bo3 choice when initial publication fails before the durable run write", async () => {
     const pool = [card("human", "Forest")];
-    wasm.start_quick_draft.mockReturnValue({ ...view(pool), match_config: { match_type: "Bo3" } });
-    await useDraftStore.getState().startDraft("pool", "TST", "Test", 2);
+    await restoreLegacyQuick({ view: { ...view(pool), match_config: { match_type: "Bo3" } } });
     useDraftStore.setState({ phase: "launching" });
     wasm.get_bot_deck.mockReturnValue({ main_deck: ["Opponent"], lands: {} });
     persistence.loadDraftRun.mockResolvedValue(null);
@@ -3102,8 +3260,7 @@ describe("draft store workspace authority", () => {
   });
 
   it("freezes the first-match choice across a pending gate and permits a new choice after rejection", async () => {
-    wasm.start_quick_draft.mockReturnValue({ ...view([card("human", "Forest")]), match_config: { match_type: "Bo3" } });
-    await useDraftStore.getState().startDraft("pool", "TST", "Test", 2);
+    await restoreLegacyQuick({ view: { ...view([card("human", "Forest")]), match_config: { match_type: "Bo3" } } });
     useDraftStore.setState({ phase: "launching" });
     wasm.get_bot_deck.mockReturnValue({ main_deck: ["Opponent"], lands: {} });
     persistence.loadDraftRun.mockResolvedValue(null);
@@ -3143,8 +3300,7 @@ describe("draft store workspace authority", () => {
   });
 
   it.each(["staged-retry", "next-match"] as const)("freezes %s through both exact Bo1 seat gates", async (branch) => {
-    wasm.start_quick_draft.mockReturnValue({ ...view([card("human", "Forest")]), match_config: { match_type: "Bo3" } });
-    await useDraftStore.getState().startDraft("pool", "TST", "Test", 2);
+    await restoreLegacyQuick({ view: { ...view([card("human", "Forest")]), match_config: { match_type: "Bo3" } } });
     const draftId = useDraftStore.getState().draftId!;
     const staged: DraftRunState = {
       format: "run", results: [], playerDeck: ["Forest"], opponentDeck: ["Opponent"], usedBotSeats: [1],
@@ -3188,8 +3344,7 @@ describe("draft store workspace authority", () => {
   });
 
   it.each(["staged-retry", "next-match"] as const)("refuses empty-sideboard Bo3 %s before stage publication", async (branch) => {
-    wasm.start_quick_draft.mockReturnValue({ ...view([card("human", "Forest")]), match_config: { match_type: "Bo3" } });
-    await useDraftStore.getState().startDraft("pool", "TST", "Test", 2);
+    await restoreLegacyQuick({ view: { ...view([card("human", "Forest")]), match_config: { match_type: "Bo3" } } });
     const draftId = useDraftStore.getState().draftId!;
     const run: DraftRunState = {
       format: "bo3", results: [], playerDeck: ["Forest"], opponentDeck: ["Opponent"], usedBotSeats: [1],
@@ -3220,8 +3375,7 @@ describe("draft store workspace authority", () => {
   });
 
   it("rejects a non-action choice mutation after a positive gate without publishing", async () => {
-    wasm.start_quick_draft.mockReturnValue({ ...view([card("human", "Forest")]), match_config: { match_type: "Bo3" } });
-    await useDraftStore.getState().startDraft("pool", "TST", "Test", 2);
+    await restoreLegacyQuick({ view: { ...view([card("human", "Forest")]), match_config: { match_type: "Bo3" } } });
     useDraftStore.setState({ phase: "launching" });
     wasm.get_bot_deck.mockReturnValue({ main_deck: ["Opponent"], lands: {} });
     persistence.loadDraftRun.mockResolvedValue(null);
@@ -3239,7 +3393,7 @@ describe("draft store workspace authority", () => {
   });
 
   it("saves the current workspace on first-launch rejection and reports a failed choice save", async () => {
-    await start([card("human", "Forest")]);
+    await restoreLegacyQuick({ view: view([card("human", "Forest")]) });
     useDraftStore.setState({ phase: "launching" });
     wasm.get_bot_deck.mockReturnValue({ main_deck: ["Opponent"], lands: {} });
     persistence.loadDraftRun.mockResolvedValue(null);
@@ -3266,7 +3420,7 @@ describe("draft store workspace authority", () => {
   });
 
   it("does not write an abandoned first-launch failure snapshot after session replacement", async () => {
-    await start([card("human", "Forest")]);
+    await restoreLegacyQuick({ view: view([card("human", "Forest")]) });
     useDraftStore.setState({ phase: "launching" });
     wasm.get_bot_deck.mockReturnValue({ main_deck: ["Opponent"], lands: {} });
     persistence.loadDraftRun.mockResolvedValue(null);
@@ -3282,7 +3436,7 @@ describe("draft store workspace authority", () => {
   });
 
   it.each(["success", "failure"] as const)("coalesces a subscriber-reentrant End Run through %s", async (outcome) => {
-    await start([card("human", "Forest")]);
+    await restoreLegacyQuick({ view: view([card("human", "Forest")]) });
     useDraftStore.setState({ phase: "launching" });
     const before = useDraftStore.getState();
     const gate = deferred<void>();
@@ -3335,7 +3489,7 @@ describe("draft store workspace authority", () => {
       await expect(nested).resolves.toBeUndefined();
       expect(useDraftStore.getState().draftId).toBeNull();
       expect(useDraftStore.getState().interactionGeneration).toBe(before.interactionGeneration + 1);
-      await start();
+      await restoreLegacyQuick();
       wasm.submit_pick.mockReturnValue(view([card("new")]));
       await expect(useDraftStore.getState().pickCard("new"))
         .resolves.toEqual({ status: "acknowledged" });
@@ -3345,7 +3499,7 @@ describe("draft store workspace authority", () => {
   });
 
   it.each(["success", "failure"] as const)("fences a pending format snapshot through cleanup %s", async (outcome) => {
-    await start([card("human", "Forest")]);
+    await restoreLegacyQuick({ view: view([card("human", "Forest")]) });
     useDraftStore.setState({ phase: "launching" });
     await settleTimers();
     persistence.persistQuickDraftSnapshot.mockClear();
@@ -3381,7 +3535,7 @@ describe("draft store workspace authority", () => {
   });
 
   it.each([false, true])("fences an engine-queued format export (end=%s)", async (end) => {
-    await start([card("human", "Forest")]);
+    await restoreLegacyQuick({ view: view([card("human", "Forest")]) });
     useDraftStore.setState({ phase: "launching" });
     await settleTimers();
     persistence.persistQuickDraftSnapshot.mockClear();
@@ -3412,7 +3566,7 @@ describe("draft store workspace authority", () => {
   });
 
   it("blocks initial launch publication and a second launch during End Run", async () => {
-    await start([card("human", "Forest")]);
+    await restoreLegacyQuick({ view: view([card("human", "Forest")]) });
     useDraftStore.setState({ phase: "launching" });
     await settleTimers();
     persistence.persistQuickDraftSnapshot.mockClear();
@@ -3449,7 +3603,7 @@ describe("draft store workspace authority", () => {
       });
       persistence.loadQuickDraftSession.mockResolvedValue(null);
     } else {
-      await start([card("human", "Forest")]);
+      await restoreLegacyQuick({ view: view([card("human", "Forest")]) });
       id = useDraftStore.getState().draftId!;
     }
     const run: DraftRunState = {
@@ -3488,7 +3642,7 @@ describe("draft store workspace authority", () => {
   });
 
   it.each(["success", "failure"] as const)("keeps a newer run and its launch after old cleanup %s", async (outcome) => {
-    await start([card("A", "Forest")]);
+    await restoreLegacyQuick({ view: view([card("A", "Forest")]), meta: { id: "legacy-draft-a" } });
     useDraftStore.setState({ phase: "launching" });
     const idA = useDraftStore.getState().draftId!;
     const cleanup = deferred<void>();
@@ -3497,7 +3651,7 @@ describe("draft store workspace authority", () => {
     await Promise.resolve();
     expect(persistence.cleanupQuickDraftLifecycle).toHaveBeenCalledExactlyOnceWith(idA);
     useDraftStore.getState().reset();
-    await start([card("B", "Forest")]);
+    await restoreLegacyQuick({ view: view([card("B", "Forest")]), meta: { id: "legacy-draft-b" } });
     useDraftStore.setState({ phase: "launching" });
     const stateB = useDraftStore.getState();
     expect(stateB.draftId).not.toBe(idA);
@@ -3721,4 +3875,580 @@ describe("draft store workspace authority", () => {
     expect(navigate).toHaveBeenCalledOnce();
   });
 
+  describe("local FIFO session", () => {
+    it("dispatches_a_fifo_pick_bound_to_its_prompt_at_explicit_time", async () => {
+      await resumeFifo();
+      wasm.local_fifo_select.mockReturnValue(fifoView({ pool: [card("pk-a")], promptGeneration: 4 }));
+
+      await expect(useDraftStore.getState().pickCard("pk-a")).resolves.toEqual({ status: "acknowledged" });
+
+      expect(wasm.local_fifo_select).toHaveBeenCalledExactlyOnceWith(7, expect.any(String), 1_700_000_000_000n);
+      expect(localFifoSelection(0)).toEqual({
+        prompt_id: { session_id: "local-0123456789abcdef", seat: 0, generation: 3 },
+        picked_card_instance_ids: ["pk-a"],
+        burned_card_instance_ids: [],
+        effect_card_instance_ids: [],
+      });
+      expect(wasm.submit_pick).not.toHaveBeenCalled();
+      expect(useDraftStore.getState().workspaceState!.placements["pk-a"].zone).toBe("deck");
+    });
+
+    it.each([
+      { kind: "Quick" as const, picks: 1, added: ["auto-1"] },
+      // CR 903.13b: Commander Draft's count, which no Quick session publishes;
+      // it separates the published count from a literal one.
+      { kind: "CommanderDraft" as const, picks: 2, added: ["auto-1", "auto-2"] },
+    ])("acknowledges_a_fifo_auto_select_by_its_published_pick_count ($picks)", async ({ kind, picks, added }) => {
+      const requirements = { picks, burns: 0 };
+      await resumeFifo({ view: fifoView({ kind, requirements }) });
+      const hints = { "auto-1": { column: 4 }, "auto-2": { column: 5 } };
+      wasm.local_fifo_auto_select.mockReturnValue(fifoView({
+        kind, requirements, pool: added.map((instanceId) => card(instanceId)), promptGeneration: 4,
+      }));
+
+      await expect(useDraftStore.getState().autoPickCard("deck", hints)).resolves.toEqual({ status: "acknowledged" });
+
+      expect(wasm.local_fifo_auto_select).toHaveBeenCalledExactlyOnceWith(
+        7,
+        JSON.stringify({ session_id: "local-0123456789abcdef", seat: 0, generation: 3 }),
+        1_700_000_000_000n,
+      );
+      expect(wasm.auto_pick).not.toHaveBeenCalled();
+      const placements = useDraftStore.getState().workspaceState!.placements;
+      for (const instanceId of added) {
+        expect(placements[instanceId]).toMatchObject({
+          zone: "deck",
+          column: hints[instanceId as keyof typeof hints].column,
+        });
+      }
+    });
+
+    it("refuses_a_fifo_auto_select_that_adds_fewer_cards_than_its_published_count", async () => {
+      const requirements = { picks: 2, burns: 0 };
+      await resumeFifo({ view: fifoView({ kind: "CommanderDraft", requirements }) });
+      const workspace = useDraftStore.getState().workspaceState;
+      wasm.local_fifo_auto_select.mockReturnValue(fifoView({
+        kind: "CommanderDraft", requirements, pool: [card("auto-1")], promptGeneration: 4,
+      }));
+
+      await expect(useDraftStore.getState().autoPickCard()).resolves.toEqual({
+        status: "rejected", reason: "unacknowledged",
+      });
+
+      expect(wasm.local_fifo_auto_select).toHaveBeenCalledOnce();
+      expect(useDraftStore.getState().workspaceState).toBe(workspace);
+    });
+
+    it("keeps_the_view_generation_and_workspace_when_the_engine_refuses_a_fifo_selection", async () => {
+      await resumeFifo();
+      const before = useDraftStore.getState();
+      wasm.local_fifo_select.mockImplementationOnce(() => { throw new Error("stale prompt"); });
+
+      await expect(before.pickCard("pk-a")).resolves.toEqual({ status: "rejected", reason: "adapter" });
+
+      expect(wasm.local_fifo_select).toHaveBeenCalledOnce();
+      const after = useDraftStore.getState();
+      expect(after.view).toBe(before.view);
+      expect(after.workspaceState).toBe(before.workspaceState);
+      expect(after.interactionGeneration).toBe(before.interactionGeneration);
+      await settleTimers();
+      expect(wasm.export_local_fifo_session).not.toHaveBeenCalled();
+    });
+
+    it("refuses_fifo_selection_without_a_prompt", async () => {
+      await expect(resumeFifo({ view: fifoView({ promptGeneration: null, currentPack: [] }) }))
+        .resolves.toEqual({ status: "resumed", draftId: "fifo-draft" });
+      const state = useDraftStore.getState();
+      expect(state.runtime).toEqual({ kind: "local-fifo", owner: 7 });
+      expect(draftViewPresentation(state.view!).isReadOnly).toBe(false);
+
+      await expect(state.pickCard("pk-a")).resolves.toEqual(INVALID_REQUEST);
+      await expect(state.autoPickCard()).resolves.toEqual(INVALID_REQUEST);
+
+      expect(wasm.local_fifo_select).not.toHaveBeenCalled();
+      expect(wasm.local_fifo_auto_select).not.toHaveBeenCalled();
+    });
+
+    it("blocks_selection_on_a_read_only_fifo_view", async () => {
+      // The engine publishes neither a prompt nor effect options outside
+      // Drafting; both are present here so neither refusal answers first.
+      await resumeFifo({
+        view: fifoView({
+          status: "Review",
+          promptGeneration: 5,
+          pool: [cogworkLibrarian()],
+          effects: { card_instance_ids: ["cogwork"], requirements: [{ picks: 2, burns: 0 }] },
+        }),
+      });
+      const actions = useDraftStore.getState();
+
+      await expect(actions.pickCard("pk-a")).resolves.toEqual(INVALID_REQUEST);
+      await expect(actions.pickCardWithDraftEffect("cogwork", ["pk-a", "pk-b"])).resolves.toEqual(INVALID_REQUEST);
+      await expect(actions.autoPickCard()).resolves.toEqual(INVALID_REQUEST);
+      actions.selectCard("pk-a");
+
+      expect(useDraftStore.getState().selectedCard).toBeNull();
+      expect(wasm.local_fifo_select).not.toHaveBeenCalled();
+      expect(wasm.local_fifo_auto_select).not.toHaveBeenCalled();
+
+      useDraftStore.setState({ view: { ...useDraftStore.getState().view!, status: "Drafting" } });
+      useDraftStore.getState().selectCard("pk-a");
+      expect(useDraftStore.getState().selectedCard).toBe("pk-a");
+      wasm.local_fifo_select.mockReturnValue(fifoView({
+        pool: [cogworkLibrarian(), card("pk-a")], promptGeneration: 6,
+      }));
+      await expect(useDraftStore.getState().pickCard("pk-a")).resolves.toEqual({ status: "acknowledged" });
+      expect(localFifoSelection(0)).toMatchObject({ prompt_id: { generation: 5 } });
+    });
+
+    it("takes_no_barrier_llm_round_on_a_fifo_session", async () => {
+      useLlmStore.setState({ draftEnabled: true });
+      await restoreLegacyQuick();
+      wasm.submit_pick.mockReturnValue(view([card("legacy-pick")]));
+      await expect(useDraftStore.getState().pickCard("legacy-pick")).resolves.toEqual({ status: "acknowledged" });
+      expect(loadProviderCatalog).toHaveBeenCalledOnce();
+      wasm.submit_pick.mockClear();
+
+      await resumeFifo({ view: fifoView({ currentPack: [card("pk-a"), card("pk-b"), card("pk-c")] }) });
+      // The catalog offers no usable profile, so the bot seats stay the engine's.
+      expect(wasm.local_fifo_set_llm_drafting).toHaveBeenCalledExactlyOnceWith(
+        7, JSON.stringify("EngineBots"), 1_700_000_000_000n,
+      );
+      wasm.local_fifo_select.mockReturnValue(fifoView({ pool: [card("pk-a")], promptGeneration: 4 }));
+      await expect(useDraftStore.getState().pickCard("pk-a")).resolves.toEqual({ status: "acknowledged" });
+
+      expect(wasm.local_fifo_select).toHaveBeenCalledOnce();
+      expect(wasm.submit_pick).not.toHaveBeenCalled();
+      expect(useDraftStore.getState().awaitingDrafters).toBe(false);
+    });
+
+    it("uses_the_owner_of_the_latest_import", async () => {
+      await resumeFifo({ owner: 7 });
+      await resumeFifo({ owner: 8 });
+      wasm.local_fifo_select.mockReturnValue(fifoView({ pool: [card("pk-a")], promptGeneration: 4 }));
+
+      await expect(useDraftStore.getState().pickCard("pk-a")).resolves.toEqual({ status: "acknowledged" });
+
+      expect(wasm.local_fifo_select).toHaveBeenCalledOnce();
+      expect(wasm.local_fifo_select.mock.calls[0]![0]).toBe(8);
+    });
+
+    it("binds_each_selection_to_the_prompt_it_was_composed_on", async () => {
+      await resumeFifo();
+      wasm.local_fifo_select.mockReturnValueOnce(fifoView({
+        pool: [card("pk-a")], promptGeneration: 4, currentPack: [card("pk-b"), card("pk-c")],
+      }));
+      wasm.local_fifo_select.mockReturnValueOnce(fifoView({
+        pool: [card("pk-a"), card("pk-b")], promptGeneration: 5, currentPack: [card("pk-c")],
+      }));
+
+      await expect(useDraftStore.getState().pickCard("pk-a")).resolves.toEqual({ status: "acknowledged" });
+      await expect(useDraftStore.getState().pickCard("pk-b")).resolves.toEqual({ status: "acknowledged" });
+
+      expect(localFifoSelection(0)).toMatchObject({ prompt_id: { generation: 3 } });
+      expect(localFifoSelection(1)).toMatchObject({ prompt_id: { generation: 4 } });
+    });
+
+    it.each(["a new head", "a head with the same ids"] as const)(
+      "moves_the_interaction_generation_with_the_prompt (%s)",
+      async (head) => {
+        const before = [card("pk-a"), card("pk-b"), card("pk-c")];
+        await resumeFifo({ view: fifoView({ currentPack: before }) });
+        useDraftStore.getState().selectCard("pk-b");
+        const generation = useDraftStore.getState().interactionGeneration;
+        wasm.local_fifo_select.mockReturnValue(fifoView({
+          pool: [card("pk-a")],
+          promptGeneration: 4,
+          currentPack: head === "a new head" ? [card("pk-d"), card("pk-e")] : before.map((entry) => ({ ...entry })),
+        }));
+
+        await expect(useDraftStore.getState().pickCard("pk-a")).resolves.toEqual({ status: "acknowledged" });
+
+        expect(useDraftStore.getState().interactionGeneration).not.toBe(generation);
+        expect(useDraftStore.getState().selectedCard).toBeNull();
+      },
+    );
+
+    it("keeps_the_interaction_generation_across_a_legacy_pick", async () => {
+      await restoreLegacyQuick();
+      const generation = useDraftStore.getState().interactionGeneration;
+      const returned = { ...view([card("legacy-pick")]), current_pack: [card("next-1"), card("next-2")] };
+      wasm.submit_pick.mockReturnValue(returned);
+
+      await expect(useDraftStore.getState().pickCard("legacy-pick")).resolves.toEqual({ status: "acknowledged" });
+
+      expect(useDraftStore.getState().view).toBe(returned);
+      expect(useDraftStore.getState().interactionGeneration).toBe(generation);
+    });
+
+    it("keeps_the_interaction_generation_across_a_workspace_edit_on_a_fifo_view", async () => {
+      await resumeFifo({ view: fifoView({ pool: [card("human", "Forest")] }) });
+      const generation = useDraftStore.getState().interactionGeneration;
+      const placement = useDraftStore.getState().workspaceState!.placements.human;
+
+      useDraftStore.getState().setWorkspacePlacement("human", { ...placement, zone: "sideboard" });
+
+      expect(useDraftStore.getState().workspaceState!.placements.human.zone).toBe("sideboard");
+      expect(useDraftStore.getState().interactionGeneration).toBe(generation);
+    });
+
+    it("never_reissues_an_interaction_generation_after_prompt_moves", async () => {
+      const generations: number[] = [];
+      let previous = useDraftStore.getState().interactionGeneration;
+      const unsubscribe = useDraftStore.subscribe((state) => {
+        if (state.interactionGeneration !== previous) {
+          previous = state.interactionGeneration;
+          generations.push(previous);
+        }
+      });
+
+      await resumeFifo();
+      wasm.local_fifo_select.mockReturnValue(fifoView({ pool: [card("pk-a")], promptGeneration: 4 }));
+      await expect(useDraftStore.getState().pickCard("pk-a")).resolves.toEqual({ status: "acknowledged" });
+      await expect(useDraftStore.getState().endRun("fifo-draft")).resolves.toBeUndefined();
+      useDraftStore.getState().reset();
+      unsubscribe();
+
+      expect(generations).toHaveLength(5);
+      expect(generations.every((generation, index) => (
+        index === 0 || generation > generations[index - 1]!
+      ))).toBe(true);
+    });
+
+    it("persists_a_fifo_session_through_its_owner_with_its_declared_identity", async () => {
+      await resumeFifo();
+      wasm.local_fifo_select.mockReturnValue(fifoView({ pool: [card("pk-a")], promptGeneration: 4 }));
+      await expect(useDraftStore.getState().pickCard("pk-a")).resolves.toEqual({ status: "acknowledged" });
+      await settleTimers();
+
+      expect(wasm.export_local_fifo_session).toHaveBeenCalledWith(7);
+      expect(wasm.export_draft_session).not.toHaveBeenCalled();
+      expect(persistence.persistQuickDraftSnapshot).toHaveBeenCalledWith(
+        "fifo-draft",
+        "fifo-export",
+        expect.any(Object),
+        expect.objectContaining({ localFifoSessionId: "local-0123456789abcdef" }),
+      );
+
+      persistence.persistQuickDraftSnapshot.mockClear();
+      await restoreLegacyQuick({ view: view([card("legacy", "Legacy")]) });
+      // A resume installs without saving; a workspace edit makes the restored
+      // legacy session save.
+      useDraftStore.getState().setWorkspaceState(useDraftStore.getState().workspaceState!);
+      await settleTimers();
+      expect(persistence.persistQuickDraftSnapshot).toHaveBeenCalledOnce();
+      const [, , , legacyMeta] = persistence.persistQuickDraftSnapshot.mock.calls[0]!;
+      expect(legacyMeta).not.toHaveProperty("localFifoSessionId");
+    });
+
+    it("routes_a_declared_record_to_the_local_fifo_import", async () => {
+      await expect(resumeFifo()).resolves.toEqual({ status: "resumed", draftId: "fifo-draft" });
+
+      expect(wasm.import_local_fifo_session).toHaveBeenCalledExactlyOnceWith("fifo-saved", 3);
+      expect(wasm.import_draft_session).not.toHaveBeenCalled();
+      expect(wasm.local_fifo_booster_pack_pool_for_game).toHaveBeenCalledWith(7);
+      expect(wasm.booster_pack_pool_for_game).not.toHaveBeenCalled();
+      expect(useDraftStore.getState()).toMatchObject({
+        runtime: { kind: "local-fifo", owner: 7 },
+        localFifoSessionId: "local-0123456789abcdef",
+      });
+    });
+
+    it("keeps_a_declared_snapshot_the_engine_refuses", async () => {
+      const outcome = await resumeFifo({ importError: new Error("This draft is not a local FIFO Quick draft") });
+
+      expect(wasm.import_local_fifo_session).toHaveBeenCalledOnce();
+      expect(outcome).toEqual({
+        status: "unavailable", draftId: "fifo-draft", reason: "This draft is not a local FIFO Quick draft",
+      });
+      await settleTimers();
+      expect(persistence.cleanupQuickDraftLifecycle).not.toHaveBeenCalled();
+      expect(persistence.persistQuickDraftSnapshot).not.toHaveBeenCalled();
+      expect(useDraftStore.getState().runtime).toBeNull();
+    });
+
+    it("refuses_an_import_that_answers_another_session", async () => {
+      const outcome = await resumeFifo({ view: fifoView({ sessionId: "local-fedcba9876543210" }) });
+
+      expect(wasm.import_local_fifo_session).toHaveBeenCalledExactlyOnceWith("fifo-saved", 3);
+      expect(outcome).toEqual({
+        status: "unavailable", draftId: "fifo-draft", reason: i18n.t("draft:run.resumeUnavailable"),
+      });
+      await settleTimers();
+      expect(persistence.cleanupQuickDraftLifecycle).not.toHaveBeenCalled();
+      expect(persistence.persistQuickDraftSnapshot).not.toHaveBeenCalled();
+      expect(useDraftStore.getState().runtime).toBeNull();
+    });
+
+    it("keeps_the_declared_identity_through_a_run_only_resume", async () => {
+      const run: DraftRunState = {
+        format: "run", results: [], playerDeck: ["Player"], opponentDeck: ["Opponent"], usedBotSeats: [1],
+      };
+      await expect(resumeFifo({ meta: { phase: "playing", runFormat: "run" }, run, saved: false }))
+        .resolves.toEqual({ status: "resumed", draftId: "fifo-draft" });
+      expect(useDraftStore.getState().runtime).toBeNull();
+      expect(wasm.import_local_fifo_session).not.toHaveBeenCalled();
+
+      await useDraftStore.getState().launchNextMatch(vi.fn());
+
+      expect(persistence.publishStagedDraftMatch).toHaveBeenCalledOnce();
+      const [[published]] = persistence.publishStagedDraftMatch.mock.calls as unknown as Array<[{ meta: ActiveQuickDraftMeta }]>;
+      expect(published.meta.localFifoSessionId).toBe("local-0123456789abcdef");
+    });
+
+    it("suggests_a_fifo_deck_through_its_owner", async () => {
+      await resumeFifo({ view: fifoView({ pool: [card("kept", "Kept"), card("cut", "Cut")] }) });
+      wasm.local_fifo_suggest_deck.mockReturnValue({ main_deck: ["Kept"], lands: {}, commander: [] });
+
+      await useDraftStore.getState().autoSuggestDeck();
+
+      expect(wasm.local_fifo_suggest_deck).toHaveBeenCalledExactlyOnceWith(7);
+      expect(wasm.suggest_deck).not.toHaveBeenCalled();
+      const placements = useDraftStore.getState().workspaceState!.placements;
+      expect(placements.kept.zone).toBe("deck");
+      expect(placements.cut.zone).toBe("sideboard");
+    });
+
+    it("suggests_fifo_lands_through_its_owner", async () => {
+      await resumeFifo({ view: fifoView({ pool: [card("human", "Forest")] }) });
+      const state = useDraftStore.getState();
+      const mainDeck = projectWorkspaceMainDeck(state.workspaceState!, state.view!.pool);
+      wasm.local_fifo_suggest_lands.mockReturnValue({ Plains: 1 });
+
+      await useDraftStore.getState().autoSuggestLands();
+
+      expect(wasm.local_fifo_suggest_lands).toHaveBeenCalledExactlyOnceWith(7, JSON.stringify(mainDeck));
+      expect(wasm.suggest_lands).not.toHaveBeenCalled();
+      expect(projectWorkspaceLandCounts(useDraftStore.getState().workspaceState!)).toEqual({ Plains: 1 });
+    });
+
+    it("submits_a_fifo_deck_through_its_owner_at_explicit_time", async () => {
+      await resumeFifo({ view: fifoView({ pool: [card("human", "Forest")] }) });
+      const state = useDraftStore.getState();
+      const main = projectWorkspaceMainDeck(state.workspaceState!, state.view!.pool);
+      const submitted = {
+        ...fifoView({ pool: [card("human", "Forest")], promptGeneration: null, currentPack: [] }),
+        status: "Pairing" as const,
+      };
+      wasm.local_fifo_submit_deck.mockReturnValue(submitted);
+      vi.setSystemTime(FIFO_NOW_MS);
+
+      await useDraftStore.getState().submitDeck();
+
+      expect(wasm.local_fifo_submit_deck).toHaveBeenCalledExactlyOnceWith(7, JSON.stringify(main), "[]", 1_700_000_000_000n);
+      expect(wasm.submit_deck).not.toHaveBeenCalled();
+      expect(useDraftStore.getState()).toMatchObject({ view: submitted, phase: "launching" });
+    });
+
+    it("launches_a_fifo_match_through_its_owner", async () => {
+      await resumeFifo({ view: fifoView({ pool: [card("human", "Forest")] }) });
+      useDraftStore.setState({ phase: "launching" });
+      persistence.loadDraftRun.mockResolvedValue(null);
+      wasm.local_fifo_bot_deck.mockReturnValue({ main_deck: ["Opponent"], lands: {} });
+
+      await useDraftStore.getState().launchMatch(vi.fn());
+
+      expect(wasm.export_local_fifo_session).toHaveBeenCalledWith(7);
+      expect(wasm.local_fifo_booster_pack_pool_for_game).toHaveBeenCalledWith(7);
+      expect(wasm.local_fifo_bot_deck).toHaveBeenCalledWith(7, 1);
+      expect(persistence.publishInitialDraftMatch).toHaveBeenCalledOnce();
+      const published = persistence.publishInitialDraftMatch.mock.calls[0]![0] as unknown as {
+        sessionJson: string;
+        meta: ActiveQuickDraftMeta;
+      };
+      expect(published.sessionJson).toBe("fifo-export");
+      expect(published.meta.localFifoSessionId).toBe("local-0123456789abcdef");
+      expect(wasm.export_draft_session).not.toHaveBeenCalled();
+      expect(wasm.booster_pack_pool_for_game).not.toHaveBeenCalled();
+      expect(wasm.get_bot_deck).not.toHaveBeenCalled();
+    });
+
+    it.each(["staged-retry", "next-match"] as const)(
+      "launches_a_staged_or_next_fifo_match_through_its_owner (%s)",
+      async (branch) => {
+        await resumeFifo({ view: fifoView({ pool: [card("human", "Forest")] }) });
+        const staged: DraftRunState = {
+          format: "run", results: [], playerDeck: ["Forest"], opponentDeck: ["Opponent"], usedBotSeats: [1],
+          activeMatch: {
+            draftId: "fifo-draft", gameId: "staged", format: "run", resultCountAtLaunch: 0,
+            botSeat: 1, opponentDeck: ["Opponent"],
+          },
+        };
+        if (branch === "staged-retry") useDraftStore.setState({ phase: "launching" });
+        else {
+          staged.results = [{ gameId: "finished", result: "win" }];
+          staged.activeMatch = undefined;
+          useDraftStore.setState({ phase: "playing", runState: staged });
+          wasm.local_fifo_bot_deck.mockReturnValue({ main_deck: ["New Opponent"], lands: {} });
+        }
+        persistence.loadDraftRun.mockResolvedValue(staged);
+        // The resume read the same pool through the same export.
+        wasm.local_fifo_booster_pack_pool_for_game.mockClear();
+        const navigate = vi.fn();
+
+        await (branch === "staged-retry"
+          ? useDraftStore.getState().launchMatch(navigate)
+          : useDraftStore.getState().launchNextMatch(navigate));
+
+        expect(wasm.local_fifo_booster_pack_pool_for_game).toHaveBeenCalledExactlyOnceWith(7);
+        expect(wasm.booster_pack_pool_for_game).not.toHaveBeenCalled();
+        expect(persistence.publishStagedDraftMatch).toHaveBeenCalledOnce();
+        expect(wasm.local_fifo_booster_pack_pool_for_game.mock.invocationCallOrder[0])
+          .toBeLessThan(persistence.publishStagedDraftMatch.mock.invocationCallOrder[0]!);
+        if (branch === "next-match") {
+          expect(wasm.local_fifo_bot_deck).toHaveBeenCalledWith(7, 1);
+          expect(wasm.get_bot_deck).not.toHaveBeenCalled();
+        }
+      },
+    );
+
+    it("sizes_a_fifo_effect_selection_by_its_published_requirement", async () => {
+      // CR 903.13b: Commander Draft drafts two cards per pick, so Cogwork
+      // Librarian's additional card makes three; Quick's would be two.
+      await resumeFifo({
+        view: fifoView({
+          kind: "CommanderDraft",
+          pool: [cogworkLibrarian()],
+          currentPack: [card("a"), card("b"), card("c"), card("d")],
+          requirements: { picks: 2, burns: 0 },
+          effects: { card_instance_ids: ["cogwork"], requirements: [{ picks: 3, burns: 0 }] },
+        }),
+      });
+      const actions = useDraftStore.getState();
+
+      await expect(actions.pickCardWithDraftEffect("cogwork", ["a", "b"])).resolves.toEqual(INVALID_REQUEST);
+      await expect(actions.pickCardWithDraftEffect("unpublished", ["a", "b", "c"])).resolves.toEqual(INVALID_REQUEST);
+      expect(wasm.local_fifo_select).not.toHaveBeenCalled();
+
+      wasm.local_fifo_select.mockReturnValue(fifoView({
+        kind: "CommanderDraft", pool: [card("a"), card("b"), card("c")], promptGeneration: 4, currentPack: [card("d")],
+      }));
+      await expect(actions.pickCardWithDraftEffect("cogwork", ["a", "b", "c"])).resolves.toEqual({ status: "acknowledged" });
+
+      expect(wasm.local_fifo_select).toHaveBeenCalledOnce();
+      expect(localFifoSelection(0)).toMatchObject({
+        picked_card_instance_ids: ["a", "b", "c"],
+        burned_card_instance_ids: [],
+        effect_card_instance_ids: ["cogwork"],
+      });
+    });
+  });
+
+  describe("local FIFO start", () => {
+    /** A session id no client constant carries, so only the started view can supply it. */
+    const STARTED_SESSION_ID = "local-fedcba9876543210";
+
+    /** Starts a Quick set draft whose constructor answers owner 11 and a FIFO view of the started session. */
+    async function startFifoQuick(difficulty: number): Promise<void> {
+      vi.setSystemTime(FIFO_NOW_MS);
+      wasm.start_quick_draft.mockReturnValue({ owner: 11, view: fifoView({ sessionId: STARTED_SESSION_ID }) });
+      await useDraftStore.getState().startDraft("pool", "TST", "Test", difficulty);
+    }
+
+    it("starts_a_quick_draft_on_the_local_fifo_runtime_with_its_engine_issued_identity", async () => {
+      await startFifoQuick(3);
+
+      expect(wasm.start_quick_draft).toHaveBeenCalledExactlyOnceWith(
+        "pool", 3, expect.any(Number), "\"EngineBots\"", 1_700_000_000_000n,
+      );
+      expect(useDraftStore.getState()).toMatchObject({
+        runtime: { kind: "local-fifo", owner: 11 },
+        localFifoSessionId: STARTED_SESSION_ID,
+      });
+      await settleTimers();
+      expect(wasm.export_local_fifo_session).toHaveBeenCalledWith(11);
+      expect(wasm.export_draft_session).not.toHaveBeenCalled();
+      expect(persistence.persistQuickDraftSnapshot).toHaveBeenCalledWith(
+        expect.any(String),
+        "fifo-export",
+        expect.any(Object),
+        expect.objectContaining({ localFifoSessionId: STARTED_SESSION_ID }),
+      );
+    });
+
+    it("resumes_a_started_drafts_saved_record_through_the_local_fifo_import", async () => {
+      await startFifoQuick(3);
+      await settleTimers();
+      const [draftId, sessionJson, , meta] = persistence.persistQuickDraftSnapshot.mock.lastCall!;
+      persistence.inspectActiveQuickDraftLifecycle.mockResolvedValue(meta);
+      persistence.loadDraftRun.mockResolvedValueOnce(null);
+      persistence.loadQuickDraftSession.mockResolvedValue({
+        sessionJson, mainDeck: [], landCounts: {},
+        poolSortMode: "color", poolPanelOpen: true, workspace: createDraftWorkspaceState(),
+      });
+      const resumed = fifoView({ sessionId: STARTED_SESSION_ID });
+      wasm.import_local_fifo_session.mockReturnValue({ owner: 12, view: resumed });
+      wasm.local_fifo_set_llm_drafting.mockReturnValue(resumed);
+
+      await expect(useDraftStore.getState().resumeDraft()).resolves.toEqual({ status: "resumed", draftId });
+
+      expect(wasm.import_local_fifo_session).toHaveBeenCalledExactlyOnceWith("fifo-export", 3);
+      expect(wasm.import_draft_session).not.toHaveBeenCalled();
+    });
+
+    it("starts_a_cube_draft_on_the_local_fifo_runtime", async () => {
+      vi.setSystemTime(FIFO_NOW_MS);
+      const settings = {
+        pod_size: 4,
+        pack_count: 3,
+        cards_per_pack: 15,
+        min_deck_size: 40,
+        addable_cards: { policy: "StandardBasics" as const, custom: [] },
+      };
+      wasm.start_quick_cube_draft.mockReturnValue({ owner: 11, view: fifoView({ sessionId: STARTED_SESSION_ID }) });
+
+      await useDraftStore.getState().startCubeDraft("1 Alpha", "Cube", settings, 3);
+
+      expect(wasm.start_quick_cube_draft).toHaveBeenCalledExactlyOnceWith(
+        "1 Alpha", "Cube", JSON.stringify(settings), 3, expect.any(Number), "\"EngineBots\"", 1_700_000_000_000n,
+      );
+      expect(useDraftStore.getState()).toMatchObject({
+        runtime: { kind: "local-fifo", owner: 11 },
+        selectedSet: "custom-cube",
+      });
+    });
+
+    it("refuses_a_start_whose_view_carries_no_session_identity", async () => {
+      // The legacy view: the one shape the identity check refuses.
+      wasm.start_quick_draft.mockReturnValue({ owner: 11, view: view([]) });
+
+      await expect(useDraftStore.getState().startDraft("pool", "TST", "Test", 2))
+        .rejects.toThrow(i18n.t("draft:run.startUnavailable"));
+
+      expect(wasm.start_quick_draft).toHaveBeenCalledOnce();
+      expect(useDraftStore.getState()).toMatchObject({ runtime: null, view: null, draftId: null });
+      await settleTimers();
+      expect(persistence.persistQuickDraftSnapshot).not.toHaveBeenCalled();
+    });
+
+    it("keeps_a_sealed_start_on_the_legacy_runtime", async () => {
+      // A drafting desire computed for Sealed would load the catalog.
+      useLlmStore.setState({ draftEnabled: true });
+      wasm.start_sealed_draft.mockReturnValue({ ...view([]), kind: "Sealed", status: "Deckbuilding" });
+
+      await useDraftStore.getState().startSealedDraft("pool", "TST", "Test", 2);
+
+      expect(wasm.start_sealed_draft).toHaveBeenCalledExactlyOnceWith("pool", 2, expect.any(Number));
+      expect(useDraftStore.getState()).toMatchObject({
+        runtime: { kind: "legacy" },
+        localFifoSessionId: null,
+        phase: "opening",
+      });
+      expect(loadProviderCatalog).not.toHaveBeenCalled();
+      expect(wasm.start_quick_draft).not.toHaveBeenCalled();
+    });
+
+    it("dispatches_a_started_drafts_pick_through_its_owner_and_prompt", async () => {
+      await startFifoQuick(3);
+      wasm.local_fifo_select.mockReturnValue(fifoView({
+        sessionId: STARTED_SESSION_ID, pool: [card("pk-a")], promptGeneration: 4,
+      }));
+
+      await expect(useDraftStore.getState().pickCard("pk-a")).resolves.toEqual({ status: "acknowledged" });
+
+      expect(wasm.local_fifo_select).toHaveBeenCalledExactlyOnceWith(11, expect.any(String), 1_700_000_000_000n);
+      expect(localFifoSelection(0).prompt_id).toEqual({ session_id: STARTED_SESSION_ID, seat: 0, generation: 3 });
+      expect(wasm.submit_pick).not.toHaveBeenCalled();
+    });
+  });
 });

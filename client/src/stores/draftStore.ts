@@ -7,24 +7,43 @@ import {
   DraftAdapter,
   distinctJoined,
   drainDraftEngineOperations,
+  draftSelectionPickCount,
+  draftViewPresentation,
+  draftViewPrompt,
+  draftViewSessionId,
+  sameDraftPrompt,
   withDraftEngineOperation,
   type CubeDraftSettings,
+  type DraftEngineOperationLease,
   type DraftPlayerView,
+  type FifoPromptId,
   type LlmDraftResponsePayload,
+  type LocalDraftRuntime,
+  type LocalFifoLlmDrafting,
+  type LocalFifoLlmPickRequest,
+  type LocalFifoOwner,
+  type LocalFifoSession,
   type SetPackSequence,
   type SuggestedDeck,
 } from "../adapter/draft-adapter";
 import { CUSTOM_CUBE_SET_CODE } from "../adapter/draftKinds";
 import {
+  buildLocalFifoLlmRequests,
+  callLlmDrafter,
   cancelLlmDraftRun,
+  recordLlmDraftSeatUsage,
   recordLlmDraftUsage,
   reportLlmDraftOutcomes,
   startLlmDraftRound,
   type LlmDraftRound,
+  type LlmDrafterState,
   type LlmDrafterStatus,
 } from "../services/llm/draftLlm";
 import { loadProviderCatalog } from "../services/llm/catalog";
+import { reportLlmFailure } from "../services/llm/diagnostics";
+import type { LlmDraftOutcome, LlmProfile } from "../services/llm/types";
 import { draftProfile, useLlmStore } from "./llmStore";
+import { exactAddedIds, poolMultiplicity } from "./draftPickAcknowledgement";
 import {
   MAX_MATERIALIZED_VIRTUAL_BASICS,
   migrateLegacyWorkspace,
@@ -133,7 +152,7 @@ export type PendingDraftPickIntent =
     }
   | {
       kind: "draft-effect";
-      instanceIds: readonly [string, string];
+      instanceIds: readonly string[];
       destination: DraftPickDestination;
       placementHint?: DraftPickPlacementHint;
     }
@@ -142,6 +161,13 @@ export type PendingDraftPickIntent =
 interface DraftStoreState {
   draftId: string | null;
   adapter: DraftAdapter | null;
+  /** The engine runtime holding this draft's session; set together with `adapter`. */
+  runtime: LocalDraftRuntime | null;
+  /**
+   * The local FIFO session id the engine issued this draft, declared in its
+   * saved record; `null` for a legacy session.
+   */
+  localFifoSessionId: string | null;
   view: DraftPlayerView | null;
   selectedCard: string | null;
   phase: DraftPhase;
@@ -184,7 +210,7 @@ interface DraftStoreActions {
   ): Promise<DraftPickOutcome>;
   pickCardWithDraftEffect(
     effectCardInstanceId: string,
-    cardInstanceIds: readonly [string, string],
+    cardInstanceIds: readonly string[],
     destination?: DraftPickDestination,
     placementHint?: DraftPickPlacementHint,
   ): Promise<DraftPickOutcome>;
@@ -212,6 +238,8 @@ interface DraftStoreActions {
 const initialState: DraftStoreState = {
   draftId: null,
   adapter: null,
+  runtime: null,
+  localFifoSessionId: null,
   view: null,
   selectedCard: null,
   phase: "setup",
@@ -239,6 +267,13 @@ function validDifficulty(value: number): boolean {
 }
 
 let lifecycleGeneration = 0;
+/**
+ * Source of every published `interactionGeneration`: one monotone counter for
+ * lifecycle resets and prompt moves alike, so a value is never issued twice.
+ * Separate from `lifecycleGeneration`, which gates in-flight operations and
+ * must not move when an accepted selection installs a new prompt.
+ */
+let interactionGenerationCounter = 0;
 let workspaceRevision = 0;
 let persistenceGeneration = 0;
 let suggestionToken = 0;
@@ -268,6 +303,8 @@ function invalidateLifecycle(): number {
   // this, a provider call started for the old draft runs to its full timeout
   // holding a socket, and its reply lands against a pod that no longer exists.
   cancelLlmDraftRun();
+  fifoLlm?.controller.abort();
+  fifoLlm = null;
   return lifecycleGeneration;
 }
 
@@ -284,9 +321,14 @@ function publishInitialState(generation: number): void {
   }));
 }
 
+function nextInteractionGeneration(): number {
+  interactionGenerationCounter += 1;
+  return interactionGenerationCounter;
+}
+
 function beginLifecycle(): number {
   const generation = invalidateLifecycle();
-  publishInitialState(generation);
+  publishInitialState(nextInteractionGeneration());
   return generation;
 }
 
@@ -350,8 +392,8 @@ async function persistDraft(
   options: { propagateFailure?: boolean; canPersist?: () => boolean } = {},
 ): Promise<void> {
   const state = useDraftStore.getState();
-  const { adapter, draftId, view, workspaceState, selectedSet, phase } = state;
-  if (!adapter || !draftId || !view || !workspaceState || !selectedSet
+  const { adapter, runtime, draftId, view, workspaceState, selectedSet, phase } = state;
+  if (!adapter || !runtime || !draftId || !view || !workspaceState || !selectedSet
     || phase === "setup" || phase === "playing" || phase === "complete"
     || endRunOwnsExclusive()
     || options.canPersist?.() === false) return;
@@ -363,7 +405,7 @@ async function persistDraft(
         || revision !== workspaceRevision || useDraftStore.getState().adapter !== adapter) {
         throw new Error("Stale draft persistence request");
       }
-      return lease.exportSession();
+      return lease.quickSession(runtime).exportSession();
     });
     if (options.canPersist?.() === false || endRunOwnsExclusive()) return;
     if (generation !== persistenceGeneration || lifecycle !== lifecycleGeneration
@@ -401,6 +443,7 @@ function makeMeta(state: DraftStoreState, phase: ActiveQuickDraftMeta["phase"], 
     runLosses: state.runState?.results.filter((entry) => entry.result === "loss").length ?? 0,
     runDraws: state.runState?.results.filter((entry) => entry.result === "draw").length ?? 0,
     currentGameId: gameId,
+    ...(state.localFifoSessionId === null ? {} : { localFifoSessionId: state.localFifoSessionId }),
   };
 }
 
@@ -453,7 +496,7 @@ type WorkspaceInstallOperation =
       readonly kind: "acknowledged-pick";
       readonly authoritativeView: DraftPlayerView;
       readonly baseWorkspace: DraftWorkspaceState;
-      readonly placeInstanceIds: readonly [string] | readonly [string, string];
+      readonly placeInstanceIds: readonly string[];
       readonly destination: DraftPickDestination;
       readonly placementHint?: DraftPickPlacementHint;
       readonly patch: WorkspaceInstallPatch;
@@ -463,8 +506,8 @@ type WorkspaceInstallOperation =
       readonly kind: "acknowledged-auto-pick";
       readonly authoritativeView: DraftPlayerView;
       readonly baseWorkspace: DraftWorkspaceState;
-      readonly addedInstanceId: string;
-      readonly placementHint?: DraftPickPlacementHint;
+      readonly addedInstanceIds: readonly string[];
+      readonly placementHints?: DraftAutoPickPlacementHints;
       readonly patch: WorkspaceInstallPatch;
       readonly persistence: "schedule";
     };
@@ -500,7 +543,9 @@ function operationResolvesOwnPlacement(operation: WorkspaceInstallOperation): re
         ? operation.placeInstanceIds
         : [];
     case "acknowledged-auto-pick":
-      return operation.placementHint !== undefined ? [operation.addedInstanceId] : [];
+      return operation.addedInstanceIds.filter(
+        (instanceId) => operation.placementHints?.[instanceId] !== undefined,
+      );
   }
 }
 
@@ -548,20 +593,32 @@ function installWorkspace(operation: WorkspaceInstallOperation): void {
       );
       break;
     case "acknowledged-auto-pick":
-      workspace = applyDestination(
-        workspace,
-        operation.authoritativeView.pool,
-        [operation.addedInstanceId],
-        "deck",
-        operation.placementHint,
-      );
+      for (const instanceId of operation.addedInstanceIds) {
+        workspace = applyDestination(
+          workspace,
+          operation.authoritativeView.pool,
+          [instanceId],
+          "deck",
+          operation.placementHints?.[instanceId],
+        );
+      }
       break;
   }
   invalidateWorkspaceDependents();
+  // The interaction generation follows the engine's prompt, never card ids: a
+  // FIFO view's new prompt is a new interaction even when its head shows the
+  // same cards, and a legacy view carries no prompt. Published in the same
+  // update as the view, so an observer sees the unlock and the move together.
+  const previous = useDraftStore.getState().view;
+  const promptMoved = !sameDraftPrompt(
+    previous === null ? null : draftViewPrompt(previous),
+    draftViewPrompt(operation.authoritativeView),
+  );
   useDraftStore.setState({
     ...operation.patch,
     view: operation.authoritativeView,
     workspaceState: workspace,
+    ...(promptMoved ? { interactionGeneration: nextInteractionGeneration() } : {}),
   });
   if (operation.persistence === "schedule") schedulePersistence(0);
 }
@@ -571,12 +628,23 @@ async function prepareCardDatabase(): Promise<string> {
   return response.text();
 }
 
+/**
+ * How a local start constructs its session: Sealed's legacy constructor, or
+ * the Quick set and cube constructors on the local FIFO runtime.
+ */
+type LocalDraftConstruction =
+  | { readonly runtime: "legacy"; construct(lease: DraftEngineOperationLease): DraftPlayerView }
+  | {
+      readonly runtime: "local-fifo";
+      construct(lease: DraftEngineOperationLease, drafting: LocalFifoLlmDrafting, nowMs: number): LocalFifoSession;
+    };
+
 async function startLocalDraft(input: {
   setCode: string;
   setName: string;
   difficulty: number;
   kind: LocalDraftKind;
-  initialize: Parameters<typeof withDraftEngineOperation<DraftPlayerView>>[0];
+  construction: LocalDraftConstruction;
 }): Promise<void> {
   const lifecycle = beginLifecycle();
   try {
@@ -586,14 +654,41 @@ async function startLocalDraft(input: {
     if (lifecycle !== lifecycleGeneration) return;
     const database = await prepareCardDatabase();
     const adapter = new DraftAdapter();
-    const view = await withDraftEngineOperation((lease) => {
+    // A FIFO start tells its constructor the drafting the player's LLM
+    // settings ask for, read before the lease as a resume reads it.
+    const { construction } = input;
+    const start = construction.runtime === "local-fifo"
+      ? { runtime: construction.runtime, construction, desire: await localFifoLlmDrafting() }
+      : { runtime: construction.runtime, construction };
+    if (lifecycle !== lifecycleGeneration) return;
+    const started = await withDraftEngineOperation((lease): {
+      runtime: LocalDraftRuntime;
+      view: DraftPlayerView;
+      localFifoSessionId: string | null;
+    } => {
       if (lifecycle !== lifecycleGeneration) throw new Error("Stale draft start");
       lease.loadCardDatabase(database);
       lease.setPickEnhancements(usePreferencesStore.getState().draftPickEnhancements);
       if (lifecycle !== lifecycleGeneration) throw new Error("Stale draft start");
-      return input.initialize(lease);
+      switch (start.runtime) {
+        case "legacy":
+          return { runtime: { kind: "legacy" }, view: start.construction.construct(lease), localFifoSessionId: null };
+        case "local-fifo": {
+          const local = start.construction.construct(lease, start.desire.drafting, Date.now());
+          // The engine issues the session id; a view that carries none cannot
+          // be saved under the identity its resume is routed by.
+          const localFifoSessionId = draftViewSessionId(local.view);
+          if (localFifoSessionId === null) throw new Error(i18n.t("draft:run.startUnavailable"));
+          return { runtime: { kind: "local-fifo", owner: local.owner }, view: local.view, localFifoSessionId };
+        }
+      }
     });
     if (lifecycle !== lifecycleGeneration) return;
+    const { runtime, view, localFifoSessionId } = started;
+    // Before the install, so the subscription's sync finds it, as on resume.
+    if (runtime.kind === "local-fifo" && start.runtime === "local-fifo") {
+      fifoLlm = createLocalFifoLlm(lifecycle, runtime.owner, start.desire.drafting);
+    }
     installWorkspace({
       kind: "state",
       authoritativeView: view,
@@ -601,6 +696,8 @@ async function startLocalDraft(input: {
       patch: {
         draftId: crypto.randomUUID(),
         adapter,
+        runtime,
+        localFifoSessionId,
         phase: input.kind === "Sealed" ? "opening" : "drafting",
         difficulty: input.difficulty,
         selectedSet: input.setCode,
@@ -650,7 +747,7 @@ type PickRequest =
   | {
       readonly kind: "draft-effect";
       readonly effectCardInstanceId: string;
-      readonly instanceIds: readonly [string, string];
+      readonly instanceIds: readonly string[];
       readonly destination: DraftPickDestination;
       readonly placementHint?: DraftPickPlacementHint;
     }
@@ -697,24 +794,24 @@ function validPickRequest(request: PickRequest): boolean {
         && request.instanceId.length > 0
         && validPlacementHint(request.placementHint);
     case "draft-effect": {
-      if (!Array.isArray(request.instanceIds) || request.instanceIds.length !== 2
+      if (!Array.isArray(request.instanceIds)
         || typeof request.effectCardInstanceId !== "string"
         || request.effectCardInstanceId.length === 0
         || !validPlacementHint(request.placementHint)) return false;
-      const [first, second] = request.instanceIds;
-      return typeof first === "string" && typeof second === "string"
-        && first.length > 0 && second.length > 0 && first !== second
-        && first !== request.effectCardInstanceId && second !== request.effectCardInstanceId;
+      // The selection's size is the view's count for this effect card; a FIFO
+      // view that publishes none for it offers no such selection.
+      const view = useDraftStore.getState().view;
+      const count = view === null ? null : draftSelectionPickCount(view, request.effectCardInstanceId);
+      return count !== null
+        && request.instanceIds.length === count
+        && request.instanceIds.every((instanceId) => typeof instanceId === "string"
+          && instanceId.length > 0
+          && instanceId !== request.effectCardInstanceId)
+        && new Set(request.instanceIds).size === request.instanceIds.length;
     }
     case "auto-pick":
       return request.destination === "deck" && validAutoPickPlacementHints(request.placementHints);
   }
-}
-
-function poolMultiplicity(pool: DraftPlayerView["pool"]): Map<string, number> {
-  const counts = new Map<string, number>();
-  for (const card of pool) counts.set(card.instance_id, (counts.get(card.instance_id) ?? 0) + 1);
-  return counts;
 }
 
 function acknowledgesRequestedId(
@@ -725,21 +822,54 @@ function acknowledgesRequestedId(
   return (before.get(instanceId) ?? 0) === 0 && (after.get(instanceId) ?? 0) === 1;
 }
 
-function acknowledgedAutoPickId(
-  before: ReadonlyMap<string, number>,
-  after: ReadonlyMap<string, number>,
-): string | null {
-  const ids = new Set([...before.keys(), ...after.keys()]);
-  let addedInstanceId: string | null = null;
-  for (const instanceId of ids) {
-    const previous = before.get(instanceId) ?? 0;
-    const current = after.get(instanceId) ?? 0;
-    const delta = current - previous;
-    if (delta === 0) continue;
-    if (delta !== 1 || previous !== 0 || addedInstanceId !== null) return null;
-    addedInstanceId = instanceId;
+/**
+ * Where an admitted selection goes: the legacy runtime, or the local FIFO
+ * runtime's owner and the prompt the selection was composed on.
+ */
+type PickEngineTarget =
+  | { readonly kind: "legacy" }
+  | { readonly kind: "local-fifo"; readonly owner: LocalFifoOwner; readonly prompt: FifoPromptId };
+
+/** `null` when a FIFO view publishes no prompt: there is nothing to select on. */
+function pickEngineTarget(runtime: LocalDraftRuntime, view: DraftPlayerView): PickEngineTarget | null {
+  switch (runtime.kind) {
+    case "legacy":
+      return { kind: "legacy" };
+    case "local-fifo": {
+      const prompt = draftViewPrompt(view);
+      return prompt === null ? null : { kind: "local-fifo", owner: runtime.owner, prompt };
+    }
   }
-  return addedInstanceId;
+}
+
+/**
+ * One admitted selection through the local FIFO exports, bound to the prompt
+ * it was composed on. The time is read here, immediately before the export.
+ */
+function submitLocalFifoSelection(
+  lease: DraftEngineOperationLease,
+  target: Extract<PickEngineTarget, { readonly kind: "local-fifo" }>,
+  request: PickRequest,
+): DraftPlayerView {
+  const nowMs = Date.now();
+  switch (request.kind) {
+    case "pick":
+      return lease.localFifoSelect(target.owner, {
+        prompt_id: target.prompt,
+        picked_card_instance_ids: [request.instanceId],
+        burned_card_instance_ids: [],
+        effect_card_instance_ids: [],
+      }, nowMs);
+    case "draft-effect":
+      return lease.localFifoSelect(target.owner, {
+        prompt_id: target.prompt,
+        picked_card_instance_ids: [...request.instanceIds],
+        burned_card_instance_ids: [],
+        effect_card_instance_ids: [request.effectCardInstanceId],
+      }, nowMs);
+    case "auto-pick":
+      return lease.localFifoAutoSelect(target.owner, target.prompt, nowMs);
+  }
 }
 
 function pendingIntentFor(request: PickRequest): PendingDraftPickIntent {
@@ -808,19 +938,320 @@ function ensureLlmDraftRound(view: DraftPlayerView): Promise<LlmDraftRound | nul
   return round;
 }
 
+/** The shape of `fifoLlm`. */
+interface LocalFifoLlm {
+  readonly lifecycle: number;
+  readonly owner: LocalFifoOwner;
+  /** What the engine was last told. */
+  drafting: LocalFifoLlmDrafting;
+  /**
+   * `"unavailable"` once requests could not be built: the bot seats are handed
+   * to the engine until the player's next accepted selection.
+   */
+  availability: "available" | "unavailable";
+  /** Cuts every call in flight loose; replaced when the engine bots take over. */
+  controller: AbortController;
+  readonly inFlight: Map<number, FifoPromptId>;
+  readonly statuses: Map<number, LlmDrafterState>;
+  /** A view the engine answered while the player's selection was pending. */
+  viewOwed: boolean;
+  /** One sync runs at a time; one asked for meanwhile runs once more after it. */
+  sync: "idle" | "running" | "rerun";
+}
+
+/** LLM drafting on the local FIFO runtime for one lifecycle: what the engine was told, and each seat's call in flight with the prompt it answers. */
+let fifoLlm: LocalFifoLlm | null = null;
+
+/**
+ * The `fifoLlm` a start or a resume installs for `lifecycle`: the local
+ * session's owner and the drafting the engine was told, with no call in flight.
+ */
+function createLocalFifoLlm(
+  lifecycle: number,
+  owner: LocalFifoOwner,
+  drafting: LocalFifoLlmDrafting,
+): LocalFifoLlm {
+  return {
+    lifecycle,
+    owner,
+    drafting,
+    availability: "available",
+    controller: new AbortController(),
+    inFlight: new Map(),
+    statuses: new Map(),
+    viewOwed: false,
+    sync: "idle",
+  };
+}
+
+/** Whether the bot seats should be LLM drafters, and through which profile. */
+type LocalFifoLlmDesire =
+  | { readonly drafting: "EngineBots" }
+  | { readonly drafting: "LlmSeats"; readonly profile: LlmProfile };
+
+/**
+ * LLM drafting is opt-in twice over, as for the barrier round: switched on,
+ * and a usable profile configured. With it switched off no catalog is loaded.
+ */
+async function localFifoLlmDrafting(): Promise<LocalFifoLlmDesire> {
+  if (!useLlmStore.getState().draftEnabled) return { drafting: "EngineBots" };
+  const profile = draftProfile(useLlmStore.getState(), await loadProviderCatalog());
+  return profile ? { drafting: "LlmSeats", profile } : { drafting: "EngineBots" };
+}
+
+/** Whether `llm` still belongs to the local draft the store holds. */
+function localFifoLlmOwnsDraft(llm: LocalFifoLlm): boolean {
+  const runtime = useDraftStore.getState().runtime;
+  return fifoLlm === llm
+    && llm.lifecycle === lifecycleGeneration
+    && runtime?.kind === "local-fifo"
+    && runtime.owner === llm.owner;
+}
+
+/**
+ * Each drafter's status, by seat. The labels keep their meaning: picking while
+ * a call is in flight, picked when the engine used the reply, engine pick when
+ * the seat fell back. The player never waits on a drafter on this runtime, so
+ * `awaitingDrafters` is never set here.
+ */
+function publishLocalFifoLlmStatuses(llm: LocalFifoLlm): void {
+  if (!localFifoLlmOwnsDraft(llm)) return;
+  const llmDrafters = [...llm.statuses]
+    .sort(([left], [right]) => left - right)
+    .map(([seat, state]) => ({ seat, state }));
+  useDraftStore.setState({ llmDrafters });
+}
+
+/**
+ * Install a view the engine answered outside the player's own selection. While
+ * that selection is pending, installing would make it stale, so the latest
+ * view is owed instead and fetched once the selection ends.
+ */
+function installLocalFifoView(llm: LocalFifoLlm, view: DraftPlayerView): void {
+  if (!localFifoLlmOwnsDraft(llm)) return;
+  if (exclusiveToken !== null) {
+    llm.viewOwed = true;
+    return;
+  }
+  const state = useDraftStore.getState();
+  if (state.workspaceState === null) return;
+  llm.viewOwed = false;
+  installWorkspace({
+    kind: "state",
+    authoritativeView: view,
+    baseWorkspace: state.workspaceState,
+    patch: { phase: view.status === "Deckbuilding" ? "deckbuilding" : state.phase },
+    persistence: "schedule",
+  });
+}
+
+/**
+ * Tell the engine whether the bot seats are LLM drafters, under a lease of its
+ * own; the engine runs the bots the declaration leaves to it. Handing the
+ * seats to the engine bots first cuts every call loose, so no late reply
+ * reaches the engine. `false` when the declaration did not land.
+ */
+async function declareLocalFifoLlmDrafting(
+  llm: LocalFifoLlm,
+  drafting: LocalFifoLlmDrafting,
+): Promise<boolean> {
+  if (drafting === "EngineBots") {
+    llm.controller.abort();
+    llm.controller = new AbortController();
+    llm.inFlight.clear();
+    llm.statuses.clear();
+    publishLocalFifoLlmStatuses(llm);
+  }
+  let view: DraftPlayerView;
+  try {
+    view = await withDraftEngineOperation((lease) => {
+      if (!localFifoLlmOwnsDraft(llm)) throw new Error("Stale LLM drafting declaration");
+      return lease.localFifoSetLlmDrafting(llm.owner, drafting, Date.now());
+    });
+  } catch (error) {
+    if (localFifoLlmOwnsDraft(llm)) console.warn("[draftStore] LLM drafting declaration failed:", error);
+    return false;
+  }
+  if (!localFifoLlmOwnsDraft(llm)) return false;
+  llm.drafting = drafting;
+  installLocalFifoView(llm, view);
+  return true;
+}
+
+/**
+ * One pass of `syncLocalFifoLlm`: install an owed view, declare the drafting
+ * the player's settings now ask for when it changed, then build the requests
+ * for every held head under one lease and start a call for each head no call
+ * is answering yet.
+ */
+async function syncLocalFifoLlmOnce(llm: LocalFifoLlm): Promise<void> {
+  const current = (): boolean => localFifoLlmOwnsDraft(llm)
+    && useDraftStore.getState().view?.status === "Drafting";
+  if (!current()) return;
+  if (llm.viewOwed && exclusiveToken === null) {
+    const view = await withDraftEngineOperation((lease) => {
+      if (!localFifoLlmOwnsDraft(llm)) throw new Error("Stale local draft view");
+      return lease.localFifoView(llm.owner);
+    });
+    installLocalFifoView(llm, view);
+    if (!current()) return;
+  }
+  const desired: LocalFifoLlmDesire = llm.availability === "unavailable"
+    ? { drafting: "EngineBots" }
+    : await localFifoLlmDrafting();
+  if (!current()) return;
+  if (desired.drafting !== llm.drafting && !(await declareLocalFifoLlmDrafting(llm, desired.drafting))) return;
+  if (desired.drafting !== "LlmSeats" || !current()) return;
+  let entries: LocalFifoLlmPickRequest[];
+  try {
+    entries = await buildLocalFifoLlmRequests(llm.owner, desired.profile);
+  } catch (error) {
+    if (!current()) return;
+    // Once, with no loop: the bot seats go to the engine until the player's
+    // next accepted selection makes the drafters available again.
+    reportLlmFailure("LLM drafters unavailable; using the engine bots", error);
+    llm.availability = "unavailable";
+    await declareLocalFifoLlmDrafting(llm, "EngineBots");
+    return;
+  }
+  if (!current() || llm.drafting !== "LlmSeats") return;
+  for (const entry of entries) {
+    if (sameDraftPrompt(llm.inFlight.get(entry.seat) ?? null, entry.promptId)) continue;
+    llm.inFlight.set(entry.seat, entry.promptId);
+    llm.statuses.set(entry.seat, "picking");
+    void resolveLocalFifoLlmSeat(llm, desired.profile, entry);
+  }
+  publishLocalFifoLlmStatuses(llm);
+}
+
+/** Whether a sync was asked for while `llm`'s sync ran. */
+function rerunRequested(llm: LocalFifoLlm): boolean {
+  return llm.sync === "rerun";
+}
+
+/**
+ * Keep the local FIFO runtime's LLM seats in step with the store. Runs after
+ * every view change, every player selection and every resolution; one sync
+ * runs at a time, and one asked for while it runs runs once more after it.
+ */
+function syncLocalFifoLlm(): void {
+  const llm = fifoLlm;
+  if (llm === null) return;
+  if (llm.sync !== "idle") {
+    llm.sync = "rerun";
+    return;
+  }
+  llm.sync = "running";
+  void (async () => {
+    try {
+      do {
+        llm.sync = "running";
+        try {
+          await syncLocalFifoLlmOnce(llm);
+        } catch (error) {
+          if (localFifoLlmOwnsDraft(llm)) console.warn("[draftStore] LLM seat sync failed:", error);
+        }
+      } while (rerunRequested(llm) && localFifoLlmOwnsDraft(llm));
+    } finally {
+      llm.sync = "idle";
+    }
+  })();
+}
+
+/**
+ * One held head's drafter: the provider call with no lease held, then the
+ * reply handed to the engine under a lease of its own. The engine alone
+ * decides whether the reply is used or the seat falls back to the engine bot.
+ * A reply whose draft, call or prompt has been superseded is dropped unsent.
+ */
+async function resolveLocalFifoLlmSeat(
+  llm: LocalFifoLlm,
+  profile: LlmProfile,
+  entry: LocalFifoLlmPickRequest,
+): Promise<void> {
+  const signal = llm.controller.signal;
+  const stale = (): boolean => !localFifoLlmOwnsDraft(llm)
+    || signal.aborted
+    || !sameDraftPrompt(llm.inFlight.get(entry.seat) ?? null, entry.promptId);
+  let reply: { status: number; body: string } | null = null;
+  switch (entry.kind) {
+    case "request":
+      reply = await callLlmDrafter(entry, signal);
+      break;
+    case "unbuildable":
+      // The engine's reason goes to the console only; the game log names the seat.
+      if (!stale()) reportLlmFailure(`LLM drafter (seat ${entry.seat}) unavailable`, entry.error);
+      break;
+  }
+  if (stale()) return;
+  let resolved: { view: DraftPlayerView; llmOutcome: LlmDraftOutcome };
+  try {
+    resolved = await withDraftEngineOperation((lease) => {
+      if (stale()) throw new Error("Stale LLM drafter reply");
+      return lease.localFifoResolveLlmPick(llm.owner, {
+        promptId: entry.promptId,
+        reply: entry.kind === "request" && reply !== null
+          ? { fingerprint: entry.fingerprint, provider: profile.provider, status: reply.status, body: reply.body }
+          : null,
+      }, Date.now());
+    });
+  } catch (error) {
+    if (stale()) return;
+    llm.inFlight.delete(entry.seat);
+    llm.statuses.delete(entry.seat);
+    publishLocalFifoLlmStatuses(llm);
+    reportLlmFailure(`LLM drafter (seat ${entry.seat}) failed`, error);
+    syncLocalFifoLlm();
+    return;
+  }
+  if (stale()) return;
+  const { view, llmOutcome } = resolved;
+  reportLlmDraftOutcomes([llmOutcome]);
+  recordLlmDraftSeatUsage(llmOutcome, entry.kind === "request" ? entry.promptChars : undefined);
+  llm.inFlight.delete(entry.seat);
+  llm.statuses.set(entry.seat, llmOutcome.used ? "ready" : "fallback");
+  publishLocalFifoLlmStatuses(llm);
+  installLocalFifoView(llm, view);
+  syncLocalFifoLlm();
+}
+
+/**
+ * One player selection. On the local FIFO runtime the LLM seats sync after it:
+ * an accepted selection makes drafters available again after requests could
+ * not be built, and a view owed while the selection was pending is installed.
+ */
 async function performPick(request: PickRequest): Promise<DraftPickOutcome> {
+  const outcome = await performPickOnce(request);
+  const llm = fifoLlm;
+  if (llm !== null && localFifoLlmOwnsDraft(llm)) {
+    if (outcome.status === "acknowledged") llm.availability = "available";
+    syncLocalFifoLlm();
+  }
+  return outcome;
+}
+
+async function performPickOnce(request: PickRequest): Promise<DraftPickOutcome> {
   if (!validPickRequest(request)) return { status: "rejected", reason: "invalid-request" };
   if (request.kind === "draft-effect") {
     request = {
       ...request,
-      instanceIds: [request.instanceIds[0], request.instanceIds[1]],
+      instanceIds: [...request.instanceIds],
     };
   }
   const token = admitExclusive("pick");
   if (!token) return { status: "ignored", reason: "busy" };
   const state = useDraftStore.getState();
-  const { adapter, draftId, workspaceState, view } = state;
-  if (!adapter || !draftId || !workspaceState || !view) {
+  const { adapter, runtime, draftId, workspaceState, view } = state;
+  if (!adapter || !runtime || !draftId || !workspaceState || !view) {
+    retireExclusive(token);
+    return { status: "rejected", reason: "invalid-request" };
+  }
+  if (draftViewPresentation(view).isReadOnly) {
+    retireExclusive(token);
+    return { status: "rejected", reason: "invalid-request" };
+  }
+  const target = pickEngineTarget(runtime, view);
+  if (target === null) {
     retireExclusive(token);
     return { status: "rejected", reason: "invalid-request" };
   }
@@ -856,7 +1287,12 @@ async function performPick(request: PickRequest): Promise<DraftPickOutcome> {
     // fingerprint it was built from and the engine re-validates it against the
     // live pack below, so a pack that moved on is refused per seat rather than
     // mis-picked.
-    const llmRoundForPick = request.kind === "pick" && useLlmStore.getState().draftEnabled
+    //
+    // The barrier round serves the legacy runtime; a local FIFO draft's LLM
+    // seats answer their own heads (see `syncLocalFifoLlm`). The round's
+    // exports read the legacy session, which a local FIFO session never is.
+    const llmRoundForPick = target.kind === "legacy" && request.kind === "pick"
+      && useLlmStore.getState().draftEnabled
       ? await ensureLlmDraftRound(view)
       : null;
     if (!isFresh()) {
@@ -885,22 +1321,27 @@ async function performPick(request: PickRequest): Promise<DraftPickOutcome> {
       if (!isFresh()) {
         throw new Error("Stale draft pick request");
       }
-      switch (request.kind) {
-        case "pick": {
-          if (llmResponses.length > 0 && llmRoundForPick) {
-            const outcome = lease.submitPickWithLlmBotPicks(request.instanceId, llmResponses);
-            reportLlmDraftOutcomes(outcome.llmOutcomes);
-            recordLlmDraftUsage(llmRoundForPick, outcome.llmOutcomes);
-            return outcome.view;
+      switch (target.kind) {
+        case "local-fifo":
+          return submitLocalFifoSelection(lease, target, request);
+        case "legacy":
+          switch (request.kind) {
+            case "pick": {
+              if (llmResponses.length > 0 && llmRoundForPick) {
+                const outcome = lease.submitPickWithLlmBotPicks(request.instanceId, llmResponses);
+                reportLlmDraftOutcomes(outcome.llmOutcomes);
+                recordLlmDraftUsage(llmRoundForPick, outcome.llmOutcomes);
+                return outcome.view;
+              }
+              return lease.submitPick(request.instanceId);
+            }
+            case "draft-effect": {
+              const adapterInstanceIds = [...request.instanceIds];
+              return lease.submitPickWithDraftEffect(request.effectCardInstanceId, adapterInstanceIds);
+            }
+            case "auto-pick":
+              return lease.autoPick();
           }
-          return lease.submitPick(request.instanceId);
-        }
-        case "draft-effect": {
-          const adapterInstanceIds = [...request.instanceIds];
-          return lease.submitPickWithDraftEffect(request.effectCardInstanceId, adapterInstanceIds);
-        }
-        case "auto-pick":
-          return lease.autoPick();
       }
     });
     if (!isFresh()) return { status: "ignored", reason: "stale" };
@@ -950,8 +1391,10 @@ async function performPick(request: PickRequest): Promise<DraftPickOutcome> {
         };
         break;
       case "auto-pick": {
-        const addedInstanceId = acknowledgedAutoPickId(before, after);
-        if (addedInstanceId === null) {
+        // Acknowledged when the pool gains exactly the selection's published
+        // count of new cards: one for every legacy Quick view.
+        const addedInstanceIds = exactAddedIds(before, after);
+        if (addedInstanceIds === null || addedInstanceIds.length !== draftSelectionPickCount(view, null)) {
           cleanup();
           return { status: "rejected", reason: "unacknowledged" };
         }
@@ -959,8 +1402,8 @@ async function performPick(request: PickRequest): Promise<DraftPickOutcome> {
           kind: "acknowledged-auto-pick",
           authoritativeView: nextView,
           baseWorkspace: workspaceState,
-          addedInstanceId,
-          placementHint: request.placementHints?.[addedInstanceId],
+          addedInstanceIds,
+          placementHints: request.placementHints,
           patch: {
             phase: nextView.status === "Deckbuilding" ? "deckbuilding" : "drafting",
             selectedCard: null,
@@ -1191,6 +1634,7 @@ function expandSuggestedDeck(deck: SuggestedDeck): string[] {
 }
 
 async function selectViableOpponent(
+  runtime: LocalDraftRuntime,
   playerDeck: string[],
   usedSeats: readonly number[],
   view: DraftPlayerView,
@@ -1208,7 +1652,7 @@ async function selectViableOpponent(
     try {
       botDeck = await withDraftEngineOperation((lease) => {
         if (!fresh()) throw new Error("Stale draft match launch");
-        return lease.getBotDeck(botSeat);
+        return lease.quickSession(runtime).botDeck(botSeat);
       });
     } catch (error) {
       if (!fresh()) throw new Error("Stale draft match launch");
@@ -1285,7 +1729,12 @@ export const useDraftStore = create<DraftStoreState & DraftStoreActions>()((set,
     setName,
     difficulty,
     kind: "Quick",
-    initialize: (lease) => lease.initialize(setPoolJson, difficulty, Math.floor(Math.random() * 0xffffffff)),
+    construction: {
+      runtime: "local-fifo",
+      construct: (lease, drafting, nowMs) => lease.initialize(
+        setPoolJson, difficulty, Math.floor(Math.random() * 0xffffffff), drafting, nowMs,
+      ),
+    },
     });
   },
 
@@ -1305,7 +1754,10 @@ export const useDraftStore = create<DraftStoreState & DraftStoreActions>()((set,
     setName,
     difficulty,
     kind: "Sealed",
-    initialize: (lease) => lease.initializeSealed(setPoolJson, difficulty, Math.floor(Math.random() * 0xffffffff)),
+    construction: {
+      runtime: "legacy",
+      construct: (lease) => lease.initializeSealed(setPoolJson, difficulty, Math.floor(Math.random() * 0xffffffff)),
+    },
     });
   },
 
@@ -1314,9 +1766,12 @@ export const useDraftStore = create<DraftStoreState & DraftStoreActions>()((set,
     setName: cubeName,
     difficulty,
     kind: "Quick",
-    initialize: (lease) => lease.initializeCube(
-      cubeListText, cubeName, settings, difficulty, Math.floor(Math.random() * 0xffffffff),
-    ),
+    construction: {
+      runtime: "local-fifo",
+      construct: (lease, drafting, nowMs) => lease.initializeCube(
+        cubeListText, cubeName, settings, difficulty, Math.floor(Math.random() * 0xffffffff), drafting, nowMs,
+      ),
+    },
   }),
 
   completeSealedOpening: () => {
@@ -1349,7 +1804,8 @@ export const useDraftStore = create<DraftStoreState & DraftStoreActions>()((set,
         return unavailable(i18n.t("draft:run.resumeUnavailable"));
       }
       set({
-        draftId: meta.id, adapter: null, view: null, workspaceState: null,
+        draftId: meta.id, adapter: null, runtime: null, view: null, workspaceState: null,
+        localFifoSessionId: meta.localFifoSessionId ?? null,
         phase: draftRunPhase(run), difficulty: meta.difficulty,
         selectedSet: meta.setCode, selectedSetName: meta.setName ?? null,
         kind: meta.kind ?? "Quick", runFormat: run.format, runState: run,
@@ -1371,18 +1827,40 @@ export const useDraftStore = create<DraftStoreState & DraftStoreActions>()((set,
     try {
       const database = await prepareCardDatabase();
       const adapter = new DraftAdapter();
+      // The engine keeps no LLM drafting across installs: the store declares
+      // it, which also runs any bot the saved session left waiting.
+      const fifoResume = meta.localFifoSessionId === undefined
+        ? null
+        : { sessionId: meta.localFifoSessionId, llm: await localFifoLlmDrafting() };
+      if (lifecycle !== lifecycleGeneration) return { status: "none" };
       const restored = await withDraftEngineOperation((lease) => {
         if (lifecycle !== lifecycleGeneration) throw new Error("Stale draft resume");
         lease.loadCardDatabase(database);
         lease.setPickEnhancements(usePreferencesStore.getState().draftPickEnhancements);
         if (lifecycle !== lifecycleGeneration) throw new Error("Stale draft resume");
+        // The record's declaration routes it; the engine's import is the check.
+        // An undeclared record keeps the legacy import it was saved for.
+        let runtime: LocalDraftRuntime;
+        let view: DraftPlayerView;
+        if (fifoResume === null) {
+          runtime = { kind: "legacy" };
+          view = lease.importSession(saved.sessionJson, meta.difficulty);
+        } else {
+          const local = lease.importLocalFifoSession(saved.sessionJson, meta.difficulty);
+          if (draftViewSessionId(local.view) !== fifoResume.sessionId) {
+            throw new Error(i18n.t("draft:run.resumeUnavailable"));
+          }
+          runtime = { kind: "local-fifo", owner: local.owner };
+          view = lease.localFifoSetLlmDrafting(local.owner, fifoResume.llm.drafting, Date.now());
+        }
         return {
-          view: lease.importSession(saved.sessionJson, meta.difficulty),
-          boosterPackPool: lease.boosterPackPoolForGame(),
+          runtime,
+          view,
+          boosterPackPool: lease.quickSession(runtime).boosterPackPoolForGame(),
         };
       });
       if (lifecycle !== lifecycleGeneration) return { status: "none" };
-      const { view } = restored;
+      const { runtime, view } = restored;
       if (run) {
         const upgraded = withBoosterPackPool(run, restored.boosterPackPool, view, meta.id);
         if (!validRun(upgraded, meta.id, meta.setCode)) {
@@ -1401,6 +1879,9 @@ export const useDraftStore = create<DraftStoreState & DraftStoreActions>()((set,
       // active run, or "playing" for a terminal one. The run's results vs its
       // limits decide; the meta's phase only matters before a run exists.
       const resumedPhase: DraftPhase = run ? draftRunPhase(run) : meta.phase;
+      if (runtime.kind === "local-fifo" && fifoResume !== null) {
+        fifoLlm = createLocalFifoLlm(lifecycle, runtime.owner, fifoResume.llm.drafting);
+      }
       installWorkspace({
         kind: "state",
         authoritativeView: view,
@@ -1408,6 +1889,8 @@ export const useDraftStore = create<DraftStoreState & DraftStoreActions>()((set,
         patch: {
           draftId: meta.id,
           adapter,
+          runtime,
+          localFifoSessionId: meta.localFifoSessionId ?? null,
           phase: phaseForView(view, resumedPhase),
           difficulty: meta.difficulty,
           selectedSet: meta.setCode,
@@ -1511,7 +1994,9 @@ export const useDraftStore = create<DraftStoreState & DraftStoreActions>()((set,
   },
 
   selectCard: (selectedCard) => {
-    if (get().pickInteractionLocked) return;
+    const state = get();
+    if (state.pickInteractionLocked) return;
+    if (state.view !== null && draftViewPresentation(state.view).isReadOnly) return;
     set({ selectedCard });
   },
 
@@ -1548,7 +2033,8 @@ export const useDraftStore = create<DraftStoreState & DraftStoreActions>()((set,
 
   autoSuggestDeck: async () => {
     const state = get();
-    if (workspaceMutationBlocked(state) || !state.adapter || !state.workspaceState || !state.view) return;
+    const runtime = state.runtime;
+    if (workspaceMutationBlocked(state) || !state.adapter || !runtime || !state.workspaceState || !state.view) return;
     const token = ++suggestionToken;
     const lifecycle = lifecycleGeneration;
     const revision = workspaceRevision;
@@ -1566,7 +2052,7 @@ export const useDraftStore = create<DraftStoreState & DraftStoreActions>()((set,
     try {
       result = await withDraftEngineOperation((lease) => {
         if (!fresh()) throw new Error("Stale draft suggestion");
-        return lease.suggestDeck();
+        return lease.quickSession(runtime).suggestDeck();
       });
     } catch (error) {
       if (!fresh()) return;
@@ -1596,7 +2082,8 @@ export const useDraftStore = create<DraftStoreState & DraftStoreActions>()((set,
 
   autoSuggestLands: async () => {
     const state = get();
-    if (workspaceMutationBlocked(state) || !state.adapter || !state.workspaceState || !state.view) return;
+    const runtime = state.runtime;
+    if (workspaceMutationBlocked(state) || !state.adapter || !runtime || !state.workspaceState || !state.view) return;
     const token = ++suggestionToken;
     const lifecycle = lifecycleGeneration;
     const revision = workspaceRevision;
@@ -1614,7 +2101,7 @@ export const useDraftStore = create<DraftStoreState & DraftStoreActions>()((set,
     try {
       lands = await withDraftEngineOperation((lease) => {
         if (!fresh()) throw new Error("Stale draft suggestion");
-        return lease.suggestLands(workspaceFacades(state.workspaceState!, state.view!).mainDeck);
+        return lease.quickSession(runtime).suggestLands(workspaceFacades(state.workspaceState!, state.view!).mainDeck);
       });
     } catch (error) {
       if (!fresh()) return;
@@ -1634,7 +2121,8 @@ export const useDraftStore = create<DraftStoreState & DraftStoreActions>()((set,
     const token = admitExclusive("submit");
     if (!token) return;
     const state = get();
-    if (!state.adapter || !state.workspaceState || !state.view) {
+    const runtime = state.runtime;
+    if (!state.adapter || !runtime || !state.workspaceState || !state.view) {
       retireExclusive(token);
       return;
     }
@@ -1656,7 +2144,7 @@ export const useDraftStore = create<DraftStoreState & DraftStoreActions>()((set,
       if (!fresh()) throw new Error("Stale draft deck submission");
       const view = await withDraftEngineOperation((lease) => {
         if (!fresh()) throw new Error("Stale draft deck submission");
-        return lease.submitDeck(partition.mainDeck, []);
+        return lease.quickSession(runtime).submitDeck(partition.mainDeck, [], Date.now());
       });
       if (!isExclusive(token, "submit") || lifecycle !== lifecycleGeneration) return;
       retireExclusive(token);
@@ -1694,7 +2182,8 @@ export const useDraftStore = create<DraftStoreState & DraftStoreActions>()((set,
     if (!token) return;
     cancelScheduledPersistence();
     const state = get();
-    if (!state.adapter || !state.draftId || !state.selectedSet || !state.workspaceState || !state.view) {
+    const runtime = state.runtime;
+    if (!state.adapter || !runtime || !state.draftId || !state.selectedSet || !state.workspaceState || !state.view) {
       retireExclusive(token);
       return;
     }
@@ -1728,20 +2217,23 @@ export const useDraftStore = create<DraftStoreState & DraftStoreActions>()((set,
       if (durableRun) {
         if (!unresolvedStageMatches(durableRun, state.draftId, selectedRunFormat, playerDeck)
           || durableRun.results.length !== 0) throw new Error(i18n.t("draft:run.startUnavailable"));
-        const boosterPackPool = await withDraftEngineOperation((lease) => lease.boosterPackPoolForGame());
+        const boosterPackPool = await withDraftEngineOperation(
+          (lease) => lease.quickSession(runtime).boosterPackPoolForGame(),
+        );
         if (!fresh()) throw new Error("Stale draft match launch");
         run = withBoosterPackPool(durableRun, boosterPackPool, state.view, state.draftId);
       } else {
         const prepared = await withDraftEngineOperation((lease) => {
           if (!fresh()) throw new Error("Stale draft match launch");
+          const session = lease.quickSession(runtime);
           return {
-            sessionJson: lease.exportSession(),
-            boosterPackPool: lease.boosterPackPoolForGame(),
+            sessionJson: session.exportSession(),
+            boosterPackPool: session.boosterPackPoolForGame(),
           };
         });
         sessionJson = prepared.sessionJson;
         const { botSeat, opponentDeck } = await selectViableOpponent(
-          playerDeck, [], state.view, codes, selectedMatchType, fresh,
+          runtime, playerDeck, [], state.view, codes, selectedMatchType, fresh,
         );
         if (!fresh()) throw new Error("Stale draft match launch");
         const gameId = crypto.randomUUID();
@@ -1872,7 +2364,7 @@ export const useDraftStore = create<DraftStoreState & DraftStoreActions>()((set,
       retireExclusive(token);
       throw new Error(i18n.t("draft:run.resumeUnavailable"));
     }
-    const runOnly = !state.adapter || !state.view || !state.workspaceState;
+    const runOnly = !state.adapter || !state.runtime || !state.view || !state.workspaceState;
     const lifecycle = lifecycleGeneration;
     const revision = workspaceRevision;
     const selectedRunFormat = state.runFormat;
@@ -1886,7 +2378,7 @@ export const useDraftStore = create<DraftStoreState & DraftStoreActions>()((set,
       const savedRun = await loadDraftRun(state.draftId);
       if (!savedRun) throw new Error(i18n.t("draft:run.resumeUnavailable"));
       const boosterPackPool = runOnly ? undefined
-        : await withDraftEngineOperation((lease) => lease.boosterPackPoolForGame());
+        : await withDraftEngineOperation((lease) => lease.quickSession(state.runtime!).boosterPackPoolForGame());
       if (!fresh()) return;
       const durableRun = withBoosterPackPool(savedRun, boosterPackPool, state.view, state.draftId);
       if (!validRun(durableRun, state.draftId, state.selectedSet)
@@ -1910,7 +2402,7 @@ export const useDraftStore = create<DraftStoreState & DraftStoreActions>()((set,
         const { botSeat, opponentDeck } = runOnly
           ? { botSeat: retainedSeat!, opponentDeck: durableRun.opponentDeck }
           : await selectViableOpponent(
-              playerDeck, durableRun.usedBotSeats, state.view!, codes, selectedMatchType, fresh,
+              state.runtime!, playerDeck, durableRun.usedBotSeats, state.view!, codes, selectedMatchType, fresh,
             );
         if (!fresh()) throw new Error("Stale next match launch");
         const gameId = crypto.randomUUID();
@@ -1974,16 +2466,17 @@ export const useDraftStore = create<DraftStoreState & DraftStoreActions>()((set,
       reject = rejectPromise;
     });
     const generation = invalidateLifecycle();
+    const interaction = nextInteractionGeneration();
     const token = admitExclusive("end")!;
     const operation = { draftId: id, promise };
     endingRun = operation;
-    useDraftStore.setState({ interactionGeneration: generation });
+    useDraftStore.setState({ interactionGeneration: interaction });
 
     void Promise.resolve().then(() => cleanupQuickDraftLifecycle(id)).then(
       () => {
         if (generation === lifecycleGeneration && isExclusive(token, "end")) {
           retireExclusive(token);
-          publishInitialState(generation);
+          publishInitialState(interaction);
         }
         if (endingRun === operation) endingRun = null;
         resolve();
@@ -2008,6 +2501,13 @@ export const useDraftStore = create<DraftStoreState & DraftStoreActions>()((set,
 // reports a pick for a pack that has already passed.
 useDraftStore.subscribe((state, previous) => {
   if (state.view === previous.view) return;
+  // A local FIFO draft's LLM seats answer their own heads, each at its own
+  // pace, so a new view neither clears their statuses nor starts a round: it
+  // syncs them. The barrier round reads the legacy session only.
+  if (state.runtime?.kind === "local-fifo") {
+    syncLocalFifoLlm();
+    return;
+  }
   if (state.llmDrafters.length > 0 || state.awaitingDrafters) {
     useDraftStore.setState({ llmDrafters: [], awaitingDrafters: false });
   }

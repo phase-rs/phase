@@ -175,6 +175,10 @@
     "cardsInPack_few": "{{count}} cartas no booster",
     "cardsInPack_many": "{{count}} cartas no booster",
     "cardsInPack_other": "{{count}} cartas no booster",
+    "queuedPacks_one": "{{count}} booster na sua fila",
+    "queuedPacks_few": "{{count}} boosters na sua fila",
+    "queuedPacks_many": "{{count}} boosters na sua fila",
+    "queuedPacks_other": "{{count}} boosters na sua fila",
     "currentPick": "Booster {{pack}} Escolha {{pick}}",
     "picking": "Escolhendo…",
     "autoPick": "Escolha automática",
@@ -667,6 +671,7 @@
     "hostLeft": "O anfitrião saiu do draft",
     "connection": "Erro de Conexão",
     "incompatible": "Este draft não é compatível com sua versão do protocolo.",
+    "unreadable": "Este draft salvo não pode ser lido, então não pode ser retomado.",
     "retry": "Tentar reconectar"
   },
   "winston": {

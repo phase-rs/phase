@@ -11,7 +11,7 @@
 
 import type { DraftPlayerView, SeatPublicView, SharedStackPileDecision } from "./draft-adapter";
 import {
-  admitDraft27GuestView,
+  classifyDraft27Compatibility,
   type Draft27CompatibilityError,
   Draft27IncompatibilityError,
 } from "./draft-compatibility";
@@ -112,6 +112,12 @@ type DraftGuestEventListener = (event: DraftGuestEvent) => void;
 
 /** Whether a deck-submission send is the awaited caller action or a reconnect's durable replay. */
 type DeckSubmissionOrigin = "caller" | "replay";
+
+/**
+ * What a handshake rejection does with its session: retire it, or leave it to
+ * a caller that retires it after settling the work the session still carries.
+ */
+type HandshakeSessionAction = "retire" | "callerRetires";
 
 const RECONNECT_BACKOFF_MS = [1_000, 2_000, 4_000, 8_000, 15_000, 30_000, 60_000];
 const RECONNECT_STEADY_STATE_MS = 60_000;
@@ -319,9 +325,9 @@ export class P2PDraftGuest {
     const session = this.attachSession(conn, route);
     await new Promise<void>((resolve, reject) => {
       const timer = setTimeout(() => {
-        this.rejectHandshake(session, new Error("Draft host did not acknowledge connection"));
+        this.rejectHandshake(session, new Error("Draft host did not acknowledge connection"), "retire");
       }, FIRST_CONTACT_TIMEOUT_MS);
-      const onAbort = () => this.rejectHandshake(session, abortError());
+      const onAbort = () => this.rejectHandshake(session, abortError(), "retire");
       signal?.addEventListener("abort", onAbort, { once: true });
       this.handshake = {
         session,
@@ -334,7 +340,7 @@ export class P2PDraftGuest {
         },
       };
       void this.sendFirstContact(session, reconnect)
-        .catch((err: unknown) => this.rejectHandshake(session, asError(err)));
+        .catch((err: unknown) => this.rejectHandshake(session, asError(err), "retire"));
     });
   }
 
@@ -367,12 +373,12 @@ export class P2PDraftGuest {
     handshake.resolve();
   }
 
-  private rejectHandshake(session: DraftPeerSession, reason: Error, retire = true): void {
+  private rejectHandshake(session: DraftPeerSession, reason: Error, action: HandshakeSessionAction): void {
     const handshake = this.handshake;
     if (!handshake || handshake.session !== session) return;
     this.handshake = null;
     handshake.cleanup();
-    if (retire) this.retireSession(session);
+    if (action === "retire") this.retireSession(session);
     handshake.reject(reason);
   }
 
@@ -389,7 +395,7 @@ export class P2PDraftGuest {
     this.failLandSuggestionWaiters("Draft host disconnected", session);
     route.session = null;
     if (this.handshake?.session === session) {
-      this.rejectHandshake(session, new Error("Draft host disconnected before acknowledging"));
+      this.rejectHandshake(session, new Error("Draft host disconnected before acknowledging"), "retire");
     } else {
       if (this.leaveAcknowledgement?.session === session) {
         this.leaveAcknowledgement.reject(new Error("Draft host disconnected before acknowledging leave"));
@@ -624,7 +630,7 @@ export class P2PDraftGuest {
 
   /** Returns true when the raw draft27 view was rejected before any carrier effects. */
   private rejectIncompatibleView(rawView: unknown, session: DraftPeerSession): boolean {
-    const admission = admitDraft27GuestView(rawView);
+    const admission = classifyDraft27Compatibility(rawView);
     if (admission.ok) return false;
     this.rejectIncompatibleDelivery(session, new Draft27IncompatibilityError(admission.error));
     return true;
@@ -653,7 +659,7 @@ export class P2PDraftGuest {
     this.reconnecting = false;
 
     if (route.retryWait) this.settleRetryWait(route, route.retryWait, { kind: "reject", reason });
-    this.rejectHandshake(session, reason, false);
+    this.rejectHandshake(session, reason, "callerRetires");
     this.failDeckSubmissionWaiters(reason, session, route);
     if (this.leaveAcknowledgement?.session === session) {
       const leave = this.leaveAcknowledgement;
@@ -675,7 +681,7 @@ export class P2PDraftGuest {
         const reason = `Draft protocol mismatch: host v${msg.draftProtocolVersion}, client v${DRAFT_PROTOCOL_VERSION}. Refresh both windows.`;
         console.error("[P2PDraftGuest]", reason);
         this.terminated = true;
-        this.rejectHandshake(session, new Error(reason));
+        this.rejectHandshake(session, new Error(reason), "retire");
         this.emit({
           type: "reconnectFailed",
           failure: { kind: "incompatible", message: reason },
@@ -701,7 +707,7 @@ export class P2PDraftGuest {
             draftCode: msg.draftCode,
           });
         } catch (err) {
-          this.rejectHandshake(session, asError(err));
+          this.rejectHandshake(session, asError(err), "retire");
           this.emit({ type: "error", message: "Could not save draft recovery details" });
           break;
         }
@@ -730,7 +736,7 @@ export class P2PDraftGuest {
               draftCode: msg.draftCode,
             });
           } catch (err) {
-            this.rejectHandshake(session, asError(err));
+            this.rejectHandshake(session, asError(err), "retire");
             this.emit({ type: "error", message: "Could not save draft recovery details" });
             break;
           }
@@ -746,7 +752,7 @@ export class P2PDraftGuest {
       }
 
       case "draft_reconnect_rejected": {
-        this.rejectHandshake(session, new Error(msg.reason));
+        this.rejectHandshake(session, new Error(msg.reason), "retire");
         if (msg.kind === "Kicked" || msg.kind === "UnknownToken") {
           this.terminated = true;
           await this.revokeRecovery();
@@ -1028,7 +1034,7 @@ export class P2PDraftGuest {
     if (this.recoveryRoute) this.cancelRecoveryRoute(this.recoveryRoute, abortError());
     this.failDeckSubmissionWaiters(new Error("Draft connection disposed"));
     this.failLandSuggestionWaiters("Draft connection disposed");
-    if (this.handshake) this.rejectHandshake(this.handshake.session, abortError());
+    if (this.handshake) this.rejectHandshake(this.handshake.session, abortError(), "retire");
     if (this.session) {
       this.retireSession(this.session);
       this.session = null;
@@ -1152,7 +1158,7 @@ export class P2PDraftGuest {
     if (this.session === session) this.session = null;
     if (route.retryWait) this.settleRetryWait(route, route.retryWait, { kind: "reject", reason });
     if (this.handshake?.route === route) {
-      this.rejectHandshake(this.handshake.session, reason);
+      this.rejectHandshake(this.handshake.session, reason, "retire");
     } else if (session) {
       session.close("Draft recovery route cancelled");
     }

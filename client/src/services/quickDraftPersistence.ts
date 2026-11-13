@@ -24,6 +24,11 @@ export interface ActiveQuickDraftMeta {
   runLosses?: number;
   runDraws?: number;
   currentGameId?: string;
+  /**
+   * The local FIFO session this record saves, as the engine issued it. Absent
+   * for a legacy session; resume routes by it.
+   */
+  localFifoSessionId?: string;
 }
 
 export type DraftMatchResult = "win" | "loss" | "draw";
@@ -140,7 +145,11 @@ function parseActiveMeta(raw: string | null): ActiveQuickDraftMeta | null {
       || typeof value.setCode !== "string"
       || typeof value.difficulty !== "number"
       || typeof value.pickCount !== "number"
-      || typeof value.updatedAt !== "number") return null;
+      || typeof value.updatedAt !== "number"
+      || (value.localFifoSessionId !== undefined
+        && (typeof value.localFifoSessionId !== "string" || value.localFifoSessionId.length === 0))) {
+      return null;
+    }
     return value as unknown as ActiveQuickDraftMeta;
   } catch {
     return null;

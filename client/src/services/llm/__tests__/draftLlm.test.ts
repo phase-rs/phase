@@ -26,12 +26,16 @@ const debugMocks = vi.hoisted(() => ({ debugLog: vi.fn() }));
 vi.mock("../../../game/debugLog", () => ({ debugLog: debugMocks.debugLog }));
 
 import {
+  buildLocalFifoLlmRequests,
+  callLlmDrafter,
   cancelLlmDraftRun,
   collectLlmDraftResponses,
+  LLM_DRAFT_TIMEOUT_MS,
   reportLlmDraftOutcomes,
   startLlmDraftRound,
   type LlmDrafterStatus,
 } from "../draftLlm";
+import type { LocalFifoOwner } from "../../../adapter/draft-adapter";
 import type { LlmProfile } from "../types";
 
 const PROFILE: LlmProfile = {
@@ -64,13 +68,23 @@ function pickRequest(seat: number, fingerprint: string) {
   };
 }
 
+/** A fake engine lease answering both request builders with `requests`. */
+function fakeLease(requests: unknown) {
+  return {
+    buildLlmDraftPickRequests: vi.fn((..._args: unknown[]) => requests),
+    localFifoBuildLlmRequests: vi.fn((..._args: unknown[]) => requests),
+  };
+}
+
+/** Every fake lease handed out, in order. */
+const leases: ReturnType<typeof fakeLease>[] = [];
+
 /** Drives the mocked lease, recording whether it was held during network I/O. */
 function leaseReturning(requests: unknown, onEnter?: () => void) {
   leaseMocks.withDraftEngineOperation.mockImplementation(async (work: (l: unknown) => unknown) => {
     onEnter?.();
-    const lease = {
-      buildLlmDraftPickRequests: vi.fn(() => requests),
-    };
+    const lease = fakeLease(requests);
+    leases.push(lease);
     const result = await work(lease);
     leaseHeld = false;
     return result;
@@ -85,6 +99,7 @@ beforeEach(() => {
   debugMocks.debugLog.mockReset();
   cancelLlmDraftRun();
   leaseHeld = false;
+  leases.length = 0;
 });
 
 describe("LLM drafters", () => {
@@ -390,5 +405,69 @@ describe("LLM drafters", () => {
       expect(llmMocks.executeLlmRequest).not.toHaveBeenCalled();
       expect(onStatus).not.toHaveBeenCalled();
     });
+  });
+
+  describe("one drafter's call", () => {
+    it("calls_one_drafter_with_the_draft_timeout_and_the_callers_signal", async () => {
+      const controller = new AbortController();
+      llmMocks.executeLlmRequest.mockResolvedValue({ status: 200, body: '{"choice":2}' });
+
+      await expect(callLlmDrafter({ seat: 1, request: REQUEST }, controller.signal))
+        .resolves.toEqual({ status: 200, body: '{"choice":2}' });
+
+      expect(llmMocks.executeLlmRequest).toHaveBeenCalledExactlyOnceWith(REQUEST, {
+        timeoutMs: 20_000,
+        signal: controller.signal,
+      });
+      expect(LLM_DRAFT_TIMEOUT_MS).toBe(20_000);
+    });
+
+    it("returns_no_reply_for_a_failed_call_and_reports_it_unless_cancelled", async () => {
+      const consoleWarn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      llmMocks.executeLlmRequest.mockRejectedValue(new Error("network down"));
+
+      await expect(callLlmDrafter({ seat: 1, request: REQUEST }, new AbortController().signal))
+        .resolves.toBeNull();
+      expect(llmMocks.executeLlmRequest).toHaveBeenCalledOnce();
+      const logged = debugMocks.debugLog.mock.calls.map((call) => String(call[0]));
+      expect(logged).toEqual(["LLM drafter (seat 1) failed"]);
+
+      // A call the draft cut loose is not the provider failing.
+      llmMocks.executeLlmRequest.mockClear();
+      debugMocks.debugLog.mockClear();
+      const cancelled = new AbortController();
+      cancelled.abort();
+      await expect(callLlmDrafter({ seat: 1, request: REQUEST }, cancelled.signal))
+        .resolves.toBeNull();
+      expect(llmMocks.executeLlmRequest).toHaveBeenCalledOnce();
+      expect(debugMocks.debugLog).not.toHaveBeenCalled();
+      consoleWarn.mockRestore();
+    });
+  });
+
+  it("builds_fifo_requests_for_the_owner_under_one_lease", async () => {
+    const built = [{
+      kind: "request",
+      seat: 1,
+      promptId: { session_id: "local-0123456789abcdef", seat: 1, generation: 3 },
+      fingerprint: "fp-1",
+      optionCount: 15,
+      requiredPickCount: 1,
+      promptChars: 1001,
+      request: REQUEST,
+    }];
+    leaseReturning(built);
+
+    await expect(buildLocalFifoLlmRequests(7 as LocalFifoOwner, PROFILE)).resolves.toBe(built);
+
+    expect(leaseMocks.withDraftEngineOperation).toHaveBeenCalledOnce();
+    expect(leases).toHaveLength(1);
+    const lease = leases[0]!;
+    expect(lease.buildLlmDraftPickRequests).not.toHaveBeenCalled();
+    expect(lease.localFifoBuildLlmRequests).toHaveBeenCalledOnce();
+    const [owner, endpointJson, setNames] = lease.localFifoBuildLlmRequests.mock.calls[0]!;
+    expect(owner).toBe(7);
+    expect(JSON.parse(endpointJson as string)).toMatchObject({ provider: "Anthropic" });
+    expect(setNames).toEqual({ MRD: "Mirrodin" });
   });
 });

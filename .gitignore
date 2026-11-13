@@ -76,6 +76,9 @@ client/public/*.mv-error.*
 # Coverage
 client/coverage/
 
+# Browser test output (Playwright run state and failure traces)
+client/test-results/
+
 # Downloaded card data (keep JSON data for CI)
 data/*
 !data/standard-cards.txt

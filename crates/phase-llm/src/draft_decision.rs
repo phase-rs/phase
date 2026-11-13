@@ -111,6 +111,42 @@ fn draft_system_prompt(brief: &str, required: usize) -> String {
     )
 }
 
+/// What one seat's pick step puts to a drafter, read from that seat's own
+/// projection: the single classification the prompt builder and the local
+/// runtime's LLM seats share.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DraftPickStep<'a> {
+    /// The seat holds no pack, or an empty one: nothing to pick.
+    NoPack,
+    /// CR 905.1a: the step takes every card left, so there is no choice to
+    /// put to a provider.
+    Forced,
+    /// A real choice: `required` cards from `pack`, in the order the seat is
+    /// shown it.
+    Choice {
+        pack: &'a [DraftCardInstance],
+        required: usize,
+    },
+}
+
+/// Classify one seat's pick step from that seat's own projection.
+pub fn draft_pick_step(view: &DraftPlayerView) -> DraftPickStep<'_> {
+    let pack = view.current_pack.as_deref().unwrap_or_default();
+    if pack.is_empty() {
+        return DraftPickStep::NoPack;
+    }
+    // CR 905.1a: a seat drafts from the pack until every card is taken. When
+    // the step takes every card left — the last card of a pack, or the last two
+    // of a two-card step — there is no choice to put to a provider.
+    if pack.len() <= view.required_pick_count.max(1) {
+        return DraftPickStep::Forced;
+    }
+    DraftPickStep::Choice {
+        pack,
+        required: view.required_pick_count.clamp(1, pack.len()),
+    }
+}
+
 /// Build the pick prompt for one seat.
 ///
 /// `view` must be that seat's own projection
@@ -123,23 +159,25 @@ pub fn build_draft_pick_prompt(
     db: Option<&CardDatabase>,
     set_names: &SetNames,
 ) -> LlmResult<DraftPickRequest> {
-    let pack = view.current_pack.as_deref().unwrap_or_default();
-    if pack.is_empty() {
-        return Err(LlmError::UndecodableChoice {
-            detail: "this seat has no pack to pick from".to_string(),
-        });
-    }
-    // CR 905.1a: a seat drafts from the pack until every card is taken. When
-    // the step takes every card left — the last card of a pack, or the last two
-    // of a two-card step — there is no choice to put to a provider: the seat
-    // takes what remains through the ordinary bot path, and the pick is
-    // recorded like any other.
-    if pack.len() <= view.required_pick_count.max(1) {
-        return Err(LlmError::UnsupportedDecision {
-            detail: "the pick is forced: this seat takes every card left in the pack".to_string(),
-        });
-    }
-    let required = view.required_pick_count.clamp(1, pack.len());
+    let (pack, required) = match draft_pick_step(view) {
+        DraftPickStep::NoPack => {
+            return Err(LlmError::UndecodableChoice {
+                detail: "this seat has no pack to pick from".to_string(),
+            });
+        }
+        // CR 905.1a: a seat drafts from the pack until every card is taken.
+        // When the step takes every card left — the last card of a pack, or
+        // the last two of a two-card step — there is no choice to put to a
+        // provider: the seat takes what remains through the ordinary bot path,
+        // and the pick is recorded like any other.
+        DraftPickStep::Forced => {
+            return Err(LlmError::UnsupportedDecision {
+                detail: "the pick is forced: this seat takes every card left in the pack"
+                    .to_string(),
+            });
+        }
+        DraftPickStep::Choice { pack, required } => (pack, required),
+    };
     let options = option_lines(pack, db, difficulty);
     // CR 100.2b gives limited a 40-card minimum, but CR 903.13f(1) requires at
     // least 60 for Commander draft. The engine publishes the number this
@@ -959,5 +997,39 @@ mod tests {
         assert!(
             build_draft_pick_prompt(0, &view, AiDifficulty::Hard, None, &SetNames::new()).is_ok()
         );
+    }
+
+    /// CR 905.1a: the step classification the local runtime holds LLM heads
+    /// by is the prompt builder's own, so a head is held exactly when a
+    /// prompt can be built for it.
+    #[test]
+    fn the_pick_step_is_the_prompts_own_classification() {
+        let forced = view_with(vec![card("z", "Last Card")], Vec::new());
+        assert!(matches!(draft_pick_step(&forced), DraftPickStep::Forced));
+        assert!(matches!(
+            build_draft_pick_prompt(0, &forced, AiDifficulty::Hard, None, &SetNames::new()),
+            Err(LlmError::UnsupportedDecision { .. })
+        ));
+
+        let choice = view_with(pack(), Vec::new());
+        match draft_pick_step(&choice) {
+            DraftPickStep::Choice { pack, required } => {
+                assert_eq!(required, 1);
+                assert_eq!(pack.len(), 3);
+            }
+            DraftPickStep::NoPack | DraftPickStep::Forced => {
+                panic!("a three-card single-pick step is a choice")
+            }
+        }
+        assert!(
+            build_draft_pick_prompt(0, &choice, AiDifficulty::Hard, None, &SetNames::new()).is_ok()
+        );
+
+        let empty = view_with(Vec::new(), Vec::new());
+        assert!(matches!(draft_pick_step(&empty), DraftPickStep::NoPack));
+        assert!(matches!(
+            build_draft_pick_prompt(0, &empty, AiDifficulty::Hard, None, &SetNames::new()),
+            Err(LlmError::UndecodableChoice { .. })
+        ));
     }
 }

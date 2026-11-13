@@ -3,7 +3,7 @@ import { act, cleanup, fireEvent, render, screen, within } from "@testing-librar
 import userEvent from "@testing-library/user-event";
 import { useRef, useState } from "react";
 
-import type { DraftPlayerView } from "../../../adapter/draft-adapter";
+import type { DraftCardInstance, DraftPlayerView, FifoEffectOptions } from "../../../adapter/draft-adapter";
 import type { PackDisplayController, PackDropSource } from "../PackDisplay";
 import type { DraftDropDispatch, DraftDropRequest, DraftPickInteractionSnapshot, WorkspaceDragSource } from "../workspace/useDraftWorkspaceDrag";
 import { useDraftWorkspaceDrag } from "../workspace/useDraftWorkspaceDrag";
@@ -130,6 +130,113 @@ function CommanderPickTwoPack({
       presentation={{ packScale: 1, setPackScale: vi.fn() }}
       onCardHover={vi.fn()}
       responsiveLayout={responsiveLayout}
+    />
+  );
+}
+
+/**
+ * Cogwork Librarian (CNS #58), whose Oracle text the engine reads as its one
+ * additional-pick draft effect:
+ *   Draft this card face up.
+ *   As you draft a card, you may draft an additional card from that booster
+ *   pack. If you do, put this card into that booster pack.
+ */
+const cogworkLibrarian = {
+  instance_id: "cogwork", name: "Cogwork Librarian", set_code: "CNS", collector_number: "58",
+  rarity: "common", colors: [], cmc: 4, type_line: "Artifact Creature — Construct",
+  draft_effect: "additional_pick",
+} satisfies DraftCardInstance;
+
+function packCard(instanceId: string): DraftCardInstance {
+  return { instance_id: instanceId, name: instanceId, set_code: "TST", collector_number: instanceId, rarity: "common", colors: [], cmc: 1, type_line: "Card" };
+}
+
+/**
+ * Seat 0's view of a local FIFO draft: a literal that passes the client's FIFO
+ * wire check, unless `dropProgress` removes its progress record.
+ */
+function fifoView({
+  currentPack,
+  effects,
+  kind = "Quick",
+  picks = 1,
+  promptGeneration = 3,
+  pickSelectionMode = "Direct",
+  draftEffects = [],
+  roundCompletedSteps = 0,
+  queueCount = 1,
+  currentPackNumber = view.current_pack_number,
+  pickNumber = view.pick_number,
+  dropProgress = false,
+}: {
+  currentPack: DraftCardInstance[];
+  effects: FifoEffectOptions | null;
+  kind?: DraftPlayerView["kind"];
+  picks?: number;
+  promptGeneration?: number;
+  pickSelectionMode?: DraftPlayerView["pick_selection_mode"];
+  draftEffects?: DraftCardInstance[];
+  /** The seat's own completed steps this round. */
+  roundCompletedSteps?: number;
+  /** Packs in the seat's queue, its head among them. */
+  queueCount?: number;
+  currentPackNumber?: number;
+  pickNumber?: number;
+  dropProgress?: boolean;
+}): DraftPlayerView {
+  const sessionId = "local-0123456789abcdef";
+  // The earlier rounds' steps plus this round's: the seat's total.
+  const progress = {
+    completed_steps: currentPackNumber * view.pick_steps_per_pack + roundCompletedSteps,
+    round_completed_steps: roundCompletedSteps,
+  };
+  return {
+    ...view,
+    kind,
+    current_pack_number: currentPackNumber,
+    pick_number: pickNumber,
+    current_pack: currentPack,
+    pool: [cogworkLibrarian],
+    draft_effects: draftEffects,
+    pick_selection_mode: pickSelectionMode,
+    required_pick_count: picks,
+    flow: "FifoAsync",
+    fifo: {
+      state: { session_id: sessionId, revision: promptGeneration, paused: null, review_clock: null },
+      ...(dropProgress ? {} : { progress }),
+      queue_count: queueCount,
+      head: { pack_id: 0, opening_seat: 0, round: currentPackNumber, original_size: 15 },
+      prompt_id: { session_id: sessionId, seat: 0, generation: promptGeneration },
+      requirements: { picks, burns: 0 },
+      effects,
+      clock: null,
+    },
+  } as DraftPlayerView;
+}
+
+/** A pack whose controller keeps the selection the way the stores do. */
+function StatefulFifoPack({
+  view: fifo,
+  pickCardWithDraftEffect,
+  dragController: localDrag = dragController,
+}: {
+  view: DraftPlayerView;
+  pickCardWithDraftEffect: WorkspaceController["pickCardWithDraftEffect"];
+  dragController?: typeof dragController;
+}) {
+  const [selectedCard, setSelectedCard] = useState<string | null>(null);
+  return (
+    <PackDisplay
+      controller={controller({
+        view: fifo,
+        selectedCard,
+        selectCard: setSelectedCard,
+        pickCardWithDraftEffect,
+        dragController: localDrag,
+      })}
+      presentation={{ packScale: 1, setPackScale: vi.fn() }}
+      onCardHover={vi.fn()}
+      enableDraftEffects
     />
   );
 }
@@ -318,6 +425,7 @@ describe("PackDisplay local workspace controller", () => {
       "min-h-9",
     );
     expect(screen.queryByText(/cards? in pack/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/in your queue/)).not.toBeInTheDocument();
     expect(screen.queryByText("Mythic Rare")).not.toBeInTheDocument();
     const scaleControls = [
       screen.getByRole("button", { name: "Decrease pack scale" }),
@@ -1910,5 +2018,127 @@ describe("PackDisplay local workspace controller", () => {
     act(() => vi.runOnlyPendingTimers());
     expect(rendered.container.querySelector('[data-visual-state="leaving"]')).not.toBeInTheDocument();
     window.matchMedia = originalMatchMedia;
+  });
+
+  it("clears_the_chosen_effect_card_on_a_new_interaction_generation", () => {
+    const effects = { card_instance_ids: ["cogwork"], requirements: [{ picks: 2, burns: 0 }] };
+    const presentation = { packScale: 1, setPackScale: vi.fn() };
+    const offered = fifoView({ currentPack: [packCard("pk-a"), packCard("pk-b"), packCard("pk-c")], effects });
+    const rendered = render(<PackDisplay controller={controller({ view: offered })} presentation={presentation} onCardHover={vi.fn()} enableDraftEffects />);
+    const librarian = () => screen.getByRole("checkbox", { name: "Cogwork Librarian" });
+
+    fireEvent.click(librarian());
+    expect(librarian()).toBeChecked();
+
+    // The next prompt's head keeps the pack and pick numbers and still offers the card.
+    const next = fifoView({ currentPack: [packCard("pk-d"), packCard("pk-e"), packCard("pk-f")], effects, promptGeneration: 4 });
+    rendered.rerender(<PackDisplay controller={controller({ view: next, interactionGeneration: 5 })} presentation={presentation} onCardHover={vi.fn()} enableDraftEffects />);
+    expect(librarian()).not.toBeChecked();
+  });
+
+  it("offers_a_fifo_effect_card_only_where_the_view_publishes_it", () => {
+    const presentation = { packScale: 1, setPackScale: vi.fn() };
+    // A one-card head cannot supply an additional card, so the engine publishes
+    // no options, though the pool's own effect list names the card.
+    const unoffered = render(<PackDisplay controller={controller({
+      view: fifoView({ currentPack: [packCard("pk-a")], effects: null, draftEffects: [cogworkLibrarian] }),
+    })} presentation={presentation} onCardHover={vi.fn()} enableDraftEffects />);
+    expect(screen.queryByRole("checkbox", { name: "Cogwork Librarian" })).not.toBeInTheDocument();
+    unoffered.unmount();
+
+    const pickEffect = vi.fn().mockResolvedValue({ status: "ignored", reason: "busy" });
+    const offered = render(<PackDisplay controller={controller({
+      view: fifoView({
+        currentPack: [packCard("pk-a"), packCard("pk-b"), packCard("pk-c")],
+        effects: { card_instance_ids: ["cogwork"], requirements: [{ picks: 2, burns: 0 }] },
+        draftEffects: [cogworkLibrarian],
+      }),
+      selectedCard: "pk-a",
+      pickCardWithDraftEffect: pickEffect,
+    })} presentation={presentation} onCardHover={vi.fn()} enableDraftEffects />);
+    fireEvent.click(screen.getByRole("checkbox", { name: "Cogwork Librarian" }));
+    const packCardElement = (instanceId: string) => offered.container.querySelector<HTMLElement>(`[data-instance-id="${instanceId}"]`)!;
+    fireEvent.click(within(packCardElement("pk-b")).getByRole("button", { name: "pk-b" }));
+    fireEvent.click(within(packCardElement("pk-a")).getByRole("button", { name: "Pick pk-a to Deck" }));
+    expect(pickEffect).toHaveBeenCalledExactlyOnceWith("cogwork", ["pk-a", "pk-b"], "deck");
+  });
+
+  it("composes_a_three_card_ordered_effect_selection_from_the_published_count", () => {
+    // CR 903.13b: Commander Draft drafts two cards per pick, so Cogwork
+    // Librarian's additional card makes a three-card selection.
+    const pickEffect = vi.fn().mockResolvedValue({ status: "ignored", reason: "busy" });
+    const localDrag = { ...dragController, handlePointerDown: vi.fn() };
+    const rendered = render(<StatefulFifoPack
+      view={fifoView({
+        kind: "CommanderDraft",
+        picks: 2,
+        pickSelectionMode: "Ordered",
+        currentPack: [packCard("a"), packCard("b"), packCard("c"), packCard("d")],
+        effects: { card_instance_ids: ["cogwork"], requirements: [{ picks: 3, burns: 0 }] },
+      })}
+      pickCardWithDraftEffect={pickEffect}
+      dragController={localDrag}
+    />);
+    const packCardElement = (instanceId: string) => rendered.container.querySelector<HTMLElement>(`[data-instance-id="${instanceId}"]`)!;
+    const activate = (instanceId: string) => fireEvent.click(within(packCardElement(instanceId)).getByRole("button", { name: instanceId }));
+
+    fireEvent.click(screen.getByRole("checkbox", { name: "Cogwork Librarian" }));
+    activate("a");
+    activate("b");
+    activate("c");
+    for (const instanceId of ["a", "b", "c"]) {
+      expect(packCardElement(instanceId)).toHaveAttribute("data-visual-state", "selected");
+    }
+
+    fireEvent.pointerDown(packCardElement("a"), { button: 0, isPrimary: true, pointerId: 3, pointerType: "mouse" });
+    expect(localDrag.handlePointerDown).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
+      kind: "draft-effect",
+      authorityId: "cogwork",
+      instanceIds: ["a", "b", "c"],
+    }));
+
+    fireEvent.click(within(packCardElement("a")).getByRole("button", { name: "Pick a to Deck" }));
+    expect(pickEffect).toHaveBeenCalledExactlyOnceWith("cogwork", ["a", "b", "c"], "deck");
+  });
+
+  it.each([
+    { queueCount: 1, queueText: "1 pack in your queue" },
+    { queueCount: 3, queueText: "3 packs in your queue" },
+  ])("labels_a_fifo_pick_with_the_seats_own_step_and_queue ($queueText)", ({ queueCount, queueText }) => {
+    // CR 905.2a: during a draft there is no active player or system of
+    // priority. On a FIFO draft a seat takes a step whenever it holds a pack,
+    // so the step it is taking follows its own `round_completed_steps`.
+    // `pick_number` stays 0 all round: a label that read it would say
+    // `Pack 2 Pick 1`.
+    render(<PackDisplay controller={controller({
+      view: fifoView({
+        currentPack: [packCard("pk-a"), packCard("pk-b")],
+        effects: null,
+        currentPackNumber: 1,
+        roundCompletedSteps: 4,
+        queueCount,
+      }),
+    })} presentation={{ packScale: 1, setPackScale: vi.fn() }} onCardHover={vi.fn()} />);
+
+    expect(screen.getByText("Pack 2 Pick 5")).toBeInTheDocument();
+    expect(screen.getByText(queueText)).toHaveAttribute("data-pack-queue");
+  });
+
+  it("shows_no_position_for_a_fifo_view_it_cannot_read", () => {
+    // Without its progress record the view fails the client's FIFO wire check.
+    // `pick_number` is 2, so a fallback to the legacy counter would say `Pick 3`.
+    const { container } = render(<PackDisplay controller={controller({
+      view: fifoView({
+        currentPack: [packCard("pk-a"), packCard("pk-b")],
+        effects: null,
+        pickNumber: 2,
+        dropProgress: true,
+      }),
+    })} presentation={{ packScale: 1, setPackScale: vi.fn() }} onCardHover={vi.fn()} />);
+
+    // Reach guard: the view's cards still render.
+    expect([...container.querySelectorAll("[data-instance-id]")].map((node) => node.getAttribute("data-instance-id"))).toEqual(["pk-a", "pk-b"]);
+    expect(screen.queryByText(/^Pack \d+ Pick \d+$/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/in your queue/)).not.toBeInTheDocument();
   });
 });

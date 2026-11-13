@@ -175,6 +175,10 @@
     "cardsInPack_few": "パック内に{{count}}枚",
     "cardsInPack_many": "パック内に{{count}}枚",
     "cardsInPack_other": "パック内に{{count}}枚",
+    "queuedPacks_one": "キューに{{count}}パック",
+    "queuedPacks_few": "キューに{{count}}パック",
+    "queuedPacks_many": "キューに{{count}}パック",
+    "queuedPacks_other": "キューに{{count}}パック",
     "currentPick": "パック{{pack}}・{{pick}}手目",
     "picking": "選択中…",
     "autoPick": "自動ピック",
@@ -728,6 +732,7 @@
     "hostLeft": "ホストがドラフトから退出しました",
     "connection": "接続エラー",
     "incompatible": "このドラフトはお使いのプロトコルバージョンと互換性がありません。",
+    "unreadable": "この保存されたドラフトは読み込めないため、再開できません。",
     "retry": "再接続を試す"
   },
   "spectator": {

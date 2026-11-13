@@ -30,6 +30,12 @@
 //! root: none of them carries hidden information, and `CARD_DB` is the PUBLIC
 //! card database a bot reads through its own argument list.
 //!
+//! The cell also holds the **local owner**: the per-install authority for a
+//! session the runtime owns locally. Any install replaces it, so a holder of an
+//! earlier owner can neither read nor act on the session that replaced theirs.
+//! The owner is never part of the session, so an exported copy carries none
+//! and every import of one is issued a new owner.
+//!
 //! # What none of this closes: the HUMAN HOST
 //!
 //! Every device above is about code inside this crate. None of them — and no
@@ -55,6 +61,7 @@
 
 use std::cell::Cell;
 
+use serde::Serialize;
 use wasm_bindgen::prelude::*;
 
 use draft_core::types::DraftSession;
@@ -65,7 +72,32 @@ thread_local! {
     ///
     /// NOT `pub` in any form: that is the point of this module.
     static DRAFT_SESSION: Cell<Option<DraftSession>> = const { Cell::new(None) };
+    /// The owner of the installed session when the runtime owns it locally,
+    /// `None` otherwise. Every install replaces it.
+    static LOCAL_OWNER: Cell<Option<LocalOwner>> = const { Cell::new(None) };
+    /// The most recently issued local owner, so each local install issues the
+    /// next one.
+    static LAST_LOCAL_OWNER: Cell<u32> = const { Cell::new(0) };
 }
+
+/// The authority a caller holds over a session the runtime owns locally.
+///
+/// Issued by [`install_local`] and checked by [`with_local_draft_inner`] and
+/// [`with_local_draft_mut_inner`] before the session is touched. It is never
+/// stored in the session, so it cannot travel with an exported copy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(transparent)]
+pub(crate) struct LocalOwner(u32);
+
+impl LocalOwner {
+    /// The owner a caller presents across the WASM boundary.
+    pub(crate) fn from_raw(raw: u32) -> Self {
+        Self(raw)
+    }
+}
+
+/// The refusal for an owner that is not the installed session's live owner.
+pub(crate) const STALE_LOCAL_OWNER: &str = "This local draft is no longer the active draft";
 
 /// Take the draft session out of the Cell, pass it to a closure, then put it back.
 pub(crate) fn with_draft<R>(f: impl FnOnce(&DraftSession) -> R) -> Result<R, JsValue> {
@@ -128,14 +160,67 @@ pub(crate) fn with_draft_inner<R>(
 /// Install a session, replacing whatever was there. The one *write* verb: every
 /// production path that used to say `DRAFT_SESSION.with(|cell| cell.set(Some(..)))`
 /// says this instead, so `grep` for the session's installers has one answer.
+///
+/// A plain install leaves no local owner: whoever held the owner of the session
+/// it replaces can no longer reach the installed one.
 pub(crate) fn install(session: DraftSession) {
+    LOCAL_OWNER.with(|cell| cell.set(None));
     DRAFT_SESSION.with(|cell| cell.set(Some(session)));
 }
 
-/// Drop the installed session, if any.
+/// Install a session the runtime owns locally, and issue its owner.
+///
+/// Each call issues the next owner in sequence, wrapping past `u32::MAX` to 1;
+/// 0 is never issued. Any earlier owner stops matching, so its holder is
+/// refused by [`with_local_draft_inner`] and [`with_local_draft_mut_inner`].
+pub(crate) fn install_local(session: DraftSession) -> LocalOwner {
+    let owner = LAST_LOCAL_OWNER.with(|cell| {
+        let next = cell.get().checked_add(1).unwrap_or(1);
+        cell.set(next);
+        LocalOwner(next)
+    });
+    install(session);
+    LOCAL_OWNER.with(|cell| cell.set(Some(owner)));
+    owner
+}
+
+/// `with_draft_inner` for a session the runtime owns locally: `owner` is
+/// compared with the live owner BEFORE the session is touched, so a stale owner
+/// neither reads it nor learns whether one is installed.
+pub(crate) fn with_local_draft_inner<R>(
+    owner: LocalOwner,
+    f: impl FnOnce(&DraftSession) -> Result<R, String>,
+) -> Result<R, String> {
+    if LOCAL_OWNER.with(|cell| cell.get()) != Some(owner) {
+        return Err(STALE_LOCAL_OWNER.to_string());
+    }
+    with_draft_inner(f)
+}
+
+/// `with_draft_mut_inner` for a session the runtime owns locally: `owner` is
+/// compared with the live owner BEFORE the session is touched, so a stale owner
+/// cannot act on it.
+pub(crate) fn with_local_draft_mut_inner<R>(
+    owner: LocalOwner,
+    f: impl FnOnce(&mut DraftSession) -> Result<R, String>,
+) -> Result<R, String> {
+    if LOCAL_OWNER.with(|cell| cell.get()) != Some(owner) {
+        return Err(STALE_LOCAL_OWNER.to_string());
+    }
+    with_draft_mut_inner(f)
+}
+
+/// Drop the installed session, if any, and its local owner.
 #[cfg(test)]
 pub(crate) fn clear() {
+    LOCAL_OWNER.with(|cell| cell.set(None));
     DRAFT_SESSION.with(|cell| cell.set(None));
+}
+
+/// The installed session's live local owner, if any.
+#[cfg(test)]
+pub(crate) fn local_owner() -> Option<LocalOwner> {
+    LOCAL_OWNER.with(|cell| cell.get())
 }
 
 /// Whether a session is installed, **without disturbing it**.

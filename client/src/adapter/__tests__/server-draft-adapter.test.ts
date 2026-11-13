@@ -4,7 +4,7 @@ import { EMPTY_DRAFT_POOL_GROUPS } from "../draft-adapter";
 import { ServerDraftAdapter } from "../server-draft-adapter";
 import { PROTOCOL_VERSION } from "../ws-adapter";
 import { AdapterError, AdapterErrorCode } from "../types";
-import type { DraftPlayerView } from "../draft-adapter";
+import type { DraftPlayerView, DraftPlayerViewFields } from "../draft-adapter";
 import type { GameAction, GameLogEntry, GameState, LegalActionsResult, ObjectAction, SubmitResult } from "../types";
 import type * as OpenPhaseSocketModule from "../../services/openPhaseSocket";
 import type {
@@ -167,7 +167,7 @@ function trackRejection(promise: Promise<unknown>): () => Promise<unknown> {
   };
 }
 
-function createMockDraftView(overrides: Partial<DraftPlayerView> = {}): DraftPlayerView {
+function createMockDraftView(overrides: Partial<DraftPlayerViewFields> = {}): DraftPlayerView {
   return {
     status: "Drafting",
     kind: "Premier",
