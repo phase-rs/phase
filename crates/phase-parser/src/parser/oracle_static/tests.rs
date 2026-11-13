@@ -42621,6 +42621,30 @@ fn nth_qualified_spell_keyword_grant_declines_unsupported_timing() {
 }
 
 #[test]
+fn opponent_cast_first_spell_cost_and_flash_grants_no_flash() {
+    // No printed card has an opponent-scoped first-spell cost combined with a flash grant; nearest are Radagast of Rhosgobel (printed, controller-scoped) and the Magic Online-only Heartwood Storyteller Avatar (opponent-scoped cost).
+    let defs = parse_static_line_multi(
+        "The first noncreature spell each opponent casts each turn costs {1} more to cast and can be cast as though it had flash.",
+    );
+    assert!(
+        defs.iter().any(|d| matches!(
+            d.mode,
+            StaticMode::ModifyCost {
+                mode: CostModifyMode::Raise,
+                ..
+            }
+        )),
+        "{defs:?}"
+    );
+    assert!(
+        !defs
+            .iter()
+            .any(|d| matches!(d.mode, StaticMode::CastWithKeyword { .. })),
+        "{defs:?}"
+    );
+}
+
+#[test]
 fn static_blue_spirit_may_cast_first_creature_spell_as_though_flash() {
     // CR 601.3b + CR 702.8a: The Blue Spirit's permission form.
     let def = parse_static_line(

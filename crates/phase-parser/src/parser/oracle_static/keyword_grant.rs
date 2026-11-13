@@ -570,14 +570,21 @@ pub(crate) fn parse_spells_have_keyword(tp: &TextPair<'_>, text: &str) -> Option
 
 /// CR 611.3a: Gated `CastWithKeyword` for a "the <ordinal> <qualifier> spell you
 /// cast <timing>" subject (`subject_lower`), the single owner of that lowering.
-/// `None` when the subject is not Nth-qualified, its qualifier/timing is
-/// unrepresentable, or text after the timing phrase would be dropped.
+/// `None` when the subject is not Nth-qualified, its caster is not "you", its
+/// qualifier/timing is unrepresentable, or text after the timing phrase would
+/// be dropped.
 pub(crate) fn nth_qualified_spell_keyword_grant(
     subject_lower: &str,
     keyword: Keyword,
     leading: Option<StaticCondition>,
     text: &str,
 ) -> Option<StaticDefinition> {
+    // CR 611.3a: the grant and its spell history below are scoped to the
+    // source's controller, so an opponent-cast subject ("each opponent casts")
+    // must decline rather than grant the controller.
+    if !nom_primitives::scan_contains(subject_lower, "you cast ") {
+        return None;
+    }
     let NthQualifiedSpell::Supported {
         filter,
         timing,
