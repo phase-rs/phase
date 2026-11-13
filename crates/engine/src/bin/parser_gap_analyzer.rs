@@ -1,9 +1,9 @@
 use std::path::PathBuf;
 use std::process;
 
-use engine::database::legality::{LegalityFormat, LegalityStatus};
+use engine::database::legality::LegalityFormat;
 use engine::database::CardDatabase;
-use engine::game::coverage::analyze_coverage;
+use engine::game::coverage::{analyze_coverage, face_is_legal_in};
 use engine::game::gap_analysis::{analyze_gaps, GapClass};
 
 fn main() {
@@ -100,10 +100,7 @@ fn main() {
 
     if let Some(fmt) = format_filter {
         let before = summary.cards.len();
-        summary.cards.retain(|c| {
-            db.legality_status(c.card_face_key.as_deref().unwrap_or(&c.card_name), fmt)
-                == Some(LegalityStatus::Legal)
-        });
+        summary.cards.retain(|c| face_is_legal_in(c, &db, fmt));
         eprintln!(
             "Filtered to {}: {} / {} cards retained",
             fmt.as_key(),

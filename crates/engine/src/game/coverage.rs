@@ -7401,6 +7401,21 @@ fn rank_top_gap_handlers(freq: impl IntoIterator<Item = (String, usize)>) -> Vec
     ranked
 }
 
+/// Whether a coverage row's own face is legal in `format`; same-name faces differ in legality.
+pub fn face_is_legal_in(
+    card: &CardCoverageResult,
+    card_db: &CardDatabase,
+    format: LegalityFormat,
+) -> bool {
+    let key = card
+        .card_face_key
+        .as_deref()
+        .expect("every scanned row has a face key");
+    card_db
+        .legality_status(key, format)
+        .is_some_and(|status| status.is_legal())
+}
+
 /// Analyze card coverage by checking which cards have all their abilities,
 /// triggers, keywords, and static abilities supported by the engine's registries.
 pub fn analyze_coverage(card_db: &CardDatabase) -> CoverageSummary {
@@ -7513,17 +7528,6 @@ pub fn analyze_coverage(card_db: &CardDatabase) -> CoverageSummary {
     // Internal frequency list — used to seed top_gaps but not stored on output
     let handler_frequency = rank_top_gap_handlers(freq);
 
-    // Same-name faces differ in legality, so a row reads its own face's.
-    let legal_in = |card: &CardCoverageResult, format: LegalityFormat| {
-        let key = card
-            .card_face_key
-            .as_deref()
-            .expect("every scanned row has a face key");
-        card_db
-            .legality_status(key, format)
-            .is_some_and(|status| status.is_legal())
-    };
-
     // Compute enriched top_gaps: single-gap counts, oracle patterns, co-occurrence
     let top_gaps = {
         // Single-gap card counts with format breakdown
@@ -7534,7 +7538,7 @@ pub fn analyze_coverage(card_db: &CardDatabase) -> CoverageSummary {
                 let entry = gap_data.entry(handler.clone()).or_default();
                 entry.0 += 1;
                 for format in LegalityFormat::ALL {
-                    if legal_in(card, format) {
+                    if face_is_legal_in(card, card_db, format) {
                         *entry.1.entry(format.as_key().to_string()).or_default() += 1;
                     }
                 }
@@ -7690,7 +7694,7 @@ pub fn analyze_coverage(card_db: &CardDatabase) -> CoverageSummary {
                 let entry = bundle_map.entry(handlers).or_default();
                 entry.0 += 1;
                 for format in LegalityFormat::ALL {
-                    if legal_in(card, format) {
+                    if face_is_legal_in(card, card_db, format) {
                         *entry.1.entry(format.as_key().to_string()).or_default() += 1;
                     }
                 }
