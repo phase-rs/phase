@@ -42601,19 +42601,21 @@ fn static_first_creature_spell_during_your_turns_costs_less_and_has_flash() {
 }
 
 #[test]
-fn static_first_creature_spell_unsupported_timing_emits_no_flash() {
-    let defs = parse_static_line_multi(
-        "The first creature spell you cast during each opponent's turn costs {1} less to cast and can be cast as though it had flash.",
-    );
-    assert!(
-        !defs.iter().any(|def| matches!(
-            def.mode,
-            StaticMode::CastWithKeyword {
-                keyword: Keyword::Flash
-            }
-        )),
-        "{defs:?}"
-    );
+fn nth_qualified_spell_keyword_grant_declines_unsupported_timing() {
+    assert!(nth_qualified_spell_keyword_grant(
+        "the first creature spell you cast each turn",
+        Keyword::Flash,
+        None,
+        "",
+    )
+    .is_some());
+    assert!(nth_qualified_spell_keyword_grant(
+        "the first creature spell you cast during each opponent's turn",
+        Keyword::Flash,
+        None,
+        "",
+    )
+    .is_none());
 }
 
 #[test]
