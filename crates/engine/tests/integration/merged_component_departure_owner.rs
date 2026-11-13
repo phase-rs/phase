@@ -68,7 +68,9 @@ use engine::types::ability::{
 use engine::types::actions::GameAction;
 use engine::types::events::{GameEvent, PlayerActionKind};
 use engine::types::format::FormatConfig;
-use engine::types::game_state::{ActionResult, GameState, StackEntryKind, WaitingFor};
+use engine::types::game_state::{
+    ActionResult, GameState, PersistedGameState, StackEntryKind, WaitingFor,
+};
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaType, ManaUnit};
 use engine::types::phase::Phase;
@@ -1517,9 +1519,10 @@ fn forge_collected_before_departure(
     }
 }
 
-/// CR 603.2c: a save whose owner claims to have collected, before a departure,
-/// a zone change neither it nor its component child holds is rejected, and so
-/// is a duplicated record; the untouched save loads. The save is taken at
+/// CR 603.2c: the persisted-state reader (`PersistedGameState`) returns an error
+/// for a save whose owner claims to have collected, before a departure, a zone
+/// change neither it nor its component child holds, and for a duplicated
+/// record; it restores the untouched snapshot. The save is taken at
 /// Brokkos's prompt after another seat conceded, when the owner holds one real
 /// record (Circuit Mender's departure).
 #[test]
@@ -1537,7 +1540,8 @@ fn a_forged_record_of_departures_collected_before_a_player_left_is_rejected_on_l
     assert_commander_prompt(runner.state(), P1, pile.brokkos);
     concede(&mut runner, P2);
 
-    let saved = serde_json::to_value(runner.state()).expect("the parked prompt serializes");
+    let saved = serde_json::to_value(PersistedGameState::capture(runner.state().clone()))
+        .expect("the parked prompt serializes");
     let real: Vec<serde_json::Value> = {
         fn find(value: &serde_json::Value, found: &mut Vec<serde_json::Value>) {
             match value {
@@ -1563,30 +1567,31 @@ fn a_forged_record_of_departures_collected_before_a_player_left_is_rejected_on_l
         1,
         "reach guard: the owner recorded Circuit Mender's departure: {real:?}"
     );
-    // A restore rejects invalid frames with an error, and in a debug build its
-    // runtime invariant check panics first; either is a rejection.
-    let loads = |value: serde_json::Value| {
-        std::panic::catch_unwind(|| {
-            serde_json::from_value::<GameState>(value)
-                .ok()
-                .is_some_and(|state| state.resolution_stack.validate(&state.waiting_for).is_ok())
-        })
-        .unwrap_or(false)
+    // The production reader of a persisted game: its error is the rejection.
+    let read = |value: serde_json::Value| {
+        serde_json::from_value::<PersistedGameState>(value)
+            .map(|_| ())
+            .map_err(|error| error.to_string())
     };
-    assert!(loads(saved.clone()), "the untouched save loads");
+    read(saved.clone()).expect("the untouched save is restored");
 
     let mut unknown = saved.clone();
     let mut forged = real[0].clone();
     forged["object_id"] = serde_json::json!(9_999);
     forge_collected_before_departure(&mut unknown, &forged, true);
+    let refusal = read(unknown).expect_err("a record naming a zone change nobody holds");
     assert!(
-        !loads(unknown),
-        "a record naming a zone change nobody holds is rejected"
+        refusal.contains("component delivery does not identify its immediate original owner"),
+        "{refusal}"
     );
 
     let mut duplicate = saved;
     forge_collected_before_departure(&mut duplicate, &real[0], true);
-    assert!(!loads(duplicate), "a duplicated record is rejected");
+    let refusal = read(duplicate).expect_err("a duplicated record");
+    assert!(
+        refusal.contains("before a departure more than once"),
+        "{refusal}"
+    );
 
     // An owner with no component child: Totally Lost on an unmerged commander.
     // Karn has not moved, so a record of Karn's move is not one of the owner's
@@ -1605,15 +1610,18 @@ fn a_forged_record_of_departures_collected_before_a_player_left_is_rejected_on_l
         .is_commander = true;
     cast_until_resolved_or_asked(&mut runner, lost, &[karn]);
     assert_commander_prompt(runner.state(), P1, karn);
-    let saved = serde_json::to_value(runner.state()).expect("the parked prompt serializes");
-    assert!(loads(saved.clone()), "the untouched unmerged save loads");
+    let saved = serde_json::to_value(PersistedGameState::capture(runner.state().clone()))
+        .expect("the parked prompt serializes");
+    read(saved.clone()).expect("the untouched unmerged save is restored");
     let mut forged_karn = real[0].clone();
     forged_karn["object_id"] = serde_json::json!(karn.0);
     let mut unlinked = saved;
     forge_collected_before_departure(&mut unlinked, &forged_karn, false);
+    let refusal = read(unlinked)
+        .expect_err("an owner with no component child cannot claim a move it has not made");
     assert!(
-        !loads(unlinked),
-        "an owner with no component child cannot claim a move it has not made"
+        refusal.contains("records a departure it does not hold as collected"),
+        "{refusal}"
     );
 }
 
