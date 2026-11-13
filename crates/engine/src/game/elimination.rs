@@ -765,7 +765,8 @@ pub(crate) fn eliminate_players(
 /// This is also the pregame-reconciliation seam for the prompts that precede
 /// mulligans: a departed companion chooser (CR 103.2b) is resumed at the walk
 /// cursor by `advance_companion_reveal`, and a departed agenda chooser (CR
-/// 103.2e) resumes at the agenda step.
+/// 103.2e) resumes at the agenda step. A departed CR 103.1 chooser passes the
+/// choice on (CR 800.4h), and a departed seat leaves the candidates.
 fn prune_mulligan_pending(state: &mut GameState, events: &mut Vec<GameEvent>) {
     let alive: HashSet<PlayerId> = state
         .prepaid_mulligan_bottoms
@@ -823,6 +824,22 @@ fn prune_mulligan_pending(state: &mut GameState, events: &mut Vec<GameEvent>) {
             // CR 103.2b precedes the CR 103.2e agenda step, so a departure here
             // resumes at the agenda step; the companion walk is already done.
             state.waiting_for = super::conspiracy::agenda_choices_or_mulligan(state, events);
+        }
+        // CR 800.4a + CR 103.1a: a departed seat is no longer a candidate to take
+        // the first turn. The candidates are re-derived from the living side
+        // representatives, so a shared-turn side whose representative left is
+        // still offered through a living member.
+        // CR 800.4h: a departed chooser's choice passes to the next player in turn order.
+        WaitingFor::ChooseStartingPlayer { player, .. } => {
+            let player = if players::is_alive(state, player) {
+                player
+            } else {
+                players::next_player_in_turn_order(state, player)
+            };
+            state.waiting_for = WaitingFor::ChooseStartingPlayer {
+                player,
+                candidates: super::topology::turn_representatives(state),
+            };
         }
         WaitingFor::OpeningHandBottomCards { pending, reason } => {
             let alive: Vec<_> = pending
@@ -2276,14 +2293,22 @@ fn retire_finished_game_triggers(state: &mut GameState) {
 /// performed either). Work the resolution parked outside the stack
 /// (`retire_parked_resolution_work`) goes first, then its frames, then its carrier.
 ///
-/// Called only at the action boundary (`engine::settle_finished_game`, which every boundary
-/// that reconciles a terminal result reaches), after every resolver has unwound. `end_game`
-/// is not the place: a resolution reaches it mid-chain (CR 104.3e / CR 104.2b effects, the
-/// CR 104.4b draw inside a repeat) while its caller still owns its frames, and the same chain
-/// can park a further prompt after it. `game_end` is the authority, not `waiting_for`: a
-/// best-of-three match may already have replaced `GameOver` with its sideboarding prompt.
+/// Ordinary game ends enter at the action boundary (`engine::settle_finished_game`), after
+/// every resolver has unwound, with `game_end` as their authority. CR 117.2e: a resolver
+/// still owns its choices and frames while it runs. `end_game` is not the place: a resolution
+/// reaches it mid-chain (CR 104.2b effects, the CR 104.4b draw inside a repeat), and the same
+/// chain can park a further prompt after it. A best-of-three match may already have replaced
+/// `GameOver` with its sideboarding prompt; the wait is not the terminal authority.
+///
+/// An admitted trusted match forfeit enters at `match_flow::apply_trusted_match_forfeit`'s
+/// own synchronous terminal boundary, outside any active resolver. Its authority is
+/// `MatchPhase::Completed` together with `match_forfeit_result`: application-policy match
+/// completion, not a CR game loss, so it needs no manufactured `game_end`. Neither a wait
+/// nor a completed match phase alone authorizes this additional retirement path.
 pub(super) fn retire_finished_game_resolution(state: &mut GameState) {
-    if state.game_end.is_none() {
+    if state.game_end.is_none()
+        && !(state.match_phase == MatchPhase::Completed && state.match_forfeit_result.is_some())
+    {
         return;
     }
     // A resolving spell may already have completed its final part. Its queued

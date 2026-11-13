@@ -3847,7 +3847,9 @@ fn process_phase_triggers(
     // already does at the sibling (`WaitingFor::Priority`) boundary, using the
     // same authority and the same gate.
     //
-    // This is load-bearing, not belt-and-braces: `engine::start_game` and
+    // This is load-bearing, not belt-and-braces: a direct call to
+    // `engine::start_game_with_starting_player` (an explicit starter, replay
+    // reconstruction, `engine::start_game_winner_plays_first`) and
     // `engine::start_game_skip_mulligan` drive `turns::auto_advance` and return
     // an `ActionResult` without going through the post-action pipeline, so on
     // those paths the pipeline's drain does not run and a parked batch would

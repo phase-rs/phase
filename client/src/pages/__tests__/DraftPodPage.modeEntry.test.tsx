@@ -150,6 +150,16 @@ function savedSession(name: string): { text: string; verdict: RestorableDraftSes
   return { text: JSON.stringify(saved.session), verdict: saved.verdict };
 }
 
+function setupProcedure(kind: string) {
+  const commander = kind === "CommanderDraft";
+  return draftProcedureFixture({
+    min_pod_size: commander ? 3 : 2,
+    allowed_pod_sizes: commander ? [3, 4, 5, 6, 7, 8] : [2, 3, 4, 5, 6, 7, 8],
+    cards_per_pick: commander ? 2 : 1,
+    post_draft_play: commander ? "CompleteImmediately" : "TournamentPairings",
+  });
+}
+
 describe("DraftPodPage ?kind= mode entry", () => {
   afterEach(cleanup);
 
@@ -989,11 +999,12 @@ describe("DraftPodPage ?kind= mode entry", () => {
     renderAt("/draft-pod");
     await user.click(screen.getByRole("button", { name: /Host a Pod/ }));
 
+    // Premier's procedure offers the format radios; Commander's does not.
+    if (tournamentFormat === "SingleElimination") {
+      await user.click(await screen.findByRole("radio", { name: "Single Elimination" }));
+    }
     if (kind === "CommanderDraft") {
       await user.click(screen.getByRole("radio", { name: "Commander" }));
-    }
-    if (tournamentFormat === "SingleElimination") {
-      await user.click(screen.getByRole("radio", { name: "Single Elimination" }));
     }
 
     await waitFor(() => expect(useDraftPodStore.getState().allowedPodSizes).toEqual(expectedSizes));
@@ -1070,6 +1081,67 @@ describe("DraftPodPage ?kind= mode entry", () => {
       "7 players",
       "8 players",
     ]);
+  });
+
+  it("hides the tournament format and round-based policy copy for a procedure that completes immediately", async () => {
+    const pendingCommander: Array<() => void> = [];
+    mocks.draftProcedure.mockImplementation((kind: string) => kind === "CommanderDraft"
+      ? new Promise((resolve) => pendingCommander.push(() => resolve(setupProcedure(kind))))
+      : Promise.resolve(setupProcedure(kind)));
+
+    const user = userEvent.setup();
+    renderAt("/draft-pod");
+    await user.click(screen.getByRole("button", { name: /Host a Pod/ }));
+    await waitFor(() => expect(screen.getByRole("radio", { name: "Swiss" })).toBeChecked());
+    expect(screen.getByText("Tournament Format")).toBeInTheDocument();
+    expect(screen.getByText(/automatic round advancement/)).toBeInTheDocument();
+
+    await user.click(screen.getByRole("radio", { name: "Commander" }));
+    await waitFor(() => expect(pendingCommander.length).toBeGreaterThan(0));
+    // The previous kind's published procedure must not keep the block up while Commander loads.
+    expect(screen.queryByRole("radio", { name: "Swiss" })).toBeNull();
+    expect(screen.queryByText("Tournament Format")).toBeNull();
+
+    act(() => pendingCommander.forEach((resolve) => resolve()));
+    await waitFor(() => expect(useDraftPodStore.getState().allowedPodSizes).toEqual([3, 4, 5, 6, 7, 8]));
+    expect(screen.getByRole("radio", { name: "Commander" })).toBeChecked();
+    expect(screen.queryByRole("radio", { name: "Swiss" })).toBeNull();
+    expect(screen.queryByRole("radio", { name: "Single Elimination" })).toBeNull();
+    expect(screen.queryByText("Tournament Format")).toBeNull();
+    expect(screen.getByText("Timed picks and automatic picks on timeout.")).toBeInTheDocument();
+    expect(screen.queryByText(/automatic round advancement/)).toBeNull();
+
+    await user.click(screen.getByRole("radio", { name: "Casual" }));
+    expect(screen.getByText("Untimed picks and host controls for resolving issues.")).toBeInTheDocument();
+    expect(screen.queryByText(/deck changes between rounds/)).toBeNull();
+
+    await user.click(screen.getByRole("radio", { name: "Premier" }));
+    await waitFor(() => expect(screen.getByRole("radio", { name: "Swiss" })).toBeChecked());
+    expect(screen.getByText("Tournament Format")).toBeInTheDocument();
+    expect(screen.getByText(/deck changes between rounds/)).toBeInTheDocument();
+  });
+
+  it("keeps the tournament format block while a format change reloads the procedure", async () => {
+    const pendingElimination: Array<() => void> = [];
+    mocks.draftProcedure.mockImplementation((kind: string, tournamentFormat: string) =>
+      tournamentFormat === "SingleElimination"
+        ? new Promise((resolve) => pendingElimination.push(() => resolve(setupProcedure(kind))))
+        : Promise.resolve(setupProcedure(kind)));
+
+    const user = userEvent.setup();
+    renderAt("/draft-pod");
+    await user.click(screen.getByRole("button", { name: /Host a Pod/ }));
+    await waitFor(() => expect(screen.getByRole("radio", { name: "Swiss" })).toBeChecked());
+
+    await user.click(screen.getByRole("radio", { name: "Single Elimination" }));
+    await waitFor(() => expect(pendingElimination.length).toBeGreaterThan(0));
+    expect(useDraftPodStore.getState().allowedPodSizes).toBeNull();
+    expect(screen.getByRole("radio", { name: "Single Elimination" })).toBeChecked();
+
+    act(() => pendingElimination.forEach((resolve) => resolve()));
+    await waitFor(() =>
+      expect(useDraftPodStore.getState().procedureCacheKey?.tournamentFormat).toBe("SingleElimination"));
+    expect(screen.getByRole("radio", { name: "Single Elimination" })).toBeChecked();
   });
 
   it("keeps the real cube panel mounted across pending floor changes", async () => {

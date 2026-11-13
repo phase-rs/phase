@@ -29,7 +29,7 @@ describe("WASM legal actions integration", () => {
   });
 
   it("get_legal_actions_js returns actions with correct shape after game init", () => {
-    initialize_game(null);
+    initialize_game(null, undefined, null, null, 2, 0);
     const legalResult = get_legal_actions_js() as { actions: Array<{ type: string; data: Record<string, unknown> }> };
     const { actions } = legalResult;
 
@@ -49,7 +49,7 @@ describe("WASM legal actions integration", () => {
   });
 
   it("PlayLand/CastSpell object_ids can be matched to hand objects via Number() coercion", () => {
-    initialize_game(null);
+    initialize_game(null, undefined, null, null, 2, 0);
     const state = get_game_state();
     const legalResult = get_legal_actions_js() as { actions: Array<{ type: string; data: Record<string, unknown> }> };
     const { actions } = legalResult;

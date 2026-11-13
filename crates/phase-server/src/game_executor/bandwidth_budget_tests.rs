@@ -671,6 +671,7 @@ impl ScriptedGame {
             | WaitingFor::ManifestDreadChoice { .. }
             | WaitingFor::BetweenGamesSideboard { .. }
             | WaitingFor::BetweenGamesChoosePlayDraw { .. }
+            | WaitingFor::ChooseStartingPlayer { .. }
             | WaitingFor::NamedChoice { .. }
             | WaitingFor::OpponentGuess { .. }
             | WaitingFor::SpellbookDraft { .. }

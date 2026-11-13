@@ -74,6 +74,42 @@ const hostConfig = {
   podPolicy: "Competitive" as const,
 };
 
+/**
+ * A launch as the P2P host builds it: the registered sideboard is the pool
+ * minus the main deck (`sideboardFromPool`), so it never carries a virtual
+ * basic. `matchAuthoritySeat: 1` makes `retryDraftSettlement` return at its
+ * first line.
+ */
+function hostLaunch(matchId: string, round: number, mainDeck: string[]) {
+  return {
+    type: "HumanHost" as const,
+    matchId,
+    matchRoomCode: `ROOM-${matchId}`,
+    round,
+    localSeat: 0,
+    opponentSeat: 1,
+    opponentName: "Guest",
+    matchHostPeerId: "peer-0",
+    deckPayload: {
+      player: { main_deck: mainDeck, sideboard: ["Twin"], commander: [] },
+      opponent: { main_deck: [], sideboard: [], commander: [] },
+      ai_decks: [],
+    },
+    matchConfig: { match_type: "Bo3" as const },
+    binding: {
+      podId: "pod-1", matchId, round, sessionKey: "session-1",
+      lease: "lease-1", nonce: "nonce-1", revision: 0, matchAuthoritySeat: 1,
+    },
+  };
+}
+
+function promptGame(matchId: string, gameNumber: number) {
+  useMultiplayerDraftStore.getState().handleBetweenGamesPrompt({
+    matchId, gameNumber,
+    score: { p0_wins: 1, p1_wins: 0, draws: 0 }, loserSeat: 1, timerMs: 0,
+  });
+}
+
 describe("multiplayerDraftStore Bo3", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -183,6 +219,77 @@ describe("multiplayerDraftStore Bo3", () => {
       await Promise.resolve();
       expect(mocks.submitAuthorized).toHaveBeenCalledTimes(1);
       expect(useMultiplayerDraftStore.getState().error).toMatch(/registered match pool/);
+    });
+  });
+
+  /**
+   * V11. MTR 7.3: the deck a player brings to a new match is the one they last
+   * chose between matches, so game 2 of a later match is seeded from that
+   * match's registered deck (the latest submission), never from the previous
+   * match's sideboard configuration. A re-delivered start for the SAME match
+   * (reconnect) keeps the in-match configuration for the next game.
+   *
+   * REVERT-PROBE: restore the matchStart arms' plain
+   * `set({ matchPairing, phase })` and match-2's game-2 seed is match-1's
+   * configuration: the multiset check fails, the seed is null and `error`
+   * names the registered match pool.
+   */
+  describe("per-match between-games seed", () => {
+    it("seeds_a_new_match_from_the_latest_submission_and_keeps_a_reconnected_match_configuration", async () => {
+      const draftView = view();
+      mocks.submitDeck.mockResolvedValue(draftView);
+      await useMultiplayerDraftStore.getState().hostDraft(hostConfig);
+      mocks.eventHandler!({ type: "workspaceRestored", workspaceState: null });
+      mocks.eventHandler!({ type: "viewUpdated", view: draftView });
+      const store = () => useMultiplayerDraftStore.getState();
+      store().setWorkspacePlacement("twin-b", { zone: "sideboard", row: 0, column: 0, order: 0 });
+      store().addBasicLand("Island");
+      await store().submitDeck();
+      expect(mocks.submitDeck).toHaveBeenLastCalledWith(["Twin", "Island"], []);
+
+      mocks.eventHandler!({ type: "matchStart", launch: hostLaunch("match-1", 1, ["Twin", "Island"]) });
+      promptGame("match-1", 2);
+      const matchOneSeed = store().intergameWorkspaceState!;
+      store().setIntergameWorkspaceState({
+        ...matchOneSeed,
+        placements: {
+          ...matchOneSeed.placements,
+          "twin-a": { ...matchOneSeed.placements["twin-a"], zone: "sideboard" },
+          "twin-b": { ...matchOneSeed.placements["twin-b"], zone: "deck" },
+        },
+      });
+      expect(store().intergameWorkspaceState!.placements["twin-a"].zone).toBe("sideboard");
+
+      // Between rounds: swap the main-deck Island for a Forest (deck B).
+      store().removeBasicLand("Island");
+      store().addBasicLand("Forest");
+      await store().submitDeck();
+      expect(mocks.submitDeck).toHaveBeenLastCalledWith(["Twin", "Forest"], []);
+      const revised = store().submittedPartition;
+      expect(revised).toEqual({ mainDeck: ["Twin", "Forest"], sideboard: ["Twin"] });
+
+      mocks.eventHandler!({ type: "matchStart", launch: hostLaunch("match-2", 2, ["Twin", "Forest"]) });
+      promptGame("match-2", 2);
+
+      const matchTwoSeed = store().intergameWorkspaceState;
+      expect(store().error).toBeNull();
+      expect(matchTwoSeed).not.toBeNull();
+      expect(projectWorkspacePartition(matchTwoSeed!, draftView.pool)).toEqual(revised);
+
+      // Same-match sibling: a reconnect re-delivers match-2's start, and game 3
+      // keeps game 2's edited placement.
+      store().setIntergameWorkspaceState({
+        ...matchTwoSeed!,
+        placements: {
+          ...matchTwoSeed!.placements,
+          "twin-a": { ...matchTwoSeed!.placements["twin-a"], zone: "sideboard" },
+        },
+      });
+      mocks.eventHandler!({ type: "matchStart", launch: hostLaunch("match-2", 2, ["Twin", "Forest"]) });
+      promptGame("match-2", 3);
+
+      expect(store().error).toBeNull();
+      expect(store().intergameWorkspaceState!.placements["twin-a"].zone).toBe("sideboard");
     });
   });
 
