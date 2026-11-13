@@ -11,11 +11,12 @@
 //! at quadratic work.
 //!
 //! The empty-hand rows rerun N = 1000 and 2000 with the AI holding nothing and
-//! controlling five Forests, timing `score_candidates` alone: the bench asserts it
+//! controlling five Forests. Each row times `score_candidates`, asserting it
 //! answers with the no-development shortcut's lone pass
 //! (`large_board_main_phase_has_no_development_sources`) and no static scan, so
-//! the shortcut is the whole measured cost. Compare each row's `min` with the
-//! parent commit's; a battlefield walk nested inside the shortcut multiplies it.
+//! the shortcut is the whole measured cost; it also times `choose_action` on the
+//! same board and asserts it passes. Compare both `min`s with the parent
+//! commit's; a battlefield walk nested inside the shortcut multiplies them.
 //!
 //! Build/run (measurement mode: node-bounded, no wall-clock cap, so the time
 //! reflects the work rather than the search deadline):
@@ -163,11 +164,11 @@ fn board(tokens: usize, hand: Hand) -> GameState {
 fn bench_n(n: usize, hand: Hand) -> Duration {
     let state = board(n, hand);
     let objects = state.battlefield.len();
+    let config = create_config(AiDifficulty::Hard, Platform::Native).into_measurement(42);
+    let choose = || choose_action(&state, P0, &config, &mut SmallRng::seed_from_u64(42));
     let (fastest, outcome, route) = match hand {
         Hand::Bears => {
-            let config = create_config(AiDifficulty::Hard, Platform::Native).into_measurement(42);
-            let (fastest, action) =
-                fastest_of(|| choose_action(&state, P0, &config, &mut SmallRng::seed_from_u64(42)));
+            let (fastest, action) = fastest_of(choose);
             let route = if objects >= LARGE_BOARD_OBJECTS {
                 "fast"
             } else {
@@ -176,6 +177,8 @@ fn bench_n(n: usize, hand: Hand) -> Duration {
             (fastest, format!("{action:?}"), route)
         }
         Hand::Empty => {
+            let (choose_min, action) = fastest_of(choose);
+            assert_eq!(action, Some(GameAction::PassPriority));
             let config =
                 create_config(AiDifficulty::VeryEasy, Platform::Native).into_measurement(42);
             let (fastest, scored) = fastest_of(|| score_candidates(&state, P0, &config));
@@ -185,7 +188,8 @@ fn bench_n(n: usize, hand: Hand) -> Duration {
                     && perf_counters::snapshot().static_full_scans == 0,
                 "no-development shortcut not taken: {scored:?}"
             );
-            (fastest, format!("{scored:?}"), "no-dev")
+            let outcome = format!("{scored:?}  choose_action min={choose_min:.3?} -> {action:?}");
+            (fastest, outcome, "no-dev")
         }
     };
     let c = perf_counters::snapshot();
