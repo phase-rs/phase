@@ -3,6 +3,8 @@ name: Essence Burn recovery evidence
 on:
   push:
     branches: [codex/essence-burn-416]
+  pull_request:
+    branches: [main]
 
 permissions:
   contents: read
