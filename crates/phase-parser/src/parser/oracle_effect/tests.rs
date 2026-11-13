@@ -98929,9 +98929,14 @@ fn exact_count_before_other_target_declares_exactly_two_targets() {
             .iter()
             .filter(|ability| ability.multi_target == Some(MultiTargetSpec::fixed(2, 2)))
             .collect();
-        assert!(
-            !exact_two.is_empty(),
-            "{name}: expected an exactly-two target slot in {:?}",
+        let expected = match name {
+            "Fleet Captain Christopher Pike" => 2,
+            _ => 1,
+        };
+        assert_eq!(
+            exact_two.len(),
+            expected,
+            "{name}: expected {expected} exactly-two target slot(s) in {:?}",
             parsed.abilities
         );
         for ability in exact_two {

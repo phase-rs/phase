@@ -104,8 +104,8 @@ const IORETH: &str = "{T}: Untap another target permanent.
 {T}: Untap two other target legendary creatures.";
 
 /// CR 115.1c + CR 115.1d + CR 602.2: Ioreth of the Healing House's second
-/// ability declares exactly two other legendary creatures. Both untap, a third
-/// legendary creature stays tapped, and Ioreth itself is not a legal target.
+/// ability declares exactly two other legendary creatures. Both untap and a third
+/// legendary creature that was not chosen stays tapped.
 #[test]
 fn ioreth_untaps_exactly_the_two_other_legendary_creatures_it_targets() {
     let mut scenario = GameScenario::new();
@@ -544,4 +544,30 @@ fn thawing_glaciers_returns_itself_and_keeps_the_fetched_land() {
         engine::types::zones::Zone::Battlefield,
         "the fetched land stays on the battlefield"
     );
+}
+
+// Oracle text from the repo's card data export.
+const REUNION_OF_THE_HOUSE: &str = "Return any number of target creature cards with total power 10 or less from your graveyard to the battlefield. Exile Reunion of the House.";
+
+/// CR 608.2c + CR 400.7: "Exile Reunion of the House." names the spell itself,
+/// not a creature card the first instruction returned. On `main` the instruction
+/// was rebound to the first returned creature (the creature went to exile and the
+/// spell stayed in the graveyard); the spell must end in exile and the returned
+/// creature must stay on the battlefield. Fails at the merge base.
+#[test]
+fn reunion_of_the_house_exiles_itself_and_leaves_the_returned_creature() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let creature = scenario
+        .add_creature_to_graveyard(P0, "Fallen Bear", 2, 2)
+        .id();
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Reunion of the House", false, REUNION_OF_THE_HOUSE)
+        .id();
+    let mut runner = scenario.build();
+
+    let outcome = runner.cast(spell).target_objects(&[creature]).resolve();
+
+    outcome.assert_zone(&[creature], engine::types::zones::Zone::Battlefield);
+    outcome.assert_zone(&[spell], engine::types::zones::Zone::Exile);
 }
