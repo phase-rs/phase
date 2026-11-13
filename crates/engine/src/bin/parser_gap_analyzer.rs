@@ -3,7 +3,7 @@ use std::process;
 
 use engine::database::legality::LegalityFormat;
 use engine::database::CardDatabase;
-use engine::game::coverage::{analyze_coverage, face_is_legal_in};
+use engine::game::coverage::{analyze_coverage, retain_faces_legal_in};
 use engine::game::gap_analysis::{analyze_gaps, GapClass};
 
 fn main() {
@@ -100,7 +100,7 @@ fn main() {
 
     if let Some(fmt) = format_filter {
         let before = summary.cards.len();
-        summary.cards.retain(|c| face_is_legal_in(c, &db, fmt));
+        retain_faces_legal_in(&mut summary.cards, &db, fmt);
         eprintln!(
             "Filtered to {}: {} / {} cards retained",
             fmt.as_key(),

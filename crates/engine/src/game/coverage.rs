@@ -581,7 +581,7 @@ pub struct ParseWarningPattern {
     pub pattern: String,
     pub warning_count: usize,
     pub card_count: usize,
-    /// Cards that are currently considered supported apart from this warning.
+    /// Cards that are currently considered supported apart from their parse warnings.
     pub otherwise_supported_cards: usize,
     /// Existing unsupported cards where this warning is the only coverage gap.
     pub single_gap_cards: usize,
@@ -6648,6 +6648,7 @@ pub struct WarningDrilldown {
     pub detector: Option<String>,
     pub matched_cards: usize,
     pub supported_cards: usize,
+    /// Matched faces whose only coverage gap is a matched warning's.
     pub single_gap_cards: usize,
     pub cards: Vec<WarningDrilldownCard>,
 }
@@ -6727,10 +6728,11 @@ pub fn build_warning_drilldown(
         .filter_map(|card| Some((card.card_face_key.as_deref()?, card)))
         .collect();
     let mut cards = Vec::new();
+    let mut single_gap_cards = 0;
 
     for (key, face) in db.face_iter() {
         let oracle_text = face.oracle_text.as_deref();
-        let warnings: Vec<_> = face
+        let (matched, warnings): (Vec<_>, Vec<_>) = face
             .parse_warnings
             .iter()
             .filter_map(|warning| {
@@ -6745,22 +6747,30 @@ pub fn build_warning_drilldown(
                 if detector.is_some_and(|expected| !warning_detector_is(warning, expected)) {
                     return None;
                 }
-                Some(WarningDrilldownWarning {
-                    category: warning_category,
-                    pattern: warning_pattern,
-                    line_index: warning.line_index(),
-                    text: warning_text(warning),
-                    unit_span: warning.unit_span().cloned(),
-                    evidence_items: warning.evidence_items().to_vec(),
-                })
+                Some((
+                    warning,
+                    WarningDrilldownWarning {
+                        category: warning_category,
+                        pattern: warning_pattern,
+                        line_index: warning.line_index(),
+                        text: warning_text(warning),
+                        unit_span: warning.unit_span().cloned(),
+                        evidence_items: warning.evidence_items().to_vec(),
+                    },
+                ))
             })
-            .collect();
+            .unzip();
 
         if warnings.is_empty() {
             continue;
         }
 
         let coverage = coverage_by_key.get(key).copied();
+        single_gap_cards += usize::from(coverage.is_some_and(|card| {
+            matched
+                .iter()
+                .any(|warning| warning_is_sole_gap(warning, &card.gap_details))
+        }));
         cards.push(WarningDrilldownCard {
             name: face.name.clone(),
             key: key.to_string(),
@@ -6804,10 +6814,6 @@ pub fn build_warning_drilldown(
     let supported_cards = cards
         .iter()
         .filter(|card| card.supported == Some(CoverageSupport::Supported))
-        .count();
-    let single_gap_cards = cards
-        .iter()
-        .filter(|card| card.gap_count == Some(1))
         .count();
     cards.truncate(limit);
 
@@ -7416,6 +7422,15 @@ pub fn face_is_legal_in(
         .is_some_and(|status| status.is_legal())
 }
 
+/// Keeps the rows whose own face is legal in `format`.
+pub fn retain_faces_legal_in(
+    cards: &mut Vec<CardCoverageResult>,
+    card_db: &CardDatabase,
+    format: LegalityFormat,
+) {
+    cards.retain(|card| face_is_legal_in(card, card_db, format));
+}
+
 /// Analyze card coverage by checking which cards have all their abilities,
 /// triggers, keywords, and static abilities supported by the engine's registries.
 pub fn analyze_coverage(card_db: &CardDatabase) -> CoverageSummary {
@@ -7494,7 +7509,7 @@ pub fn analyze_coverage(card_db: &CardDatabase) -> CoverageSummary {
                 .push(
                     &face.name,
                     coverage.supported_before_parse_warnings(),
-                    gap_count == 1,
+                    warning_is_sole_gap(warning, &gap_details),
                     &legal_formats,
                 );
         }
@@ -9033,6 +9048,14 @@ fn parse_warning_gap_label(warning: &OracleDiagnostic) -> Option<String> {
             Some(format!("ParseWarning:cascade-loss:{slot:?}"))
         }
         OracleDiagnostic::IgnoredRemainder { .. } => None,
+    }
+}
+
+/// Whether `warning`'s canonical gap is the face's sole coverage gap.
+fn warning_is_sole_gap(warning: &OracleDiagnostic, gap_details: &[GapDetail]) -> bool {
+    match gap_details {
+        [gap] => parse_warning_gap_label(warning).as_deref() == Some(gap.handler.as_str()),
+        _ => false,
     }
 }
 

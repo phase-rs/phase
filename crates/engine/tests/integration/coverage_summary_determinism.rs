@@ -2,11 +2,14 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use engine::database::legality::LegalityFormat;
 use engine::database::CardDatabase;
 use engine::game::coverage::{
     analyze_coverage, audit_resolver_features, audit_semantic, build_warning_drilldown,
-    format_semantic_audit_markdown, CoverageSupport, WarningDrilldownCard,
+    format_semantic_audit_markdown, retain_faces_legal_in, CardCoverageResult, CoverageSupport,
+    ParseWarningPattern, WarningDrilldownCard,
 };
+use engine::game::gap_analysis::analyze_gaps;
 use flate2::read::GzDecoder;
 use serde::Serialize;
 
@@ -95,6 +98,35 @@ fn channel_face(oracle_id: &str, printings: &[&str]) -> serde_json::Value {
     })
 }
 
+/// Both Channel faces with their printed legalities: the standalone card is banned in Commander,
+/// the SOC prepared face is legal there.
+fn channel_faces_with_legalities() -> [(String, serde_json::Value); 2] {
+    let mut channel = channel_face("d1b815d1-2848-40d4-a555-66822d1becbc", &CHANNEL_PRINTINGS);
+    channel["legalities"] = serde_json::json!({
+        "brawl": "banned",
+        "commander": "banned",
+        "duel": "banned",
+        "historic": "banned",
+        "legacy": "banned",
+        "oathbreaker": "banned",
+        "premodern": "banned",
+        "timeless": "restricted",
+        "vintage": "restricted"
+    });
+    let mut channel_prepare = channel_face("d9068051-b51c-4700-b492-30b148e3a72c", &["SOC"]);
+    channel_prepare["legalities"] = serde_json::json!({
+        "commander": "legal",
+        "duel": "legal",
+        "legacy": "legal",
+        "oathbreaker": "legal",
+        "vintage": "legal"
+    });
+    [
+        (CHANNEL.to_string(), channel),
+        (CHANNEL_PREPARE.to_string(), channel_prepare),
+    ]
+}
+
 const ANCESTRAL_RECALL: &str = "ancestral recall";
 
 /// Ancestral Recall's exported face with a synthetic `IgnoredRemainder`, a warning that adds no gap.
@@ -172,6 +204,21 @@ fn warning_drilldown_joins_by_face_key_and_breaks_name_ties_by_key() {
     .to_string();
     let load = || CardDatabase::from_json_str(&export).expect("test export deserializes");
     let summary = analyze_coverage(&load());
+
+    let recall = patterns_starting_with(&summary.parse_warning_patterns, "draw:");
+    assert_eq!(recall.len(), 1);
+    assert_eq!(recall[0].single_gap_cards, 0);
+    let recall_drill = build_warning_drilldown(
+        &load(),
+        &summary,
+        None,
+        Some(&recall[0].pattern),
+        None,
+        usize::MAX,
+        false,
+    );
+    assert_eq!(recall_drill.supported_cards, 1);
+    assert_eq!(recall_drill.single_gap_cards, 0);
 
     let mut walk_leaders = BTreeSet::new();
     for _ in 0..64 {
@@ -333,29 +380,9 @@ fn jump_face(oracle_id: &str, legalities: serde_json::Value, warnings: usize) ->
     })
 }
 
-#[test]
-fn single_gap_formats_credit_every_same_name_face() {
-    let mut channel = channel_face("d1b815d1-2848-40d4-a555-66822d1becbc", &CHANNEL_PRINTINGS);
-    channel["legalities"] = serde_json::json!({
-        "brawl": "banned",
-        "commander": "banned",
-        "duel": "banned",
-        "historic": "banned",
-        "legacy": "banned",
-        "oathbreaker": "banned",
-        "premodern": "banned",
-        "timeless": "restricted",
-        "vintage": "restricted"
-    });
-    let mut channel_prepare = channel_face("d9068051-b51c-4700-b492-30b148e3a72c", &["SOC"]);
-    channel_prepare["legalities"] = serde_json::json!({
-        "commander": "legal",
-        "duel": "legal",
-        "legacy": "legal",
-        "oathbreaker": "legal",
-        "vintage": "legal"
-    });
-    let export = serde_json::Value::Object(serde_json::Map::from_iter([
+/// Both Jump faces, each with its own synthetic warning as its only gap.
+fn jump_faces() -> [(String, serde_json::Value); 2] {
+    [
         (
             JUMP.to_string(),
             jump_face(
@@ -395,12 +422,347 @@ fn single_gap_formats_credit_every_same_name_face() {
                 1,
             ),
         ),
-        (CHANNEL.to_string(), channel),
-        (CHANNEL_PREPARE.to_string(), channel_prepare),
-    ]))
+    ]
+}
+
+const JERMANE: &str = "jermane, pride of the circus";
+
+/// Jermane's exported face; its real `IgnoredRemainder` sits on the ability without the gap.
+fn jermane_face() -> serde_json::Value {
+    serde_json::json!({
+        "name": "Jermane, Pride of the Circus",
+        "mana_cost": {
+            "generic": 0,
+            "shards": [
+                "Green",
+                "Green"
+            ],
+            "type": "Cost"
+        },
+        "card_type": {
+            "core_types": [
+                "Creature"
+            ],
+            "subtypes": [
+                "Cat",
+                "Performer"
+            ],
+            "supertypes": [
+                "Legendary"
+            ]
+        },
+        "power": {
+            "type": "Fixed",
+            "value": 2
+        },
+        "toughness": {
+            "type": "Fixed",
+            "value": 3
+        },
+        "loyalty": null,
+        "defense": null,
+        "oracle_text": "{G}, {T}: Put two +1/+1 counters on target creature with four or more legs.\n{1}{G}{G}, {T}: Until end of turn, all creatures able to block target creature with four or more legs do so.",
+        "non_ability_text": null,
+        "flavor_name": null,
+        "keywords": [],
+        "abilities": [
+            {
+                "condition": null,
+                "cost": {
+                    "costs": [
+                        {
+                            "cost": {
+                                "generic": 0,
+                                "shards": [
+                                    "Green"
+                                ],
+                                "type": "Cost"
+                            },
+                            "type": "Mana"
+                        },
+                        {
+                            "type": "Tap"
+                        }
+                    ],
+                    "type": "Composite"
+                },
+                "description": "{G}, {T}: Put two +1/+1 counters on target creature with four or more legs.",
+                "duration": null,
+                "effect": {
+                    "description": "Put two +1/+1 counters on target creature with four or more legs",
+                    "name": "put_counter_tail",
+                    "type": "Unimplemented"
+                },
+                "forward_result": false,
+                "kind": "Activated",
+                "optional": false,
+                "optional_targeting": false,
+                "sub_ability": null,
+                "target_prompt": null
+            },
+            {
+                "condition": null,
+                "cost": {
+                    "costs": [
+                        {
+                            "cost": {
+                                "generic": 1,
+                                "shards": [
+                                    "Green",
+                                    "Green"
+                                ],
+                                "type": "Cost"
+                            },
+                            "type": "Mana"
+                        },
+                        {
+                            "type": "Tap"
+                        }
+                    ],
+                    "type": "Composite"
+                },
+                "description": "{1}{G}{G}, {T}: Until end of turn, all creatures able to block target creature with four or more legs do so.",
+                "duration": "UntilEndOfTurn",
+                "effect": {
+                    "duration": "UntilEndOfTurn",
+                    "static_abilities": [
+                        {
+                            "active_zones": [],
+                            "affected": {
+                                "controller": null,
+                                "properties": [],
+                                "type": "Typed",
+                                "type_filters": [
+                                    "Creature"
+                                ]
+                            },
+                            "affected_zone": null,
+                            "characteristic_defining": false,
+                            "condition": null,
+                            "description": null,
+                            "effect_zone": null,
+                            "mode": {
+                                "MustBeBlockedByAll": {}
+                            },
+                            "modifications": [
+                                {
+                                    "mode": {
+                                        "MustBeBlockedByAll": {}
+                                    },
+                                    "type": "AddStaticMode"
+                                }
+                            ]
+                        }
+                    ],
+                    "target": {
+                        "controller": null,
+                        "properties": [],
+                        "type": "Typed",
+                        "type_filters": [
+                            "Creature"
+                        ]
+                    },
+                    "type": "GenericEffect"
+                },
+                "forward_result": false,
+                "kind": "Activated",
+                "optional": false,
+                "optional_targeting": false,
+                "sub_ability": null,
+                "target_prompt": null
+            }
+        ],
+        "triggers": [],
+        "static_abilities": [],
+        "replacements": [],
+        "color_override": null,
+        "scryfall_oracle_id": "2b7855b8-33ac-4e49-a043-8cc392fc6397",
+        "legalities": {},
+        "printings": [
+            "UNF"
+        ],
+        "parse_warnings": [
+            {
+                "line_index": 1,
+                "parser": "must-block",
+                "text": "with four or more legs",
+                "type": "IgnoredRemainder"
+            }
+        ]
+    })
+}
+
+const RAM_THROUGH: &str = "ram through";
+
+/// Ram Through's exported face; its two real warnings are two different gaps.
+fn ram_through_face() -> serde_json::Value {
+    serde_json::json!({
+        "name": "Ram Through",
+        "mana_cost": {
+            "generic": 1,
+            "shards": [
+                "Green"
+            ],
+            "type": "Cost"
+        },
+        "card_type": {
+            "core_types": [
+                "Instant"
+            ],
+            "subtypes": [],
+            "supertypes": []
+        },
+        "power": null,
+        "toughness": null,
+        "loyalty": null,
+        "defense": null,
+        "oracle_text": "Target creature you control deals damage equal to its power to target creature you don't control. If the creature you control has trample, excess damage is dealt to that creature's controller instead.",
+        "non_ability_text": null,
+        "flavor_name": null,
+        "keywords": [],
+        "abilities": [
+            {
+                "condition": null,
+                "cost": null,
+                "declares_chosen_group": 0,
+                "description": "Target creature you control deals damage equal to its power to target creature you don't control. If the creature you control has trample, excess damage is dealt to that creature's controller instead.",
+                "duration": null,
+                "effect": {
+                    "target": {
+                        "controller": "You",
+                        "properties": [],
+                        "type": "Typed",
+                        "type_filters": [
+                            "Creature"
+                        ]
+                    },
+                    "type": "TargetOnly"
+                },
+                "forward_result": false,
+                "kind": "Spell",
+                "optional": false,
+                "optional_targeting": false,
+                "sub_ability": {
+                    "condition": null,
+                    "cost": null,
+                    "description": null,
+                    "duration": null,
+                    "effect": {
+                        "amount": {
+                            "qty": {
+                                "scope": {
+                                    "type": "Target"
+                                },
+                                "type": "Power"
+                            },
+                            "type": "Ref"
+                        },
+                        "damage_source": "Target",
+                        "excess": {
+                            "source_keyword": "Trample",
+                            "type": "TargetController"
+                        },
+                        "target": {
+                            "controller": "Opponent",
+                            "properties": [],
+                            "type": "Typed",
+                            "type_filters": [
+                                "Creature"
+                            ]
+                        },
+                        "type": "DealDamage"
+                    },
+                    "forward_result": false,
+                    "kind": "Spell",
+                    "optional": false,
+                    "optional_targeting": false,
+                    "sub_ability": null,
+                    "target_prompt": null
+                },
+                "target_prompt": null
+            }
+        ],
+        "triggers": [],
+        "static_abilities": [],
+        "replacements": [],
+        "color_override": null,
+        "scryfall_oracle_id": "4b1befff-48fa-47a3-832e-bdaf43495c02",
+        "legalities": {
+            "brawl": "legal",
+            "commander": "legal",
+            "duel": "legal",
+            "historic": "legal",
+            "legacy": "legal",
+            "modern": "legal",
+            "oathbreaker": "legal",
+            "pauper": "legal",
+            "paupercommander": "legal",
+            "pioneer": "legal",
+            "timeless": "legal",
+            "vintage": "legal"
+        },
+        "printings": [
+            "CMM",
+            "FDC",
+            "GN3",
+            "IKO",
+            "J22",
+            "PLST"
+        ],
+        "parse_warnings": [
+            {
+                "description": "Target creature you control deals damage equal to its power to target creature you don't control. If the creature you control has trample, e",
+                "detector": "Replacement_Instead",
+                "items": [
+                    0
+                ],
+                "line_index": 0,
+                "type": "SwallowedClause",
+                "unit_span": {
+                    "end_byte": 200,
+                    "first_line": 0,
+                    "last_line": 0,
+                    "ordinal_within_span": 0,
+                    "precision": "Exact",
+                    "start_byte": 0
+                }
+            },
+            {
+                "description": "Target creature you control deals damage equal to its power to target creature you don't control. If the creature you control has trample, e",
+                "detector": "Condition_If",
+                "gap": {
+                    "guard": "the creature you control has trample",
+                    "kind": "unparsed_condition"
+                },
+                "items": [
+                    0
+                ],
+                "line_index": 0,
+                "type": "SwallowedClause",
+                "unit_span": {
+                    "end_byte": 200,
+                    "first_line": 0,
+                    "last_line": 0,
+                    "ordinal_within_span": 0,
+                    "precision": "Exact",
+                    "start_byte": 0
+                }
+            }
+        ]
+    })
+}
+
+#[test]
+fn single_gap_formats_credit_every_same_name_face() {
+    let export = serde_json::Value::Object(serde_json::Map::from_iter(
+        jump_faces()
+            .into_iter()
+            .chain(channel_faces_with_legalities())
+            .chain([(JERMANE.to_string(), jermane_face())]),
+    ))
     .to_string();
-    let summary =
-        analyze_coverage(&CardDatabase::from_json_str(&export).expect("test export deserializes"));
+    let db = CardDatabase::from_json_str(&export).expect("test export deserializes");
+    let summary = analyze_coverage(&db);
     let count = |map: &BTreeMap<String, usize>, format: &str| map.get(format).copied().unwrap_or(0);
 
     let pattern = summary
@@ -439,5 +801,98 @@ fn single_gap_formats_credit_every_same_name_face() {
         ["commander", "duel", "legacy", "oathbreaker", "vintage"]
             .map(|format| (format.to_string(), 1))
             .into()
+    );
+
+    let jermane = summary
+        .cards
+        .iter()
+        .find(|card| card.card_face_key.as_deref() == Some(JERMANE))
+        .expect("Jermane is scanned");
+    assert_eq!(jermane.gap_count, 1);
+    assert_eq!(jermane.gap_details[0].handler, "Effect:put_counter_tail");
+    let must_block = summary
+        .parse_warning_patterns
+        .iter()
+        .find(|pattern| pattern.pattern.starts_with("must-block:"))
+        .expect("Jermane's warning forms a pattern");
+    assert_eq!((must_block.warning_count, must_block.card_count), (1, 1));
+    assert_eq!(must_block.single_gap_cards, 0);
+
+    let drill = |pattern: &str| {
+        build_warning_drilldown(&db, &summary, None, Some(pattern), None, usize::MAX, false)
+    };
+    let jermane_drill = drill(&must_block.pattern);
+    assert_eq!(jermane_drill.matched_cards, 1);
+    assert_eq!(jermane_drill.cards[0].gap_count, Some(1));
+    assert_eq!(jermane_drill.single_gap_cards, 0);
+    assert_eq!(drill(&pattern.pattern).single_gap_cards, 2);
+}
+
+fn patterns_starting_with<'a>(
+    patterns: &'a [ParseWarningPattern],
+    prefix: &str,
+) -> Vec<&'a ParseWarningPattern> {
+    patterns
+        .iter()
+        .filter(|pattern| pattern.pattern.starts_with(prefix))
+        .collect()
+}
+
+#[test]
+fn otherwise_supported_counts_a_face_gapped_only_by_its_warnings() {
+    let export = serde_json::Value::Object(serde_json::Map::from_iter(
+        jump_faces()
+            .into_iter()
+            .chain([(RAM_THROUGH.to_string(), ram_through_face())]),
+    ))
+    .to_string();
+    let summary =
+        analyze_coverage(&CardDatabase::from_json_str(&export).expect("test export deserializes"));
+
+    let ram_through = summary
+        .cards
+        .iter()
+        .find(|card| card.card_face_key.as_deref() == Some(RAM_THROUGH))
+        .expect("Ram Through is scanned");
+    assert_eq!(ram_through.gap_count, 2);
+    for prefix in ["Condition_If:", "Replacement_Instead:"] {
+        let patterns = patterns_starting_with(&summary.parse_warning_patterns, prefix);
+        assert_eq!(patterns.len(), 1, "{prefix}");
+        assert_eq!(patterns[0].card_count, 1, "{prefix}");
+        assert_eq!(patterns[0].otherwise_supported_cards, 1, "{prefix}");
+    }
+    let jump = patterns_starting_with(&summary.parse_warning_patterns, "Duration_UntilEndOfTurn:");
+    assert_eq!(jump.len(), 1);
+    assert_eq!(jump[0].otherwise_supported_cards, 1);
+}
+
+#[test]
+fn gap_report_format_filter_reads_each_face_legality() {
+    let export =
+        serde_json::Value::Object(serde_json::Map::from_iter(channel_faces_with_legalities()))
+            .to_string();
+    let db = CardDatabase::from_json_str(&export).expect("test export deserializes");
+    let mut cards = analyze_coverage(&db).cards;
+    let gaps = |cards: &[CardCoverageResult], key| {
+        cards
+            .iter()
+            .find(|card| card.card_face_key.as_deref() == Some(key))
+            .map(|card| card.gap_count)
+    };
+    let soc_gaps = gaps(&cards, CHANNEL_PREPARE).expect("SOC Channel is scanned");
+    assert!(soc_gaps > 0 && gaps(&cards, CHANNEL).is_some_and(|n| n > 0));
+
+    retain_faces_legal_in(&mut cards, &db, LegalityFormat::Commander);
+    assert_eq!(
+        cards
+            .iter()
+            .map(|card| card.card_face_key.as_deref())
+            .collect::<Vec<_>>(),
+        [Some(CHANNEL_PREPARE)]
+    );
+    let report = analyze_gaps(&cards);
+    assert_eq!(
+        (report.total_unsupported, report.total_classified),
+        (1, soc_gaps)
     );
 }
