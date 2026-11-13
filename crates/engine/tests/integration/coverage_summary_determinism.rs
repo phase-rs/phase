@@ -10,10 +10,11 @@ use engine::game::coverage::{
 use flate2::read::GzDecoder;
 use serde::Serialize;
 
-const FIXTURE: &[u8] = include_bytes!("../fixtures/integration_cards.json.gz");
-
 fn load() -> CardDatabase {
-    CardDatabase::from_export_reader(GzDecoder::new(FIXTURE)).expect("integration fixture loads")
+    CardDatabase::from_export_reader(GzDecoder::new(
+        &include_bytes!("../fixtures/integration_cards.json.gz")[..],
+    ))
+    .expect("integration fixture loads")
 }
 
 fn json(value: &impl Serialize) -> String {
@@ -96,16 +97,63 @@ fn channel_face(oracle_id: &str, printings: &[&str]) -> serde_json::Value {
 
 const ANCESTRAL_RECALL: &str = "ancestral recall";
 
-/// The fixture's Ancestral Recall face with a synthetic `IgnoredRemainder`, a warning that adds no gap.
+/// Ancestral Recall's exported face with a synthetic `IgnoredRemainder`, a warning that adds no gap.
 fn ancestral_recall_face() -> serde_json::Value {
-    let mut export: serde_json::Value =
-        serde_json::from_reader(GzDecoder::new(FIXTURE)).expect("integration fixture parses");
-    let mut face = export[ANCESTRAL_RECALL].take();
-    assert_eq!(face["oracle_text"], "Target player draws three cards.");
-    face["parse_warnings"] = serde_json::json!([{
-        "type": "IgnoredRemainder", "parser": "draw", "text": "three cards", "line_index": 0
-    }]);
-    face
+    serde_json::json!({
+        "name": "Ancestral Recall",
+        "mana_cost": { "type": "Cost", "shards": ["Blue"], "generic": 0 },
+        "card_type": { "supertypes": [], "core_types": ["Instant"], "subtypes": [] },
+        "power": null,
+        "toughness": null,
+        "loyalty": null,
+        "defense": null,
+        "oracle_text": "Target player draws three cards.",
+        "non_ability_text": null,
+        "flavor_name": null,
+        "keywords": [],
+        "abilities": [{
+            "condition": null,
+            "cost": null,
+            "declares_chosen_group": 2147483648_u64,
+            "description": "Target player draws three cards.",
+            "duration": null,
+            "effect": {
+                "type": "Draw",
+                "count": { "type": "Fixed", "value": 3 },
+                "target": { "type": "Player" }
+            },
+            "forward_result": false,
+            "kind": "Spell",
+            "optional": false,
+            "optional_targeting": false,
+            "sub_ability": null,
+            "target_prompt": null
+        }],
+        "triggers": [],
+        "static_abilities": [],
+        "replacements": [],
+        "color_override": null,
+        "color_identity": ["Blue"],
+        "legalities": {
+            "commander": "banned",
+            "duel": "banned",
+            "legacy": "banned",
+            "oathbreaker": "banned",
+            "vintage": "restricted"
+        },
+        "metadata": {
+            "source_printing_ids": [
+                "71283e4c-efd9-4a96-991c-6bbb169b99e7",
+                "d3c44b29-a973-4174-80a6-76edbd4f2a22"
+            ]
+        },
+        "rarities": ["rare", "mythic"],
+        "scryfall_oracle_id": "550c74d4-1fcb-406a-b02a-639a760a4380",
+        "printings": ["2ED", "30A", "CED", "CEI", "LEA", "LEB", "OVNT", "PRM", "VMA", "YDMU"],
+        "parse_warnings": [{
+            "type": "IgnoredRemainder", "parser": "draw", "text": "three cards", "line_index": 0
+        }]
+    })
 }
 
 #[test]
