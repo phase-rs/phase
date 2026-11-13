@@ -37044,9 +37044,13 @@ impl GameState {
         // CR 400.7 + CR 603.7c + CR 601.2c: the pins and snapshots captured by every
         // ability that can still resolve. Each carrier's own `source_id` keys its ability's
         // bare source epochs; normalization zeroes only the ability's copy.
+        // A pin is also a reader of its departure snapshot (CR 608.2h), which
+        // `retain_carrier_referenced_lki` keeps: the snapshot's key ranks in the pin's pool,
+        // so the ranked pin still selects its row.
         self.for_each_loop_ability_carrier_mut(&mut |source_id, ability| {
             ability.for_each_loop_pin_mut(source_id, &mut |object_id, incarnation| {
                 present.entry(object_id).or_default().push(*incarnation);
+                carrier_read.insert(ObjectIncarnationRef::of(object_id, *incarnation));
             });
             ability.for_each_loop_lki_snapshot_mut(&mut |snapshot| {
                 lki_incarnations(snapshot, &mut |object_id, incarnation| {
@@ -37088,6 +37092,9 @@ impl GameState {
                     .or_default()
                     .push(reference.incarnation);
             }
+            // CR 508.1 + CR 608.2h: the attack ledger selects its attacker's departure
+            // snapshot, so that key ranks in the ledger's pool too.
+            carrier_read.extend(combat.attacking_incarnations_this_combat.iter().copied());
         }
         for reference in self
             .crew_activated_this_turn
@@ -53862,6 +53869,30 @@ mod tests {
                     .insert(5, departed);
                 state
             };
+            // The ranked stamp still selects its row, after one normalization and after two
+            // (a ring prior the resource projection normalizes again).
+            let once = frame(2).normalize_for_loop();
+            let twice = once.normalize_for_loop();
+            for normalized in [&once, &twice] {
+                let mut selected = Vec::new();
+                let mut probe = normalized.clone();
+                probe.for_each_loop_ability_carrier_mut(&mut |source_id, ability| {
+                    ability.for_each_loop_pin_mut(source_id, &mut |object_id, incarnation| {
+                        selected.push(
+                            normalized
+                                .lki_by_incarnation
+                                .get(&object_id)
+                                .and_then(|history| history.get(incarnation))
+                                .map(|row| row.intensity),
+                        );
+                    });
+                });
+                assert_eq!(
+                    selected,
+                    vec![Some(2)],
+                    "{name}: the ranked stamp selects its retained row"
+                );
+            }
             assert!(
                 normalized_equal(&frame(2), &frame(2)),
                 "{name}: reach guard, the same selected snapshot is the same position"
@@ -53897,6 +53928,27 @@ mod tests {
                 .insert(5, departed);
             state
         };
+        let once = frame(2).normalize_for_loop();
+        let twice = once.normalize_for_loop();
+        for normalized in [&once, &twice] {
+            let selected: Vec<Option<i32>> = normalized
+                .combat
+                .iter()
+                .flat_map(|combat| combat.attacking_incarnations_this_combat.iter())
+                .map(|reference| {
+                    normalized
+                        .lki_by_incarnation
+                        .get(&reference.object_id)
+                        .and_then(|history| history.get(&reference.incarnation))
+                        .and_then(|row| row.power)
+                })
+                .collect();
+            assert_eq!(
+                selected,
+                vec![Some(2)],
+                "the ranked ledger stamp selects its retained row"
+            );
+        }
         assert!(
             normalized_equal(&frame(2), &frame(2)),
             "reach guard: the same selected snapshot is the same position"

@@ -2257,9 +2257,9 @@ mod tests {
         );
     }
 
-    /// CR 104.4b + CR 732.2c + CR 732.4 + CR 608.2k: the MANDATORY-REPLAY caller settling a
-    /// take that performs, while a real damage event waits under the loop for a real reader of
-    /// its recipient. Every card is the printed card from the card database except Matsu-Tribe
+    /// CR 104.4b + CR 732.4 + CR 608.2k: the MANDATORY-REPLAY caller confirming a period,
+    /// with an undelimited counted take, while a real damage event waits under the loop for a
+    /// real reader of its recipient. Every card is the printed card from the card database except Matsu-Tribe
     /// Sniper, which the test fixture lacks and which is built from its printed text and 1/1.
     ///
     /// P0's Animate Dead returns Grizzly Bears, then P0 casts Worldgorger Dragon ("When this
