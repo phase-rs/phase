@@ -377,10 +377,14 @@ struct Answered {
 /// `twinflame_paused_copy_referent.rs::save_and_restore`) — not a bare
 /// `serde_json::from_str::<GameState>`.
 fn save_and_restore(runner: &GameRunner) -> GameRunner {
-    let db = shared_card_db().expect("REACH-GUARD: a restore needs the integration CardDB");
     let json = serde_json::to_string(&PersistedGameState::capture(runner.state().clone()))
         .expect("the paused state serializes");
-    let state = serde_json::from_str::<PersistedGameState>(&json)
+    restore_json(&json)
+}
+
+fn restore_json(json: &str) -> GameRunner {
+    let db = shared_card_db().expect("REACH-GUARD: a restore needs the integration CardDB");
+    let state = serde_json::from_str::<PersistedGameState>(json)
         .expect("the paused state decodes")
         .prepare_for_restore(PersistedRestoreFinalization::DeferUntilRehydrated)
         .expect("the paused state is admissible")
@@ -1739,6 +1743,98 @@ fn clone_legion_spark_double_copy_chooses_after_a_counter_order_beside_a_co_ente
     assert_restored_row_matches_live(spark_double_copy_of_voice_beside_margle, "G4");
 }
 
+#[test]
+fn legacy_counter_pause_restores_the_owed_color_choice_without_repeating_counters() {
+    let mut paused = None;
+    clone_legion_beside(
+        MARGLE_NAME,
+        &[MARGLE_DONOR, SPARK_DOUBLE_DONOR],
+        |scenario| {
+            add_donor(scenario, P0, VOICE_DONOR);
+            scenario.add_enchantment_from_oracle(P0, "Hardened Scales", HARDENED_SCALES);
+            scenario.add_enchantment_from_oracle(P0, "Branching Evolution", BRANCHING_EVOLUTION);
+        },
+        |_| {},
+        PauseCarry::Live,
+        &Script {
+            copy_targets: vec![CopyPick::card(VOICE_NAME, P0)],
+            first: Some("Hardened Scales"),
+            ..Script::default()
+        },
+        |runner, prompt| {
+            if matches!(prompt, Prompt::Replacement)
+                && replacement_sources(runner).contains(&"Hardened Scales".to_string())
+            {
+                assert!(!has_color_choice(runner, the_token(runner, VOICE_NAME)));
+                paused = Some(runner.state().clone());
+            }
+        },
+    );
+    let state = paused.expect("reached the G4 counter-order pause");
+    let copy = the_token(&GameRunner::from_state(state.clone()), VOICE_NAME);
+    let mut json = serde_json::to_value(PersistedGameState::capture(state)).unwrap();
+    // Reconstruct the old pause: no answer was latched and no resume stage existed.
+    fn legacy_shape(value: &mut serde_json::Value) -> (usize, usize) {
+        let mut removed = (0, 0);
+        match value {
+            serde_json::Value::Object(map) => {
+                if let Some(action) = map.get_mut("FinishCopyTargetChoiceEntry") {
+                    assert_eq!(action["resume_stage"], "ChoiceOwedAfterCounters");
+                    action.as_object_mut().unwrap().remove("resume_stage");
+                    removed.0 += 1;
+                }
+                if let Some(attributes) = map.get_mut("chosen_attributes") {
+                    let attributes = attributes.as_array_mut().unwrap();
+                    removed.1 += attributes.len();
+                    attributes.clear();
+                }
+                for child in map.values_mut() {
+                    let count = legacy_shape(child);
+                    removed.0 += count.0;
+                    removed.1 += count.1;
+                }
+            }
+            serde_json::Value::Array(values) => {
+                for child in values {
+                    let count = legacy_shape(child);
+                    removed.0 += count.0;
+                    removed.1 += count.1;
+                }
+            }
+            _ => {}
+        }
+        removed
+    }
+    assert_eq!(
+        legacy_shape(&mut json),
+        (1, 0),
+        "only the continuation stage is removed"
+    );
+    let mut runner = restore_json(&serde_json::to_string(&json).unwrap());
+    assert!(!has_color_choice(&runner, copy));
+    let answered = drive_carried(
+        &mut runner,
+        PauseCarry::Live,
+        &Script {
+            first: Some("Hardened Scales"),
+            ..Script::default()
+        },
+        |runner, prompt| {
+            if matches!(prompt, Prompt::Named { .. }) {
+                assert_eq!(plus_counters(runner, copy), 4);
+            }
+        },
+    );
+    // CR 707.5 + CR 614.12a: the copied entry choice is still mandatory.
+    assert_eq!(
+        prompt_kinds(&answered.prompts),
+        vec!["Replacement", "Named"]
+    );
+    assert!(has_color_choice(&runner, copy));
+    assert_eq!(plus_counters(&runner, copy), 4);
+    assert_settled(&runner, "legacy G4");
+}
+
 fn spark_double_copy_of_voice_beside_margle(carry: PauseCarry) -> RowOutcome {
     let mut sources_at_replacement = Vec::new();
     let (runner, answered) = clone_legion_beside(
@@ -2854,4 +2950,112 @@ fn g8_copied_minion_soul_warden_observes_simultaneous_entries_across_save_and_re
         |carry| minion_payment_soul_warden(carry, false),
         "G8 Soul Warden",
     );
+}
+
+#[test]
+fn clone_legion_gargantuan_copy_of_canker_counts_chosen_opponents_creatures() {
+    gargantuan_copy_of_canker(PauseCarry::Live);
+}
+
+#[test]
+fn clone_legion_gargantuan_copy_of_canker_counts_chosen_opponents_creatures_across_save_and_restore(
+) {
+    assert_restored_row_matches_live(gargantuan_copy_of_canker, "F2 Canker");
+}
+
+fn gargantuan_copy_of_canker(carry: PauseCarry) -> RowOutcome {
+    const CANKER_NAME: &str = "Canker Abomination";
+    const CANKER: Donor = Donor {
+        name: CANKER_NAME,
+        oracle: "As this creature enters, choose an opponent. This creature enters with a -1/-1 counter on it for each creature that player controls.",
+        power: 6,
+        toughness: 6,
+    };
+    let (runner, answered) = clone_legion_carried(
+        &[BEARS_DONOR, BEARS_DONOR, GARGANTUAN_DONOR],
+        |scenario| {
+            add_donor(scenario, P0, CANKER);
+        },
+        |_| {},
+        carry,
+        &Script {
+            copy_targets: vec![CopyPick::card(CANKER_NAME, P0)],
+            ..Script::default()
+        },
+        |runner, prompt| {
+            let bears = battlefield_tokens(runner, BEARS_NAME);
+            assert_eq!(
+                bears.len(),
+                2,
+                "REACH-GUARD F2: both Bears copies precede the pause"
+            );
+            let parked = parked_created_ids(runner).expect("REACH-GUARD F2: parked copy batch");
+            assert!(
+                bears.iter().all(|id| parked.contains(id)),
+                "REACH-GUARD F2: the batch retains both Bears"
+            );
+            if matches!(prompt, Prompt::Named { .. }) {
+                let WaitingFor::NamedChoice {
+                    player,
+                    choice_type,
+                    options,
+                    ..
+                } = &runner.state().waiting_for
+                else {
+                    panic!("REACH-GUARD F2: acquired named choice");
+                };
+                assert_eq!(*player, P0);
+                assert!(matches!(
+                    choice_type,
+                    engine::types::ability::ChoiceType::Opponent { .. }
+                ));
+                assert_eq!(options, &[P1.0.to_string()]);
+                let creatures = |player| {
+                    runner
+                        .state()
+                        .objects
+                        .values()
+                        .filter(|object| {
+                            object.is_phased_in_permanent()
+                                && object.controller == player
+                                && object.card_types.core_types.contains(&CoreType::Creature)
+                        })
+                        .count()
+                };
+                assert_eq!(
+                    creatures(P1),
+                    3,
+                    "REACH-GUARD F2: chosen opponent has three creatures"
+                );
+                assert_ne!(
+                    creatures(P0),
+                    creatures(P1),
+                    "REACH-GUARD F2: populations differ"
+                );
+            }
+        },
+    );
+    assert_eq!(
+        prompt_kinds(&answered.prompts),
+        vec!["Replacement", "CopyTarget", "Named"],
+        "REACH-GUARD F2: the Gargantuan acquires Canker's choice"
+    );
+    assert_settled(&runner, "F2 Canker");
+    let copy = &runner.state().objects[&the_token(&runner, CANKER_NAME)];
+    assert!(
+        copy.chosen_attributes
+            .contains(&ChosenAttribute::Player(P1)),
+        "REACH-GUARD F2: the chosen opponent is latched"
+    );
+    // CR 607.2d + CR 614.12a: the linked counter quantity uses the opponent
+    // chosen by the acquired as-enters ability, before the copy enters.
+    assert_eq!(
+        copy.counters
+            .get(&CounterType::Minus1Minus1)
+            .copied()
+            .unwrap_or(0),
+        3,
+        "F2: copied Canker counts the chosen opponent's three creatures"
+    );
+    row_outcome(&runner, answered)
 }
