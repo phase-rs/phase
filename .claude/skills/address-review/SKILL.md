@@ -16,8 +16,9 @@ Fetch all three kinds of feedback, paginated, with the GraphQL query in [pr-revi
 Your work list is:
 
 - every numbered finding `F1…Fn` under `🔴 Blocker` in the latest maintainer review. All of them block, at every severity;
-- every finding in an earlier maintainer review that has no disposition yet (the re-review carries these forward);
-- every unresolved inline thread (`isResolved == false`).
+- every finding in an earlier maintainer review that no later maintainer review has credited as fixed or withdrawn (the re-review carries these forward; your own earlier reply does not close one);
+- every unresolved inline thread (`isResolved == false`);
+- any other actionable request in a top-level review body or conversation comment. Read each one; an external item the maintainer review already refuted is not on the list.
 
 `🟡 Non-blocking` lines (`Late note:`, Pre-existing, refuted external items) are not obligations; do not change code for them in this push. Record `REVIEWED_HEAD`: the head the latest maintainer review names in its body, otherwise that review's `commit.oid`.
 
@@ -55,6 +56,8 @@ Draft the PR-body and title edits first (narrowed claims, `## Claimed parse impa
 Ask it to state, for each open finding, whether it is cleared at this head, and to review the delta and the drafted claims as new work.
 
 Its findings are handled exactly as §5 and the pipeline's [decline path](../engine-implementer/SKILL.md#run-limits) say, within their retry limits. Only a residual the decline path permits may be listed under `## Validation Failures` with `Final review-impl UNRESOLVED`. Anything else that remains — a HIGH or MED `behavior` or `machinery` finding, wrong behaviour, a false CR claim, missing required evidence — means stop: do not push, and report to your user.
+
+A finding you **disputed** that this reviewer, given your evidence, still reports open is not an exception: two reviews now say it is a defect. Fix it, or, if you still dispute it, do not push. Post the dispute alone as the step 6 reply, wait for the maintainer to adjudicate, and push the whole batch afterwards. The fixes you hold back cost nothing; a push with a confirmed finding open costs a round.
 
 ## 5. Verify, push once, update the body
 
