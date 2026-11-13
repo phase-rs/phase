@@ -11332,6 +11332,19 @@ mod tests {
         assert!(cond.is_some(), "a battlefield token has a controller");
     }
 
+    /// Reach guard for a noun-rejection row on "Counter target creature spell":
+    /// the shared grammar recognizes `condition`, the operand announces exactly
+    /// one Stack-timed role, and the same operand binds under "that spell's
+    /// controller".
+    fn creature_spell_noun_reach_guard(condition: &str) {
+        let effect = "Counter target creature spell";
+        announced_roles_reaching_count(effect, condition, 1);
+        assert_full_strip_binds(
+            effect,
+            "you control more creatures than that spell's controller",
+        );
+    }
+
     /// CR 115.1 + CR 109.2 + CR 109.2b: the named-permanent branch proves the whole
     /// slot is a battlefield permanent; a typed creature SPELL does not.
     /// Synthetic: Disenchant's, Kraul Whipcracker's and Essence Scatter's
@@ -11351,6 +11364,12 @@ mod tests {
         );
         assert!(cond.is_some(), "a battlefield token is a permanent");
 
+        // Reach guards: the grammar recognizes the noun, the operand announces
+        // one Stack-timed spell role, and the spell-noun twin binds, so only the
+        // noun match can decline the row.
+        creature_spell_noun_reach_guard(
+            "you control more creatures than that permanent's controller",
+        );
         let (cond, _) = strip_suffix_conditional(
             "Counter target creature spell if you control more creatures than that permanent's controller",
             &mut ParseContext::default(),
@@ -11364,6 +11383,9 @@ mod tests {
     /// creature's" referent (nearest printed card: Unified Will).
     #[test]
     fn creature_noun_declines_a_creature_spell_slot() {
+        creature_spell_noun_reach_guard(
+            "you control more creatures than that creature's controller",
+        );
         let (cond, _) = strip_suffix_conditional(
             "Counter target creature spell if you control more creatures than that creature's controller",
             &mut ParseContext::default(),
