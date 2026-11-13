@@ -271,6 +271,7 @@ fn park_prompt(
         conditional_enter_with_counters: vec![],
         count_param: 0,
         library_position,
+        library_shuffle: engine::types::ability::LibraryShuffleMode::PerObject,
         mass_library_order: None,
         is_cost_payment: false,
         enters_modified_if: None,
