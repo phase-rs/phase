@@ -42550,3 +42550,78 @@ fn repaired_grammar_neighbours_parse_to_their_meaning_or_an_explicit_gap() {
         );
     }
 }
+
+fn assert_you_creature_flash_grant(def: &StaticDefinition, expect_during_your_turn: bool) {
+    assert_eq!(
+        def.mode,
+        StaticMode::CastWithKeyword {
+            keyword: Keyword::Flash,
+        }
+    );
+    let Some(TargetFilter::Typed(tf)) = &def.affected else {
+        panic!("expected Typed affected, got {:?}", def.affected);
+    };
+    assert_eq!(tf.controller, Some(ControllerRef::You));
+    assert!(tf.type_filters.contains(&TypeFilter::Creature));
+    let inner = assert_first_spell_gate(
+        def.condition.as_ref().expect("expected first-spell gate"),
+        expect_during_your_turn,
+    );
+    let TargetFilter::Typed(inner_tf) = inner else {
+        panic!("expected typed inner filter");
+    };
+    assert!(inner_tf.type_filters.contains(&TypeFilter::Creature));
+}
+
+#[test]
+fn static_radagast_first_creature_spell_costs_less_and_has_flash() {
+    // CR 601.2f + CR 601.3b: one subject, two statics under the same gate.
+    let defs = parse_static_line_multi(
+        "The first creature spell you cast each turn costs {2} less to cast and can be cast as though it had flash.",
+    );
+    assert_eq!(defs.len(), 2, "{defs:?}");
+    assert!(matches!(
+        defs[0].mode,
+        StaticMode::ModifyCost {
+            mode: CostModifyMode::Reduce,
+            ..
+        }
+    ));
+    assert_you_creature_flash_grant(&defs[1], false);
+    assert_eq!(defs[0].condition, defs[1].condition);
+}
+
+#[test]
+fn static_first_creature_spell_during_your_turns_costs_less_and_has_flash() {
+    let defs = parse_static_line_multi(
+        "The first creature spell you cast during each of your turns costs {1} less to cast and can be cast as though it had flash.",
+    );
+    assert_eq!(defs.len(), 2, "{defs:?}");
+    assert_you_creature_flash_grant(&defs[1], true);
+}
+
+#[test]
+fn static_first_creature_spell_unsupported_timing_emits_no_flash() {
+    let defs = parse_static_line_multi(
+        "The first creature spell you cast during each opponent's turn costs {1} less to cast and can be cast as though it had flash.",
+    );
+    assert!(
+        !defs.iter().any(|def| matches!(
+            def.mode,
+            StaticMode::CastWithKeyword {
+                keyword: Keyword::Flash
+            }
+        )),
+        "{defs:?}"
+    );
+}
+
+#[test]
+fn static_blue_spirit_may_cast_first_creature_spell_as_though_flash() {
+    // CR 601.3b + CR 702.8a: The Blue Spirit's permission form.
+    let def = parse_static_line(
+        "You may cast the first creature spell you cast each turn as though it had flash.",
+    )
+    .unwrap();
+    assert_you_creature_flash_grant(&def, false);
+}

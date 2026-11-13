@@ -351,53 +351,12 @@ pub(crate) fn parse_spells_have_keyword(tp: &TextPair<'_>, text: &str) -> Option
     // `parse_nth_qualified_spell_filter` grammar + `nth_qualified_spell_condition`
     // gate as the paired cost-modifier consumer, so the qualifying spell filter,
     // cast-origin restriction, and `SpellsCastThisTurn == 0` gate are all preserved
-    // instead of collapsing to "every spell you cast".
-    match parse_nth_qualified_spell_filter(subject) {
-        // Not an Nth-qualified-spell line — fall through to the ordinary
-        // "[type] spells you cast [from zone] have [keyword]" patterns below.
-        NthQualifiedSpell::NotApplicable => {}
-        // The shape is present but the qualifier/timing isn't representable. Fall
-        // through (NOT a `return None`) so the existing gateless static is
-        // preserved for not-yet-representable qualifiers — no regression.
-        NthQualifiedSpell::UnsupportedQualifier => {}
-        NthQualifiedSpell::Supported {
-            filter,
-            timing,
-            ordinal,
-        } => {
-            // CR 601.2f: trailing-residue guard. `parse_nth_qualified_spell_filter`
-            // discards any text after the timing phrase; if that region is
-            // non-empty an unrepresentable qualifier was dropped (Rain of Riches'
-            // "that mana from a Treasure was spent to cast"; TARDIS Bay's
-            // post-timing "with mana value 2 or greater"). Decline rather than emit
-            // a residue-blind gate — fall through to the existing gateless static.
-            if nth_qualified_spell_subject_fully_consumed(subject) {
-                // CR 601.2a: scope `ControllerRef::You` to every leaf (And/Not
-                // recursion) so an opponent's qualifying spell never qualifies.
-                let affected =
-                    apply_spell_keyword_subject_constraints(filter.clone(), None, None, Vec::new());
-                // CR 611.2f: `SpellsCastThisTurn(filter) == 0` first-spell gate,
-                // plus `DuringYourTurn` for the controller-turn timing (a clean
-                // "during each of your turns" subject with no post-timing residue;
-                // TARDIS Bay itself declines above because its MV qualifier follows
-                // the timing). When a leading "during your turn," scope was already
-                // stripped, combine both rather than dropping either.
-                let nth_qualified = nth_qualified_spell_condition(&filter, &timing, ordinal);
-                let combined_condition = match condition.clone() {
-                    Some(leading) => StaticCondition::And {
-                        conditions: vec![leading, nth_qualified],
-                    },
-                    None => nth_qualified,
-                };
-                return Some(
-                    StaticDefinition::new(StaticMode::CastWithKeyword { keyword })
-                        .affected(affected)
-                        .condition(combined_condition)
-                        .description(text.to_string())
-                        .active_zones(vec![Zone::Battlefield]),
-                );
-            }
-        }
+    // instead of collapsing to "every spell you cast". `None` falls through to
+    // the ordinary patterns below, preserving the gateless static.
+    if let Some(def) =
+        nth_qualified_spell_keyword_grant(subject, keyword.clone(), condition.clone(), text)
+    {
+        return Some(def);
     }
 
     // Find "spells you cast" in the subject — may be preceded by a type descriptor
@@ -609,6 +568,65 @@ pub(crate) fn parse_spells_have_keyword(tp: &TextPair<'_>, text: &str) -> Option
     None
 }
 
+/// CR 611.3a: Gated `CastWithKeyword` for a "the <ordinal> <qualifier> spell you
+/// cast <timing>" subject (`subject_lower`), the single owner of that lowering.
+/// `None` when the subject is not Nth-qualified, its qualifier/timing is
+/// unrepresentable, or text after the timing phrase would be dropped.
+pub(crate) fn nth_qualified_spell_keyword_grant(
+    subject_lower: &str,
+    keyword: Keyword,
+    leading: Option<StaticCondition>,
+    text: &str,
+) -> Option<StaticDefinition> {
+    let NthQualifiedSpell::Supported {
+        filter,
+        timing,
+        ordinal,
+    } = parse_nth_qualified_spell_filter(subject_lower)
+    else {
+        return None;
+    };
+    // CR 601.2f: trailing-residue guard (Rain of Riches' "that mana from a
+    // Treasure was spent to cast"; TARDIS Bay's post-timing MV qualifier).
+    if !nth_qualified_spell_subject_fully_consumed(subject_lower) {
+        return None;
+    }
+    // CR 601.2a: scope `ControllerRef::You` to every leaf (And/Not recursion) so
+    // an opponent's qualifying spell never qualifies.
+    let affected = apply_spell_keyword_subject_constraints(filter.clone(), None, None, Vec::new());
+    let nth_qualified = nth_qualified_spell_condition(&filter, &timing, ordinal);
+    let condition = match leading {
+        Some(leading) => StaticCondition::And {
+            conditions: vec![leading, nth_qualified],
+        },
+        None => nth_qualified,
+    };
+    Some(
+        StaticDefinition::new(StaticMode::CastWithKeyword { keyword })
+            .affected(affected)
+            .condition(condition)
+            .description(text.to_string())
+            .active_zones(vec![Zone::Battlefield]),
+    )
+}
+
+/// "you may cast <subject> as though it had flash[.]" → the lowercase subject.
+fn parse_singular_flash_permission_subject(lower: &str) -> OracleResult<'_, &str> {
+    let (i, subject) =
+        preceded(tag("you may cast "), take_until(" as though it had flash")).parse(lower)?;
+    let (i, _) = (tag(" as though it had flash"), opt(tag(".")), eof).parse(i)?;
+    Ok((i, subject))
+}
+
+/// CR 601.3b: The Blue Spirit — "You may cast the first creature spell you cast
+/// each turn as though it had flash." Shares the permission arm's combinator so
+/// the classifier routes exactly the lines the static parser lowers.
+pub(crate) fn is_nth_qualified_spell_flash_permission(lower: &str) -> bool {
+    parse_singular_flash_permission_subject(lower).is_ok_and(|(_, subject)| {
+        nth_qualified_spell_keyword_grant(subject, Keyword::Flash, None, lower).is_some()
+    })
+}
+
 /// Parse the static permission "You may cast [type] spells as though they had
 /// flash." (Leyline of Anticipation, Vedalken Orrery, Vivien, Champion of the
 /// Wilds' first ability).
@@ -629,6 +647,12 @@ pub(crate) fn parse_cast_as_though_flash_static(
     tp: &TextPair<'_>,
     text: &str,
 ) -> Option<StaticDefinition> {
+    // CR 601.3b + CR 702.8a: singular nth-qualified subject (The Blue Spirit);
+    // no ungated fallback, so "this spell" subjects never become a static.
+    if let Ok((_, subject)) = parse_singular_flash_permission_subject(tp.lower) {
+        return nth_qualified_spell_keyword_grant(subject, Keyword::Flash, None, text);
+    }
+
     let (type_text, all_players) = nom_on_lower(tp.original, tp.lower, |i| {
         let (i, all_players) = alt((
             value(false, tag::<_, _, OracleError<'_>>("you may ")),
