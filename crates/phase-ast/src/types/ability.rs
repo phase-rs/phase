@@ -11112,14 +11112,17 @@ pub fn instruction_object_reach(effect: &Effect) -> InstructionObjectReach<'_> {
 /// surfaces `SearchLibrary::target_player`, so iterated-search variants are
 /// covered through the same single path.
 pub fn effect_refs_parent_target(effect: &Effect) -> bool {
-    effect_parent_ref_slot_count(effect) > 0
+    effect_parent_ref_slots(effect)
+        .iter()
+        .any(|filter| filter_refs_parent_target(filter))
 }
 
 /// CR 608.2c: how many of the effect's target-filter slots (the ones
-/// [`effect_refs_parent_target`] scans) read its parent's target. The parser's
-/// cross-choice antecedent binder links a reader only when exactly one does.
+/// [`effect_refs_parent_target`] scans, without a zone move's performer) read
+/// its parent's target. The parser's cross-choice antecedent binder links a
+/// reader only when exactly one does.
 pub fn effect_parent_ref_slot_count(effect: &Effect) -> usize {
-    effect_parent_ref_slots(effect)
+    effect_target_parent_ref_slots(effect)
         .iter()
         .filter(|filter| filter_refs_parent_target(filter))
         .count()
@@ -11205,6 +11208,30 @@ pub fn filter_requires_parent_target_object(filter: &TargetFilter) -> bool {
 /// Any FUTURE effect that hides an object slot behind `target_filter()` MUST add
 /// an arm here, or its for-each parent-ref form won't rebind.
 pub fn effect_parent_ref_slots(effect: &Effect) -> Vec<&TargetFilter> {
+    let mut slots = effect_target_parent_ref_slots(effect);
+    // CR 608.2c + CR 109.4: a zone move's named performer that is derived from
+    // the parent OBJECT ("its controller exiles it", "its owner shuffles it
+    // into their library") is a parent reference of its own, even when the
+    // moved population names no parent. Surfacing it here lets every
+    // member-driven loop rebind it per member, so each iteration's performer is
+    // that member's controller or owner rather than the first parent target's.
+    // A performer that names a player directly (`ParentTarget` on a player
+    // target, a declared or event player) is not object-derived and is left to
+    // the dependency readers that ask about it by name.
+    if let Effect::ChangeZone { actor, .. } | Effect::ChangeZoneAll { actor, .. } = effect {
+        if let Some(
+            performer @ (TargetFilter::ParentTargetController | TargetFilter::ParentTargetOwner),
+        ) = actor.player_filter()
+        {
+            slots.push(performer);
+        }
+    }
+    slots
+}
+
+/// The target-filter slots of [`effect_parent_ref_slots`], without a zone
+/// move's performer.
+fn effect_target_parent_ref_slots(effect: &Effect) -> Vec<&TargetFilter> {
     let mut slots: Vec<&TargetFilter> = effect_target_filter(effect).into_iter().collect();
     match effect {
         Effect::CopyTokenOf {

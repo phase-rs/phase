@@ -122,7 +122,7 @@ use crate::parser::oracle_effect::subject::parse_subject_application;
 use crate::parser::oracle_ir::diagnostic::{ClauseGapKind, OracleDiagnostic};
 use crate::types::ability::{
     effect_has_stack_target_declaration, effect_owns_resolution_zone_choice,
-    effect_parent_ref_slot_count, effect_refs_parent_target, effect_requires_parent_target_object,
+    effect_parent_ref_slot_count, effect_requires_parent_target_object,
     extract_target_filter_from_effect, instruction_object_reach, payer_is_declared_target,
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AbilityTag, AggregateFunction,
     AttachCardinality, AttachSelection, AttackSubject, BounceSelection, CardPlayMode,
@@ -29041,7 +29041,7 @@ fn selection_filter_excludes_anaphor_noun(noun: &AnaphorNoun, filter: &TargetFil
 /// CR 608.2c: whether any node of the clause reads its parent's target
 /// (`ParentTarget`, `ParentTargetController`, `ParentTargetOwner`, …).
 fn clause_refs_parent_target(clause: &ClauseIr) -> bool {
-    clause_nodes(clause).any(|(effect, _, _)| effect_refs_parent_target(effect))
+    clause_nodes(clause).any(|(effect, _, _)| effect_parent_ref_slot_count(effect) > 0)
 }
 
 /// CR 115.1 + CR 608.2b: a target the choice clause itself announces besides
@@ -29193,7 +29193,7 @@ fn intervening_object_could_be_anaphor(
         .collect();
     let reader_node = nodes
         .iter()
-        .rposition(|&(c, effect, _)| c == reader && effect_refs_parent_target(effect))
+        .rposition(|&(c, effect, _)| c == reader && effect_parent_ref_slot_count(effect) > 0)
         .unwrap_or(nodes.len());
     let mut after_choice = false;
     for &(c, effect, timing) in nodes.get(skipped_nodes..reader_node).unwrap_or_default() {

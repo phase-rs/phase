@@ -52454,6 +52454,171 @@ mod tests {
         }
     }
 
+    fn subject_exile(target: TargetFilter, actor: LibraryInstructionActor) -> Effect {
+        Effect::ChangeZone {
+            actor,
+            origin: None,
+            destination: Zone::Exile,
+            target,
+            owner_library: false,
+            enter_transformed: false,
+            enters_under: None,
+            enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+            enters_attacking: false,
+            up_to: false,
+            enter_with_counters: vec![],
+            conditional_enter_with_counters: vec![],
+            face_down_profile: None,
+            enters_modified_if: None,
+            library_shuffle: Default::default(),
+        }
+    }
+
+    /// CR 608.2c + CR 109.4: a performer derived from the parent object ("its
+    /// controller", "its owner") is a parent-reference slot of the shared
+    /// collector even when the moved population names no parent; a performer
+    /// that names a player directly is not. The parser's slot count, which
+    /// links cross-choice antecedents, does not count the performer.
+    /// Revert-probe: drop the performer push from `effect_parent_ref_slots` ⇒
+    /// the two object-derived rows read no slot.
+    #[test]
+    fn parent_ref_slots_surface_an_object_derived_performer() {
+        use crate::types::ability::effect_parent_ref_slot_count;
+        for derived in [
+            TargetFilter::ParentTargetController,
+            TargetFilter::ParentTargetOwner,
+        ] {
+            let effect = subject_exile(
+                TargetFilter::SelfRef,
+                LibraryInstructionActor::Player {
+                    player: derived.clone(),
+                },
+            );
+            assert_eq!(
+                effect_parent_ref_slots(&effect),
+                vec![&TargetFilter::SelfRef, &derived]
+            );
+            assert!(effect_refs_parent_target(&effect));
+            assert!(effect_iterates_over_parent_target(&effect));
+            assert_eq!(effect_parent_ref_slot_count(&effect), 0);
+        }
+        for direct in [
+            LibraryInstructionActor::Controller,
+            LibraryInstructionActor::LibraryPlayer,
+            LibraryInstructionActor::Player {
+                player: TargetFilter::ParentTarget,
+            },
+            LibraryInstructionActor::Player {
+                player: TargetFilter::TriggeringPlayer,
+            },
+        ] {
+            let effect = subject_exile(TargetFilter::SelfRef, direct);
+            assert_eq!(
+                effect_parent_ref_slots(&effect),
+                vec![&TargetFilter::SelfRef]
+            );
+            assert!(!effect_refs_parent_target(&effect));
+        }
+    }
+
+    /// Three seats; `first` is controlled by P1 and `second` by P2, published
+    /// as the chain's tracked set in that order. Returns the state, the two
+    /// members and a P0-controlled source permanent.
+    fn member_loop_board() -> (GameState, ObjectId, ObjectId, ObjectId) {
+        let mut state = GameState::new(crate::types::format::FormatConfig::standard(), 3, 42);
+        let first = create_object(
+            &mut state,
+            CardId(9801),
+            PlayerId(1),
+            "P1 permanent".to_string(),
+            Zone::Battlefield,
+        );
+        let second = create_object(
+            &mut state,
+            CardId(9802),
+            PlayerId(2),
+            "P2 permanent".to_string(),
+            Zone::Battlefield,
+        );
+        let source = create_object(
+            &mut state,
+            CardId(9803),
+            PlayerId(0),
+            "P0 source".to_string(),
+            Zone::Battlefield,
+        );
+        let set_id = TrackedSetId(state.next_tracked_set_id);
+        state.next_tracked_set_id += 1;
+        state
+            .tracked_object_sets
+            .insert(set_id, vec![first, second]);
+        state.chain_tracked_set_id = Some(set_id);
+        (state, first, second, source)
+    }
+
+    /// CR 608.2c + CR 109.4: "For each permanent chosen this way, its
+    /// controller may exile it" (Disorienting Choice; its printed parse does
+    /// not reach this loop, so the typed form is driven directly — synthetic).
+    /// Each iteration's performer is that member's controller: P1 exiles the
+    /// first member and P2 the second.
+    #[test]
+    fn member_loop_credits_each_members_controller_as_performer() {
+        let (mut state, first, second, source) = member_loop_board();
+        let mut ability = ResolvedAbility::new(
+            subject_exile(
+                TargetFilter::ParentTarget,
+                LibraryInstructionActor::Player {
+                    player: TargetFilter::ParentTargetController,
+                },
+            ),
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        ability.repeat_for = Some(QuantityExpr::Ref {
+            qty: QuantityRef::TrackedSetSize,
+        });
+        resolve_ability_chain(&mut state, &ability, &mut Vec::new(), 1).unwrap();
+
+        assert_eq!(state.objects[&first].zone, Zone::Exile);
+        assert_eq!(state.objects[&second].zone, Zone::Exile);
+        assert_eq!(state.objects[&first].exiled_by, Some(PlayerId(1)));
+        assert_eq!(state.objects[&second].exiled_by, Some(PlayerId(2)));
+    }
+
+    /// CR 608.2c + CR 109.4: the same loop when the performer is the move's
+    /// ONLY parent reference — the moved object is the source itself. The loop
+    /// must still bind the iterated member. Each iteration exiles the source
+    /// again (CR 400.8: an object exiled from exile is a new exiled object),
+    /// so the surviving record is the LAST member's controller (P2), not the
+    /// ability's controller and not the first member's.
+    /// Synthetic typed form; nearest printed analogue as above.
+    /// Revert-probe: drop the performer push from `effect_parent_ref_slots` ⇒
+    /// the loop binds no member and P0 is recorded.
+    #[test]
+    fn member_loop_binds_a_performer_only_parent_reference() {
+        let (mut state, _first, _second, source) = member_loop_board();
+        let mut ability = ResolvedAbility::new(
+            subject_exile(
+                TargetFilter::SelfRef,
+                LibraryInstructionActor::Player {
+                    player: TargetFilter::ParentTargetController,
+                },
+            ),
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        ability.repeat_for = Some(QuantityExpr::Ref {
+            qty: QuantityRef::TrackedSetSize,
+        });
+        resolve_ability_chain(&mut state, &ability, &mut Vec::new(), 1).unwrap();
+
+        // Reach-guard: the move ran.
+        assert_eq!(state.objects[&source].zone, Zone::Exile);
+        assert_eq!(state.objects[&source].exiled_by, Some(PlayerId(2)));
+    }
+
     /// CR 603.7c + CR 608.2c: a zone move whose only parent reference is its
     /// performer still counts as referencing the parent target, so a delayed
     /// trigger snapshots the parent referent for it. Synthetic: no printed
