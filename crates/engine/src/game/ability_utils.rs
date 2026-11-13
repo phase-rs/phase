@@ -3072,9 +3072,11 @@ pub(crate) fn declared_target_entries_in_chain(
 /// * the announcement's own slot list ([`build_target_slots`]) has exactly as
 ///   many positions as there are entries.
 ///
-/// Equal counts means nothing was declined (each filled slot pushes exactly one
-/// target, in the same chain order), so no index shifted and the k-th entry
-/// filled the k-th static slot. Otherwise NO view is supplied and every referent
+/// Equal counts means nothing was declined — PREMISE: each declared slot
+/// contributes at most one target, so a `multi_target` slot can keep the counts
+/// equal while shifting the mapping, which can only suppress a comparison and
+/// never invent one — and no index shifted, so the k-th entry filled the k-th
+/// static slot. Otherwise NO view is supplied and every referent
 /// answers UNKNOWN — the governing answer for an axis the record cannot state,
 /// and never a refusal of an honest save.
 pub(crate) fn record_check_declared_slot_view(

@@ -36,7 +36,8 @@
 //! are declared as the spell is put on the stack), CR 601.2c (announcing
 //! targets), CR 601.2h (costs are paid after targets are chosen), CR 608.2h (last
 //! known information), CR 400.7 (a moved object is a new object), CR 122.1
-//! (counters), CR 110.5 (counters are a permanent-state fact).
+//! (a counter is a marker placed on an object; counters are not objects and
+//! have no characteristics).
 //!
 //! Oracle text is verbatim from Scryfall.
 

@@ -8597,10 +8597,11 @@ fn epoch_answerable_property(prop: &FilterProp) -> bool {
         // nonblack creature that entered this turn") on restore.
         FilterProp::EnteredThisTurn => true,
         // CR 122.1: the counter set IS captured (`LKISnapshot::counters`), so the
-        // leaf is answered by the epoch and not by the ObjectId-keyed exit cache
-        // the record walk reads (which has no row for a target that never
-        // departed — a legal Heartless Act, "Destroy target creature with no
-        // counters on it", must not be refused).
+        // leaf is answerable from the epoch. It is answered here with the SAME
+        // reading as the record walk's own epoch arm, so routing it through the
+        // three-valued door changes no answer for any save: it only lets an
+        // UNKNOWN travel through the conjunction instead of being collapsed to a
+        // definite false.
         FilterProp::Counters { .. } => true,
         FilterProp::AnyOf { props } => props.iter().any(epoch_answerable_property),
         FilterProp::Not { prop } => epoch_answerable_property(prop),
