@@ -46,12 +46,14 @@
 #      failed; no verdict.
 #   2  the added-line helper (scripts/lib/added-lines.py) could not read the
 #      diff; no verdict.
+#   2  the base ref does not resolve to a commit; no verdict.
 
 set -euo pipefail
 # shellcheck source=scripts/lib/added-lines.sh
 . "$(dirname "$0")/lib/added-lines.sh"
 
 BASE="${1:-$(git merge-base origin/main HEAD 2>/dev/null || echo HEAD~1)}"
+added_lines_require_base "$BASE"
 SCOPE=(crates/engine/src crates/phase-ast/src crates/phase-parser/src)
 # Files allowed to touch raw keyword state: the authority module, the layer
 # engine that computes `obj.keywords`, and copy machinery that snapshots

@@ -4757,15 +4757,14 @@ fn enters_with_counters_outcome(
     // Pet). CR 614.1c makes those riders part of this one replacement; every
     // reader below sees only the counter clause that follows them.
     let (leading_keywords, after_with) = split_enters_with_leading_keyword_riders(head.after_with);
-    // CR 614.1c: a granted QUOTED ability is a printed part of the replacement
-    // this parser cannot carry. Once a leading keyword chain makes the line
-    // claimable, a quoted rider in the payload would be dropped silently, so the
-    // clause fails closed instead.
-    if !leading_keywords.is_empty()
-        && nom_primitives::strip_double_quoted_spans(head.after_with) != head.after_with
-    {
-        return Err(EntersWithDecline::FailsClosed(EntersWithGap::Clause));
-    }
+    // CR 614.1c + CR 611.2a: the quoted-ability riders ("…and with "<ability>"",
+    // the five Invasion/Apocalypse kicker lines) are part of THIS replacement,
+    // like the bare-keyword riders. They classify through the single
+    // quoted-grant authority and compose onto the same execute chain below, so
+    // they inherit the definition's gate. An unreadable rider fails the clause
+    // closed rather than reviving the counters-only claim.
+    let quoted_riders =
+        parse_enters_with_quoted_riders(original_text).map_err(EntersWithDecline::FailsClosed)?;
     // CR 614.1c + CR 611.2a: one keyword list per replacement — the leading
     // riders first, then the trailing "… and with <keyword>" riders. The trailing
     // scan visits every marker, so it re-reads leading chain members; dedupe.
@@ -4915,9 +4914,9 @@ fn enters_with_counters_outcome(
         choice.description = Some("your choice of counter".to_string());
 
         // Compose with "enters tapped" if present (mirrors the single-counter
-        // tail below). The keyword rider composes here too, for the same reason
-        // it does there — CR 614.1c makes it part of this replacement.
-        let choice = compose_enters_with_keyword_grant(choice, keyword_riders);
+        // tail below). The entry riders compose here too, for the same reason
+        // they do there — CR 614.1c makes them part of this replacement.
+        let choice = compose_enters_with_entry_grants(choice, keyword_riders, quoted_riders);
         let execute = if has_enters_tapped_phrase(work_text) {
             AbilityDefinition::new(
                 AbilityKind::Spell,
@@ -5113,10 +5112,10 @@ fn enters_with_counters_outcome(
     let put_counter = build_enters_counter_ability(
         counter_entries.unwrap_or_else(|| vec![(counter_type, count_expr)]),
     );
-    // CR 614.1c: the "and with <keyword>" rider is part of THIS replacement, so
-    // it composes onto the same execute chain as the counters and inherits the
+    // CR 614.1c: the "and with …" riders are part of THIS replacement, so they
+    // compose onto the same execute chain as the counters and inherit the
     // definition's gate (Invasion kicker cycle).
-    let put_counter = compose_enters_with_keyword_grant(put_counter, keyword_riders);
+    let put_counter = compose_enters_with_entry_grants(put_counter, keyword_riders, quoted_riders);
     let execute = if has_enters_tapped_phrase(work_text) {
         AbilityDefinition::new(
             AbilityKind::Spell,
@@ -5347,8 +5346,9 @@ fn split_enters_with_leading_keyword_riders(
 /// Lancer, Cetavolver, Degavolver, Duskwalker, Faerie Squadron, Kavu Titan,
 /// Necravolver, Pouncing Kavu, Pouncing Wurm, Prison Barricade, Rakavolver,
 /// Voidpouncer. They print 18 rider lines: 13 BARE keywords (this function's
-/// class) and 5 QUOTED abilities (below). 12 cards print at least one bare
-/// rider; 8 of them print ONLY bare riders and so are fully covered here.
+/// class) and 5 QUOTED abilities (the sibling [`parse_enters_with_quoted_riders`]).
+/// 12 cards print at least one bare rider; 8 of them print ONLY bare riders
+/// and so are fully covered here.
 ///
 /// Scans at `" and with "` boundaries rather than anchoring, because the rider
 /// follows a counter clause of unbounded shape and may not be the first `" and "`
@@ -5364,19 +5364,23 @@ fn split_enters_with_leading_keyword_riders(
 /// keyword parser rejects as a compound — reintroducing, for X, exactly the
 /// silent-keyword-drop bug this function exists to fix.
 ///
-/// The sibling QUOTED-ability rider is deliberately NOT handled here: it needs a
-/// granted-ability parse, not a keyword lookup. Five lines across five cards —
-/// Anavolver's {B} and Degavolver's {1}{B} halves ("Pay 3 life: Regenerate this
-/// creature."), Necravolver's {W} and Rakavolver's {1}{W} halves ("Whenever this
-/// creature deals damage, you gain that much life."), and Prison Barricade
-/// ("This creature can attack as though it didn't have defender."). They keep
-/// their current counters-only behavior rather than being failed closed, since
-/// that would trade a partial parse for no parse at all. Tracked separately.
+/// The sibling QUOTED-ability rider (`"and with "<ability>""`) is handled by
+/// [`parse_enters_with_quoted_riders`], not here: it needs a granted-ability
+/// parse, not a keyword lookup. Five lines across five cards — Anavolver's {B}
+/// and Degavolver's {1}{B} halves ("Pay 3 life: Regenerate this creature."),
+/// Necravolver's {W} and Rakavolver's {1}{W} halves ("Whenever this creature
+/// deals damage, you gain that much life."), and Prison Barricade ("This
+/// creature can attack as though it didn't have defender."). A quoted span is
+/// never a bare keyword, so the two scans partition the rider slot without
+/// overlap: this one lifts bare keywords, the sibling lifts quoted abilities,
+/// and both compose onto the same execute chain.
 fn parse_enters_with_keyword_riders(text: &str) -> Vec<crate::types::keywords::Keyword> {
     let mut riders = Vec::new();
     // CR 614.1c: the rider is part of the SAME sentence as the enters-with
     // clause, so the scan is bounded to that sentence UP FRONT rather than
-    // per-candidate. Bounding only after a marker was found would still let the
+    // per-candidate, on the quote-aware boundary shared with the quoted scan:
+    // a quoted sibling rider's own period must not end the entering sentence.
+    // Bounding only after a marker was found would still let the
     // very first `take_until` reach into a later sentence when the entering
     // sentence carried no rider at all, granting an unrelated later
     // `" and with "` to this replacement. The production caller,
@@ -5413,17 +5417,42 @@ fn parse_enters_with_keyword_riders(text: &str) -> Vec<crate::types::keywords::K
 /// therefore the only one whose `" and with "` riders belong to this replacement
 /// (CR 614.1c).
 ///
+/// The SHARED sentence boundary for both rider scans (bare-keyword and
+/// quoted-ability). Quoted spans are masked on the length-preserving quote
+/// mask, so a granted ability's own period ("…Regenerate this creature.\"")
+/// does not end the entering sentence: without the mask the bare scan clips at
+/// the quoted period and a bare rider printed AFTER a quoted one ("…and with
+/// \"…creature.\" and with haste.") is silently dropped.
+///
 /// Clipping here is what makes the scan sentence-safe as a whole. Doing it only
 /// inside the per-rider candidate bound is not enough: that bound is applied
 /// after a marker has already been selected, so it cannot undo an initial search
 /// that already crossed a period.
+///
+/// Quoteless input keeps the naive clip: it is zero-alloc and preserves the
+/// exact historical boundary for the entire quoteless corpus. Only text that
+/// actually contains a quote pays for the mask.
 fn enters_with_rider_sentence(text: &str) -> &str {
-    terminated(
+    // Zero-alloc fast path: no double quote means the naive clip is already
+    // exact. A char scan, not string-literal dispatch, mirroring
+    // `strip_double_quoted_spans` and the mask's own fast path.
+    if text.find('"').is_none() {
+        return terminated(
+            take_until::<_, _, OracleError<'_>>("."),
+            tag::<_, _, OracleError<'_>>("."),
+        )
+        .parse(text)
+        .map_or(text, |(_, sentence)| sentence);
+    }
+    let masked = nom_primitives::mask_double_quoted_spans_preserving_len(text);
+    let masked: &str = &masked;
+    let clip_len = terminated(
         take_until::<_, _, OracleError<'_>>("."),
         tag::<_, _, OracleError<'_>>("."),
     )
-    .parse(text)
-    .map_or(text, |(_, sentence)| sentence)
+    .parse(masked)
+    .map_or(text.len(), |(rest, _)| masked.len() - rest.len());
+    text.get(..clip_len).unwrap_or(text)
 }
 
 /// The `" and with "` rider marker — both the scan anchor and one of the two
@@ -5482,28 +5511,262 @@ fn parse_enters_with_keyword_rider_candidate(input: &str) -> OracleResult<'_, &s
         .map_or_else(|| rest(input), Ok)
 }
 
-/// CR 611.2a: wrap `inner` so the entering permanent also gains `keywords` for
-/// as long as it remains on the battlefield.
+/// CR 614.1c + CR 611.2a: the `"and with "<ability>""` entry rider printed
+/// alongside an enters-with-counters clause by five lines across five cards —
+/// Anavolver's {B} and Degavolver's {1}{B} halves ("Pay 3 life: Regenerate this
+/// creature."), Necravolver's {W} and Rakavolver's {1}{W} halves ("Whenever this
+/// creature deals damage, you gain that much life."), and Prison Barricade
+/// ("This creature can attack as though it didn't have defender."). CR 614.1c
+/// makes the whole line ONE replacement effect, so this rider is a sibling of
+/// the counters and of the bare-keyword rider, not a separate ability.
 ///
-/// Modeled as a continuous `AddKeyword` grant on `SelfRef` with
-/// `Duration::UntilHostLeavesPlay` rather than a one-shot effect. The sibling
+/// The quoted sibling of [`parse_enters_with_keyword_riders`]: each span is
+/// classified by the single quoted-grant authority
+/// (`oracle_static::classify_quoted_inner`), which routes the three corpus
+/// bodies to `GrantAbility` (activated), `GrantTrigger` (triggered), and
+/// `AddStaticMode` (static) respectively. The caller composes the returned
+/// modifications onto the same execute chain as the counters, so they inherit
+/// the definition's gate (Invasion/Apocalypse kicker cycle).
+///
+/// Quote-aware throughout: the sentence clip is the quote-aware boundary
+/// shared with the bare-keyword scan ([`enters_with_rider_sentence`]), so a
+/// granted ability's own period ("…Regenerate this creature.\"") does not end
+/// the entering sentence. A marker with no closing quote, a span that
+/// classifies to nothing, or an unconsumed span inside the rider region fails
+/// closed (`EntersWithGap::Clause`) rather than dropping printed text — the
+/// counters-only claim was the defect this function exists to fix. "Classifies
+/// to nothing" includes a nonempty grant with an unbuildable body
+/// ([`quoted_rider_grant_is_unsupported`]), and an unmatched trailing opener
+/// is unread text even when the complete-span count matches.
+///
+/// Takes the ORIGINAL-case line: the inner text feeds the quoted-grant
+/// authority verbatim (mana symbols, descriptions), and both its self-reference
+/// forms ("this creature" in direct calls, `~` once `parse_oracle_text` has
+/// normalized) classify identically.
+///
+/// Only the rider region — at and after the first ` and with ` — is rider
+/// text this scan owns. A quoted span inside the counter clause itself
+/// (`Baron Von Count enters with a doom counter on "5."`) belongs to the
+/// counter readers; policing it here fails closed a line the counter clause
+/// reads fine. No rider marker, no riders: the scan returns before the span
+/// count so a non-rider span can never trip the guard.
+fn parse_enters_with_quoted_riders(
+    text: &str,
+) -> Result<Vec<ContinuousModification>, EntersWithGap> {
+    // Zero-alloc fast path: no double quote means no rider. A char scan, not
+    // string-literal dispatch, mirroring `strip_double_quoted_spans`.
+    if text.find('"').is_none() {
+        return Ok(Vec::new());
+    }
+    let sentence = enters_with_rider_sentence(text);
+    let region = match take_until::<_, _, OracleError<'_>>(ENTERS_WITH_KEYWORD_RIDER_MARKER)
+        .parse(sentence)
+    {
+        Ok((region, _)) => region,
+        Err(_) => return Ok(Vec::new()),
+    };
+    let mut modifications = Vec::new();
+    let mut consumed_spans = 0usize;
+    let mut remaining = region;
+    while let Ok((after_marker, _)) = preceded(
+        take_until::<_, _, OracleError<'_>>(ENTERS_WITH_QUOTED_RIDER_MARKER),
+        tag::<_, _, OracleError<'_>>(ENTERS_WITH_QUOTED_RIDER_MARKER),
+    )
+    .parse(remaining)
+    {
+        // CR 614.1c: the marker promises a quoted ability (its opening quote is
+        // part of the marker, already consumed); an unterminated span is unread
+        // rider text, not an absent rider.
+        let (after_span, inner) = terminated(
+            take_until::<_, _, OracleError<'_>>("\""),
+            char::<_, OracleError<'_>>('"'),
+        )
+        .parse(after_marker)
+        .map_err(|_| EntersWithGap::Clause)?;
+        let classified = crate::parser::oracle_static::classify_quoted_inner(inner.trim());
+        // CR 614.1c: "unreadable" includes a NONEMPTY classification whose
+        // granted body the classifier could not build. The GrantAbility
+        // fallback wraps whatever `parse_quoted_ability` produced — including
+        // an `Unimplemented` body — and a GrantTrigger may carry an
+        // unimplemented (or missing) execute chain. Coverage detects the
+        // nested gap, but the rider check must not accept the span first:
+        // accepting it publishes the line as supported while the grant is
+        // silently lost.
+        let unsupported =
+            classified.is_empty() || classified.iter().any(quoted_rider_grant_is_unsupported);
+        if unsupported {
+            return Err(EntersWithGap::Clause);
+        }
+        modifications.extend(classified);
+        consumed_spans += 1;
+        remaining = after_span;
+    }
+    // CR 614.1c: every quoted span in the RIDER REGION is rider text or a
+    // gap — a span the marker loop did not consume would otherwise be dropped
+    // while the line reads supported. An unmatched trailing opener is unread
+    // text too, and the complete-span count cannot see it (it contributes
+    // zero), so it is checked separately. Spans before the first rider marker
+    // are counter-clause text (Baron Von Count's "5."), owned by other readers.
+    let (span_count, has_unmatched_opener) = count_double_quoted_spans(region);
+    if span_count != consumed_spans || has_unmatched_opener {
+        return Err(EntersWithGap::Clause);
+    }
+    Ok(modifications)
+}
+
+/// True when a classified quoted-rider modification carries a granted body
+/// the classifier could not build — the fail-closed half of the rider
+/// acceptance check. Only the two executable grants are validated, against
+/// the single unimplemented authority (`oracle::has_unimplemented`); every
+/// other variant carries no executable body and passes. A trigger grant with
+/// NO execute chain is unsupported too: trigger lowering leaves `execute`
+/// empty exactly when the effect half did not parse, so there is no body to
+/// check and nothing honest to grant.
+///
+/// The accepted variants are listed exhaustively, with NO wildcard arm: a
+/// future `ContinuousModification` variant must make a deliberate choice here
+/// (and fail compilation until it does) instead of silently passing.
+fn quoted_rider_grant_is_unsupported(modification: &ContinuousModification) -> bool {
+    match modification {
+        ContinuousModification::GrantAbility { definition } => {
+            crate::parser::oracle::has_unimplemented(definition)
+        }
+        ContinuousModification::GrantTrigger { trigger } => trigger
+            .execute
+            .as_deref()
+            .is_none_or(crate::parser::oracle::has_unimplemented),
+        // Copy, name, text, power, and toughness characteristics.
+        ContinuousModification::CopyValues { .. }
+        | ContinuousModification::CopyChosen
+        | ContinuousModification::RemoveManaCost
+        | ContinuousModification::SetName { .. }
+        | ContinuousModification::SetTextName { .. }
+        | ContinuousModification::SubstituteTextWord { .. }
+        | ContinuousModification::SetChosenName
+        | ContinuousModification::AddPower { .. }
+        | ContinuousModification::AddToughness { .. }
+        | ContinuousModification::SetPower { .. }
+        | ContinuousModification::SetToughness { .. }
+        | ContinuousModification::SetDynamicPower { .. }
+        | ContinuousModification::SetDynamicToughness { .. }
+        | ContinuousModification::SetPowerDynamic { .. }
+        | ContinuousModification::SetToughnessDynamic { .. }
+        | ContinuousModification::AddDynamicPower { .. }
+        | ContinuousModification::AddDynamicToughness { .. }
+        | ContinuousModification::SwitchPowerToughness => false,
+        // Keywords.
+        ContinuousModification::AddKeyword { .. }
+        | ContinuousModification::RemoveKeyword { .. }
+        | ContinuousModification::AddDynamicKeyword { .. }
+        | ContinuousModification::AddKeywordWithDerivedCost { .. }
+        | ContinuousModification::RemoveChosenKeyword
+        | ContinuousModification::AddChosenKeyword => false,
+        // Types and subtypes.
+        ContinuousModification::AddType { .. }
+        | ContinuousModification::RemoveType { .. }
+        | ContinuousModification::AddSubtype { .. }
+        | ContinuousModification::RemoveSubtype { .. }
+        | ContinuousModification::SetCardTypes { .. }
+        | ContinuousModification::RemoveAllSubtypes { .. }
+        | ContinuousModification::AddAllCreatureTypes
+        | ContinuousModification::AddAllBasicLandTypes
+        | ContinuousModification::AddAllLandTypes
+        | ContinuousModification::AddChosenSubtype { .. }
+        | ContinuousModification::AddSupertype { .. }
+        | ContinuousModification::RemoveSupertype { .. } => false,
+        // Colors.
+        ContinuousModification::AddChosenColor { .. }
+        | ContinuousModification::SetColor { .. }
+        | ContinuousModification::AddColor { .. } => false,
+        // Non-executable grants, modes, and retention markers.
+        ContinuousModification::GrantAllActivatedAbilitiesOf { .. }
+        | ContinuousModification::GrantAllTriggeredAbilitiesOf { .. }
+        | ContinuousModification::GrantReplacement { .. }
+        | ContinuousModification::GrantStaticAbility { .. }
+        | ContinuousModification::AddStaticMode { .. }
+        | ContinuousModification::RemoveAllAbilities
+        | ContinuousModification::RetainPrintedTriggerFromSource { .. }
+        | ContinuousModification::RetainPrintedAbilityFromSource { .. }
+        | ContinuousModification::RetainAllOtherAbilitiesFromSource => false,
+        // Combat, control, lands, and counters.
+        ContinuousModification::AssignDamageFromToughness
+        | ContinuousModification::AssignDamageAsThoughUnblocked
+        | ContinuousModification::AssignNoCombatDamage
+        | ContinuousModification::ChangeController
+        | ContinuousModification::SetBasicLandType { .. }
+        | ContinuousModification::SetChosenBasicLandType
+        | ContinuousModification::AddCounterOnEnter { .. }
+        | ContinuousModification::SetStartingLoyalty { .. } => false,
+    }
+}
+
+/// Complete `"..."` pairs in `text`, plus whether a trailing opening quote
+/// has no close — read with nom combinators so the result agrees with
+/// [`parse_enters_with_quoted_riders`] about what a span is. The unmatched
+/// flag keeps a malformed trailing opener from hiding behind the
+/// complete-span count (it contributes zero there): an opener with no close
+/// is unread rider text, not a valid end of input. `strip_double_quoted_spans`
+/// likewise does not treat it as a span — but unlike that stripper, this
+/// guard must FAIL on it rather than skip it.
+fn count_double_quoted_spans(text: &str) -> (usize, bool) {
+    let mut count = 0usize;
+    let mut unmatched_opener = false;
+    let mut remaining = text;
+    while let Ok((after_open, _)) = preceded(
+        take_until::<_, _, OracleError<'_>>("\""),
+        char::<_, OracleError<'_>>('"'),
+    )
+    .parse(remaining)
+    {
+        match preceded(
+            take_until::<_, _, OracleError<'_>>("\""),
+            char::<_, OracleError<'_>>('"'),
+        )
+        .parse(after_open)
+        {
+            Ok((after_close, _)) => {
+                count += 1;
+                remaining = after_close;
+            }
+            Err(_) => {
+                unmatched_opener = true;
+                break;
+            }
+        }
+    }
+    (count, unmatched_opener)
+}
+
+/// The `" and with "` rider marker with its opening quote — the quoted-rider
+/// anchor, so a bare-keyword rider never enters the quoted scan.
+const ENTERS_WITH_QUOTED_RIDER_MARKER: &str = " and with \"";
+
+/// CR 614.1c + CR 611.2a: wrap `inner` so the entering permanent also gains
+/// the entry riders — bare `keywords` and quoted-ability `quoted` — for as
+/// long as it remains on the battlefield.
+///
+/// Modeled as continuous grants on `SelfRef` with
+/// `Duration::UntilHostLeavesPlay` rather than one-shot effects. The sibling
 /// `"enters tapped"` rider composes a one-shot `SetTapState` because tapping
-/// happens once as the object enters; a granted keyword is not an event but a
-/// characteristic the permanent must keep, and it must end when the object
-/// leaves the battlefield (CR 611.2a) so the new object it becomes elsewhere
-/// does not inherit it.
+/// happens once as the object enters; a granted keyword or ability is not an
+/// event but a characteristic the permanent must keep, and it must end when
+/// the object leaves the battlefield (CR 611.2a) so the new object it becomes
+/// elsewhere does not inherit it. The quoted modifications arrive classified
+/// by the single quoted-grant authority (`GrantAbility`, `GrantTrigger`, or a
+/// static mode), so they ride the same continuous wrapper as the keywords.
 ///
 /// The gate is inherited for free: this rides the SAME `ReplacementDefinition`
 /// as the counters, whose condition already carries the kicker requirement
-/// (CR 702.33d), so the grant applies exactly when the counters do.
-fn compose_enters_with_keyword_grant(
+/// (CR 702.33d), so the grants apply exactly when the counters do.
+fn compose_enters_with_entry_grants(
     inner: AbilityDefinition,
     keywords: Vec<crate::types::keywords::Keyword>,
+    quoted: Vec<ContinuousModification>,
 ) -> AbilityDefinition {
-    if keywords.is_empty() {
+    if keywords.is_empty() && quoted.is_empty() {
         return inner;
     }
-    let statics = keywords
+    let mut statics: Vec<StaticDefinition> = keywords
         .into_iter()
         .map(|keyword| {
             StaticDefinition::continuous()
@@ -5511,6 +5774,13 @@ fn compose_enters_with_keyword_grant(
                 .modifications(vec![ContinuousModification::AddKeyword { keyword }])
         })
         .collect();
+    if !quoted.is_empty() {
+        statics.push(
+            StaticDefinition::continuous()
+                .affected(TargetFilter::SelfRef)
+                .modifications(quoted),
+        );
+    }
     AbilityDefinition::new(
         AbilityKind::Spell,
         Effect::GenericEffect {
@@ -16343,6 +16613,8 @@ mod tests {
     };
     use crate::types::card_type::{CoreType, Supertype};
     use crate::types::keywords::Keyword;
+    use crate::types::mana::ManaCostShard;
+    use crate::types::statics::StaticMode;
 
     #[test]
     fn damage_target_chosen_player_marker() {
@@ -24111,20 +24383,35 @@ mod tests {
         );
     }
 
-    /// CR 614.1c: once a leading keyword chain makes a line claimable, a quoted
-    /// granted ability in the payload is a printed part of the replacement the
-    /// parser cannot carry, so the clause fails closed. Twin: the same line
-    /// without the quote is supported.
+    /// CR 614.1c + CR 611.2a: a leading keyword chain AND a quoted rider compose
+    /// onto the same replacement — the line that used to fail closed on its
+    /// quoted half (no printed card pairs the two; the quoted class is
+    /// trailing-only in the corpus). Twin: the same line without the quote.
     #[test]
-    fn leading_keyword_rider_with_a_quoted_rider_fails_closed() {
+    fn leading_keyword_rider_with_a_quoted_rider_carries_both() {
         let quoted = "If this creature was kicked, it enters with flying and with a +1/+1 counter on it and with \"Pay 3 life: Regenerate this creature.\"";
+        let def = parse_replacement_line(quoted, "Synthetic Quoted Rider")
+            .expect("leading keywords and a quoted rider compose");
         assert_eq!(
-            parse_replacement_line(quoted, "Synthetic Quoted Rider"),
-            None
+            put_counters_in_chain(&def),
+            vec![(CounterType::Plus1Plus1, QuantityExpr::Fixed { value: 1 })]
         );
-        assert_eq!(
-            enters_with_fails_closed(quoted, "Synthetic Quoted Rider"),
-            Some(EntersWithGap::Clause)
+        let grants = quoted_entry_grants(&def);
+        assert_eq!(grants.len(), 2, "got {grants:?}");
+        assert!(
+            matches!(
+                grants[0],
+                ContinuousModification::AddKeyword {
+                    keyword: Keyword::Flying
+                }
+            ),
+            "got {:?}",
+            grants[0]
+        );
+        assert!(
+            matches!(grants[1], ContinuousModification::GrantAbility { .. }),
+            "got {:?}",
+            grants[1]
         );
 
         let unquoted =
@@ -24734,6 +25021,48 @@ mod tests {
         assert_eq!(
             enters_with_fails_closed(two_sentences, "Synthetic No First Sentence Rider"),
             Some(EntersWithGap::Clause)
+        );
+    }
+
+    /// CR 614.1c: a bare-keyword rider printed AFTER a quoted sibling rider in
+    /// the same sentence must still lift. The quoted ability's own period
+    /// ("…Regenerate this creature.\"") is not the sentence end; a naive
+    /// first-period clip ends the scan inside the quote and `haste` is never
+    /// reached. No printed card chains a quoted rider with a bare one, so the
+    /// frame is synthetic — but both halves are verbatim printed rider shapes
+    /// (Anavolver's regeneration grant, the kicker cycle's bare keywords).
+    #[test]
+    fn enters_with_keyword_rider_after_a_quoted_rider_is_kept() {
+        // Scanner level: the quote's period must not end the entering sentence.
+        assert_eq!(
+            parse_enters_with_keyword_riders(
+                "it enters with a +1/+1 counter on it and with \"Pay 3 life: Regenerate this creature.\" and with haste."
+            ),
+            vec![Keyword::Haste],
+            "a bare rider after a quoted sibling must survive the sentence clip"
+        );
+
+        // Composed level: both riders land on the one kicker-gated replacement.
+        let def = parse_replacement_line(
+            "If this creature was kicked, it enters with a +1/+1 counter on it and with \"Pay 3 life: Regenerate this creature.\" and with haste.",
+            "Synthetic Quoted Then Bare Rider",
+        )
+        .expect("the composed line is claimed");
+        let execute = def.execute.as_deref().expect("execute ability");
+        assert_eq!(
+            collect_granted_keywords(execute),
+            vec![Keyword::Haste],
+            "the bare half grants Haste"
+        );
+        assert!(
+            quoted_entry_grants(&def)
+                .iter()
+                .any(|grant| matches!(grant, ContinuousModification::GrantAbility { .. })),
+            "the quoted half still grants the regeneration ability"
+        );
+        assert!(
+            find_put_counter(execute).is_some(),
+            "the counters must still be placed"
         );
     }
 
@@ -33472,29 +33801,476 @@ mod tests {
         assert_eq!(plain.valid_card, Some(TargetFilter::SelfRef));
     }
 
-    /// Pending the quoted-rider fix. Anavolver's {B} half prints a counter AND a quoted granted ability ("Pay 3 life:
-    /// Regenerate this creature."); the parser keeps only the counter, a known
-    /// pre-existing defect tracked outside #9658. This pin asserts only that the
-    /// quote-masked sentence count keeps the line a single sentence (so it is
-    /// not reclassified by this change); it does NOT assert the reading correct.
-    /// Pending the quoted-rider follow-up: Anavolver, Degavolver, Necravolver,
-    /// Rakavolver and Prison Barricade keep only their counters and drop the
-    /// quoted granted ability (see the 'quoted rider' note near the keyword-rider
-    /// scanner).
+    /// Collect the entry-grant modifications (`AddKeyword` riders and quoted-ability
+    /// riders) composed onto an enters-with execute chain.
+    fn quoted_entry_grants(def: &ReplacementDefinition) -> Vec<ContinuousModification> {
+        let mut grants = Vec::new();
+        let mut cursor = def.execute.as_deref();
+        while let Some(node) = cursor {
+            if let Effect::GenericEffect {
+                static_abilities, ..
+            } = &*node.effect
+            {
+                for static_ability in static_abilities {
+                    grants.extend(static_ability.modifications.iter().cloned());
+                }
+            }
+            cursor = node.sub_ability.as_deref();
+        }
+        grants
+    }
+
+    /// CR 614.1c + CR 611.2a: Anavolver's {B} half prints a counter AND a quoted
+    /// granted ability ("Pay 3 life: Regenerate this creature."); both ride the
+    /// one kicker-gated replacement. Replaces the counters-only pin: reverting
+    /// the quoted-rider composition leaves a bare PutCounter head and fails the
+    /// grant assertion while the counter reach-guard still passes.
     #[test]
-    fn anavolver_quoted_rider_unchanged_from_base_pending_quoted_rider_fix() {
+    fn anavolver_quoted_rider_grants_regenerate_ability() {
         let def = parse_replacement_line(
             "If this creature was kicked with its {B} kicker, it enters with a +1/+1 counter on it and with \"Pay 3 life: Regenerate this creature.\"",
             "Anavolver",
         )
         .expect("the line is still claimed");
+        // Reach-guard: the counter half still lands, so a failing grant
+        // assertion below means the rider specifically was dropped.
+        assert_eq!(
+            put_counters_in_chain(&def),
+            vec![(CounterType::Plus1Plus1, QuantityExpr::Fixed { value: 1 })]
+        );
+        // Line level: the gate carries the printed kicker cost; First/Second
+        // variant resolution is a full-card synthesis step (it needs the kicker
+        // line), pinned end-to-end by the runtime tests.
+        assert!(
+            matches!(
+                def.condition,
+                Some(ReplacementCondition::CastViaKicker {
+                    variant: None,
+                    kicker_cost: Some(ManaCost::Cost { .. }),
+                })
+            ),
+            "the gate must carry the {{B}} kicker cost, got {:?}",
+            def.condition
+        );
+        // The grant wrapper heads the execute chain: one SelfRef static carrying
+        // the classified quoted ability, lasting until the host leaves play.
+        let head = def.execute.as_deref().expect("execute");
+        let Effect::GenericEffect {
+            static_abilities,
+            duration,
+            target,
+            ..
+        } = &*head.effect
+        else {
+            panic!("expected the entry-grant wrapper, got {:?}", head.effect);
+        };
+        assert_eq!(*duration, Some(Duration::UntilHostLeavesPlay));
+        assert_eq!(*target, Some(TargetFilter::SelfRef));
+        assert_eq!(static_abilities.len(), 1);
+        assert_eq!(static_abilities[0].affected, Some(TargetFilter::SelfRef));
+        let [ContinuousModification::GrantAbility { definition }] =
+            static_abilities[0].modifications.as_slice()
+        else {
+            panic!(
+                "expected one granted activated ability, got {:?}",
+                static_abilities[0].modifications
+            );
+        };
+        assert_eq!(definition.kind, AbilityKind::Activated);
+        assert!(
+            matches!(
+                &*definition.effect,
+                Effect::Regenerate {
+                    target: TargetFilter::SelfRef
+                }
+            ),
+            "got {:?}",
+            definition.effect
+        );
+        assert!(
+            matches!(
+                &definition.cost,
+                Some(AbilityCost::PayLife {
+                    amount: QuantityExpr::Fixed { value: 3 }
+                })
+            ),
+            "got {:?}",
+            definition.cost
+        );
+        assert_eq!(
+            definition.description.as_deref(),
+            Some("Pay 3 life: Regenerate this creature.")
+        );
+        // Tail: the counter the reach-guard counted above.
         assert!(matches!(
-            &*def.execute.as_deref().unwrap().effect,
-            Effect::PutCounter {
-                counter_type: CounterType::Plus1Plus1,
-                ..
+            &*head.sub_ability.as_deref().expect("counter tail").effect,
+            Effect::PutCounter { .. }
+        ));
+    }
+
+    /// CR 614.1c: all five quoted-rider lines carry their counters AND their
+    /// granted ability. Verbatim Oracle lines (Scryfall); each row names the
+    /// expected counter count, kicker cost, and grant shape. Line level: the
+    /// gate carries the printed kicker cost with no resolved variant —
+    /// First/Second resolution is a full-card synthesis step, pinned end-to-end
+    /// by the runtime tests.
+    #[test]
+    fn quoted_rider_lines_carry_counters_and_grants() {
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        enum ExpectedGrant {
+            Regenerate,
+            DamageLifegain,
+            CanAttack,
+        }
+        for (card, line, count, cost, expected) in [
+            (
+                "Anavolver",
+                "If this creature was kicked with its {B} kicker, it enters with a +1/+1 counter on it and with \"Pay 3 life: Regenerate this creature.\"",
+                1,
+                Some(ManaCost::Cost {
+                    generic: 0,
+                    shards: vec![ManaCostShard::Black],
+                }),
+                ExpectedGrant::Regenerate,
+            ),
+            (
+                "Degavolver",
+                "If this creature was kicked with its {1}{B} kicker, it enters with two +1/+1 counters on it and with \"Pay 3 life: Regenerate this creature.\"",
+                2,
+                Some(ManaCost::Cost {
+                    generic: 1,
+                    shards: vec![ManaCostShard::Black],
+                }),
+                ExpectedGrant::Regenerate,
+            ),
+            (
+                "Necravolver",
+                "If this creature was kicked with its {W} kicker, it enters with a +1/+1 counter on it and with \"Whenever this creature deals damage, you gain that much life.\"",
+                1,
+                Some(ManaCost::Cost {
+                    generic: 0,
+                    shards: vec![ManaCostShard::White],
+                }),
+                ExpectedGrant::DamageLifegain,
+            ),
+            (
+                "Rakavolver",
+                "If this creature was kicked with its {1}{W} kicker, it enters with two +1/+1 counters on it and with \"Whenever this creature deals damage, you gain that much life.\"",
+                2,
+                Some(ManaCost::Cost {
+                    generic: 1,
+                    shards: vec![ManaCostShard::White],
+                }),
+                ExpectedGrant::DamageLifegain,
+            ),
+            (
+                "Prison Barricade",
+                "If this creature was kicked, it enters with a +1/+1 counter on it and with \"This creature can attack as though it didn't have defender.\"",
+                1,
+                None,
+                ExpectedGrant::CanAttack,
+            ),
+        ] {
+            let def = parse_replacement_line(line, card)
+                .unwrap_or_else(|| panic!("{card}: the line is claimed"));
+            assert_eq!(
+                put_counters_in_chain(&def),
+                vec![(
+                    CounterType::Plus1Plus1,
+                    QuantityExpr::Fixed { value: count }
+                )],
+                "{card}: counter half"
+            );
+            assert!(
+                matches!(
+                    def.condition,
+                    Some(ReplacementCondition::CastViaKicker {
+                        variant: None,
+                        kicker_cost: ref parsed,
+                    }) if parsed == &cost
+                ),
+                "{card}: kicker gate, got {:?}",
+                def.condition
+            );
+            let grants = quoted_entry_grants(&def);
+            assert_eq!(grants.len(), 1, "{card}: one quoted grant, got {grants:?}");
+            match (&grants[0], expected) {
+                (
+                    ContinuousModification::GrantAbility { definition },
+                    ExpectedGrant::Regenerate,
+                ) => {
+                    assert_eq!(definition.kind, AbilityKind::Activated);
+                    assert!(
+                        matches!(
+                            &*definition.effect,
+                            Effect::Regenerate {
+                                target: TargetFilter::SelfRef
+                            }
+                        ),
+                        "{card}: got {:?}",
+                        definition.effect
+                    );
+                    assert!(
+                        matches!(
+                            &definition.cost,
+                            Some(AbilityCost::PayLife {
+                                amount: QuantityExpr::Fixed { value: 3 }
+                            })
+                        ),
+                        "{card}: got {:?}",
+                        definition.cost
+                    );
+                }
+                (
+                    ContinuousModification::GrantTrigger { trigger },
+                    ExpectedGrant::DamageLifegain,
+                ) => {
+                    assert_eq!(trigger.mode, TriggerMode::DamageDone);
+                    assert_eq!(trigger.valid_source, Some(TargetFilter::SelfRef));
+                    let execute = trigger.execute.as_deref().expect("execute");
+                    assert!(
+                        matches!(
+                            &*execute.effect,
+                            Effect::GainLife {
+                                amount: QuantityExpr::Ref {
+                                    qty: QuantityRef::EventContextAmount
+                                },
+                                ..
+                            }
+                        ),
+                        "{card}: got {:?}",
+                        execute.effect
+                    );
+                }
+                (
+                    ContinuousModification::AddStaticMode { mode },
+                    ExpectedGrant::CanAttack,
+                ) => {
+                    assert_eq!(*mode, StaticMode::CanAttackWithDefender);
+                }
+                (other, _) => panic!("{card}: wrong grant shape, got {other:?}"),
+            }
+        }
+    }
+
+    /// The normalized (`~`) self-reference form classifies identically: when
+    /// invoked via `parse_oracle_text` the quoted body already reads "Regenerate
+    /// ~", and the grant must still bind SelfRef.
+    #[test]
+    fn quoted_rider_normalized_self_reference_form() {
+        let def = parse_replacement_line(
+            "If ~ was kicked with its {B} kicker, it enters with a +1/+1 counter on it and with \"Pay 3 life: Regenerate ~.\"",
+            "Anavolver",
+        )
+        .expect("the normalized line is claimed");
+        let grants = quoted_entry_grants(&def);
+        assert_eq!(grants.len(), 1, "got {grants:?}");
+        let ContinuousModification::GrantAbility { definition } = &grants[0] else {
+            panic!(
+                "expected the granted regenerate ability, got {:?}",
+                grants[0]
+            );
+        };
+        assert!(matches!(
+            &*definition.effect,
+            Effect::Regenerate {
+                target: TargetFilter::SelfRef
             }
         ));
+    }
+
+    /// CR 614.1c: a quoted rider the extractor cannot read fails the clause
+    /// closed — the counters-only claim must not come back through a malformed
+    /// span, an empty span, a stray span inside the rider region, or an
+    /// unmatched trailing opener after a valid grant.
+    #[test]
+    fn enters_with_quoted_rider_unread_fails_closed() {
+        // `~`-normalized: the typed outcome takes normalized input, like every
+        // other direct caller (`parse_replacement_line` accepts the same form —
+        // normalization is idempotent on `~`).
+        for line in [
+            // Unterminated span after the marker.
+            "If ~ was kicked, it enters with a +1/+1 counter on it and with \"Pay 3 life: Regenerate ~.",
+            // Empty span classifies to nothing.
+            "If ~ was kicked, it enters with a +1/+1 counter on it and with \"\".",
+            // A stray span inside the rider region the marker loop never consumes.
+            "If ~ was kicked, it enters with a +1/+1 counter on it and with \"Pay 3 life: Regenerate ~.\" \"stray words\".",
+            // An unmatched trailing opener after a valid grant: the
+            // complete-span count still matches the consumed count, so only
+            // the unmatched-opener check fails it closed.
+            "If ~ was kicked, it enters with a +1/+1 counter on it and with \"Pay 3 life: Regenerate ~.\" \"stray text.",
+        ] {
+            assert_eq!(
+                enters_with_counters_outcome(&line.to_lowercase(), line).err(),
+                Some(EntersWithDecline::FailsClosed(EntersWithGap::Clause)),
+                "{line:?}"
+            );
+            assert!(
+                parse_replacement_line(line, "Test Creature").is_none(),
+                "{line:?}: the Clause decline must be preserved at the replacement boundary"
+            );
+        }
+        // Reach-guards: the decline is about the QUOTES, not the frame — the
+        // same frames without quotes are claimed.
+        assert!(parse_replacement_line(
+            "If this creature was kicked, it enters with a +1/+1 counter on it.",
+            "Test Creature"
+        )
+        .is_some());
+        assert!(parse_replacement_line(
+            "This creature enters with a +1/+1 counter on it.",
+            "Test Creature"
+        )
+        .is_some());
+    }
+
+    /// CR 614.1c: a quoted rider that classifies NONEMPTY but whose granted
+    /// body is unimplemented fails the clause closed — the acceptance check
+    /// must not publish the line as supported while the grant is silently
+    /// lost. Pins both grant arms (activated fallback, triggered) at the
+    /// classifier level, then at the scan level, with supported-body
+    /// reach-guards proving the frames themselves still lift.
+    #[test]
+    fn enters_with_quoted_rider_unsupported_body_fails_closed() {
+        // Classifier level: both bodies classify nonempty, and both granted
+        // bodies are unbuildable — the exact shape the scan must reject.
+        let activated =
+            crate::parser::oracle_static::classify_quoted_inner("Blah blah xyzzy nonsense.");
+        assert_eq!(activated.len(), 1, "got {activated:?}");
+        let ContinuousModification::GrantAbility { definition } = &activated[0] else {
+            panic!("expected the GrantAbility fallback, got {:?}", activated[0]);
+        };
+        assert!(
+            crate::parser::oracle::has_unimplemented(definition),
+            "the control body must be unimplemented"
+        );
+
+        let triggered = crate::parser::oracle_static::classify_quoted_inner(
+            "Whenever this creature deals damage, xyzzy nonsense.",
+        );
+        assert_eq!(triggered.len(), 1, "got {triggered:?}");
+        let ContinuousModification::GrantTrigger { trigger } = &triggered[0] else {
+            panic!("expected GrantTrigger, got {:?}", triggered[0]);
+        };
+        assert!(
+            trigger
+                .execute
+                .as_deref()
+                .is_none_or(crate::parser::oracle::has_unimplemented),
+            "the control trigger must be unimplemented or missing its execute"
+        );
+
+        // Scan level: both frames fail closed.
+        for line in [
+            "it enters with a +1/+1 counter on it and with \"Blah blah xyzzy nonsense.\".",
+            "it enters with a +1/+1 counter on it and with \"Whenever this creature deals damage, xyzzy nonsense.\".",
+        ] {
+            assert_eq!(
+                parse_enters_with_quoted_riders(line).err(),
+                Some(EntersWithGap::Clause),
+                "{line:?}"
+            );
+        }
+
+        // Reach-guards: the same frames with supported bodies still lift.
+        assert_eq!(
+            parse_enters_with_quoted_riders(
+                "it enters with a +1/+1 counter on it and with \"Pay 3 life: Regenerate this creature.\"."
+            )
+            .expect("supported activated body lifts")
+            .len(),
+            1
+        );
+        assert_eq!(
+            parse_enters_with_quoted_riders(
+                "it enters with a +1/+1 counter on it and with \"Whenever this creature deals damage, you gain that much life.\"."
+            )
+            .expect("supported trigger body lifts")
+            .len(),
+            1
+        );
+    }
+
+    /// CR 614.1c: a quoted span inside the counter clause is not a rider.
+    /// Baron Von Count's verbatim line carries `"5."` (the doom counter's
+    /// numeral) with no rider marker; the quoted scan must return no riders
+    /// and leave the line claimed with its doom counter — the span-count
+    /// guard's first version failed this line closed (PR #10722 regression).
+    #[test]
+    fn baron_von_count_counter_clause_quote_is_not_a_rider() {
+        assert_eq!(
+            parse_enters_with_quoted_riders("Baron Von Count enters with a doom counter on \"5.\"")
+                .expect("no rider marker, no riders"),
+            Vec::new()
+        );
+        let def = parse_replacement_line(
+            "Baron Von Count enters with a doom counter on \"5.\"",
+            "Baron Von Count",
+        )
+        .expect("the counter-clause quote must not fail the line closed");
+        assert_eq!(
+            put_counters_in_chain(&def),
+            vec![(
+                CounterType::Generic("doom".to_string()),
+                QuantityExpr::Fixed { value: 1 }
+            )],
+            "doom counter half"
+        );
+        assert!(
+            quoted_entry_grants(&def).is_empty(),
+            "no riders: got {:?}",
+            quoted_entry_grants(&def)
+        );
+    }
+
+    /// Helper level: the quoted scan lifts every ` and with "<ability>"` rider
+    /// in the entering sentence and nothing else. No printed card chains two
+    /// quoted riders; the chain row asserts the supported shape, mirroring the
+    /// bare-keyword chain test.
+    #[test]
+    fn quoted_rider_scan_lifts_riders_in_sentence_only() {
+        // Single rider, original case preserved for the grant authority.
+        let single = parse_enters_with_quoted_riders(
+            "it enters with a +1/+1 counter on it and with \"Pay 3 life: Regenerate this creature.\"",
+        )
+        .expect("one rider");
+        assert_eq!(single.len(), 1);
+        assert!(matches!(
+            single[0],
+            ContinuousModification::GrantAbility { .. }
+        ));
+
+        // Chained riders both lift, in printed order.
+        let chained = parse_enters_with_quoted_riders(
+            "it enters with a +1/+1 counter on it and with \"Pay 3 life: Regenerate this creature.\" and with \"Whenever ~ deals damage, you gain that much life.\"",
+        )
+        .expect("two riders");
+        assert_eq!(chained.len(), 2);
+        assert!(matches!(
+            chained[0],
+            ContinuousModification::GrantAbility { .. }
+        ));
+        assert!(matches!(
+            chained[1],
+            ContinuousModification::GrantTrigger { .. }
+        ));
+
+        // A later sentence's rider is not lifted...
+        assert_eq!(
+            parse_enters_with_quoted_riders(
+                "it enters with two +1/+1 counters on it. exile it and with \"Pay 3 life: Regenerate this creature.\""
+            )
+            .expect("no rider in the entering sentence"),
+            Vec::new()
+        );
+        // ...nor is a bare-keyword rider (the sibling scan's class).
+        assert_eq!(
+            parse_enters_with_quoted_riders(
+                "it enters with three +1/+1 counters on it and with trample."
+            )
+            .expect("bare keywords are not quoted spans"),
+            Vec::new()
+        );
     }
 
     // ── "As ~ enters, <one-shot>" (CR 614.1c + CR 603.6d) ──────────────────
