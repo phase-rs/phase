@@ -4628,7 +4628,11 @@ impl LogicalZoneChangeGroup {
     /// group's entrants are its retained moves to the battlefield from another zone
     /// (`from: Some(_)`). An object created on the battlefield while the group delivers
     /// (`from: None`: CR 111.1, a token another effect puts onto the battlefield) is not one of
-    /// them. Fewer than two entrants stamp nothing.
+    /// them. Fewer than two entrants stamp nothing. Known gap: membership is read from the
+    /// occurrence shape, so a card that a replacement effect moves onto the battlefield while the
+    /// group delivers would be stamped as a co-entrant. No printed card reaches it: the
+    /// battlefield-destination replacements (Obstinate Baloth's, Out of the Tombs') replace a
+    /// discard or a draw, which no entry's delivery performs.
     pub fn stamp_battlefield_entries(&mut self) {
         let mut entrant_ids: Vec<ObjectId> = Vec::new();
         for occurrence in &self.all_origin_occurrences {
