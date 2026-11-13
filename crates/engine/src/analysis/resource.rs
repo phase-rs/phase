@@ -535,9 +535,9 @@ impl LoopDetectCost {
     /// Every comparison in the four counted populations, each of which projects both sides
     /// as a pair. That is what makes
     /// `projected_clones <= 2 * resource_compares()` a bound over this closed population —
-    /// a bound and not a parity, because `SharedCurrentFrames::new` projects twice per
+    /// a bound and not a parity, because `SharedCurrentFrames::new` projects once per
     /// ring-walk entry and ticks no compare: the bound needs a ring long enough to pay for
-    /// those two as well, and a short drive breaches it.
+    /// that one as well, and a short drive can breach it.
     pub fn resource_compares(&self) -> u32 {
         self.compares_equal_modulo_resources
             + self.compares_cover_modulo_growth_scoped
