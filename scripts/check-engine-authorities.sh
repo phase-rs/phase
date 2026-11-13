@@ -82,23 +82,14 @@ FAIL=0
 report_keyword=""
 
 filter_allow_annotation() {
-    local file="$1"
-    local candidates="$2"
-    local added=""
-    while IFS= read -r diff_line; do
-        [ -z "$diff_line" ] && continue
-        local text="${diff_line#*+}"
-        local ln
-        ln=$(grep -nFx "$text" "$file" 2>/dev/null | head -1 | cut -d: -f1)
-        if [ -n "$ln" ] && [ "$ln" -gt 1 ]; then
-            local prev
-            prev=$(sed -n "$((ln-1))p" "$file")
-            if echo "$prev" | grep -q 'allow-raw-authority'; then
-                continue
-            fi
-        fi
-        if echo "$text" | grep -q 'allow-raw-authority'; then
-            continue
+    local file="$1" candidates="$2" added="" rec ln text prev
+    while IFS= read -r rec; do
+        [ -z "$rec" ] && continue
+        ln="${rec%%$'\t'*}"; text="${rec#*$'\t'}"
+        case "$text" in *allow-raw-authority*) continue ;; esac
+        if [ "$ln" -gt 1 ]; then
+            prev=$(added_lines_text_at "$file" "$((ln - 1))")
+            case "$prev" in *allow-raw-authority*) continue ;; esac
         fi
         added="${added}${text}
 "
@@ -116,12 +107,12 @@ fi
 while IFS= read -r file; do
     [ -f "$file" ] || continue
 
-    diff_added=$(added_lines_for "$file" | cut -f2- | sed 's/^/+/' | grep -E '^\+[^+]' || true)
-    if [ -z "$diff_added" ]; then
+    kept=$(added_lines_for "$file" | grep -E $'^[0-9]+\t[^+]' || true)
+    if [ -z "$kept" ]; then
         continue
     fi
 
-    keyword_hits=$(echo "$diff_added" | grep -Ev 'allow-raw-authority' | grep -E "$FORBIDDEN_KEYWORD_QUERY" || true)
+    keyword_hits=$(added_lines_grep "$kept" "$FORBIDDEN_KEYWORD_QUERY" || true)
     keyword_clean=$(filter_allow_annotation "$file" "$keyword_hits")
     if [ -n "$keyword_clean" ]; then
         report_keyword="${report_keyword}

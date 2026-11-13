@@ -248,6 +248,44 @@ run_gate
 expect_listed 'parser: a line planted in phase-parser lib.rs is not listed' "  crates/phase-parser/src/parser/oracle.rs:
     $P_PLANTED"
 
+# The allow-noncombinator lookup reads each candidate's own recorded line, so
+# an added line whose text duplicates an annotated one is not exempted by it.
+P_ALLOW='// allow-noncombinator: fixture exemption'
+parser_fixture
+put crates/engine/src/parser/clause.rs 'use super::*;' "$P_ALLOW" "$P_FROZEN" 'fn other() {}'
+commit_base
+printf '%s\n' "$P_FROZEN" >> "$FIXTURE/crates/engine/src/parser/clause.rs"
+commit 'duplicate an annotated line'
+run_gate
+expect_rc 'parser: an unannotated duplicate of an annotated line fails' 1
+expect_listed 'parser: only the unannotated duplicate is listed' "  crates/engine/src/parser/clause.rs:
+    $P_FROZEN"
+parser_fixture
+put crates/engine/src/parser/clause.rs 'use super::*;' 'fn other() {}'
+commit_base
+put crates/engine/src/parser/clause.rs 'use super::*;' "$P_PLANTED" 'fn other() {}' \
+    "$P_ALLOW" "$P_PLANTED" "$P_PLANTED $P_ALLOW"
+commit 'plant three copies, two annotated'
+run_gate
+expect_rc 'parser: an unannotated copy beside annotated ones fails' 1
+expect_listed 'parser: previous-line and same-line annotations each exempt their copy' "  crates/engine/src/parser/clause.rs:
+    $P_PLANTED"
+
+# Under --cached the recorded lines index the staged blob, so the annotation is
+# read there, not from a working tree whose unstaged edit shifted the lines.
+parser_fixture
+put crates/engine/src/parser/clause.rs 'use super::*;' 'fn other() {}'
+commit_base
+put crates/engine/src/parser/clause.rs 'use super::*;' "$P_ALLOW" "$P_PLANTED" 'fn other() {}' "$P_FROZEN"
+git -C "$FIXTURE" add -A
+put crates/engine/src/parser/clause.rs 'fn shifted() {}' 'use super::*;' "$P_ALLOW" "$P_PLANTED" 'fn other() {}' "$P_FROZEN"
+BASE="$(git -C "$FIXTURE" rev-parse HEAD)"
+run_gate
+expect_out 'parser cached: the staged index is scanned' 'staged index vs'
+expect_rc 'parser cached: an unannotated staged line fails' 1
+expect_listed 'parser cached: the annotation is read from the index' "  crates/engine/src/parser/clause.rs:
+    $P_FROZEN"
+
 # --- check-engine-authorities.sh: family (A) -------------------------------
 # Sections (B0)-(D) are full-tree censuses of the real engine. Here they are
 # stubs that pass, so section (A), the diff-based one, decides the exit.
@@ -350,6 +388,28 @@ expect_rc 'authority: a line planted in phase-parser fails' 1
 expect_listed 'authority: only the line planted in phase-parser is listed' "  crates/phase-parser/src/parser/oracle.rs:
     $A_PLANTED"
 
+# The allow-raw-authority lookup reads each candidate's own recorded line.
+A_ALLOW='// allow-raw-authority: fixture exemption'
+authority_fixture
+put crates/engine/src/game/combat.rs 'use super::*;' "$A_ALLOW" "$A_FROZEN" 'fn other() {}'
+commit_base
+printf '%s\n' "$A_FROZEN" >> "$FIXTURE/crates/engine/src/game/combat.rs"
+commit 'duplicate an annotated line'
+run_gate
+expect_rc 'authority: an unannotated duplicate of an annotated line fails' 1
+expect_listed 'authority: only the unannotated duplicate is listed' "  crates/engine/src/game/combat.rs:
+    $A_FROZEN"
+authority_fixture
+put crates/engine/src/game/combat.rs 'use super::*;' 'fn other() {}'
+commit_base
+put crates/engine/src/game/combat.rs 'use super::*;' "$A_PLANTED" 'fn other() {}' \
+    "$A_ALLOW" "$A_PLANTED" "$A_PLANTED $A_ALLOW"
+commit 'plant three copies, two annotated'
+run_gate
+expect_rc 'authority: an unannotated copy beside annotated ones fails' 1
+expect_listed 'authority: previous-line and same-line annotations each exempt their copy' "  crates/engine/src/game/combat.rs:
+    $A_PLANTED"
+
 # --- check-test-card-data-load.sh -------------------------------------------
 C_FROZEN='    let db = CardDatabase::from_export(Path::new("../../client/public/card-data.json"));'
 C_PLANTED='    let raw = std::fs::read_to_string("../../client/public/card-data.json");'
@@ -428,6 +488,21 @@ commit planted
 run_gate
 expect_rc 'card-data: a load planted in phase-parser fails' 1
 expect_listed 'card-data: only the load planted in phase-parser is listed, at its line' "  crates/phase-parser/src/parser/oracle.rs:5:$C_PLANTED"
+
+# Under --cached the annotation above a load is read from the staged blob the
+# recorded line indexes, not from a working tree shifted by an unstaged edit.
+new_fixture check-test-card-data-load.sh
+put crates/engine/tests/integration/combat.rs 'fn other() {}'
+commit_base
+put crates/engine/tests/integration/combat.rs 'fn other() {}' \
+    'fn load() {' '// allow-full-card-db: fixture' "$C_PLANTED" '}' 'fn raw() {' "$C_PLANTED" '}'
+git -C "$FIXTURE" add -A
+put crates/engine/tests/integration/combat.rs 'fn shifted() {}' 'fn other() {}' \
+    'fn load() {' '// allow-full-card-db: fixture' "$C_PLANTED" '}' 'fn raw() {' "$C_PLANTED" '}'
+BASE="$(git -C "$FIXTURE" rev-parse HEAD)"
+run_gate
+expect_rc 'card-data cached: an unannotated staged load fails' 1
+expect_listed 'card-data cached: the annotation is read from the index' "  crates/engine/tests/integration/combat.rs:7:$C_PLANTED"
 
 # --- check-legacy-quantity-callsites.sh ---------------------------------------
 # Its embedded seam check reads five hardcoded seam files and requires each
