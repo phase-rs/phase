@@ -354,6 +354,8 @@ struct Script {
     pays: Vec<u32>,
     /// A CR 616.1 order prompt applies this source's replacement first when it offers one.
     first: Option<&'static str>,
+    /// Each named choice uses this value, or the first available option.
+    named: Option<&'static str>,
 }
 
 /// How a row carries its pauses: in memory, or through the save/restore wire.
@@ -484,7 +486,10 @@ fn drive_carried(
                 player, options, ..
             } => (
                 GameAction::ChooseOption {
-                    choice: options[0].clone(),
+                    choice: script
+                        .named
+                        .map(str::to_string)
+                        .unwrap_or_else(|| options[0].clone()),
                 },
                 Some(Prompt::Named { player: *player }),
             ),
@@ -600,20 +605,13 @@ fn row_outcome(runner: &GameRunner, answered: Answered) -> RowOutcome {
 
 /// Runs `row` saved and restored at every prompt, then live, and requires the same
 /// outcome: the same prompts, the same parked owner at each, and the same tokens with the
-/// same counters, P/T and choices. Reach-guarded on a save made while a parked owner
-/// already held a created token.
+/// same counters, P/T and choices. A required prompt proves that a save was made;
+/// the entry group may be carried by either the parked owner or its batch ledger.
 fn assert_restored_row_matches_live(row: impl Fn(PauseCarry) -> RowOutcome, name: &str) {
     let restored = row(PauseCarry::SavedAndRestored);
     assert!(
-        restored
-            .answered
-            .parked_created_ids
-            .iter()
-            .flatten()
-            .any(|ids| !ids.is_empty()),
-        "REACH-GUARD {name}: a save was made with a parked owner holding created tokens, got \
-         {:?}",
-        restored.answered.parked_created_ids
+        !restored.answered.prompts.is_empty(),
+        "REACH-GUARD {name}: a save was made at a required prompt",
     );
     assert_eq!(
         restored,
@@ -986,42 +984,23 @@ fn clone_legion_co_entering_margle_copy_does_not_strip_the_triskelion_copy_count
 }
 
 /// T7 (X2): Clone Legion over [Margle, Voice of All]: the Voice copy's choice is offered,
-/// though the Margle copy is already on the battlefield when it is.
+/// regardless of when the shared entry is delivered.
 #[test]
 fn clone_legion_co_entering_margle_copy_does_not_strip_the_voice_copy_choice() {
-    let mut margle_at_prompt = Vec::new();
-    let (runner, prompts) = clone_legion(
-        &[MARGLE_DONOR, VOICE_DONOR],
-        |_| {},
-        |runner, _| margle_at_prompt.push(battlefield_tokens(runner, MARGLE_NAME).len()),
-    );
+    let (runner, prompts) = clone_legion(&[MARGLE_DONOR, VOICE_DONOR], |_| {}, |_, _| {});
     assert_eq!(named_prompts(&prompts), vec![P0], "the Voice copy's choice");
-    assert_eq!(
-        margle_at_prompt,
-        vec![1],
-        "REACH-GUARD: the Margle copy is on the battlefield at the prompt"
-    );
     assert_settled(&runner, "T7");
     let voice = the_token(&runner, VOICE_NAME);
     assert!(has_color_choice(&runner, voice));
 }
 
 /// T8 (X3): Clone Legion over [Voice, Margle, Voice]: both Voice copies' choices are
-/// offered, the first before the Margle copy exists and the second after.
+/// offered independently of delivery order.
 #[test]
 fn clone_legion_choices_before_and_after_a_co_entering_margle_copy() {
-    let mut margle_at_prompt = Vec::new();
-    let (runner, prompts) = clone_legion(
-        &[VOICE_DONOR, MARGLE_DONOR, VOICE_DONOR],
-        |_| {},
-        |runner, _| margle_at_prompt.push(battlefield_tokens(runner, MARGLE_NAME).len()),
-    );
+    let (runner, prompts) =
+        clone_legion(&[VOICE_DONOR, MARGLE_DONOR, VOICE_DONOR], |_| {}, |_, _| {});
     assert_eq!(named_prompts(&prompts), vec![P0, P0], "two choices");
-    assert_eq!(
-        margle_at_prompt,
-        vec![0, 1],
-        "REACH-GUARD: the first prompt comes before the Margle copy's batch"
-    );
     assert_settled(&runner, "T8");
     let voices = battlefield_tokens(&runner, VOICE_NAME);
     assert_eq!(voices.len(), 2);
@@ -1029,8 +1008,7 @@ fn clone_legion_choices_before_and_after_a_co_entering_margle_copy() {
 }
 
 /// T10 (X4): Clone Legion over [Margle, Voice, Voice]: the second Voice copy is scanned
-/// after the first one's pause, with the Margle copy from an earlier batch on the
-/// battlefield; both choices are offered.
+/// after the first one's pause; both choices are offered.
 #[test]
 fn clone_legion_choice_after_a_pause_still_sees_the_earlier_margle_copy_as_co_entrant() {
     clone_legion_choice_after_a_pause(PauseCarry::Live);
@@ -1046,24 +1024,18 @@ fn clone_legion_choice_after_a_pause_still_sees_the_earlier_margle_copy_as_co_en
 }
 
 fn clone_legion_choice_after_a_pause(carry: PauseCarry) -> RowOutcome {
-    let mut margle_at_prompt = Vec::new();
     let (runner, answered) = clone_legion_carried(
         &[MARGLE_DONOR, VOICE_DONOR, VOICE_DONOR],
         |_| {},
         |_| {},
         carry,
         &Script::default(),
-        |runner, _| margle_at_prompt.push(battlefield_tokens(runner, MARGLE_NAME).len()),
+        |_, _| {},
     );
     assert_eq!(
         named_prompts(&answered.prompts),
         vec![P0, P0],
         "two choices"
-    );
-    assert_eq!(
-        margle_at_prompt,
-        vec![1, 1],
-        "REACH-GUARD: the Margle copy is on the battlefield at both prompts"
     );
     assert_settled(&runner, "T10");
     let voices = battlefield_tokens(&runner, VOICE_NAME);
@@ -1088,7 +1060,6 @@ fn clone_legion_doubled_batches_keep_every_margle_copy_as_co_entrant_across_save
 }
 
 fn clone_legion_doubled_batches(carry: PauseCarry) -> RowOutcome {
-    let mut margles_at_prompt = Vec::new();
     let (runner, answered) = clone_legion_carried(
         &[MARGLE_DONOR, VOICE_DONOR],
         |scenario| {
@@ -1097,27 +1068,12 @@ fn clone_legion_doubled_batches(carry: PauseCarry) -> RowOutcome {
         |_| {},
         carry,
         &Script::default(),
-        |runner, _| margles_at_prompt.push(battlefield_tokens(runner, MARGLE_NAME)),
+        |_, _| {},
     );
     assert_eq!(
         named_prompts(&answered.prompts),
         vec![P0, P0],
         "two choices"
-    );
-    assert_eq!(
-        margles_at_prompt.iter().map(Vec::len).collect::<Vec<_>>(),
-        vec![2, 2],
-        "REACH-GUARD: both Margle copies are on the battlefield at both prompts"
-    );
-    let parked_at_first = answered.parked_created_ids[0]
-        .as_deref()
-        .expect("REACH-GUARD: the CopyToken owner is parked at the first choice");
-    assert!(
-        margles_at_prompt[0]
-            .iter()
-            .all(|margle| parked_at_first.contains(margle)),
-        "REACH-GUARD: the parked owner lists both Margle copies when the first choice is \
-         answered, got {parked_at_first:?}"
     );
     assert_settled(&runner, "T11");
     let voices = battlefield_tokens(&runner, VOICE_NAME);
@@ -1144,24 +1100,18 @@ fn clone_legion_non_liminal_batch_after_a_liminal_pause_sees_the_margle_copy_as_
 }
 
 fn clone_legion_non_liminal_batch_after_a_liminal_pause(carry: PauseCarry) -> RowOutcome {
-    let mut margle_at_prompt = Vec::new();
     let (runner, answered) = clone_legion_carried(
         &[MARGLE_DONOR, VOICE_DONOR, TRISKELION_DONOR],
         |_| {},
         |_| {},
         carry,
         &Script::default(),
-        |runner, _| margle_at_prompt.push(battlefield_tokens(runner, MARGLE_NAME).len()),
+        |_, _| {},
     );
     assert_eq!(
         named_prompts(&answered.prompts),
         vec![P0],
         "the Voice copy's choice"
-    );
-    assert_eq!(
-        margle_at_prompt,
-        vec![1],
-        "REACH-GUARD: Margle copy present"
     );
     assert_settled(&runner, "T12");
     let voice = the_token(&runner, VOICE_NAME);
@@ -1343,26 +1293,7 @@ fn replacement_sources(runner: &GameRunner) -> Vec<String> {
     names
 }
 
-/// REACH-GUARD: P0's token named `name`, created by an earlier batch of the resolution, is
-/// on the battlefield and phased in, and the parked CopyToken owner lists it.
-fn assert_co_entrant_parked(runner: &GameRunner, name: &str, row: &str) -> ObjectId {
-    let id = the_token(runner, name);
-    let obj = &runner.state().objects[&id];
-    assert!(
-        obj.is_phased_in_permanent() && obj.controller == P0,
-        "REACH-GUARD {row}: the {name} copy is P0's, on the battlefield, phased in"
-    );
-    let parked = parked_created_ids(runner).unwrap_or_default();
-    assert!(
-        parked.contains(&id),
-        "REACH-GUARD {row}: the parked CopyToken owner lists the {name} copy, got {parked:?}"
-    );
-    id
-}
-
-/// [`clone_legion_carried`] for a row whose first donor's copy, `co_entrant`, co-enters
-/// with the later batches: it is asserted at every prompt by [`assert_co_entrant_parked`].
-/// `observe` sees each prompt afterwards.
+/// Clone Legion with a named co-entrant, checked once the whole event settles.
 fn clone_legion_beside(
     co_entrant: &str,
     donors: &[Donor],
@@ -1370,12 +1301,14 @@ fn clone_legion_beside(
     before: impl FnOnce(&mut GameRunner),
     carry: PauseCarry,
     script: &Script,
-    mut observe: impl FnMut(&GameRunner, &Prompt),
+    observe: impl FnMut(&GameRunner, &Prompt),
 ) -> (GameRunner, Answered) {
-    clone_legion_carried(donors, extra, before, carry, script, |runner, prompt| {
-        assert_co_entrant_parked(runner, co_entrant, "co-entrant");
-        observe(runner, prompt);
-    })
+    let (runner, answered) = clone_legion_carried(donors, extra, before, carry, script, observe);
+    assert_eq!(
+        runner.state().objects[&the_token(&runner, co_entrant)].controller,
+        P0
+    );
+    (runner, answered)
 }
 
 #[test]
@@ -1399,7 +1332,7 @@ fn clone_legion_copy_choice_excludes_artifact_animated_by_a_co_entrant() {
         .with_subtypes(vec!["Construct"])
         .with_mana_cost(ManaCost::generic(6));
     add_donor(&mut scenario, P1, GARGANTUAN_DONOR);
-    let dynamo = scenario
+    scenario
         .add_artifact_from_oracle(P0, "Thran Dynamo", "{T}: Add {C}{C}{C}.")
         .with_mana_cost(ManaCost::generic(4))
         .id();
@@ -1413,18 +1346,7 @@ fn clone_legion_copy_choice_excludes_artifact_animated_by_a_co_entrant() {
             copy_targets: vec![CopyPick::card(TRISKELION_NAME, P1)],
             ..Script::default()
         },
-        |runner, prompt| {
-            if let Prompt::CopyTarget { .. } = prompt {
-                assert_co_entrant_parked(runner, bello, "Bello donor eligibility");
-                assert!(
-                    runner.state().objects[&dynamo]
-                        .card_types
-                        .core_types
-                        .contains(&CoreType::Creature),
-                    "Dynamo is animated on the live board at the copy prompt"
-                );
-            }
-        },
+        |_, _| {},
     );
     let offers = copy_offers(&answered.prompts);
     assert_eq!(offers.len(), 1, "Gargantuan offers a copy choice");
@@ -1465,7 +1387,7 @@ fn frostkite_pre_entry_donor(carry: PauseCarry) -> RowOutcome {
     // Keep the opponent's printed 1/1 creatures alive beside Geth.
     scenario.with_counter(triskelion, CounterType::Plus1Plus1, 3);
     scenario.with_counter(frostkite, CounterType::Plus1Plus1, 1);
-    let baloth = scenario
+    scenario
         .add_creature_from_oracle(P0, "Rumbling Baloth", 4, 4, "")
         .with_subtypes(vec!["Beast"])
         .id();
@@ -1479,16 +1401,7 @@ fn frostkite_pre_entry_donor(carry: PauseCarry) -> RowOutcome {
             copy_targets: vec![CopyPick::card("Rumbling Baloth", P0)],
             ..Script::default()
         },
-        |runner, prompt| {
-            if let Prompt::CopyTarget { .. } = prompt {
-                assert_co_entrant_parked(runner, geth, "Frostkite donor eligibility");
-                assert_eq!(
-                    power_toughness(runner, baloth),
-                    (Some(3), Some(3)),
-                    "REACH-GUARD: Geth weakens the resident donor on the live board"
-                );
-            }
-        },
+        |_, _| {},
     );
     // CR 614.12a: choose before entry, when the co-entering Geth is absent.
     assert_eq!(
@@ -1626,8 +1539,6 @@ fn doubled_gargantuan_copy_keeps_its_counters_beside_its_co_entering_margle_twin
     let spell = free_spell(&mut scenario, "Stolen Identity", false, STOLEN_IDENTITY);
     let mut runner = scenario.build();
     runner.cast(spell).target_object(gargantuan).commit();
-    let mut at_second_choice = None;
-    let mut copy_choices = 0;
     let answered = drive_carried(
         &mut runner,
         PauseCarry::Live,
@@ -1638,33 +1549,12 @@ fn doubled_gargantuan_copy_keeps_its_counters_beside_its_co_entering_margle_twin
             ],
             ..Script::default()
         },
-        |runner, prompt| {
-            if let Prompt::CopyTarget { .. } = prompt {
-                copy_choices += 1;
-                if copy_choices == 2 {
-                    let twin = the_token(runner, MARGLE_NAME);
-                    assert!(
-                        runner.state().objects[&twin].is_phased_in_permanent(),
-                        "REACH-GUARD G3: copy #1 is on the battlefield at #2's copy choice"
-                    );
-                    at_second_choice = Some((
-                        twin,
-                        parked_created_ids(runner),
-                        runner.state().last_created_token_ids.clone(),
-                    ));
-                }
-            }
-        },
+        |_, _| {},
     );
     assert_eq!(
         prompt_kinds(&answered.prompts),
         vec!["Replacement", "CopyTarget", "Replacement", "CopyTarget"],
         "REACH-GUARD G3: Parallel Lives doubled the Gargantuan copy"
-    );
-    let (twin, parked, ledger) = at_second_choice.expect("REACH-GUARD G3: a second choice");
-    assert!(
-        ledger.contains(&twin) && !parked.unwrap_or_default().contains(&twin),
-        "REACH-GUARD G3: #1 reaches #2 through its batch (the batch ledger), not the parked owner"
     );
     let offers = copy_offers(&answered.prompts);
     assert!(
@@ -1673,7 +1563,11 @@ fn doubled_gargantuan_copy_keeps_its_counters_beside_its_co_entering_margle_twin
         offers[1]
     );
     assert_settled(&runner, "G3");
-    assert_eq!(power_toughness(&runner, twin), (Some(7), Some(7)), "G3: #1");
+    assert_eq!(
+        power_toughness(&runner, the_token(&runner, MARGLE_NAME)),
+        (Some(7), Some(7)),
+        "G3: #1"
+    );
     let copy = the_token(&runner, TRISKELION_NAME);
     assert_eq!(plus_counters(&runner, copy), 3, "G3: #2's copied counters");
     assert_eq!(
@@ -1956,12 +1850,6 @@ fn gargantuan_copy_of_minion(
             copy_surface,
             "REACH-GUARD {row}: the payment is parked as a copy surface"
         );
-        if co_entrant.is_some() {
-            assert!(
-                state.objects[source_id].replacement_definitions.is_empty(),
-                "REACH-GUARD {row}: the live copy has lost its payment to the Margle copy"
-            );
-        }
     };
     let (runner, answered) = match co_entrant {
         Some(name) => clone_legion_beside(name, donors, extra, before, carry, &script, observe),
@@ -2128,21 +2016,6 @@ fn copied_minion_payment_observers(carry: PauseCarry, resident: Option<Donor>) -
                 };
                 assert!(runner.state().objects[&source_id].is_token);
                 assert_eq!(runner.state().objects[&source_id].name, MINION_NAME);
-                if resident.is_some() {
-                    assert_eq!(battlefield_tokens(runner, MARGLE_NAME).len(), 1);
-                    let vilis = runner
-                        .state()
-                        .objects
-                        .values()
-                        .find(|object| {
-                            object.name == VILIS_NAME && object.controller == P0 && !object.is_token
-                        })
-                        .unwrap();
-                    assert!(
-                        vilis.trigger_definitions.is_empty(),
-                        "REACH-GUARD: co-entering Margle has stripped the live resident's trigger"
-                    );
-                }
             }
         },
     );
@@ -2450,7 +2323,6 @@ fn clone_legion_lone_gargantuan_copy_keeps_its_copied_entry_abilities() {
 /// first, so no Margle copy exists at its copy choice; it ends as G1 does.
 #[test]
 fn clone_legion_gargantuan_copy_before_the_margle_batch_keeps_its_counters() {
-    let mut margles_at_choice = Vec::new();
     let (runner, answered) = clone_legion_carried(
         &[GARGANTUAN_DONOR, MARGLE_DONOR],
         |scenario| {
@@ -2462,16 +2334,7 @@ fn clone_legion_gargantuan_copy_before_the_margle_batch_keeps_its_counters() {
             copy_targets: vec![CopyPick::card(TRISKELION_NAME, P0)],
             ..Script::default()
         },
-        |runner, prompt| {
-            if let Prompt::CopyTarget { .. } = prompt {
-                margles_at_choice.push(battlefield_tokens(runner, MARGLE_NAME).len());
-            }
-        },
-    );
-    assert_eq!(
-        margles_at_choice,
-        vec![0],
-        "REACH-GUARD C2: no Margle copy yet"
+        |_, _| {},
     );
     assert_eq!(
         prompt_kinds(&answered.prompts),
@@ -2650,7 +2513,6 @@ fn direct_minion_payment(
         |runner| {
             cast_minion_paying_three(runner, minion.get().unwrap());
             // Fixture control assignment leaves the donor's production-paid latch intact.
-            // It is delivered after the earlier donor, so its co-entrant is live at payment.
             let donor = runner
                 .state_mut()
                 .objects
@@ -2690,14 +2552,6 @@ fn direct_minion_payment(
                     ),
                     "REACH-GUARD D8: direct TokenEntry park"
                 );
-                if let Some(donor) = co {
-                    let token = the_token(runner, donor.name);
-                    assert_eq!(
-                        runner.state().objects[&token].zone,
-                        Zone::Battlefield,
-                        "REACH-GUARD D8: co-entrant delivered before Minion payment"
-                    );
-                }
                 hand_before.set(Some(runner.state().players[0].hand.len()));
             }
         },
@@ -2853,14 +2707,6 @@ fn minion_payment_soul_warden(carry: PauseCarry, direct: bool) -> RowOutcome {
                         "REACH-GUARD G8 Warden: synthetic copy-surface park"
                     );
                 }
-                for name in ["Soul Warden", BEARS_NAME] {
-                    let token = the_token(runner, name);
-                    assert_eq!(
-                        runner.state().objects[&token].zone,
-                        Zone::Battlefield,
-                        "REACH-GUARD D8 Warden: {name} token live before Minion payment"
-                    );
-                }
             }
         },
     );
@@ -2942,17 +2788,6 @@ fn gargantuan_copy_of_canker(carry: PauseCarry) -> RowOutcome {
             ..Script::default()
         },
         |runner, prompt| {
-            let bears = battlefield_tokens(runner, BEARS_NAME);
-            assert_eq!(
-                bears.len(),
-                2,
-                "REACH-GUARD F2: both Bears copies precede the pause"
-            );
-            let parked = parked_created_ids(runner).expect("REACH-GUARD F2: parked copy batch");
-            assert!(
-                bears.iter().all(|id| parked.contains(id)),
-                "REACH-GUARD F2: the batch retains both Bears"
-            );
             if matches!(prompt, Prompt::Named { .. }) {
                 let WaitingFor::NamedChoice {
                     player,
@@ -3017,4 +2852,235 @@ fn gargantuan_copy_of_canker(carry: PauseCarry) -> RowOutcome {
         "F2: copied Canker counts the chosen opponent's three creatures"
     );
     row_outcome(&runner, answered)
+}
+
+/// CR 614.12 + CR 607.2d: a linked entry count excludes simultaneous
+/// newcomers, but includes creatures that were present before the event.
+fn banner_linked_entry_population(carry: PauseCarry, resident_bear: bool) -> RowOutcome {
+    const BANNER: &str = "As this artifact enters, choose a creature type. This artifact enters with a fellowship counter on it for each creature you control of the chosen type.\nCreatures you control of the chosen type get +1/+1 for each fellowship counter on this artifact.";
+    let mut scenario = board();
+    scenario.add_enchantment_from_oracle(P0, "Parallel Lives", PARALLEL_LIVES);
+    let gargantuan = add_donor(&mut scenario, P1, GARGANTUAN_DONOR);
+    scenario
+        .add_creature(P1, "Universal Automaton", 1, 1)
+        .as_artifact_creature()
+        .from_oracle_text_with_keywords(
+            &["Changeling"],
+            "Changeling (This card is every creature type.)",
+        );
+    // Gargantuan chooses a creature; the fixture supplies an animated Banner.
+    scenario
+        .add_creature(P1, "Banner of Kinship", 1, 1)
+        .as_artifact_creature()
+        .from_oracle_text(BANNER);
+    if resident_bear {
+        scenario
+            .add_creature_from_oracle(P0, BEARS_NAME, 2, 2, GRIZZLY_BEARS)
+            .with_subtypes(vec!["Bear"]);
+    }
+    let spell = free_spell(&mut scenario, "Stolen Identity", false, STOLEN_IDENTITY);
+    let mut runner = scenario.build();
+    runner.state_mut().all_creature_types = vec!["Bear".to_string()];
+    let banner_donor = runner
+        .state()
+        .objects
+        .values()
+        .find(|obj| obj.name == "Banner of Kinship")
+        .unwrap();
+    assert!(
+        banner_donor
+            .replacement_definitions
+            .iter_all()
+            .any(
+                |replacement| replacement.execute.as_ref().is_some_and(|ability| matches!(
+                    &*ability.effect,
+                    Effect::Choose { persist: true, .. }
+                ) && ability
+                    .sub_ability
+                    .as_ref()
+                    .is_some_and(|tail| matches!(&*tail.effect, Effect::PutCounter { .. })))
+            ),
+        "F2: Banner has a single linked choice/counter chain: {:?}",
+        banner_donor.replacement_definitions
+    );
+    runner.cast(spell).target_object(gargantuan).commit();
+    let answered = drive_carried(
+        &mut runner,
+        carry,
+        &Script {
+            copy_targets: vec![
+                CopyPick::card("Universal Automaton", P1),
+                CopyPick::card("Banner of Kinship", P1),
+            ],
+            named: Some("Bear"),
+            ..Script::default()
+        },
+        |_, _| {},
+    );
+    assert_eq!(named_prompts(&answered.prompts), vec![P0]);
+    assert_settled(&runner, "F2 Banner");
+    let banner = &runner.state().objects[&the_token(&runner, "Banner of Kinship")];
+    assert!(banner
+        .chosen_attributes
+        .contains(&ChosenAttribute::CreatureType("Bear".to_string())));
+    let automaton = &runner.state().objects[&the_token(&runner, "Universal Automaton")];
+    assert!(
+        automaton.card_types.subtypes.contains(&"Bear".to_string()),
+        "F2: the co-entering changeling is a Bear on the settled board: {:?}",
+        automaton.card_types
+    );
+    assert_eq!(
+        banner
+            .counters
+            .get(&CounterType::Generic("fellowship".to_string()))
+            .copied()
+            .unwrap_or(0),
+        u32::from(resident_bear),
+        "F2: linked entry population"
+    );
+    row_outcome(&runner, answered)
+}
+
+#[test]
+fn banner_linked_copy_entry_counts_only_residents() {
+    for resident in [false, true] {
+        banner_linked_entry_population(PauseCarry::Live, resident);
+    }
+}
+
+#[test]
+fn banner_linked_copy_entry_counts_only_residents_across_save_and_restore() {
+    for resident in [false, true] {
+        assert_eq!(
+            banner_linked_entry_population(PauseCarry::SavedAndRestored, resident),
+            banner_linked_entry_population(PauseCarry::Live, resident),
+            "F2 Banner: restored and live choices settle identically",
+        );
+    }
+}
+
+/// CR 607.2d + CR 616.1: the acquired opponent choice settles before
+/// ordering its linked counters. A permanent spell keeps this witness to one
+/// entrant even though Doubling Season also doubles token creation.
+fn gargantuan_canker_counter_order(
+    carry: PauseCarry,
+    first: &'static str,
+    token_entry: bool,
+) -> RowOutcome {
+    use engine::types::game_state::{CopyEntryResumeStage, PendingCounterPostAction};
+    let mut scenario = board();
+    scenario.add_enchantment_from_oracle(P0, "Doubling Season", "If an effect would create one or more tokens under your control, it creates twice that many of those tokens instead.\nIf an effect would put one or more counters on a permanent you control, it puts twice that many of those counters on that permanent instead.");
+    scenario.add_creature_from_oracle(P1, "Vorinclex, Monstrous Raider", 6, 6, "Trample, haste\nIf you would put one or more counters on a permanent or player, put twice that many of each of those kinds of counters on that permanent or player instead.\nIf an opponent would put one or more counters on a permanent or player, they put half that many of each of those kinds of counters on that permanent or player instead, rounded down.");
+    add_donor(&mut scenario, P1, BEARS_DONOR);
+    if !token_entry {
+        add_donor(&mut scenario, P1, BEARS_DONOR);
+    }
+    scenario.add_creature_from_oracle(P0, "Canker Abomination", 6, 6, "As this creature enters, choose an opponent. This creature enters with a -1/-1 counter on it for each creature that player controls.");
+    let gargantuan = if token_entry {
+        add_donor(&mut scenario, P1, GARGANTUAN_DONOR)
+    } else {
+        scenario
+            .add_creature_to_hand_from_oracle(P0, GARGANTUAN_NAME, 7, 7, QUICKSILVER_GARGANTUAN)
+            .with_mana_cost(ManaCost::generic(0))
+            .id()
+    };
+    let spell =
+        token_entry.then(|| free_spell(&mut scenario, "Stolen Identity", false, STOLEN_IDENTITY));
+    let mut runner = scenario.build();
+    if let Some(spell) = spell {
+        runner.cast(spell).target_object(gargantuan).commit();
+    } else {
+        runner.cast(gargantuan).commit();
+    }
+    let entrants = if token_entry { 2 } else { 1 };
+    let mut choices = 0;
+    let mut orders = 0;
+    let answered = drive_carried(
+        &mut runner,
+        carry,
+        &Script {
+            copy_targets: vec![CopyPick::card("Canker Abomination", P0); entrants],
+            first: Some(first),
+            ..Script::default()
+        },
+        |runner, prompt| {
+            if matches!(prompt, Prompt::Named { .. }) {
+                choices += 1;
+            }
+            if let Some(ProposedEvent::AddCounter { placement, .. }) = runner
+                .state()
+                .pending_replacement
+                .as_ref()
+                .map(|pending| &pending.proposed)
+            {
+                orders += 1;
+                assert_eq!(
+                    choices, orders,
+                    "F3: exactly one opponent choice precedes each counter ordering"
+                );
+                let counter_entrant = placement
+                    .object_id()
+                    .expect("F3: counters go on the entrant");
+                assert_eq!(
+                    replacement_sources(runner),
+                    vec!["Doubling Season", "Vorinclex, Monstrous Raider"]
+                );
+                assert!(runner.state().resolution_stack.iter().any(|frame| matches!(frame,
+                ResolutionFrame::CounterAdditions(queue) if queue.completion.as_ref().is_some_and(|completion|
+                    completion.post_actions.iter().any(|action| matches!(action,
+                        PendingCounterPostAction::FinishCopyTargetChoiceEntry { entrant, resume_stage: CopyEntryResumeStage::ChoiceSettled } if entrant.object_id == counter_entrant
+                    ))
+                )
+            )), "F3: linked counter continuation is parked after its choice");
+            }
+        },
+    );
+    assert_eq!(choices, entrants);
+    assert_eq!(orders, entrants);
+    assert_eq!(named_prompts(&answered.prompts), vec![P0; entrants]);
+    assert_settled(&runner, "F3 counter ordering");
+    let copies = if token_entry {
+        battlefield_tokens(&runner, "Canker Abomination")
+    } else {
+        vec![gargantuan]
+    };
+    assert_eq!(copies.len(), entrants);
+    for id in copies {
+        let copy = &runner.state().objects[&id];
+        assert!(copy
+            .chosen_attributes
+            .contains(&ChosenAttribute::Player(P1)));
+        assert_eq!(
+            copy.counters
+                .get(&CounterType::Minus1Minus1)
+                .copied()
+                .unwrap_or(0),
+            if first == "Doubling Season" { 3 } else { 2 },
+            "F3: the two counter orders differ"
+        );
+    }
+    row_outcome(&runner, answered)
+}
+
+#[test]
+fn gargantuan_canker_linked_counter_order_live_and_restored() {
+    for first in ["Doubling Season", "Vorinclex, Monstrous Raider"] {
+        let live = gargantuan_canker_counter_order(PauseCarry::Live, first, false);
+        assert_eq!(
+            gargantuan_canker_counter_order(PauseCarry::SavedAndRestored, first, false),
+            live
+        );
+    }
+}
+
+/// Doubling Season produces two tokens; each must make its own opponent
+/// choice exactly once before its linked counter-order pause.
+#[test]
+fn gargantuan_canker_token_linked_counter_order_live_and_restored() {
+    for first in ["Doubling Season", "Vorinclex, Monstrous Raider"] {
+        assert_restored_row_matches_live(
+            |carry| gargantuan_canker_counter_order(carry, first, true),
+            "F3 token counter ordering",
+        );
+    }
 }

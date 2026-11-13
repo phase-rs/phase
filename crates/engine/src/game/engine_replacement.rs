@@ -3533,7 +3533,10 @@ fn finish_copy_target_choice_entry(
             && super::replacement::copy_entry_counters_read_choice(&board, source_id);
         (choice, linked)
     };
-    if let Some(choice) = choice.filter(|_| linked) {
+    if let Some(choice) = choice
+        .filter(|_| linked)
+        .map(super::replacement::copy_entry_choice_without_linked_counters)
+    {
         // CR 607.2d + CR 614.12a: linked quantities must read the answer,
         // not a controller fallback, before any entry counters are evaluated.
         let entrant = state
