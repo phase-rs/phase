@@ -4834,6 +4834,10 @@ pub(crate) fn collect_logical_zone_trigger_segment(
             .find(|(latched, _)| Some(*latched) == source)
         {
             context.pending.controller = *controller;
+            context
+                .pending
+                .ability
+                .set_controller_recursive(*controller);
         }
     }
     retire_departed_controller_contexts(state, contexts)
