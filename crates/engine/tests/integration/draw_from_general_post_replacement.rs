@@ -55,14 +55,19 @@
 
 use engine::database::card_db::CardDatabase;
 use engine::game::combat::AttackTarget;
+use engine::game::effects::resolve_ability_chain;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::scenario_db::GameScenarioDbExt;
+use engine::types::ability::{Effect, QuantityExpr, ResolvedAbility, TargetFilter};
 use engine::types::actions::GameAction;
-use engine::types::game_state::WaitingFor;
+use engine::types::events::GameEvent;
+use engine::types::game_state::{GameState, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
+use engine::types::proposed_event::ProposedEvent;
+use engine::types::resolution::FrameKind;
 use engine::types::zones::Zone;
 
 use crate::support::shared_card_db as load_db;
@@ -589,5 +594,136 @@ fn nested_mandatory_post_effect_runs_when_a_dispatching_continuation_draws() {
          Dropping the re-entrant stash strands that post-effect and P1 never wins — \
          exactly the regression the has_ready() guard fixes. got {:?}",
         runner.state().waiting_for
+    );
+}
+
+// A draw finishing in the post-choice draw driver (`resume_active_draw_sequences`), with no cost or entry
+// waiting on it. A replaced draw dispatches its substitute from a post-replacement frame installed beneath the
+// draw frame. These rows pin the end state only: the effect's next instruction runs after the draw settles and
+// nothing is left on the resolution stack. The helpers are shared with the Teferi's Ageless Insight and Mox
+// Diamond suites.
+
+/// Stinkweed Imp, verbatim Oracle text: Dredge 5 replaces a draw (CR 702.52a).
+pub(crate) const STINKWEED_IMP_ORACLE: &str = "Flying\nWhenever this creature deals combat damage to a creature, \
+destroy that creature.\nDredge 5 (If you would draw a card, you may mill five cards instead. If you do, \
+return this card from your graveyard to your hand.)";
+
+/// At an optional replacement prompt, index 0 applies the replacement.
+pub(crate) const APPLY_REPLACEMENT: usize = 0;
+
+/// P0's library: Dredge 5 needs at least five cards, and every outcome is read on its size.
+pub(crate) const EIGHT_CARD_LIBRARY: [&str; 8] = ["L1", "L2", "L3", "L4", "L5", "L6", "L7", "L8"];
+
+/// A bare "draw `cards`, then gain 3 life" effect with Stinkweed Imp in P0's graveyard, resolved until the
+/// draw pauses on its replacement choice. `add_permanents` places any further replacement sources before the
+/// game is built. Returns the runner and the Imp.
+pub(crate) fn draw_then_gain_life(
+    cards: i32,
+    add_permanents: impl FnOnce(&mut GameScenario),
+) -> (GameRunner, ObjectId) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_library_top(P0, &EIGHT_CARD_LIBRARY);
+    let imp = scenario
+        .add_creature_to_graveyard(P0, "Stinkweed Imp", 1, 2)
+        .from_oracle_text(STINKWEED_IMP_ORACLE)
+        .id();
+    add_permanents(&mut scenario);
+    let mut runner = scenario.build();
+    engine::game::layers::evaluate_layers(runner.state_mut());
+    let draw_then_gain = ResolvedAbility::new(
+        Effect::Draw {
+            count: QuantityExpr::Fixed { value: cards },
+            target: TargetFilter::Controller,
+        },
+        vec![],
+        ObjectId(9000),
+        PlayerId(0),
+    )
+    .sub_ability(ResolvedAbility::new(
+        Effect::GainLife {
+            amount: QuantityExpr::Fixed { value: 3 },
+            player: TargetFilter::Controller,
+        },
+        vec![],
+        ObjectId(9000),
+        PlayerId(0),
+    ));
+    let mut events = Vec::new();
+    resolve_ability_chain(runner.state_mut(), &draw_then_gain, &mut events, 0)
+        .expect("the draw pauses on its replacement choice");
+    (runner, imp)
+}
+
+/// Submit `ChooseReplacement { index }` through the reducer, accumulating its events.
+pub(crate) fn choose_replacement(
+    runner: &mut GameRunner,
+    index: usize,
+    events: &mut Vec<GameEvent>,
+) {
+    let result = runner
+        .act(GameAction::ChooseReplacement { index })
+        .expect("the replacement answer is legal");
+    events.extend(result.events);
+}
+
+pub(crate) fn frame_kinds(state: &GameState) -> Vec<FrameKind> {
+    state
+        .resolution_stack
+        .iter()
+        .map(|frame| frame.kind())
+        .collect()
+}
+
+/// The order of the Imp's return, every card draw and every life change across the accumulated events.
+pub(crate) fn dredge_draw_and_life_order(events: &[GameEvent], imp: ObjectId) -> Vec<&'static str> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            GameEvent::ZoneChanged {
+                object_id,
+                to: Zone::Hand,
+                ..
+            } if *object_id == imp => Some("imp returned"),
+            GameEvent::CardDrawn { .. } => Some("drawn"),
+            GameEvent::LifeChanged { .. } => Some("life"),
+            _ => None,
+        })
+        .collect()
+}
+
+/// CR 614.11a + CR 702.52a + CR 608.2c: a dredged draw finishes its substitute (mill five, return the Imp)
+/// before the effect's next instruction, and nothing is left on the resolution stack once the effect finishes.
+#[test]
+fn a_dredged_draw_settles_before_the_effects_next_instruction() {
+    let (mut runner, imp) = draw_then_gain_life(1, |_| {});
+    let mut events = Vec::new();
+    // Reach guard: the draw's Dredge prompt is open.
+    assert!(matches!(
+        runner
+            .state()
+            .pending_replacement
+            .as_ref()
+            .map(|record| &record.proposed),
+        Some(ProposedEvent::Draw { .. })
+    ));
+    choose_replacement(&mut runner, APPLY_REPLACEMENT, &mut events);
+
+    let state = runner.state();
+    assert_eq!(
+        dredge_draw_and_life_order(&events, imp),
+        vec!["imp returned", "life"]
+    );
+    assert_eq!(state.objects[&imp].zone, Zone::Hand);
+    assert_eq!(
+        library_len(state, PlayerId(0)),
+        EIGHT_CARD_LIBRARY.len() - 5
+    );
+    assert_eq!(state.players[0].life, 23);
+    assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+    assert!(
+        state.resolution_stack.is_empty(),
+        "got {:?}",
+        frame_kinds(state)
     );
 }
