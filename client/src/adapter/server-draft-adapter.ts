@@ -1280,7 +1280,14 @@ export class ServerDraftAdapter implements EngineAdapter {
       let noteSetupAnswer: (() => void) | null = null;
       sourceSocket.onmessage = (event) => {
         setupMessages.push(event);
-        noteSetupAnswer?.();
+        if (noteSetupAnswer !== null) {
+          // The answer to an unconfirmed attachment's setup settles its wait and
+          // is drained next, so, like a confirmed interval's settling bootstrap
+          // (which may be a large Full), it is not charged to the backlog.
+          noteSetupAnswer();
+          noteSetupAnswer = null;
+          return;
+        }
         // The positive bootstrap or the server's `DraftActionRejected` answer
         // adopts (the seat may already be this candidate's); an `Error` ends
         // the interval.

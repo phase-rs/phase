@@ -2617,7 +2617,14 @@ export class WebSocketAdapter implements EngineAdapter {
       const bufferBudget = new SetupBufferBudget();
       socket.ws.onmessage = (event) => {
         (setupMessages ??= []).push(event);
-        noteSetupAnswer?.();
+        if (noteSetupAnswer !== null) {
+          // The answer to an unconfirmed attachment's setup settles its wait and
+          // is drained next, so, like a confirmed interval's settling bootstrap
+          // (which may be a large Full), it is not charged to the backlog.
+          noteSetupAnswer();
+          noteSetupAnswer = null;
+          return;
+        }
         // Only the positive bootstrap adopts; a refusal ends the interval.
         const parsed = confirmation?.observe("game", event.data);
         if (parsed !== undefined) {
@@ -2779,6 +2786,10 @@ export class WebSocketAdapter implements EngineAdapter {
         }
         const bufferedFrames = () => (setupMessages as MessageEvent<string>[] | null)?.length ?? 0;
         const framesBeforeWrite = bufferedFrames();
+        // Armed before the transport is invoked: its send may deliver the
+        // candidate's close synchronously, which must settle the attachment
+        // then, not at the receipt's bound.
+        writePending = confirmation === null;
         const write = writeSetupFrame(
           socket.ws, setupFrame, preparation.signal, (frame, target) => this.send(frame, target),
         );
@@ -2804,7 +2815,6 @@ export class WebSocketAdapter implements EngineAdapter {
             if (bufferedFrames() > framesBeforeWrite) resolve(true);
             else noteSetupAnswer = () => resolve(true);
           });
-          writePending = true;
           try {
             // The receipt belongs to the transport and may never settle on a
             // socket that stays open: past the bound the frame counts as unsent
