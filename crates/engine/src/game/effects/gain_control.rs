@@ -1435,6 +1435,35 @@ mod tests {
         assert!(!changed);
     }
 
+    /// CR 800.4b: a control effect for a player who has left the game installs nothing.
+    #[test]
+    fn control_effect_for_a_departed_player_installs_nothing() {
+        let mut state = GameState::new(FormatConfig::free_for_all(), 3, 42);
+        let creature = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Grizzly Bears".to_string(),
+            Zone::Battlefield,
+        );
+        state.players[1].is_eliminated = true;
+        let install = |state: &mut GameState, recipient: PlayerId| {
+            state.add_transient_continuous_effect(
+                ObjectId(100),
+                recipient,
+                Duration::Permanent,
+                TargetFilter::SpecificObject { id: creature },
+                vec![ContinuousModification::ChangeController],
+                None,
+            )
+        };
+
+        assert_eq!(install(&mut state, PlayerId(1)), None);
+        assert!(state.transient_continuous_effects.is_empty());
+        assert!(install(&mut state, PlayerId(2)).is_some());
+        assert_eq!(state.transient_continuous_effects.len(), 1);
+    }
+
     /// CR 706.2 + CR 102.1 + CR 103.1 + CR 613.3: End-to-end resolution of
     /// Bucknard's Everfull Purse's activated ability
     /// (`{1}, {T}: Roll a d4 and create a number of Treasure tokens equal to

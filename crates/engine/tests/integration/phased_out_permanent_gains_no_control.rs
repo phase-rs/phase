@@ -2,8 +2,9 @@
 //! instruction (gain control or exchange of control) applies to it.
 
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
-use engine::types::ability::{ContinuousModification, TargetFilter, TargetRef};
+use engine::types::ability::{ContinuousModification, EffectKind, TargetFilter, TargetRef};
 use engine::types::actions::GameAction;
+use engine::types::events::GameEvent;
 use engine::types::game_state::{CastPaymentMode, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaType, ManaUnit};
@@ -202,7 +203,25 @@ fn phased_out_gilded_drake_exchanges_nothing_and_is_not_sacrificed() {
         "the ETB trigger is on the stack"
     );
     phase_out(&mut runner, ripple, drake);
-    runner.advance_until_stack_empty();
+    let mut events = Vec::new();
+    for _ in 0..10 {
+        if runner.state().stack.is_empty() {
+            break;
+        }
+        events.extend(runner.act(GameAction::PassPriority).unwrap().events);
+    }
+    assert!(runner.state().stack.is_empty());
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            GameEvent::EffectResolved { kind: EffectKind::ExchangeControl, source_id, .. }
+                if *source_id == drake
+        )),
+        "the Drake's exchange instruction resolves"
+    );
+    assert!(!events
+        .iter()
+        .any(|event| matches!(event, GameEvent::ControllerChanged { .. })));
 
     let d = &runner.state().objects[&drake];
     assert_eq!(

@@ -34825,9 +34825,10 @@ impl GameState {
     /// the CR 613.7b timestamp and the effect id, installs the effect, and
     /// journals the settled CR 611.2a creation through its owning family.
     ///
-    /// Returns `None` when a CR 611.2b "for as long as" duration never starts:
-    /// the effect does nothing, so nothing is allocated, installed or journaled
-    /// and callers must not emit the effect's side effects.
+    /// Returns `None` when a CR 611.2b "for as long as" duration never starts,
+    /// or when the effect would give control to a player who has left the game
+    /// (CR 800.4b): the effect does nothing, so nothing is allocated, installed
+    /// or journaled and callers must not emit the effect's side effects.
     pub fn add_transient_continuous_effect(
         &mut self,
         source_id: ObjectId,
@@ -34924,6 +34925,14 @@ impl GameState {
         creating_ability: Option<&ResolvedAbility>,
     ) -> Option<u64> {
         debug_assert!(creating_ability.is_none_or(|ability| ability.source_id == source_id));
+        // CR 800.4b: an object never changes to the control of a player who has left the game.
+        if modifications
+            .iter()
+            .any(|m| matches!(m, ContinuousModification::ChangeController))
+            && !crate::game::players::is_alive(self, controller)
+        {
+            return None;
+        }
         self.transient_duration_begins(source_id, controller, &duration, &affected, bindings)
             .then(|| {
                 self.install_started_transient_continuous_effect(
