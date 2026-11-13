@@ -2257,12 +2257,22 @@ fn attached_to_declared_slot(
 /// any. The view is indexed by declared-slot number, and a player target or an
 /// empty/illegal slot (`None`) binds no object.
 ///
-/// Only the identity half of the view read. The live attachment arm
+/// Only the identity half of the view is read. The live attachment arm
 /// ([`attached_to_declared_slot`]) needs more than that — it distinguishes an
 /// ELECTED target from an ANNOUNCED one and carries the announcement pin, because
-/// it compares the candidate against the object holding the id NOW — while a
-/// RECORD comparison needs only the id, since both sides of it are
-/// announcement-time statements.
+/// it compares the candidate against the object holding the id NOW.
+///
+/// The record arm reads `Announced` and NOTHING else, because both sides of a
+/// record comparison must be announcement-time statements and `Elected` is not
+/// one: by [`crate::game::targeting::DeclaredSlotBinding::Elected`]'s own
+/// definition it is the LIVE object of the current choice (CR 601.2c), which is
+/// exactly why [`attached_to_declared_slot`] gives the two arms different
+/// readings. A record is a projection of one permanent taken at a past moment, so
+/// resolving its comparison referent through a live id would make the answer
+/// depend on whatever object holds that storage id now (CR 400.7) — a
+/// contradiction invented from drift, not read from the record. An `Elected`
+/// binding therefore answers `None`: UNKNOWN, and the restore guard has nothing to
+/// refuse on.
 fn declared_slot_object(
     view: &[Option<crate::game::targeting::DeclaredSlotBinding>],
     slot: usize,
@@ -2271,13 +2281,12 @@ fn declared_slot_object(
         crate::game::targeting::DeclaredSlotBinding::Announced {
             target: TargetRef::Object(id),
             ..
-        }
-        | crate::game::targeting::DeclaredSlotBinding::Elected(TargetRef::Object(id)) => Some(*id),
+        } => Some(*id),
         crate::game::targeting::DeclaredSlotBinding::Announced {
             target: TargetRef::Player(_),
             ..
         }
-        | crate::game::targeting::DeclaredSlotBinding::Elected(TargetRef::Player(_)) => None,
+        | crate::game::targeting::DeclaredSlotBinding::Elected(_) => None,
     }
 }
 
@@ -28981,6 +28990,74 @@ mod tests {
             source,
             missing
         ));
+    }
+}
+
+/// CR 601.2c + CR 400.7: the RECORD arm of the declared-slot view may only be
+/// resolved against an ANNOUNCED binding. A record states the world at a past
+/// moment; an `Elected` binding states the LIVE object of a choice in progress,
+/// so comparing the two would let drift decide a contradiction.
+#[cfg(test)]
+mod declared_slot_object_record_tests {
+    use super::*;
+    use crate::game::targeting::DeclaredSlotBinding;
+
+    /// The helper's answer IS the record comparison's answer: `None` is
+    /// UNRECORDED, and every caller treats an unanswerable comparison as "the
+    /// guard has nothing to check". `Some(id)` is what a record is compared
+    /// against.
+    #[test]
+    fn a_live_elected_binding_answers_unknown_to_a_record_comparison() {
+        let announced = ObjectId(3);
+        let live = ObjectId(4);
+        let view = [
+            Some(DeclaredSlotBinding::Announced {
+                target: TargetRef::Object(announced),
+                pin: None,
+            }),
+            // The live object, which HAPPENS to be the record's own subject:
+            // reading it would answer `Some(true)` off a binding that makes no
+            // announcement-time statement at all.
+            Some(DeclaredSlotBinding::Elected(TargetRef::Object(live))),
+            Some(DeclaredSlotBinding::Announced {
+                target: TargetRef::Player(PlayerId(1)),
+                pin: None,
+            }),
+            Some(DeclaredSlotBinding::Elected(TargetRef::Player(PlayerId(1)))),
+            None,
+        ];
+
+        assert_eq!(
+            declared_slot_object(&view, 0),
+            Some(announced),
+            "positive control: an ANNOUNCED object binding is the record's referent"
+        );
+        assert_eq!(
+            declared_slot_object(&view, 1),
+            None,
+            "an ELECTED object is the live object (CR 601.2c), never a record referent — \
+             answering `Some(live)` would compare a record against whatever holds that id now"
+        );
+        assert_eq!(
+            declared_slot_object(&view, 2),
+            None,
+            "an announced PLAYER slot binds no object"
+        );
+        assert_eq!(
+            declared_slot_object(&view, 3),
+            None,
+            "an elected player slot binds no object either"
+        );
+        assert_eq!(
+            declared_slot_object(&view, 4),
+            None,
+            "an empty slot binds nothing"
+        );
+        assert_eq!(
+            declared_slot_object(&view, 5),
+            None,
+            "a slot outside the view binds nothing"
+        );
     }
 }
 

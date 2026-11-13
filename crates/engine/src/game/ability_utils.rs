@@ -3038,6 +3038,70 @@ pub(crate) fn declared_target_entries_in_chain(
     entries
 }
 
+/// CR 601.2c + CR 115.1: the declared-slot VIEW a RECORD comparison may read —
+/// indexed in the STATIC declared-slot space — or `None` when that space cannot
+/// be recovered from the save.
+///
+/// The two numberings are not the same space:
+///
+/// * `AttachmentReferent::DeclaredTarget { slot }` is authored in the STATIC
+///   space. The announcement walk maps `selected_slots` — one position per
+///   surfaced slot, a declined optional slot included as a `None` hole — onto the
+///   view one-for-one, and the spec enumeration writes `view[slot]` with the
+///   filter's own slot number.
+/// * [`declared_target_entries_in_chain`] returns the COMPACTED space: one entry
+///   per target actually pushed. `ResolvedAbility::push_chosen_target` numbers by
+///   `targets.len()` and a declining `optional_targeting` node pushes nothing, so
+///   a declined slot leaves NO hole here.
+///
+/// Indexing one space with the other is not a harmless off-by-one: the referent
+/// resolves to the wrong object, and a record comparison states that as a
+/// DEFINITE contradiction (`Some(false)`), which the restore guard refuses an
+/// honest save on.
+///
+/// The static index of a compacted entry is genuinely not recoverable from the
+/// persisted chain. `selected_slots` is consumed at CR 601.2c and only the pushed
+/// targets survive, so "the optional slot was filled" and "it was declined while
+/// the next one was filled" produce the same saved shape for two different
+/// announcements; guessing would re-introduce exactly the misalignment above.
+/// A view is therefore supplied only when the spaces are PROVABLY the same:
+///
+/// * the chain is numbered by [`DeclaredNumbering::Recorded`], the numbering that
+///   counts chosen occurrences rather than every target a node happens to hold
+///   (CR 115.10a), and
+/// * the announcement's own slot list ([`build_target_slots`]) has exactly as
+///   many positions as there are entries.
+///
+/// Equal counts means nothing was declined (each filled slot pushes exactly one
+/// target, in the same chain order), so no index shifted and the k-th entry
+/// filled the k-th static slot. Otherwise NO view is supplied and every referent
+/// answers UNKNOWN — the governing answer for an axis the record cannot state,
+/// and never a refusal of an honest save.
+pub(crate) fn record_check_declared_slot_view(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    entries: &[DeclaredTargetEntry],
+) -> Option<Vec<Option<targeting::DeclaredSlotBinding>>> {
+    if !matches!(DeclaredNumbering::of(ability), DeclaredNumbering::Recorded) {
+        return None;
+    }
+    let slots = build_target_slots(state, ability).ok()?;
+    if slots.len() != entries.len() {
+        return None;
+    }
+    Some(
+        entries
+            .iter()
+            .map(|entry| {
+                Some(targeting::DeclaredSlotBinding::Announced {
+                    target: entry.target.clone(),
+                    pin: entry.pin,
+                })
+            })
+            .collect(),
+    )
+}
+
 /// CR 608.2c: ParentTarget's lexical chain excludes unselected coin outcomes.
 /// Reuse declaration numbering rather than treating the aggregate target view
 /// as an incoming reference channel. An empty declaration is still a referent.
@@ -30922,6 +30986,192 @@ mod tests {
         assert_eq!(
             declared_group_player_slot(&root, group),
             Some(Some((1, PlayerId(1))))
+        );
+    }
+
+    /// CR 601.2c + CR 115.1: the restore guard's declared-slot view must be indexed
+    /// in the STATIC declared-slot space, because `DeclaredTarget { slot }` is
+    /// authored there (the announcement walk maps `selected_slots` position for
+    /// position, declined slots included as `None` holes).
+    /// [`declared_target_entries_in_chain`] is the COMPACTED space — a declining
+    /// optional slot pushes no target and leaves no hole — so a declined slot BEFORE
+    /// the referent resolves it against the wrong object. A record comparison states
+    /// that as a DEFINITE contradiction, which the restore guard refuses an honest
+    /// save on. This pins the builder's answer AND that consequence on one honest
+    /// announcement.
+    #[test]
+    fn record_check_view_is_withheld_when_a_declined_slot_shifts_the_numbering() {
+        use crate::game::effects::attach::attach_to;
+        use crate::game::filter::{
+            matches_target_filter_on_recorded_announcement, AnnouncedTargetRecord, FilterContext,
+        };
+        use crate::game::game_object::AttachTarget;
+        use crate::game::targeting::DeclaredSlotBinding;
+        use crate::types::ability::{
+            AttachmentReferent, EffectScope, FilterProp, TapStateChange, TypeFilter, TypedFilter,
+        };
+        use crate::types::game_state::ActivationTargetFact;
+
+        let mut scenario = GameScenario::new();
+        let creature = scenario.add_creature(P1, "Host", 2, 7).id();
+        let gear = scenario
+            .add_artifact_from_oracle(P1, "Gear", "Equipped creature gets +1/+0.")
+            .with_subtypes(vec!["Equipment"])
+            .id();
+        let trinket = scenario.add_artifact_from_oracle(P1, "Trinket", "").id();
+        let mut state = scenario.state;
+        attach_to(&mut state, gear, creature);
+
+        // The probe chain of three static declared slots: an optional first slot, a
+        // required creature slot, and a slot whose filter reads declared slot 1.
+        let equipment_filter = TargetFilter::Typed(
+            TypedFilter::new(TypeFilter::Artifact)
+                .subtype("Equipment".to_string())
+                .properties(vec![FilterProp::AttachedTo {
+                    to: AttachmentReferent::DeclaredTarget { slot: 1 },
+                }]),
+        );
+        let node = |filter: TargetFilter| {
+            ResolvedAbility::new(
+                Effect::SetTapState {
+                    target: filter,
+                    scope: EffectScope::Single,
+                    state: TapStateChange::Tap,
+                },
+                vec![],
+                ObjectId(999),
+                PlayerId(0),
+            )
+        };
+        let optional_chain = || {
+            let mut root = node(TargetFilter::Typed(TypedFilter::new(TypeFilter::Artifact)));
+            root.optional_targeting = true;
+            root.sub_ability(
+                node(TargetFilter::Typed(TypedFilter::creature()))
+                    .sub_ability(node(equipment_filter.clone())),
+            )
+        };
+
+        let mut chain = optional_chain();
+        // CR 601.2c: the honest announcement — the optional first slot DECLINED, the
+        // creature and its Equipment announced in declaration order.
+        assign_selected_slots_in_chain(
+            &state,
+            &mut chain,
+            &[
+                None,
+                Some(TargetRef::Object(creature)),
+                Some(TargetRef::Object(gear)),
+            ],
+        )
+        .expect("the honest announcement assigns");
+        let entries = declared_target_entries_in_chain(&chain);
+        assert_eq!(
+            entries.len(),
+            2,
+            "reach: the declined slot contributed no entry"
+        );
+        assert_eq!(
+            build_target_slots(&state, &chain)
+                .expect("the chain's slots rebuild")
+                .len(),
+            3,
+            "reach: the declined optional slot is still a declared slot"
+        );
+        assert!(
+            record_check_declared_slot_view(&state, &chain, &entries).is_none(),
+            "the compacted entries cannot address the static space, so no view is supplied"
+        );
+
+        // Control: with the optional slot FILLED the two numberings coincide and the
+        // view names each announced object at its own static position.
+        let mut filled = optional_chain();
+        assign_selected_slots_in_chain(
+            &state,
+            &mut filled,
+            &[
+                Some(TargetRef::Object(trinket)),
+                Some(TargetRef::Object(creature)),
+                Some(TargetRef::Object(gear)),
+            ],
+        )
+        .expect("the full announcement assigns");
+        let filled_entries = declared_target_entries_in_chain(&filled);
+        let view = record_check_declared_slot_view(&state, &filled, &filled_entries)
+            .expect("a 1:1 chain supplies its view");
+        assert_eq!(view.len(), 3, "the view spans the static space");
+        for (slot, expected) in [(0, trinket), (1, creature), (2, gear)] {
+            assert!(
+                matches!(
+                    &view[slot],
+                    Some(DeclaredSlotBinding::Announced {
+                        target: TargetRef::Object(id),
+                        ..
+                    }) if *id == expected
+                ),
+                "static slot {slot} names {expected:?}: {view:?}"
+            );
+        }
+
+        // CR 601.2c + CR 301.5a: the honest record of the Equipment fact. Its host is
+        // the creature the declaration named for slot 1.
+        let facts = crate::game::casting::capture_target_facts(&state, &[TargetRef::Object(gear)]);
+        let ActivationTargetFact::Object {
+            lki,
+            zone,
+            token,
+            attached_to,
+            ..
+        } = &facts[0]
+        else {
+            panic!("reach: the announced Equipment produced an object fact");
+        };
+        assert_eq!(
+            *attached_to,
+            Some(AttachTarget::Object(creature)),
+            "reach guard: the capture states the host the caster saw"
+        );
+        let ask = |view: Option<&[Option<DeclaredSlotBinding>]>| {
+            let context = match view {
+                Some(view) => FilterContext::neutral().with_declared_slot_view(view),
+                None => FilterContext::neutral(),
+            };
+            matches_target_filter_on_recorded_announcement(
+                &state,
+                gear,
+                AnnouncedTargetRecord {
+                    lki,
+                    zone: zone.zone(),
+                    token: token.bit(),
+                    attached_to: *attached_to,
+                },
+                &equipment_filter,
+                &context,
+            )
+        };
+        // The pre-fix view: the COMPACTED entry list. Static slot 1 therefore reads
+        // the entry that filled static slot 2 — the Equipment itself — so the honest
+        // host reads as a contradiction the guard refuses on.
+        let compacted: Vec<Option<DeclaredSlotBinding>> = entries
+            .iter()
+            .map(|entry| {
+                Some(DeclaredSlotBinding::Announced {
+                    target: entry.target.clone(),
+                    pin: entry.pin,
+                })
+            })
+            .collect();
+        assert_eq!(
+            ask(Some(&compacted)),
+            Some(false),
+            "the mis-indexed view reports an honest announcement as a contradiction"
+        );
+        // What the guard supplies for this chain: no view, so the axis is UNKNOWN and
+        // the save is admitted.
+        assert_eq!(
+            ask(record_check_declared_slot_view(&state, &chain, &entries).as_deref()),
+            None,
+            "no view answers UNKNOWN, never a refusal"
         );
     }
 

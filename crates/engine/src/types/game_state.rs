@@ -20005,18 +20005,22 @@ impl GameState {
             // against the object announced for an EARLIER slot, and that comparison cannot be
             // read off the fact's own snapshot — the snapshot is one target, the chain that
             // numbered the slots is the cast. `declared_entries` IS that chain, read from the
-            // same walk the fact pairing above uses, so it is the authority for which object
-            // each slot named.
-            let declared_slot_view: Vec<Option<crate::game::targeting::DeclaredSlotBinding>> =
-                declared_entries
-                    .iter()
-                    .map(|entry| {
-                        Some(crate::game::targeting::DeclaredSlotBinding::Announced {
-                            target: entry.target.clone(),
-                            pin: entry.pin,
-                        })
-                    })
-                    .collect();
+            // same walk the fact pairing above uses, so it is the authority for the objects
+            // the announcement chose, in the order it chose them.
+            //
+            // CR 601.2c: but a REFERENT is numbered in the STATIC declared-slot space, and
+            // `declared_entries` is COMPACTED — a declining optional slot pushes no target
+            // and therefore leaves no hole — so the two spaces diverge as soon as an optional
+            // slot is declined. The builder answers `None` there rather than index one space
+            // with the other: a referent resolved at the wrong index names the wrong object,
+            // which a record comparison reports as a DEFINITE contradiction and this guard
+            // would refuse an honest save on. No view means every referent answers UNKNOWN,
+            // which is the governing answer for an axis the record cannot state.
+            let declared_slot_view = crate::game::ability_utils::record_check_declared_slot_view(
+                state,
+                &pending.ability,
+                &declared_entries,
+            );
             for (slot, entry) in declared_entries.iter().enumerate() {
                 // CR 601.2c: the fact THIS slot produced, from the pairing above. A slot whose
                 // target the capture dropped has no fact to judge, and a first-match on
@@ -20069,7 +20073,7 @@ impl GameState {
                         recipient_id: None,
                         scoped_iteration_player: None,
                         triggering_object: None,
-                        declared_slot_view: Some(&declared_slot_view),
+                        declared_slot_view: declared_slot_view.as_deref(),
                         granting_object: None,
                     };
                     // CR 109.2a + CR 115.9: judge the filter against the RECORDED
