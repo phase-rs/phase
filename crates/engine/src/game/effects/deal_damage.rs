@@ -1515,14 +1515,33 @@ fn run_damage_batch(
                 }
             }
             ReplacementResult::NeedsChoice(player) => {
-                // CR 616.1e: this portion's replacements need an order. The answer hands its
-                // replaced event back to the parked batch (`return_answered_portion_to_batch`),
-                // which finishes the other portions' replacement before any delivery.
-                state.waiting_for = replacement::replacement_choice_waiting_for(player, state);
                 if let Some(pending) = state.pending_replacement.as_mut() {
                     pending.excess_recipient = ctx.excess_recipient;
                     pending.lifelink_bonus = ctx.lifelink_bonus;
                 }
+                // CR 616.1 + CR 101.4: a choice that falls to a player later in APNAP order than
+                // another outstanding choice of this batch (a sole Pariah redirecting P1's damage
+                // to P3's creature while P2's portion is still to come) waits its turn.
+                let earliest_outstanding = portions
+                    .iter()
+                    .filter_map(BatchPortion::raw)
+                    .map(|raw| affected_rank(state, &order, &raw.target))
+                    .chain(
+                        deferred
+                            .iter()
+                            .map(|choice| player_rank(&order, choice.chooser)),
+                    )
+                    .min();
+                if earliest_outstanding.is_some_and(|rank| rank < player_rank(&order, player)) {
+                    if let Some(choice) = take_pending_damage_choice(state, player) {
+                        deferred.push(choice);
+                        continue;
+                    }
+                }
+                // CR 616.1e: this portion's replacements need an order. The answer hands its
+                // replaced event back to the parked batch (`return_answered_portion_to_batch`),
+                // which finishes the other portions' replacement before any delivery.
+                state.waiting_for = replacement::replacement_choice_waiting_for(player, state);
                 let remaining = portions.iter().filter_map(BatchPortion::raw).collect();
                 park_damage_batch(
                     state, ability, kind, &replaced, remaining, awaiting, deferred, boundary,
@@ -1568,6 +1587,69 @@ fn run_damage_batch(
         subject: None,
     });
     Ok(())
+}
+
+/// CR 120.4b + CR 120.4c: run `portions` (each source's context, recipient and amount) as one
+/// two-phase damage batch that completes as `kind` (a fight's two directions, CR 701.14a).
+pub(crate) fn run_object_damage_batch(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    kind: EffectKind,
+    portions: Vec<(DamageContext, TargetRef, u32)>,
+    events: &mut Vec<GameEvent>,
+) -> Result<(), EffectError> {
+    let portions = portions
+        .into_iter()
+        .map(|(ctx, target, amount)| BatchPortion::Ungated {
+            ctx,
+            target,
+            amount,
+        })
+        .collect();
+    run_damage_batch(
+        state,
+        ability,
+        kind,
+        Vec::new(),
+        portions,
+        Vec::new(),
+        events,
+    )
+}
+
+/// CR 616.1 + CR 614.5: take the parked damage choice for `chooser` out of
+/// `pending_replacement`, keeping the replacements already applied to its event, so the batch
+/// can ask it in its APNAP turn. `None` (and nothing taken) when the parked record isn't a
+/// damage event.
+fn take_pending_damage_choice(
+    state: &mut GameState,
+    chooser: PlayerId,
+) -> Option<DeferredDamageChoice> {
+    let pending = state.pending_replacement.as_ref()?;
+    let ProposedEvent::Damage {
+        source_id,
+        target,
+        amount,
+        is_combat,
+        applied,
+    } = &pending.proposed
+    else {
+        return None;
+    };
+    let mut applied: Vec<_> = applied.iter().copied().collect();
+    applied.sort_unstable();
+    let choice = DeferredDamageChoice {
+        chooser,
+        source: *source_id,
+        target: target.clone(),
+        amount: *amount,
+        is_combat: *is_combat,
+        applied,
+        excess_recipient: pending.excess_recipient,
+        lifelink_bonus: pending.lifelink_bonus,
+    };
+    state.pending_replacement = None;
+    Some(choice)
 }
 
 /// CR 616.1 + CR 614.5: a deferred choice's event, back as a portion already through the gate,
@@ -1625,16 +1707,10 @@ pub(crate) fn defer_choice_behind_earlier_players(
 ) -> bool {
     let order = crate::game::players::apnap_order(state);
     let chooser_rank = player_rank(&order, chooser);
-    let Some(pending) = state.pending_replacement.as_ref() else {
-        return false;
-    };
-    let ProposedEvent::Damage {
-        source_id,
-        target,
-        amount,
-        is_combat,
-        applied,
-    } = &pending.proposed
+    let Some(ProposedEvent::Damage { source_id, .. }) = state
+        .pending_replacement
+        .as_ref()
+        .map(|pending| &pending.proposed)
     else {
         return false;
     };
@@ -1670,21 +1746,9 @@ pub(crate) fn defer_choice_behind_earlier_players(
     if !earliest_outstanding.is_some_and(|rank| rank < chooser_rank) {
         return false;
     }
-    let choice = DeferredDamageChoice {
-        chooser,
-        source: *source_id,
-        target: target.clone(),
-        amount: *amount,
-        is_combat: *is_combat,
-        applied: {
-            let mut applied: Vec<_> = applied.iter().copied().collect();
-            applied.sort_unstable();
-            applied
-        },
-        excess_recipient: pending.excess_recipient,
-        lifelink_bonus: pending.lifelink_bonus,
+    let Some(choice) = take_pending_damage_choice(state, chooser) else {
+        return false;
     };
-    state.pending_replacement = None;
     let Some(frame) = state.active_ability_continuation_frame_mut() else {
         return false;
     };
@@ -1813,8 +1877,8 @@ pub(crate) fn parked_batch_owns_tail(state: &GameState, ability: &ResolvedAbilit
 ///
 /// The portion is known by its source (CR 120.1): a replacement may change its recipient
 /// (Pariah: "All damage that would be dealt to you is dealt to enchanted creature instead.")
-/// and its amount, never the object dealing it. The batch is parked as the active frame
-/// exactly while that portion's choice stands, and one choice stands at a time.
+/// and its amount, never the object dealing it. One choice stands at a time, so the topmost
+/// batch awaiting that source is the one the answer belongs to.
 pub(crate) fn return_answered_portion_to_batch(
     state: &mut GameState,
     ctx: &DamageContext,
@@ -1830,21 +1894,27 @@ pub(crate) fn return_answered_portion_to_batch(
     else {
         return false;
     };
-    let Some(frame) = state.active_ability_continuation_frame_mut() else {
-        return false;
-    };
-    let Effect::ResumeDamageBatch {
-        replaced, awaiting, ..
-    } = &mut frame.pending.chain.effect
+    // The batch is the topmost continuation: the answer may have raised a rider's frames
+    // above it (Test of Faith's counters after its shield was chosen).
+    let Some((replaced, awaiting)) = state
+        .resolution_stack
+        .ability_continuations_from_top_mut()
+        .find_map(|pending| match &mut pending.chain.effect {
+            Effect::ResumeDamageBatch {
+                replaced,
+                awaiting: awaiting @ Some(_),
+                ..
+            } if awaiting
+                .as_ref()
+                .is_some_and(|portion| portion.source == *source_id) =>
+            {
+                Some((replaced, awaiting))
+            }
+            _ => None,
+        })
     else {
         return false;
     };
-    if !awaiting
-        .as_ref()
-        .is_some_and(|portion| portion.source == *source_id)
-    {
-        return false;
-    }
     *awaiting = None;
     replaced.push(ReplacedDamagePortion {
         context: DamageContextSnapshot::from(ctx),

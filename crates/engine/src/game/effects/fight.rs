@@ -1,8 +1,6 @@
-use crate::game::effects::deal_damage::{
-    apply_damage_to_target, park_damage_batch, DamageContext, DamageResult,
-};
+use crate::game::effects::deal_damage::{run_object_damage_batch, DamageContext};
 use crate::types::ability::{
-    Effect, EffectError, EffectKind, RawDamagePortion, ResolvedAbility, TargetFilter, TargetRef,
+    Effect, EffectError, EffectKind, ResolvedAbility, TargetFilter, TargetRef,
 };
 use crate::types::card_type::CoreType;
 use crate::types::events::GameEvent;
@@ -226,132 +224,50 @@ fn resolve_fight(
         (obj.power.unwrap_or(0), obj.controller)
     };
 
-    // CR 608.2c: where a pause parks the rest of the fight (`deal_damage::park_damage_batch`).
-    let boundary = state.resolution_stack.capture_child_boundary();
-
-    // CR 701.14c: Self-fight deals twice the creature's power as a single damage instance.
+    // CR 701.14a + CR 608.2f + CR 700.1: "Each of those creatures deals damage equal to its
+    // power to the other creature": both directions are one simultaneous damage event, so the
+    // batch owner applies every replacement to both before dealing either, and asks their
+    // CR 616.1 choices in APNAP order, and the fight completes once, after both. CR 701.14c: a
+    // creature fighting itself deals twice its power to itself as a single damage instance.
+    // CR 701.14d + CR 120.2b: fight damage is not combat damage.
+    let portion = |state: &GameState, dealer: ObjectId, controller, recipient: ObjectId, amount| {
+        let ctx = DamageContext::from_source(state, dealer)
+            .unwrap_or_else(|| DamageContext::fallback(dealer, controller));
+        (ctx, TargetRef::Object(recipient), amount)
+    };
+    let mut portions = Vec::new();
     if source_id == target_id {
         if source_power > 0 {
             let amount = (source_power as u32).saturating_mul(2);
-            let source_ctx = DamageContext::from_source(state, source_id)
-                .unwrap_or_else(|| DamageContext::fallback(source_id, source_controller));
-            let result = apply_damage_to_target(
+            portions.push(portion(
                 state,
-                &source_ctx,
-                TargetRef::Object(source_id),
+                source_id,
+                source_controller,
+                source_id,
                 amount,
-                false,
-                events,
-            )?;
-            if fight_waits(state, &result) {
-                park_damage_batch(
-                    state,
-                    ability,
-                    EffectKind::Fight,
-                    &[],
-                    Vec::new(),
-                    None,
-                    Vec::new(),
-                    boundary,
-                )?;
-                return Ok(());
-            }
+            ));
         }
-        events.push(GameEvent::EffectResolved {
-            kind: EffectKind::from(&ability.effect),
-            source_id: ability.source_id,
-            subject: None,
-        });
-        return Ok(());
-    }
-
-    // CR 701.14d + CR 120.2b: Fight damage is not combat damage.
-    // Source deals damage to target (power of source → target's damage)
-    if source_power > 0 {
-        let source_ctx = DamageContext::from_source(state, source_id)
-            .unwrap_or_else(|| DamageContext::fallback(source_id, source_controller));
-        let first = apply_damage_to_target(
-            state,
-            &source_ctx,
-            TargetRef::Object(target_id),
-            source_power as u32,
-            false,
-            events,
-        )?;
-        // CR 608.2c + CR 616.1: the first direction waits on a player's answer: a replacement
-        // choice on its own event, or a choice its rider asks (Dralnu, Lich Lord: "If damage would
-        // be dealt to Dralnu, sacrifice that many permanents instead."). One prompt stands at a
-        // time, so the second direction waits behind that answer instead of opening its own
-        // prompt over it. CR 701.14a + CR 608.2f + CR 700.1: it is a remaining portion of the same
-        // simultaneous event, so the parked fight resumes it under the guards this batch read,
-        // and the fight completes once, after both directions.
-        if fight_waits(state, &first) {
-            let remaining = (target_power > 0)
-                .then_some(RawDamagePortion {
-                    source: target_id,
-                    target: TargetRef::Object(source_id),
-                    amount: target_power as u32,
-                })
-                .into_iter()
-                .collect();
-            park_damage_batch(
+    } else {
+        if source_power > 0 {
+            portions.push(portion(
                 state,
-                ability,
-                EffectKind::Fight,
-                &[],
-                remaining,
-                None,
-                Vec::new(),
-                boundary,
-            )?;
-            return Ok(());
+                source_id,
+                source_controller,
+                target_id,
+                source_power as u32,
+            ));
         }
-    }
-
-    // Target deals damage to source (power of target → source's damage)
-    if target_power > 0 {
-        let target_ctx = DamageContext::from_source(state, target_id)
-            .unwrap_or_else(|| DamageContext::fallback(target_id, target_controller));
-        let second = apply_damage_to_target(
-            state,
-            &target_ctx,
-            TargetRef::Object(source_id),
-            target_power as u32,
-            false,
-            events,
-        )?;
-        // CR 701.14a + CR 608.2c: the second direction waits on an answer too (a replacement
-        // choice, or its rider's prompt: Test of Faith's counters under Hardened Scales and
-        // Doubling Season). The fight completes once that answer is given, not before.
-        if fight_waits(state, &second) {
-            park_damage_batch(
+        if target_power > 0 {
+            portions.push(portion(
                 state,
-                ability,
-                EffectKind::Fight,
-                &[],
-                Vec::new(),
-                None,
-                Vec::new(),
-                boundary,
-            )?;
-            return Ok(());
+                target_id,
+                target_controller,
+                source_id,
+                target_power as u32,
+            ));
         }
     }
-
-    events.push(GameEvent::EffectResolved {
-        kind: EffectKind::from(&ability.effect),
-        source_id: ability.source_id,
-        subject: None,
-    });
-
-    Ok(())
-}
-
-/// CR 608.2c + CR 616.1: whether a direction of the fight waits on a player's answer: a
-/// replacement choice on its own event, or a prompt its rider left standing.
-fn fight_waits(state: &GameState, result: &DamageResult) -> bool {
-    matches!(result, DamageResult::NeedsChoice)
-        || crate::game::replacement::damage_batch_has_paused_rider(state)
+    run_object_damage_batch(state, ability, EffectKind::Fight, portions, events)
 }
 
 #[cfg(test)]
@@ -736,8 +652,10 @@ mod tests {
         let cont = state
             .active_ability_continuation()
             .expect("expected pending_continuation for second-direction fight damage");
-        // CR 701.14a: the parked fight holds the wolf's 2 to the bear, and completes the
-        // fight itself once that direction is dealt.
+        // CR 701.14a + CR 616.1 + CR 101.4: both directions are one batch, asked in APNAP
+        // order: the active player P0's bear is affected first (the wolf's 2), so the parked
+        // fight holds the bear's 3 to the wolf, and completes the fight itself once both are
+        // dealt.
         match &cont.chain.effect {
             Effect::ResumeDamageBatch {
                 kind, remaining, ..
@@ -746,17 +664,18 @@ mod tests {
                 assert_eq!(
                     remaining,
                     &vec![crate::types::ability::RawDamagePortion {
-                        source: wolf,
-                        target: TargetRef::Object(bear),
-                        amount: 2,
+                        source: bear,
+                        target: TargetRef::Object(wolf),
+                        amount: 3,
                     }],
-                    "wolf.power = 2 should drive second direction"
+                    "bear.power = 3 drives the other direction"
                 );
             }
             other => panic!("expected the parked fight, got {other:?}"),
         }
-        // Bear hasn't taken damage yet — second direction is still pending.
+        // Nothing is dealt before every replacement is chosen (CR 120.4b).
         assert_eq!(state.objects[&bear].damage_marked, 0);
+        assert_eq!(state.objects[&wolf].damage_marked, 0);
     }
 
     /// CR 120.3 + CR 616.1e: End-to-end fight+replacement accept delivery.
@@ -826,14 +745,11 @@ mod tests {
             .expect("accept replacement");
         let mut all_events = result.events;
 
-        // First direction must have landed (previously this was silently dropped).
-        assert_eq!(
-            state.objects[&wolf].damage_marked, 3,
-            "first direction (bear → wolf, 3 damage) must apply on accept"
-        );
+        // CR 120.4b: nothing is dealt until both directions' replacements are chosen.
+        assert_eq!(state.objects[&wolf].damage_marked, 0);
 
-        // The continuation (wolf → bear) also triggers the Optional Shield replacement.
-        // Accept it so the second direction lands.
+        // The other direction (wolf → bear) also meets the Optional Shield replacement.
+        // Accept it, and both directions land.
         if matches!(state.waiting_for, WaitingFor::ReplacementChoice { .. }) {
             let result = apply_as_current(&mut state, GameAction::ChooseReplacement { index: 0 })
                 .expect("accept second-direction replacement");
@@ -841,8 +757,12 @@ mod tests {
         }
 
         assert_eq!(
+            state.objects[&wolf].damage_marked, 3,
+            "first direction (bear → wolf, 3 damage) must apply"
+        );
+        assert_eq!(
             state.objects[&bear].damage_marked, 2,
-            "second direction (wolf → bear, 2 damage) must apply via pending_continuation + accept"
+            "second direction (wolf → bear, 2 damage) must apply"
         );
         assert!(
             state.active_ability_continuation().is_none(),

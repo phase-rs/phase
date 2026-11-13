@@ -1288,6 +1288,19 @@ impl ResolutionStack {
         })
     }
 
+    /// The ability continuations from the top of the stack down, mutably.
+    pub(crate) fn ability_continuations_from_top_mut(
+        &mut self,
+    ) -> impl Iterator<Item = &mut PendingContinuation> {
+        self.frames
+            .iter_mut()
+            .rev()
+            .filter_map(|frame| match frame {
+                ResolutionFrame::AbilityContinuation(frame) => Some(&mut frame.pending),
+                _ => None,
+            })
+    }
+
     pub(crate) fn next_draw_sequence_frame_id(&self) -> u64 {
         self.next_draw_sequence_frame_id
     }

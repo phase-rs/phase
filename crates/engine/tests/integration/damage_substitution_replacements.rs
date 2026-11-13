@@ -49,6 +49,7 @@ const SHAKE: &str =
 const PYROCLASM: &str = "Pyroclasm deals 2 damage to each creature.";
 const FLAME_RIFT: &str = "Flame Rift deals 4 damage to each player.";
 const RAKDOS_CHARM: &str = "Choose one —\n• Exile target player's graveyard.\n• Destroy target artifact.\n• Each creature deals 1 damage to its controller.";
+const PIT_FIGHT: &str = "Target creature you control fights another target creature. (Each deals damage equal to its power to the other.)";
 const PARIAH: &str =
     "Enchant creature\nAll damage that would be dealt to you is dealt to enchanted creature instead.";
 const COORDINATED_CLOBBERING: &str = "Tap one or two target untapped creatures you control. They each deal damage equal to their power to target creature an opponent controls.";
@@ -3807,6 +3808,88 @@ fn reverse_fight_rider_holds_fight_completion_until_its_answer() {
     assert_eq!(plus_counters(&runner, fighter), 4);
     assert_eq!(completions(&events, EffectKind::Fight, fight).len(), 1);
     assert_eq!(damage(&runner, fighter), 0);
+    assert_at_rest(&runner);
+}
+
+/// CR 616.1 + CR 101.4 at first discovery: Rakdos Charm, four players. P1's Pariah ("All damage
+/// that would be dealt to you is dealt to enchanted creature instead.") enchants P3's Wall and is
+/// the only replacement on P1's 1, so it redirects without a choice. The Wall's 1 then meets Test
+/// of Faith and Mending Hands, an order P3 chooses; P2's own 1 meets Force Bubble and Delaying
+/// Shield, an order P2 chooses. Both choices are outstanding at once, so P2 is asked before P3, and
+/// nothing is dealt before the last replacement answer (CR 120.4b).
+#[test]
+fn an_automatic_redirect_waits_for_an_earlier_players_choice() {
+    let p3 = PlayerId(3);
+    let mut scenario = GameScenario::new_n_player(4, 11);
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.add_creature(P1, "Grizzly Bears", 2, 2);
+    scenario.add_creature(P2, "Hill Giant", 3, 3);
+    let wall = scenario.add_creature(p3, "Wall", 0, 20).id();
+    let pariah = scenario
+        .add_enchantment_from_oracle(P1, "Pariah", PARIAH)
+        .with_subtypes(vec!["Aura"])
+        .from_oracle_text_with_keywords(&["Enchant"], PARIAH)
+        .id();
+    let bubble = force_bubble(&mut scenario, P2);
+    scenario.add_enchantment_from_oracle(P2, "Delaying Shield", DELAYING_SHIELD);
+    let faith = instant(&mut scenario, "Test of Faith", TEST_OF_FAITH);
+    let hands = instant(&mut scenario, "Mending Hands", MENDING_HANDS);
+    let charm = instant(&mut scenario, "Rakdos Charm", RAKDOS_CHARM);
+    let mut runner = scenario.build();
+    attach_to(runner.state_mut(), pariah, wall);
+    cast(&mut runner, faith, vec![object_target(wall)]);
+    cast(&mut runner, hands, vec![object_target(wall)]);
+    assert_at_rest(&runner);
+    let mut events = cast_rakdos_charm_damage_mode(&mut runner, charm);
+
+    let prompts = answer_batch_prompts(&mut runner, &mut events, |player, _| {
+        (player == P2).then_some(bubble)
+    });
+
+    assert_eq!(prompts, vec![("order", P2, 0), ("order", p3, 0)]);
+    assert_eq!(counters(&runner, bubble, &depletion()), 1);
+    assert_eq!(damage(&runner, wall), 0, "the Wall's 1 was prevented");
+    assert_eq!(life(&runner, P1), 20, "P1's 1 went to the Wall");
+    assert_completes_once_after_its_damage(&events, EffectKind::EachSourceDealsDamage, charm);
+    assert_at_rest(&runner);
+}
+
+/// CR 701.14a + CR 608.2f: Pit Fight ("Target creature you control fights another target
+/// creature.") deals both directions as one simultaneous event. Furnace of Rath doubles each, and
+/// each fighter is under its own Test of Faith, so each direction's damage meets two replacements,
+/// an order its fighter's controller chooses (CR 616.1). The active player P0 is asked first, then
+/// P1 (CR 101.4). Nothing is dealt before both answers (CR 120.4b), and the fight completes once.
+#[test]
+fn a_fights_two_directions_ask_their_choices_in_apnap_order() {
+    let mut scenario = scenario();
+    let ours = scenario.add_creature(P0, "Hill Giant", 3, 3).id();
+    let theirs = scenario.add_creature(P1, "Grizzly Bears", 2, 2).id();
+    furnace(&mut scenario);
+    let faith_ours = instant(&mut scenario, "Test of Faith", TEST_OF_FAITH);
+    let faith_theirs = instant(&mut scenario, "Test of Faith", TEST_OF_FAITH);
+    let pit_fight = instant(&mut scenario, "Pit Fight", PIT_FIGHT);
+    let mut runner = scenario.build();
+    cast(&mut runner, faith_ours, vec![object_target(ours)]);
+    cast(&mut runner, faith_theirs, vec![object_target(theirs)]);
+    let mut events = cast(
+        &mut runner,
+        pit_fight,
+        vec![object_target(ours), object_target(theirs)],
+    );
+
+    let prompts = answer_batch_prompts(&mut runner, &mut events, |_, _| None);
+
+    let order: Vec<(&str, PlayerId)> = prompts
+        .iter()
+        .take(2)
+        .map(|(kind, player, _)| (*kind, *player))
+        .collect();
+    assert_eq!(order, vec![("order", P0), ("order", P1)], "{prompts:?}");
+    assert!(
+        prompts.iter().take(2).all(|(_, _, dealt)| *dealt == 0),
+        "{prompts:?}"
+    );
+    assert_completes_once_after_its_damage(&events, EffectKind::Fight, pit_fight);
     assert_at_rest(&runner);
 }
 

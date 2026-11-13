@@ -1082,15 +1082,11 @@ const TEST_OF_FAITH: &str = "Prevent the next 3 damage that would be dealt to ta
 /// itself: fight damage is dealt simultaneously, so Dralnu's 3 is still dealt after P1 sacrifices
 /// it.
 ///
-/// strict-failure: the prompt order is not the cards' reading. Both directions are one
-/// simultaneous damage event (CR 701.14a), so the reverse direction's replacements apply before
-/// anything happens (CR 614.6), and Dralnu's ruling has the sacrifice happen with the damage: "If
-/// any of the sacrificed permanents would deal or be dealt damage at the same time as Dralnu,
-/// they deal or are dealt damage at the same time that they're sacrificed." The cards ask P0's
-/// order first, then P1's sacrifice; the engine asks P1's sacrifice first and applies the reverse
-/// direction's replacements after it. The counters agree here; the Gratuitous Violence row below
-/// shows where they don't. Dralnu reports unsupported for it
-/// (`ResolverFeature:structural:damage_replacement_choice_unasked_in_combat`).
+/// Both directions are one simultaneous damage event (CR 701.14a), so the reverse direction's
+/// replacements apply before anything happens (CR 614.6), and Dralnu's ruling has the sacrifice
+/// happen with the damage: "If any of the sacrificed permanents would deal or be dealt damage at
+/// the same time as Dralnu, they deal or are dealt damage at the same time that they're
+/// sacrificed." P0, the active player, orders first (CR 616.1, CR 101.4), then P1 sacrifices.
 #[test]
 fn a_fight_waits_behind_dralnus_sacrifice() {
     for sacrifice_dralnu in [false, true] {
@@ -1116,7 +1112,20 @@ fn a_fight_waits_behind_dralnus_sacrifice() {
                 vec![TargetRef::Object(hydra), TargetRef::Object(dralnu)],
             );
 
-            // P1's sacrifice comes first, and nothing else is asked over it.
+            // P0's order for Dralnu's 3 comes first (APNAP), and nothing else is asked over it.
+            assert_eq!(
+                plus_counters(&runner, hydra),
+                0,
+                "nothing is dealt before the replacements"
+            );
+            let pick = if test_of_faith_first {
+                Pick::Described(TEST_OF_FAITH_SHIELD)
+            } else {
+                Pick::Described(PHYTOHYDRA_SUBSTITUTION)
+            };
+            let prompts = answer(&mut runner, &[pick], hydra, &mut events);
+
+            // Then P1's sacrifice.
             let WaitingFor::EffectZoneChoice {
                 player,
                 count,
@@ -1136,11 +1145,6 @@ fn a_fight_waits_behind_dralnus_sacrifice() {
             permanents.push(dralnu);
             permanents.sort_by_key(|id| id.0);
             assert_eq!(offered, permanents);
-            assert_eq!(
-                plus_counters(&runner, hydra),
-                0,
-                "the second direction waits"
-            );
             let sacrificed = if sacrifice_dralnu { dralnu } else { bears[0] };
             events.extend(
                 runner
@@ -1151,14 +1155,6 @@ fn a_fight_waits_behind_dralnus_sacrifice() {
                     .events,
             );
             drive(&mut runner, &mut Vec::new(), &mut events);
-
-            // Then P0's order for Dralnu's 3.
-            let pick = if test_of_faith_first {
-                Pick::Described(TEST_OF_FAITH_SHIELD)
-            } else {
-                Pick::Described(PHYTOHYDRA_SUBSTITUTION)
-            };
-            let prompts = answer(&mut runner, &[pick], hydra, &mut events);
 
             assert_eq!(prompts.len(), 1, "{prompts:?}");
             assert_settled(&runner);
@@ -1183,7 +1179,7 @@ fn a_fight_waits_behind_dralnus_sacrifice() {
 
 const GRATUITOUS_VIOLENCE: &str = "If a creature you control would deal damage to a permanent or player, it deals double that damage instead.";
 
-/// strict-failure: Pit Fight: P0's Siege Mastodon (3/5) fights P1's Dralnu, Lich Lord; P1 controls
+/// Pit Fight: P0's Siege Mastodon (3/5) fights P1's Dralnu, Lich Lord; P1 controls
 /// Gratuitous Violence ("If a creature you control would deal damage to a permanent or player, it
 /// deals double that damage instead.") and two Grizzly Bears. The Mastodon's 3 becomes P1's
 /// sacrifice of three permanents, and P1 sacrifices Gratuitous Violence and both Bears. The cards
@@ -1191,11 +1187,9 @@ const GRATUITOUS_VIOLENCE: &str = "If a creature you control would deal damage t
 /// Violence doubles Dralnu's 3 before anything happens (CR 614.6), and Dralnu's ruling deals that
 /// damage at the same time as the sacrifice ("If any of the sacrificed permanents would deal or be
 /// dealt damage at the same time as Dralnu, they deal or are dealt damage at the same time that
-/// they're sacrificed."), so the Mastodon dies. The engine sacrifices first and applies the reverse
-/// direction's replacements after it, with Gratuitous Violence gone: Dralnu deals 3 and the
-/// Mastodon survives. This row asserts that result; Dralnu reports unsupported for it.
+/// they're sacrificed."), so the Mastodon dies.
 #[test]
-fn a_fight_applies_the_reverse_replacements_after_dralnus_sacrifice() {
+fn a_fight_applies_the_reverse_replacements_before_dralnus_sacrifice() {
     let mut scenario = main_phase();
     let mastodon = scenario.add_creature(P0, "Siege Mastodon", 3, 5).id();
     let dralnu = scenario
@@ -1244,10 +1238,8 @@ fn a_fight_applies_the_reverse_replacements_after_dralnus_sacrifice() {
     }
     assert_eq!(state.objects[&dralnu].zone, Zone::Battlefield);
     assert_eq!(state.objects[&pit_fight].zone, Zone::Graveyard);
-    // strict-failure: the cards deal 6 and the Mastodon dies; the engine deals 3.
-    assert_eq!(damage_dealt_to(&events, mastodon), vec![3]);
-    assert_eq!(state.objects[&mastodon].zone, Zone::Battlefield);
-    assert_eq!(state.objects[&mastodon].damage_marked, 3);
+    assert_eq!(damage_dealt_to(&events, mastodon), vec![6]);
+    assert_eq!(state.objects[&mastodon].zone, Zone::Graveyard);
 }
 
 /// CR 608.2c + CR 700.1: a later instruction is a new event and reads the guard live. Misthios's
