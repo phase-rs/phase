@@ -6,7 +6,7 @@
 //! first asserts the cast and the route: ordinary scoring, which clones the
 //! state for legality, at N = 1 and 100 (below
 //! `LARGE_BOARD_FAST_PRIORITY_BATTLEFIELD_OBJECTS`, 128, in `search.rs`), and the
-//! large-board fast route, which clones nothing, at N = 1000 and 2000.
+//! large-board fast route, which takes no legality clone, at N = 1000 and 2000.
 //!
 //! The empty-hand rows rerun N = 1000 and 2000 with the AI holding nothing and
 //! controlling five Forests. Each times `score_candidates`, asserting the
@@ -14,9 +14,9 @@
 //! (`large_board_main_phase_has_no_development_sources`) with no static scan,
 //! and `choose_action`, asserting it passes.
 //!
-//! Comparing: copy this file onto the comparison revision (it has no bench of its
-//! own; add this target's `[[bin]]` entry to `crates/phase-ai/Cargo.toml`) and run
-//! it on both revisions on one machine. Per route, a `min` ratio above the
+//! Comparing: check out the PR's merge base (`git merge-base HEAD upstream/main`),
+//! which has no bench, copy this file onto it, add this target's `[[bin]]` entry to
+//! `crates/phase-ai/Cargo.toml`, and run it on both revisions on one machine. Per route, a `min` ratio above the
 //! comparison's flags repeated board-dependent work, and one moving toward 4x
 //! rather than 2x points at quadratic work. For the empty-hand rows compare both
 //! `min`s directly; a battlefield walk nested inside the shortcut multiplies them.
@@ -38,7 +38,7 @@ use engine::game::scenario::GameScenario;
 use engine::types::actions::GameAction;
 use engine::types::game_state::GameState;
 use engine::types::identifiers::ObjectId;
-use engine::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaPipId, ManaType, ManaUnit};
+use engine::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 use phase_ai::config::{create_config, AiDifficulty, Platform};
@@ -77,17 +77,8 @@ fn board(tokens: usize, hand: Hand) -> GameState {
                     shards: vec![ManaCostShard::Green],
                     generic: 1,
                 });
-            let green = ManaUnit {
-                color: ManaType::Green,
-                source_id: ObjectId(0),
-                pip_id: ManaPipId(0),
-                supertype: None,
-                source_could_produce_two_or_more_colors: false,
-                restrictions: Vec::new(),
-                grants: Vec::new(),
-                expiry: None,
-            };
-            scenario.with_mana_pool(P0, vec![green.clone(), green]);
+            let green = ManaUnit::new(ManaType::Green, ObjectId(0), false, Vec::new());
+            scenario.with_mana_pool(P0, vec![green; 2]);
         }
     }
     scenario.build().state().clone()
