@@ -4738,6 +4738,20 @@ pub(super) fn strip_suffix_conditional(
     (routed.map(|(condition, _)| condition), body)
 }
 
+/// CR 608.2c: whether `text` still carries a trailing condition the shared
+/// target-controller recognizer identifies. The suffix strip removes it when it
+/// binds, so a chunk that still carries it was refused (or never offered to the
+/// strip), and the caller turns the chunk into an explicit gap instead of
+/// lowering the instruction without its printed condition.
+pub(super) fn carries_unbound_target_controller_suffix(text: &str) -> bool {
+    let lower = text.to_lowercase();
+    find_trailing_condition_start(&lower).is_some_and(|if_pos| {
+        let condition_text = lower[if_pos + " if ".len()..].trim_end_matches('.').trim();
+        let (condition_core, _) = peel_copy_retarget_tail_from_condition_text(condition_text);
+        parse_target_controller_control_condition_prefix(condition_core).is_some()
+    })
+}
+
 /// Strip a trailing "<effect> if <condition>" rider into a clause-level gate,
 /// also naming the recognizer family ([`LeadingConditionRoute`]) that produced
 /// it, so the chain parser applies the same route-specific binding guard it
@@ -4871,8 +4885,9 @@ pub(super) fn strip_routed_suffix_conditional(
     //
     // Once the shared grammar recognizes the text, an unbound referent returns
     // the original clause here, so the recognizers below, which have no way to
-    // bind the referent, never see it. (The grammar is deliberately not
-    // reachable from `parse_inner_condition`.)
+    // bind the referent, never see it; the chunk loop then records that clause
+    // as an explicit unimplemented gap (`carries_unbound_target_controller_suffix`).
+    // (The grammar is deliberately not reachable from `parse_inner_condition`.)
     if let Some((referent, condition)) =
         parse_target_controller_control_condition_parts(condition_core)
     {
@@ -4993,8 +5008,9 @@ fn declared_roles_for_node(
         .collect()
 }
 
-/// CR 608.2b + CR 601.2c: whether any definition below `root` (sub, else and
-/// mode nodes, recursively) announces a target of its own: an object or player
+/// CR 608.2b + CR 601.2c: whether any definition below `root` that the same
+/// ability announces for (sub, else and mode nodes and coin-flip outcome
+/// branches, recursively) announces a target of its own: an object or player
 /// role, a declared payer, or any optional, multi-target or distributed slot.
 ///
 /// A root gated on its own target's controller must be the only announcer of
@@ -5004,13 +5020,31 @@ fn declared_roles_for_node(
 /// controller, counts zero and can turn true. Until the resolver keeps that
 /// slot, the combination is declined.
 pub(super) fn chain_announces_target_below(root: &AbilityDefinition) -> bool {
+    // The definitions the SAME ability announces targets for: its sub, else
+    // and mode nodes, and the outcome branches of a coin flip, whose targets
+    // the engine collects with the ability's own (`materialize_coin_branches`).
+    // CR 601.2c: those are the targets this spell or ability requires. A
+    // definition nested anywhere else in an effect (a token's quoted ability, a
+    // granted or delayed ability) is a separate ability whose targets are
+    // chosen when that ability is put on the stack (CR 602.2b / CR 603.3d), so
+    // it is not entered.
     fn children(definition: &AbilityDefinition) -> impl Iterator<Item = &AbilityDefinition> {
+        let (won, lost) = match &*definition.effect {
+            Effect::FlipCoins {
+                win_effect,
+                lose_effect,
+                ..
+            } => (win_effect.as_deref(), lose_effect.as_deref()),
+            _ => (None, None),
+        };
         definition
             .sub_ability
             .as_deref()
             .into_iter()
             .chain(definition.else_ability.as_deref())
             .chain(definition.mode_abilities.iter())
+            .chain(won)
+            .chain(lost)
     }
     let mut pending: Vec<&AbilityDefinition> = children(root).collect();
     while let Some(definition) = pending.pop() {
@@ -12082,10 +12116,9 @@ mod tests {
     /// would skip it with the child. Full parsing with an independent "Draw a
     /// card." after the clause: the head owns the only target, its child is a
     /// condition-free, target-less continuation step, and the draw follows as
-    /// an independent instruction; no node carries a gate, and the suffix is an
-    /// explicit gap of the form each row names (the compound splitter keeps it
-    /// in an unimplemented child for the compound; the swallow detector reports
-    /// a `Condition` gap for the `TargetOnly` head). Both clauses are synthetic:
+    /// an independent instruction; no node carries a gate, and the gated
+    /// instruction is one explicit unimplemented gap naming the condition. Both
+    /// clauses are synthetic:
     /// a compound head with a
     /// targetless child (nearest printed analogue: Skulking Killer's "target
     /// creature an opponent controls gets -2/-2 until end of turn"), and a
@@ -12094,24 +12127,10 @@ mod tests {
     /// each other creature and each opponent.").
     #[test]
     fn gated_clause_with_a_continuation_child_is_an_explicit_gap() {
-        /// The explicit gap a declined suffix becomes.
-        #[derive(Debug, PartialEq)]
-        enum GapForm {
-            /// The compound splitter keeps the suffix inside an unimplemented child.
-            UnimplementedChild,
-            /// The swallow detector reports it as a `Condition` gap.
-            ConditionWarning,
-        }
         let condition = "that creature's controller controls no other creatures";
-        for (effect, expected) in [
-            (
-                "Target creature gets -2/-2 until end of turn and gains haste until end of turn",
-                GapForm::UnimplementedChild,
-            ),
-            (
-                "Target creature deals 2 damage to each other creature",
-                GapForm::ConditionWarning,
-            ),
+        for effect in [
+            "Target creature gets -2/-2 until end of turn and gains haste until end of turn",
+            "Target creature deals 2 damage to each other creature",
         ] {
             let roles = stack_announced_roles(effect, &trigger_ctx()).expect("reach guard");
             assert_eq!(roles.head.len(), 1, "reach guard: {effect}: one head role");
@@ -12119,72 +12138,56 @@ mod tests {
             assert_eq!(roles.shape, GatedClauseShape::WithContinuation, "{effect}");
             assert_full_strip_declines(effect, condition);
 
-            let text = format!("{effect} if {condition}. Draw a card.");
-            let (head, warnings) = parse_single_ability(&text, "Synthetic", &["Instant"], &[]);
+            // Reach guard on the clause without its suffix: a targeted head, a
+            // target-less continuation child, then the independent draw.
+            let (head, warnings) = parse_single_ability(
+                &format!("{effect}. Draw a card."),
+                "Synthetic",
+                &["Instant"],
+                &[],
+            );
+            assert!(warnings.is_empty(), "reach guard: {effect}: {warnings:?}");
             assert!(
                 head.effect
                     .target_filter()
                     .is_some_and(|filter| !filter.is_context_ref()),
-                "reach guard: {text}: the head declares the target: {:?}",
+                "reach guard: {effect}: the head declares the target: {:?}",
                 head.effect
             );
             let children = sub_chain(&head);
             let [continuation @ .., draw] = &children[..] else {
-                panic!("reach guard: {text}: expected a child and the draw");
+                panic!("reach guard: {effect}: expected a child and the draw");
             };
-            assert!(
-                !continuation.is_empty(),
-                "reach guard: {text}: a continuation"
-            );
+            assert!(!continuation.is_empty(), "reach guard: {effect}");
             for child in continuation {
                 assert!(
                     child
                         .effect
                         .target_filter()
                         .is_none_or(TargetFilter::is_context_ref),
-                    "reach guard: {text}: the child declares no target: {:?}",
+                    "reach guard: {effect}: the child declares no target: {:?}",
                     child.effect
                 );
                 assert_eq!(
                     child.sub_link,
                     crate::types::ability::SubAbilityLink::ContinuationStep,
-                    "reach guard: {text}"
+                    "reach guard: {effect}"
                 );
             }
-            assert!(
-                matches!(*draw.effect, Effect::Draw { .. }),
-                "{:?}",
-                draw.effect
-            );
             assert_eq!(
                 draw.sub_link,
                 crate::types::ability::SubAbilityLink::SequentialSibling,
-                "reach guard: {text}: the draw is an independent instruction"
+                "reach guard: {effect}: the draw is an independent instruction"
             );
-            assert_eq!(head.condition, None, "{text}");
-            for child in &children {
-                assert_eq!(child.condition, None, "{text}: {:?}", child.effect);
-            }
-            let gaps: Vec<_> = warnings.iter().filter_map(|w| w.gap()).collect();
-            let condition_gap = crate::parser::oracle_ir::diagnostic::ClauseGap::Condition {
-                guard: condition.to_string(),
-            };
-            let unimplemented_suffix = children.iter().any(|child| {
-                child
-                    .effect
-                    .unimplemented_description()
-                    .is_some_and(|fragment| nom_primitives::scan_contains(fragment, condition))
-            });
-            let form = match (gaps.as_slice(), unimplemented_suffix) {
-                ([gap], false) if **gap == condition_gap => Some(GapForm::ConditionWarning),
-                ([], true) => Some(GapForm::UnimplementedChild),
-                _ => None,
-            };
-            assert_eq!(
-                form,
-                Some(expected),
-                "{text}: the suffix must be an explicit gap: {warnings:?} {children:?}"
+
+            let parsed = parse_oracle_text(
+                &format!("{effect} if {condition}. Draw a card."),
+                "Synthetic",
+                &[],
+                &["Instant".to_owned()],
+                &[],
             );
+            assert_suffix_is_explicit_gap(&parsed, condition);
         }
     }
 
@@ -12197,70 +12200,60 @@ mod tests {
     /// slot; and gating the child alone would leave the head's self-bounce
     /// ungated. The suffix "if that creature's controller controls no other
     /// creatures" is synthetic. Full parsing: first assert the child-only slot
-    /// positively, then assert the suffix is an explicit condition gap rather
+    /// positively, then assert the instruction is an explicit unimplemented gap rather
     /// than a controller gate on any node.
     #[test]
     fn child_only_target_suffix_is_an_explicit_gap() {
         let printed = "Return this creature and another target creature to their owners' hands";
         let condition = "that creature's controller controls no other creatures";
         let activation_window = "Activate only during your turn, before attackers are declared.";
-        for (text, suffixed) in [
-            (format!("{{T}}: {printed}. {activation_window}"), false),
-            (
-                format!("{{T}}: {printed} if {condition}. {activation_window}"),
-                true,
+        let types = ["Creature".to_owned()];
+        let subtypes = ["Human".to_owned(), "Wizard".to_owned()];
+
+        // Reach guard: the printed ability lowers to a child-only slot.
+        let (head, warnings) = parse_single_ability(
+            &format!("{{T}}: {printed}. {activation_window}"),
+            "Coastal Wizard",
+            &["Creature"],
+            &["Human", "Wizard"],
+        );
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert!(
+            matches!(
+                &*head.effect,
+                Effect::Bounce {
+                    target: TargetFilter::SelfRef,
+                    destination: None,
+                    ..
+                }
             ),
-        ] {
-            let (head, warnings) =
-                parse_single_ability(&text, "Coastal Wizard", &["Creature"], &["Human", "Wizard"]);
-            assert!(
-                matches!(
-                    &*head.effect,
-                    Effect::Bounce {
-                        target: TargetFilter::SelfRef,
-                        destination: None,
-                        ..
-                    }
-                ),
-                "{text}: the head bounces this creature and declares no target: {:?}",
-                head.effect
-            );
-            let [child] = sub_chain(&head)[..] else {
-                panic!("{text}: expected one child, got {:?}", head.sub_ability);
-            };
-            assert!(
-                matches!(
-                    &*child.effect,
-                    Effect::Bounce { target, .. } if !target.is_context_ref()
-                ),
-                "{text}: the child owns the only announced target: {:?}",
-                child.effect
-            );
-            assert_eq!(
-                child.target_choice_timing,
-                TargetChoiceTiming::Stack,
-                "{text}"
-            );
-            assert_eq!(head.condition, None, "{text}");
-            assert_eq!(child.condition, None, "{text}");
-            let gaps: Vec<_> = warnings.iter().filter_map(|w| w.gap()).collect();
-            if suffixed {
-                assert_eq!(
-                    gaps,
-                    vec![
-                        &crate::parser::oracle_ir::diagnostic::ClauseGap::Condition {
-                            guard: condition.to_string()
-                        }
-                    ],
-                    "{text}: the suffix must be an explicit gap: {warnings:?}"
-                );
-            } else {
-                assert!(warnings.is_empty(), "{text}: {warnings:?}");
-            }
-        }
+            "the head bounces this creature and declares no target: {:?}",
+            head.effect
+        );
+        let [child] = sub_chain(&head)[..] else {
+            panic!("expected one child, got {:?}", head.sub_ability);
+        };
+        assert!(
+            matches!(
+                &*child.effect,
+                Effect::Bounce { target, .. } if !target.is_context_ref()
+            ),
+            "the child owns the only announced target: {:?}",
+            child.effect
+        );
+        assert_eq!(child.target_choice_timing, TargetChoiceTiming::Stack);
         let roles = stack_announced_roles(printed, &trigger_ctx()).expect("reach guard");
         assert_eq!((roles.head.len(), roles.descendants.len()), (0, 1));
         assert_full_strip_declines(printed, condition);
+
+        let parsed = parse_oracle_text(
+            &format!("{{T}}: {printed} if {condition}. {activation_window}"),
+            "Coastal Wizard",
+            &[],
+            &types,
+            &subtypes,
+        );
+        assert_suffix_is_explicit_gap(&parsed, condition);
     }
 
     /// CR 608.2c: a later instruction lowers as a sub-ability,
@@ -12293,43 +12286,21 @@ mod tests {
         ] {
             assert_full_strip_binds(gated_effect, condition);
             let parsed = parse_oracle_text(text, "Synthetic", &[], &[types.to_owned()], &[]);
-            let root = match (parsed.abilities.as_slice(), parsed.triggers.as_slice()) {
-                ([ability], []) => ability.clone(),
-                ([], [trigger]) => {
-                    assert_eq!(trigger.condition, None, "{text}");
-                    trigger.execute.as_deref().expect("trigger body").clone()
-                }
-                _ => panic!("{text}: expected one ability or trigger: {parsed:?}"),
-            };
-            let children = sub_chain(&root);
-            let [gated] = children[..] else {
-                panic!("{text}: expected one later instruction, got {children:?}");
+            let definitions = all_chain_definitions(&parsed);
+            let [root, later] = definitions.as_slice() else {
+                panic!("reach guard: {text}: a root and one later instruction: {definitions:?}");
             };
             assert!(
-                gated
-                    .effect
-                    .target_filter()
-                    .is_some_and(|filter| !filter.is_context_ref()),
-                "reach guard: {text}: the later instruction declares its own target: {:?}",
-                gated.effect
+                root.effect.unimplemented_description().is_none(),
+                "reach guard: {text}: the earlier instruction parsed: {:?}",
+                root.effect
             );
-            assert_eq!(root.condition, None, "{text}");
-            assert_eq!(gated.condition, None, "{text}");
-            let gaps: Vec<_> = parsed
-                .parse_warnings
-                .iter()
-                .filter_map(|w| w.gap())
-                .collect();
-            assert_eq!(
-                gaps,
-                vec![
-                    &crate::parser::oracle_ir::diagnostic::ClauseGap::Condition {
-                        guard: condition.to_string()
-                    }
-                ],
-                "{text}: the suffix must be an explicit gap: {:?}",
-                parsed.parse_warnings
+            assert!(
+                later.effect.unimplemented_description().is_some(),
+                "{text}: the later, gated instruction is the gap: {:?}",
+                later.effect
             );
+            assert_suffix_is_explicit_gap(&parsed, condition);
         }
     }
 
@@ -12369,37 +12340,31 @@ mod tests {
         let condition = "that opponent controls no other creatures";
         assert_full_strip_binds(gated_effect, condition);
         let parsed = parse_oracle_text(text, "Synthetic", &[], &["Creature".to_owned()], &[]);
-        let definitions = all_chain_definitions(&parsed);
-        assert!(
-            definitions.iter().any(|def| def
-                .effect
-                .target_filter()
-                .is_some_and(|filter| !filter.is_context_ref())),
-            "reach guard: the gated instruction declares a target: {definitions:?}"
-        );
+        assert_suffix_is_explicit_gap(&parsed, condition);
+    }
+
+    /// The declined suffix is an explicit gap: no definition carries a
+    /// condition, and exactly one is an unimplemented node whose fragment
+    /// still names `condition`.
+    fn assert_suffix_is_explicit_gap(
+        parsed: &crate::parser::oracle::ParsedAbilities,
+        condition: &str,
+    ) {
+        let definitions = all_chain_definitions(parsed);
         for def in &definitions {
             assert_eq!(def.condition, None, "{:?}", def.effect);
         }
-        assert_only_condition_gap(&parsed, condition);
-    }
-
-    /// The parse produced exactly one explicit `Condition` gap, for `condition`.
-    fn assert_only_condition_gap(parsed: &crate::parser::oracle::ParsedAbilities, condition: &str) {
-        let gaps: Vec<_> = parsed
-            .parse_warnings
+        let gaps = definitions
             .iter()
-            .filter_map(|w| w.gap())
-            .collect();
-        assert_eq!(
-            gaps,
-            vec![
-                &crate::parser::oracle_ir::diagnostic::ClauseGap::Condition {
-                    guard: condition.to_string()
-                }
-            ],
-            "the suffix must be an explicit gap: {:?}",
-            parsed.parse_warnings
-        );
+            .filter(|def| {
+                def.effect
+                    .unimplemented_description()
+                    .is_some_and(|fragment| {
+                        nom_primitives::scan_contains(&fragment.to_lowercase(), condition)
+                    })
+            })
+            .count();
+        assert_eq!(gaps, 1, "one gap naming `{condition}`: {definitions:?}");
     }
 
     /// CR 608.2c: a card whose spell is rewritten at cast has no spell line
@@ -12533,18 +12498,7 @@ mod tests {
                 &["Instant".to_owned()],
                 &subtypes,
             );
-            let definitions = all_chain_definitions(&parsed);
-            assert!(
-                definitions.iter().any(|def| matches!(
-                    &*def.effect,
-                    Effect::Destroy { target, .. } if !target.is_context_ref()
-                )),
-                "reach guard: {text}: the targeted spell line parsed: {definitions:?}"
-            );
-            for def in &definitions {
-                assert_eq!(def.condition, None, "{text}: {:?}", def.effect);
-            }
-            assert_only_condition_gap(&parsed, condition);
+            assert_suffix_is_explicit_gap(&parsed, condition);
         }
     }
 
@@ -12573,30 +12527,11 @@ mod tests {
         assert_eq!(first.kind, AbilityKind::Spell);
         assert_eq!(later.kind, AbilityKind::Spell);
         assert!(
-            matches!(
-                &*later.effect,
-                Effect::Destroy { target, .. } if !target.is_context_ref()
-            ),
-            "reach guard: the later paragraph is its own targeted root: {:?}",
+            later.effect.unimplemented_description().is_some(),
+            "the later paragraph, its own spell ability root, is the gap: {:?}",
             later.effect
         );
-        assert_eq!(first.condition, None);
-        assert_eq!(later.condition, None);
-        let gaps: Vec<_> = parsed
-            .parse_warnings
-            .iter()
-            .filter_map(|w| w.gap())
-            .collect();
-        assert_eq!(
-            gaps,
-            vec![
-                &crate::parser::oracle_ir::diagnostic::ClauseGap::Condition {
-                    guard: condition.to_string()
-                }
-            ],
-            "the suffix must be an explicit gap: {:?}",
-            parsed.parse_warnings
-        );
+        assert_suffix_is_explicit_gap(&parsed, condition);
     }
 
     /// CR 608.2c: a gated spell line on a card with a second non-keyword line
@@ -12624,18 +12559,7 @@ mod tests {
              turn."
         );
         let parsed = parse_oracle_text(&text, "Synthetic", &[], &["Instant".to_owned()], &[]);
-        let definitions = all_chain_definitions(&parsed);
-        assert!(
-            definitions.iter().any(|def| matches!(
-                &*def.effect,
-                Effect::Destroy { target, .. } if !target.is_context_ref()
-            )),
-            "reach guard: the targeted line parsed: {definitions:?}"
-        );
-        for def in &definitions {
-            assert_eq!(def.condition, None, "{:?}", def.effect);
-        }
-        assert_only_condition_gap(&parsed, condition);
+        assert_suffix_is_explicit_gap(&parsed, condition);
     }
 
     /// CR 608.2c: the mirror positive. A card's only non-keyword line is its
@@ -12821,7 +12745,7 @@ mod tests {
                 panic!("reach guard: {text}: one clause");
             };
             root.condition = Some(gate.clone());
-            super::super::keep_own_target_gate_readable(&mut ir, &gate, &[]);
+            super::super::keep_own_target_gate_readable(&mut ir, &gate);
             assert_eq!(ir.clauses[0].condition.is_some(), kept, "{text}");
             assert_eq!(
                 ir.clauses[0]
@@ -12899,21 +12823,14 @@ mod tests {
             let text = format!("{gift}\n{activated}");
             let parsed =
                 parse_oracle_text(&text, "Synthetic", &keywords, &["Creature".to_owned()], &[]);
-            let definitions = all_chain_definitions(&parsed);
             assert!(
-                definitions
+                all_chain_definitions(&parsed)
                     .iter()
                     .any(|def| def.kind == AbilityKind::Activated
-                        && matches!(
-                            &*def.effect,
-                            Effect::Destroy { target, .. } if !target.is_context_ref()
-                        )),
-                "reach guard: {gift}: the activated ability parsed: {definitions:?}"
+                        && def.effect.unimplemented_description().is_some()),
+                "{gift}: the activated ability is the gap"
             );
-            for def in &definitions {
-                assert_eq!(def.condition, None, "{gift}: {:?}", def.effect);
-            }
-            assert_only_condition_gap(&parsed, condition);
+            assert_suffix_is_explicit_gap(&parsed, condition);
         }
     }
 
@@ -12928,16 +12845,19 @@ mod tests {
     /// and the extended trigger's root target is stamped optional.
     #[test]
     fn target_controller_suffix_under_a_body_wide_optional_target_is_not_bound() {
-        let killer = "When this creature enters, target creature an opponent controls gets \
-                      -2/-2 until end of turn if that opponent controls no other creatures.";
-        let execute = |text: &str| {
-            let parsed = parse_oracle_text(text, "Synthetic", &[], &["Creature".to_owned()], &[]);
+        let head = "When this creature enters, target creature an opponent controls gets -2/-2 \
+                    until end of turn";
+        let condition = "that opponent controls no other creatures";
+        let tail = "Up to one target creature you control gets +2/+2 until end of turn.";
+        let parse =
+            |text: &str| parse_oracle_text(text, "Synthetic", &[], &["Creature".to_owned()], &[]);
+        let execute = |parsed: &crate::parser::oracle::ParsedAbilities| {
             let [trigger] = parsed.triggers.as_slice() else {
-                panic!("{text}: expected one trigger: {parsed:?}");
+                panic!("expected one trigger: {parsed:?}");
             };
             trigger.execute.as_deref().cloned().expect("trigger body")
         };
-        let plain = execute(killer);
+        let plain = execute(&parse(&format!("{head} if {condition}.")));
         assert!(
             plain.condition.is_some(),
             "reach guard: the printed trigger binds"
@@ -12946,17 +12866,13 @@ mod tests {
             !plain.optional_targeting,
             "reach guard: its target is mandatory"
         );
-
-        let extended = execute(&format!(
-            "{killer} Up to one target creature you control gets +2/+2 until end of turn."
-        ));
+        let stamped = execute(&parse(&format!("{head}. {tail}")));
         assert!(
-            extended.optional_targeting,
+            stamped.optional_targeting,
             "reach guard: the later \"up to one\" makes the root target declinable"
         );
-        for def in std::iter::once(&extended).chain(sub_chain(&extended)) {
-            assert_eq!(def.condition, None, "{:?}", def.effect);
-        }
+
+        assert_suffix_is_explicit_gap(&parse(&format!("{head} if {condition}. {tail}")), condition);
     }
 
     /// CR 118.12 + CR 608.2c: a trigger-level unless-payment with a targeted
@@ -12985,14 +12901,18 @@ mod tests {
         assert!(payer.is_none());
         assert!(plain.condition.is_some(), "reach guard: it binds unpaid");
 
-        let (payer, gated) = execute(&format!("{body} unless target opponent pays 3 life."));
+        let text = format!("{body} unless target opponent pays 3 life.");
+        let (payer, _) = execute(&text);
         assert!(
             payer.is_some_and(|modifier| payer_is_declared_target(&modifier.payer)),
             "reach guard: the trigger hoisted a targeted payer"
         );
-        for def in std::iter::once(&gated).chain(sub_chain(&gated)) {
-            assert_eq!(def.condition, None, "{:?}", def.effect);
-        }
+        // The hoisted payment is a populated condition slot of the same
+        // ability; the declined suffix must still be its own explicit gap.
+        assert_suffix_is_explicit_gap(
+            &parse_oracle_text(&text, "Synthetic", &[], &["Creature".to_owned()], &[]),
+            "its controller controls no creatures",
+        );
     }
 
     /// CR 608.2b + CR 608.2c: a gated root followed by an instruction that
@@ -13034,30 +12954,55 @@ mod tests {
             );
             assert!(!chain_announces_target_below(&bound), "reach guard");
         }
-        for (head, types, tail, seen_by_walk) in [
-            // The target sits inside the coin flip's outcome, which the
-            // definition walk does not enter; the printed word declines it.
-            (
-                &spell,
-                "Instant",
-                "Flip a coin. If you win the flip, destroy target artifact.",
-                false,
+        // A target in a token's own quoted ability is announced when that
+        // ability is activated, not by this spell (CR 111.3 + CR 602.2b), so the
+        // gate stays. Ertha Jo, Frontier Mentor's printed token.
+        let token = "Create a 1/1 red Mercenary creature token with \"{T}: Target creature you \
+                     control gets +1/+0 until end of turn. Activate only as a sorcery.\"";
+        let (kept, warnings) = roots(&format!("{spell} {token}"), "Instant");
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert!(
+            matches!(
+                kept.sub_ability.as_deref().map(|next| &*next.effect),
+                Some(Effect::Token { .. })
             ),
-            (&spell, "Instant", "Destroy target artifact.", true),
+            "reach guard: the token creation follows the gated root: {kept:?}"
+        );
+        assert!(
+            kept.condition.is_some(),
+            "a target inside the token's quoted ability does not decline the gate"
+        );
+
+        // Chaotic Strike's printed coin tail: the winning outcome's target is
+        // announced by this spell with its own targets.
+        let coin = "Flip a coin. If you win the flip, target creature gets +1/+1 until end of \
+                    turn.";
+        let (flip, warnings) = roots(&format!("Draw a card. {coin}"), "Instant");
+        assert!(warnings.is_empty(), "reach guard: {warnings:?}");
+        assert!(
+            sub_chain(&flip).iter().any(|def| matches!(
+                &*def.effect,
+                Effect::FlipCoins { win_effect: Some(won), .. }
+                    if won.effect.target_filter().is_some_and(|filter| !filter.is_context_ref())
+            )),
+            "reach guard: the lowered win branch owns a declared target: {flip:?}"
+        );
+
+        for (head, types, tail) in [
+            (&spell, "Instant", coin),
+            (&spell, "Instant", "Destroy target artifact."),
             (
                 &spell,
                 "Instant",
                 "Up to one target creature gets +1/+1 until end of turn.",
-                true,
             ),
-            (&spell, "Instant", "Target player draws a card.", true),
-            (&trigger, "Creature", "Destroy target artifact.", true),
+            (&spell, "Instant", "Target player draws a card."),
+            (&trigger, "Creature", "Destroy target artifact."),
         ] {
             let text = format!("{head} {tail}");
             let (root, warnings) = roots(&text, types);
             assert!(
-                chain_announces_target_below(&root) == seen_by_walk
-                    && nom_primitives::scan_contains(&tail.to_lowercase(), "target"),
+                chain_announces_target_below(&root),
                 "reach guard: {text}: the tail announces its own target: {root:?}"
             );
             assert_eq!(root.condition, None, "{text}");
@@ -13114,9 +13059,16 @@ mod tests {
             crate::types::ability::IllegalTargetsDisposition::StillResolves,
             "reach guard: the override sentence was recognized"
         );
-        for def in std::iter::once(root).chain(sub_chain(root)) {
-            assert_eq!(def.condition, None, "{:?}", def.effect);
-        }
+        assert_suffix_is_explicit_gap(
+            &parse_oracle_text(
+                &format!("{body} This ability still resolves if its target becomes illegal."),
+                "Synthetic",
+                &[],
+                &["Creature".to_owned()],
+                &[],
+            ),
+            "that opponent controls no other creatures",
+        );
     }
 
     /// CR 608.2c: the assembled-chain check is total. If the first clause no
@@ -13151,7 +13103,7 @@ mod tests {
                 panic!("reach guard: one clause");
             };
             root.condition = Some(condition);
-            super::super::keep_own_target_gate_readable(&mut ir, &gate, &[]);
+            super::super::keep_own_target_gate_readable(&mut ir, &gate);
             assert_eq!(
                 ir.clauses[0]
                     .parsed
@@ -13310,41 +13262,17 @@ mod tests {
             (modal.min_choices, modal.max_choices, modal.mode_count),
             (2, 2, 2)
         );
-        let [tap, gated] = parsed.abilities.as_slice() else {
+        let [tap, _gated] = parsed.abilities.as_slice() else {
             panic!("expected one ability per mode, got {:?}", parsed.abilities);
         };
-        for mode in [tap, gated] {
-            assert!(
-                mode.effect
-                    .target_filter()
-                    .is_some_and(|filter| !filter.is_context_ref()),
-                "reach guard: each mode declares its own target: {:?}",
-                mode.effect
-            );
-            assert_eq!(mode.target_choice_timing, TargetChoiceTiming::Stack);
-            assert_eq!(mode.condition, None, "{:?}", mode.effect);
-            assert!(mode.sub_ability.is_none(), "{:?}", mode.sub_ability);
-        }
         assert!(
-            matches!(*gated.effect, Effect::Pump { .. }),
-            "{:?}",
-            gated.effect
+            tap.effect
+                .target_filter()
+                .is_some_and(|filter| !filter.is_context_ref()),
+            "reach guard: the first mode declares its own target: {:?}",
+            tap.effect
         );
-        let gaps: Vec<_> = parsed
-            .parse_warnings
-            .iter()
-            .filter_map(|w| w.gap())
-            .collect();
-        assert_eq!(
-            gaps,
-            vec![
-                &crate::parser::oracle_ir::diagnostic::ClauseGap::Condition {
-                    guard: condition.to_string()
-                }
-            ],
-            "the suffix must be an explicit gap: {:?}",
-            parsed.parse_warnings
-        );
+        assert_suffix_is_explicit_gap(&parsed, condition);
     }
 
     /// CR 608.2d + CR 107.4 + CR 202.1: Omnath, Locus of All — "you may reveal

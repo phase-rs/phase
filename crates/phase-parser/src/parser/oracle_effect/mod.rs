@@ -45791,7 +45791,7 @@ fn parse_effect_chain_ir_body(
     let mut builder = ClauseIrBuilder::new(full_text);
     // CR 608.2c: the gate a chain root took on its own target's controller,
     // checked against the assembled chain by `keep_own_target_gate_readable`.
-    let mut own_target_gate: Option<(AbilityCondition, usize)> = None;
+    let mut own_target_gate: Option<AbilityCondition> = None;
 
     // CR 608.2c + CR 117.3a: "Anchor subject" for chain-level anaphoric
     // inheritance. When a clause in the chain declares an explicit player-scope
@@ -47723,9 +47723,22 @@ fn parse_effect_chain_ir_body(
             (route, suffix_route) => route.or(suffix_route),
         };
         if let Some((gate, LeadingConditionRoute::OwnTargetController)) = &suffix_cond {
-            own_target_gate = Some((gate.clone(), chunk_idx));
+            own_target_gate = Some(gate.clone());
         }
         let suffix_cond = suffix_cond.map(|(condition, _)| condition);
+        // CR 608.2c: a target-controller condition the binder refused must
+        // not vanish. The instruction would otherwise lower without it, and
+        // the coverage detector can be satisfied by any other condition slot
+        // of the same ability (a hoisted unless-payment, a later gate).
+        if suffix_cond.is_none() && conditions::carries_unbound_target_controller_suffix(&text) {
+            unimplemented_clause(
+                &mut builder,
+                "target_controller_condition_unbound",
+                normalized_text,
+                chunk.boundary_after,
+            );
+            continue;
+        }
         let guard_condition = condition
             .or(counter_cond)
             .or(mv_cond)
@@ -51483,9 +51496,8 @@ fn parse_effect_chain_ir_body(
     };
     // CR 608.2c: on the assembled chain, so every node assembly adds above,
     // below or around the gated instruction is known.
-    if let Some((gate, gated_chunk)) = &own_target_gate {
-        let later_chunks = chunks.get(gated_chunk + 1..).unwrap_or_default();
-        keep_own_target_gate_readable(&mut ir, gate, later_chunks);
+    if let Some(gate) = &own_target_gate {
+        keep_own_target_gate_readable(&mut ir, gate);
     }
     ir
 }
@@ -51506,25 +51518,15 @@ fn parse_effect_chain_ir_body(
 ///   condition-false path of `resolve_chain_body`), and the rest of the chain
 ///   is reached through it. A sub the engine would also run for another reason
 ///   (a released or replicated gate) is declined conservatively.
-/// - no later chunk prints the word "target" and nothing below the root
-///   announces a target of its own (CR 608.2b): were
+/// - nothing below the root that the same ability announces for (including a
+///   coin flip's outcome branches, but not a token's or a granted ability's
+///   own text) announces a target of its own (CR 608.2b): were
 ///   the root's target illegal while a later target stayed legal, the engine
 ///   would not keep the illegal head slot and the gate would read no
 ///   controller (`conditions::chain_announces_target_below`).
 ///
 /// Otherwise the gated clause becomes an explicit gap.
-fn keep_own_target_gate_readable(
-    ir: &mut EffectChainIr,
-    gate: &AbilityCondition,
-    later_chunks: &[ClauseChunk],
-) {
-    // CR 115.1 + CR 608.2b: a target is declared only by the word "target", so
-    // a later chunk that prints it announces a target wherever lowering puts
-    // it, including inside an effect's own branches (a coin-flip outcome),
-    // which the definition walk below does not enter.
-    let later_target_word = later_chunks
-        .iter()
-        .any(|chunk| nom_primitives::scan_contains(&chunk.text.to_lowercase(), "target"));
+fn keep_own_target_gate_readable(ir: &mut EffectChainIr, gate: &AbilityCondition) {
     // The gated clause is the chain's first clause (the strip binds only when no
     // earlier clause was pushed). If something re-homed the gate since, the
     // check cannot vouch for it, so it fails closed instead of returning.
@@ -51532,7 +51534,7 @@ fn keep_own_target_gate_readable(
         .clauses
         .first()
         .is_some_and(|root| root.condition.as_ref() == Some(gate));
-    let readable = carries_gate && !later_target_word && {
+    let readable = carries_gate && {
         let assembled = lower::lower_effect_chain_ir(ir);
         assembled.condition.as_ref() == Some(gate)
             && assembled
