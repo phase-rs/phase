@@ -149,6 +149,46 @@ fn source_lki_for_context(
         })
 }
 
+/// CR 608.2h + CR 400.7: the counters of the triggered source as it last existed
+/// on the battlefield. A live exact source answers with its current counters;
+/// once it has left, the EXIT snapshot of that exact incarnation answers (the
+/// same authority `source_intensity` uses), so counters added after the trigger
+/// and before the departure are counted. With no exit record left, the
+/// trigger-time snapshot remains the fallback.
+fn source_counters_lki_for_context(
+    state: &GameState,
+    ctx: &QuantityContext,
+) -> Option<HashMap<CounterType, u32>> {
+    let Some(source) = ctx.trigger_source.as_ref() else {
+        return source_lki_for_context(state, ctx).map(|lki| lki.counters);
+    };
+    Some(match source.source_read(state) {
+        crate::types::game_state::TriggerSourceRead::ExactLive(object) => {
+            object.snapshot_public_characteristics().counters
+        }
+        crate::types::game_state::TriggerSourceRead::Latched(context) => {
+            latched_source_counters(state, context).clone()
+        }
+    })
+}
+
+/// CR 608.2h + CR 400.7: the counters a departed triggered source is read as
+/// having — the exit snapshot of its exact incarnation, else the trigger-time
+/// snapshot latched in `context`. The single authority behind
+/// [`source_counters_lki_for_context`] and loop normalization's carried read.
+pub(crate) fn latched_source_counters<'a>(
+    state: &'a GameState,
+    context: &'a crate::types::game_state::TriggerSourceContext,
+) -> &'a HashMap<CounterType, u32> {
+    &crate::game::filter::exit_lki_for_incarnation(
+        state,
+        context.identity.reference.object_id,
+        context.identity.reference.incarnation,
+    )
+    .unwrap_or(&context.lki)
+    .counters
+}
+
 /// Digital-only Alchemy: the intensity of the resolving ability's source, read
 /// for the exact source incarnation the ability belongs to. CR 608.2h: while
 /// that incarnation is still in its public zone, its current intensity; once
@@ -4891,6 +4931,14 @@ fn resolve_ref(
     };
     filter_ctx.recipient_id = ctx.recipient;
     filter_ctx.ability_targets = ability_targets;
+    // CR 614.12 + CR 614.1c: a quantity read for an ENTERING object's replacement
+    // (`ctx.entering`) counts the battlefield as it was before the simultaneous
+    // entry, so permanents entering in the same event are excluded from every
+    // population read (object counts, counters among objects, aggregates) at
+    // this single boundary. Every other read keeps the live battlefield.
+    filter_ctx.pre_entry_battlefield = ctx
+        .entering
+        .and(state.active_pre_entry_battlefield_snapshot());
     let player = state.players.iter().find(|p| p.id == controller);
     match qty {
         // CR 402: hand size for the scoped player(s).
@@ -5510,7 +5558,8 @@ fn resolve_ref(
                         Some(a) => FilterContext::from_ability_with_controller(a, p.id),
                         None => FilterContext::from_source_with_controller(source_id, p.id)
                             .with_granting_object(ctx.granting_object),
-                    };
+                    }
+                    .with_pre_entry_battlefield(filter_ctx.pre_entry_battlefield);
                     usize_to_i32_saturating(
                         zone_ids
                             .iter()
@@ -7713,12 +7762,54 @@ pub(crate) fn distinct_counter_kinds_among(
     filter: &TargetFilter,
     filter_ctx: &FilterContext<'_>,
 ) -> Vec<CounterType> {
+    // CR 122.1 + CR 608.2k: the ability's own object — what a bare "kind of
+    // counter on it" names (the parser binds it only to that object), or the
+    // object choosing a kind of counter it doesn't have — is read through the
+    // same per-object reader as its counter COUNT (`read_counters_on_scope` at
+    // `ObjectScope::Source`, as `QuantityRef::CountersOn` reads it), so a census
+    // and a count read at the same moment see the same counter map. They are
+    // not read at the same moment everywhere: a delayed trigger freezes its
+    // count at creation (`snapshot_quantity_ref`) but takes no census
+    // snapshot, so the parser accepts the census only where this read is the
+    // ability's own object at that ability's own resolution — never in a
+    // delayed-trigger body (`ParseContext::enter_delayed_trigger_body`).
+    // CR 603.10a + CR 608.2h: a source that has left the battlefield ("When
+    // this creature dies, …") still reports the kinds it had, from its
+    // departure record or last known information, rather than dropping out of
+    // a battlefield scan.
+    if matches!(filter, TargetFilter::SelfRef) {
+        let ctx = QuantityContext {
+            entering: None,
+            source: filter_ctx.source_id,
+            trigger_source: filter_ctx.trigger_source.cloned(),
+            recipient: None,
+            scoped_player: None,
+            damage_source: None,
+            spell: None,
+            event_amount: None,
+            // CR 201.5a: the definition's granter stamp, as every filter-derived read carries it.
+            granting_object: filter_ctx.granting_object,
+        };
+        let targets = filter_ctx
+            .ability
+            .map_or(&[][..], |ability| ability.targets.as_slice());
+        let kinds = read_counters_on_scope(
+            state,
+            ObjectScope::Source,
+            ctx,
+            targets,
+            filter_ctx.ability,
+            positive_counter_types,
+        )
+        .unwrap_or_default();
+        return sorted_counter_kinds(kinds.into_iter().collect());
+    }
     let mut seen: HashSet<CounterType> = HashSet::new();
-    // CR 608.2c + CR 122.1: parent-target domains ("it", "that permanent",
-    // or an indexed parent slot) resolve through the same ability-bound
-    // authorities as other resolution effects. Predicate domains instead scan
-    // every zone declared by `InZone` / `InAnyZone`, defaulting to the
-    // battlefield only when the filter declares no zone.
+    // CR 608.2c + CR 122.1: parent-target domains ("that permanent", or an
+    // indexed parent slot) resolve through the same ability-bound authorities
+    // as other resolution effects. Predicate domains instead scan every zone
+    // declared by `InZone` / `InAnyZone`, defaulting to the battlefield only
+    // when the filter declares no zone.
     let object_ids: Vec<ObjectId> = match filter {
         TargetFilter::ParentTarget | TargetFilter::ParentTargetSlot { .. } => filter_ctx
             .ability
@@ -7753,6 +7844,12 @@ pub(crate) fn distinct_counter_kinds_among(
             }
         }
     }
+    sorted_counter_kinds(seen)
+}
+
+/// The deterministic (`CounterType::as_str`-sorted) order of a counter-kind
+/// set — see [`distinct_counter_kinds_among`].
+fn sorted_counter_kinds(seen: HashSet<CounterType>) -> Vec<CounterType> {
     let mut kinds: Vec<CounterType> = seen.into_iter().collect();
     kinds.sort_by(|a, b| a.as_str().cmp(&b.as_str()));
     kinds
@@ -8042,28 +8139,27 @@ fn counter_total_from_map(counters: &HashMap<CounterType, u32>) -> i32 {
     i32::try_from(crate::types::counter::counter_total(counters)).unwrap_or(i32::MAX)
 }
 
-/// Resolve an ordinary object scope through its live object or its LKI snapshot.
+/// Read the counters on the object an ordinary scope names through its live
+/// object or its LKI snapshot. `None` when the scope names no object.
 ///
 /// CR 122.2 + CR 400.7 + CR 603.10a: When a source has changed zones, its
 /// live counter map has been cleared, so its departure snapshot provides the
 /// pre-exit values. A live battlefield object remains authoritative over a
 /// stale ObjectId-keyed cache entry from an earlier incarnation.
-fn resolve_counters_on_live_or_lki_scope(
+fn read_counters_on_live_or_lki_scope<T>(
     state: &GameState,
     scope: ObjectScope,
     ctx: QuantityContext,
     targets: &[TargetRef],
-    counter_type: Option<&CounterType>,
-) -> i32 {
+    read: impl FnOnce(&HashMap<CounterType, u32>) -> T,
+) -> Option<T> {
     // CR 608.2k: An `Anaphoric` counter read that reached runtime found no
     // clause subject and no per-recipient static to bind it, so the pronoun
     // names the ability's own object — "+1/+1 counters on him" on Red Hulk's
     // Enrage reflex.
     if matches!(scope, ObjectScope::Source | ObjectScope::Anaphoric) && ctx.trigger_source.is_some()
     {
-        return source_lki_for_context(state, &ctx)
-            .map(|lki| counter_count_from_map(&lki.counters, counter_type))
-            .unwrap_or(0);
+        return source_counters_lki_for_context(state, &ctx).map(|counters| read(&counters));
     }
     // An unbound anaphor resolves through the `Source` lookup — the generic
     // scope helpers have no referent for `Anaphoric` itself.
@@ -8071,18 +8167,15 @@ fn resolve_counters_on_live_or_lki_scope(
         ObjectScope::Anaphoric => ObjectScope::Source,
         other => other,
     };
-    let Some(object_id) = object_id_for_scope(state, lookup_scope, ctx, targets) else {
-        return 0;
-    };
+    let object_id = object_id_for_scope(state, lookup_scope, ctx, targets)?;
     let live = state.objects.get(&object_id);
     let on_battlefield = live.is_some_and(|obj| obj.zone == Zone::Battlefield);
     if !on_battlefield {
         if let Some(lki) = state.lki_cache.get(&object_id) {
-            return counter_count_from_map(&lki.counters, counter_type);
+            return Some(read(&lki.counters));
         }
     }
-    live.map(|obj| counter_count_from_map(&obj.counters, counter_type))
-        .unwrap_or(0)
+    live.map(|obj| read(&obj.counters))
 }
 
 /// CR 201.5a: the incarnation stamped on the definition read — the resolving
@@ -8095,6 +8188,9 @@ fn granter_scope(ability: Option<&ResolvedAbility>, ctx: &QuantityContext) -> Op
     .map(|object| ObjectScope::SpecificObject { object })
 }
 
+/// CR 122.1: The counter COUNT on the object `scope` names
+/// (`QuantityRef::CountersOn`); `counter_type = None` sums every kind. Zero when
+/// the scope names no object.
 fn resolve_counters_on_scope(
     state: &GameState,
     scope: ObjectScope,
@@ -8103,6 +8199,29 @@ fn resolve_counters_on_scope(
     ability: Option<&ResolvedAbility>,
     counter_type: Option<&CounterType>,
 ) -> i32 {
+    read_counters_on_scope(state, scope, ctx, targets, ability, |counters| {
+        counter_count_from_map(counters, counter_type)
+    })
+    .unwrap_or(0)
+}
+
+/// CR 122.1: The single authority for reading ONE object's counters, by the
+/// scope that names it — behind both the counter COUNT
+/// (`QuantityRef::CountersOn`, via [`resolve_counters_on_scope`]) and the
+/// counter-KIND census of a single named object
+/// (`QuantityRef::DistinctCounterKindsAmong`, via
+/// [`distinct_counter_kinds_among`]), so the two can never disagree about which
+/// counter map — live, departure record, or last known information — an object
+/// contributes. `read` sees that map; `None` when the scope names no object (or
+/// names it only through a malformed departure record).
+fn read_counters_on_scope<T>(
+    state: &GameState,
+    scope: ObjectScope,
+    ctx: QuantityContext,
+    targets: &[TargetRef],
+    ability: Option<&ResolvedAbility>,
+    read: impl Fn(&HashMap<CounterType, u32>) -> T,
+) -> Option<T> {
     match scope {
         // CR 400.7 + CR 603.10a: On a battlefield departure, EventSource is
         // the event's prior incarnation, not a same-id object that has since
@@ -8115,16 +8234,15 @@ fn resolve_counters_on_scope(
                 .unwrap_or(BattlefieldDepartureCounterContext::NotBattlefieldDeparture)
             {
                 BattlefieldDepartureCounterContext::Present { context } => {
-                    counter_count_from_map(&context.lki.counters, counter_type)
+                    Some(read(&context.lki.counters))
                 }
                 BattlefieldDepartureCounterContext::Absent { object_id } => state
                     .lki_cache
                     .get(&object_id)
-                    .map(|lki| counter_count_from_map(&lki.counters, counter_type))
-                    .unwrap_or(0),
-                BattlefieldDepartureCounterContext::Malformed => 0,
+                    .map(|lki| read(&lki.counters)),
+                BattlefieldDepartureCounterContext::Malformed => None,
                 BattlefieldDepartureCounterContext::NotBattlefieldDeparture => {
-                    resolve_counters_on_live_or_lki_scope(state, scope, ctx, targets, counter_type)
+                    read_counters_on_live_or_lki_scope(state, scope, ctx, targets, read)
                 }
             }
         }
@@ -8135,12 +8253,11 @@ fn resolve_counters_on_scope(
         // `Source`/`Anaphoric` live-with-LKI shape; `object_id_for_scope`
         // reads `ctx.damage_source`).
         | ObjectScope::BatchSource => {
-            resolve_counters_on_live_or_lki_scope(state, scope, ctx, targets, counter_type)
+            read_counters_on_live_or_lki_scope(state, scope, ctx, targets, read)
         }
         ObjectScope::CostPaidObject => ability
             .and_then(|ability| ability.cost_paid_object.as_ref())
-            .map(|snapshot| counter_count_from_map(&snapshot.lki.counters, counter_type))
-            .unwrap_or(0),
+            .map(|snapshot| read(&snapshot.lki.counters)),
         ObjectScope::AmassedArmy => ability
             .and_then(|ability| ability.amassed_army_object.as_ref())
             .map(|snapshot| {
@@ -8148,32 +8265,27 @@ fn resolve_counters_on_scope(
                 // an Army that changed zones and returned is a new object. The
                 // LKI fallbacks below are deliberately ungated (CR 608.2h: they
                 // report the departed Army's recorded counters).
-                let live = snapshot
+                let live_on_battlefield = snapshot
                     .live_object_id(state)
-                    .and_then(|id| state.objects.get(&id));
-                let on_battlefield =
-                    live.is_some_and(|obj| obj.zone == crate::types::zones::Zone::Battlefield);
-                if on_battlefield {
-                    return live
-                        .map(|obj| counter_count_from_map(&obj.counters, counter_type))
-                        .unwrap_or(0);
-                }
-                // CR 608.2h + CR 400.7: departure-time counters for THIS
-                // incarnation. The id-keyed `state.lki_cache` is overwritten on
-                // every departure, so it would report a later incarnation's
-                // counters once the referent has departed again; qualify by the
-                // captured incarnation and fall back to the binding-time
-                // snapshot only when no versioned record exists.
-                state
-                    .lki_by_incarnation
-                    .get(&snapshot.object_id)
-                    .and_then(|history| history.get(&snapshot.incarnation))
-                    .map(|lki| counter_count_from_map(&lki.counters, counter_type))
-                    .unwrap_or_else(|| {
-                        counter_count_from_map(&snapshot.lki.counters, counter_type)
-                    })
-            })
-            .unwrap_or(0),
+                    .and_then(|id| state.objects.get(&id))
+                    .filter(|obj| obj.zone == crate::types::zones::Zone::Battlefield);
+                let counters = match live_on_battlefield {
+                    Some(obj) => &obj.counters,
+                    // CR 608.2h + CR 400.7: departure-time counters for THIS
+                    // incarnation. The id-keyed `state.lki_cache` is overwritten
+                    // on every departure, so it would report a later
+                    // incarnation's counters once the referent has departed
+                    // again; qualify by the captured incarnation and fall back
+                    // to the binding-time snapshot only when no versioned record
+                    // exists.
+                    None => state
+                        .lki_by_incarnation
+                        .get(&snapshot.object_id)
+                        .and_then(|history| history.get(&snapshot.incarnation))
+                        .map_or(&snapshot.lki.counters, |lki| &lki.counters),
+                };
+                read(counters)
+            }),
         // CR 608.2c + CR 122.2 + CR 400.7 + CR 608.2h: "that <permanent>" /
         // "that many" back-reference to the chain-root spell's own target.
         // LIVE counters while that target is still on the battlefield (an
@@ -8198,26 +8310,24 @@ fn resolve_counters_on_scope(
                         _ => None,
                     })
             })
-            .map(|id| {
+            .and_then(|id| {
                 let live = state.objects.get(&id);
                 let on_battlefield = live.is_some_and(|obj| obj.zone == Zone::Battlefield);
-                if !on_battlefield {
-                    if let Some(lki) = state.lki_cache.get(&id) {
-                        return counter_count_from_map(&lki.counters, counter_type);
-                    }
-                }
-                live.map(|obj| counter_count_from_map(&obj.counters, counter_type))
-                    .unwrap_or(0)
-            })
-            .unwrap_or(0),
+                let departed = (!on_battlefield)
+                    .then(|| state.lki_cache.get(&id).map(|lki| &lki.counters))
+                    .flatten();
+                departed
+                    .or_else(|| live.map(|obj| &obj.counters))
+                    .map(read)
+            }),
         // CR 201.5a: the stamped granter; unbound, the symbol reads the ability's source (CR 113.7).
-        ObjectScope::GrantingObject => resolve_counters_on_scope(
+        ObjectScope::GrantingObject => read_counters_on_scope(
             state,
             granter_scope(ability, &ctx).unwrap_or(ObjectScope::Source),
             ctx,
             targets,
             ability,
-            counter_type,
+            read,
         ),
         // CR 400.7 + CR 608.2h + CR 122.2: the bound incarnation's counters; once it has
         // changed zones its counters ceased to exist, so only a resolution reads its LKI.
@@ -8225,13 +8335,10 @@ fn resolve_counters_on_scope(
             state,
             object,
             ability,
-            &|o| Some(counter_count_from_map(&o.counters, counter_type)),
-            &|l| Some(counter_count_from_map(&l.counters, counter_type)),
-        )
-        .unwrap_or(0),
-        _ => object_for_scope(state, scope, ctx, targets)
-            .map(|obj| counter_count_from_map(&obj.counters, counter_type))
-            .unwrap_or(0),
+            &|o| Some(read(&o.counters)),
+            &|l| Some(read(&l.counters)),
+        ),
+        _ => object_for_scope(state, scope, ctx, targets).map(|obj| read(&obj.counters)),
     }
 }
 
@@ -8430,16 +8537,16 @@ where
 /// zone-change record identifies it. A leave and re-entry can reuse the same
 /// `ObjectId`, but the re-entered permanent is a new object; it must not replace
 /// the original entrant's LKI for an already-pending trigger.
-fn read_object_pt_by_id_for_incarnation<F, G>(
+fn read_object_pt_by_id_for_incarnation<T, F, G>(
     state: &GameState,
     id: ObjectId,
     expected_incarnation: Option<u64>,
     obj_extract: &F,
     lki_extract: &G,
-) -> Option<i32>
+) -> Option<T>
 where
-    F: Fn(&crate::game::game_object::GameObject) -> Option<i32>,
-    G: Fn(&crate::types::game_state::LKISnapshot) -> Option<i32>,
+    F: Fn(&crate::game::game_object::GameObject) -> Option<T>,
+    G: Fn(&crate::types::game_state::LKISnapshot) -> Option<T>,
 {
     let live = state.objects.get(&id);
     live.filter(|obj| {
@@ -8476,16 +8583,16 @@ where
 
 /// CR 400.7 + CR 608.2h: reads the bound incarnation live wherever it is, else its LKI only for
 /// a resolution that carries its ability.
-fn read_specific_object<F, G>(
+fn read_specific_object<T, F, G>(
     state: &GameState,
     object: ObjectIncarnationRef,
     ability: Option<&ResolvedAbility>,
     obj_extract: &F,
     lki_extract: &G,
-) -> Option<i32>
+) -> Option<T>
 where
-    F: Fn(&crate::game::game_object::GameObject) -> Option<i32>,
-    G: Fn(&crate::types::game_state::LKISnapshot) -> Option<i32>,
+    F: Fn(&crate::game::game_object::GameObject) -> Option<T>,
+    G: Fn(&crate::types::game_state::LKISnapshot) -> Option<T>,
 {
     state
         .objects

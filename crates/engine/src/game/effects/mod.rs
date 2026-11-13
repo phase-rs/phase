@@ -64362,6 +64362,7 @@ mod entry_observation_settlement_tests {
                 attempted: Vec::new(),
                 zone_change_record_start: state.zone_changes_this_turn.len(),
                 deferred_events: Vec::new(),
+                pre_entry_battlefield: None,
             };
             state
                 .resolution_stack

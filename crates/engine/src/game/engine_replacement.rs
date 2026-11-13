@@ -142,6 +142,92 @@ pub(crate) fn object_has_devour_replacement(state: &GameState, id: ObjectId) -> 
     })
 }
 
+/// CR 614.12 + CR 614.1c: whether `id`'s own as-enters replacement reads the
+/// battlefield population as it was before the entry — a self-scoped
+/// "enters with N counters" whose count is a dynamic quantity ("for each
+/// +1/+1 counter among other creatures you control"). Such an entrant must not
+/// count permanents entering in the same simultaneous event, so the mass-entry
+/// loops snapshot the pre-entry battlefield for it, exactly as for Devour.
+pub(crate) fn object_has_pre_entry_population_replacement(state: &GameState, id: ObjectId) -> bool {
+    state.objects.get(&id).is_some_and(|obj| {
+        obj.replacement_definitions.iter_all().any(|def| {
+            def.valid_card == Some(TargetFilter::SelfRef) && {
+                let mut current = def.execute.as_deref();
+                let mut dynamic = false;
+                while let Some(exec) = current {
+                    dynamic |= matches!(
+                        &*exec.effect,
+                        Effect::PutCounter { count, .. }
+                            if !matches!(count, crate::types::ability::QuantityExpr::Fixed { .. })
+                    );
+                    current = exec.sub_ability.as_deref();
+                }
+                dynamic
+            }
+        })
+    })
+}
+
+/// CR 707.5 + CR 614.12: whether `id` has its own as-enters copy replacement
+/// ("you may have this enter as a copy of any creature", Clone). The copiable
+/// values it takes on at entry can carry a replacement of the copied object's
+/// own (a copied Ascendant Acolyte's population count, a copied Devour), which
+/// the member's CURRENT definitions do not yet show.
+pub(crate) fn object_has_as_enters_copy_replacement(state: &GameState, id: ObjectId) -> bool {
+    state.objects.get(&id).is_some_and(|obj| {
+        obj.replacement_definitions.iter_all().any(|def| {
+            def.valid_card == Some(TargetFilter::SelfRef)
+                && super::replacement::EventModifiers::first_non_modifier_ability(
+                    def.execute.as_deref(),
+                )
+                .is_some_and(|real| matches!(&*real.effect, Effect::BecomeCopy { .. }))
+        })
+    })
+}
+
+/// CR 614.12a + CR 614.13a + CR 614.1c + CR 707.5: whether a co-entering member
+/// needs the pre-entry battlefield snapshot — a Devour sacrifice pool, a
+/// population-counting as-enters replacement, or an as-enters copy that may
+/// acquire either from the object it copies. Capturing for every copy-capable
+/// member (rather than every multi-member batch) keeps the snapshot, and the
+/// batch frame that carries it, off every entry that cannot need it.
+pub(crate) fn object_needs_pre_entry_battlefield(state: &GameState, id: ObjectId) -> bool {
+    object_has_devour_replacement(state, id)
+        || object_has_pre_entry_population_replacement(state, id)
+        || object_has_as_enters_copy_replacement(state, id)
+}
+
+/// CR 614.12 + CR 614.1c + CR 614.12a: single authority deciding whether a
+/// simultaneous multi-permanent entry needs the pre-entry battlefield snapshot,
+/// and capturing it. Returns the battlefield as it stands BEFORE the first member
+/// enters when any member needs it, so every co-entrant is excluded regardless of
+/// delivery order. An already-active snapshot (this or an outer entry's) is never
+/// re-captured, which keeps a resumed batch on its original snapshot.
+pub(crate) fn pre_entry_snapshot_for_entry(
+    state: &GameState,
+    members: impl IntoIterator<Item = ObjectId>,
+    destination: Zone,
+) -> Option<HashSet<ObjectId>> {
+    (destination == Zone::Battlefield
+        && state.active_pre_entry_battlefield_snapshot().is_none()
+        && members
+            .into_iter()
+            .any(|id| object_needs_pre_entry_battlefield(state, id)))
+    .then(|| state.battlefield.iter().copied().collect())
+}
+
+/// As [`pre_entry_snapshot_for_entry`], for the ChangeZone multi-entry loops:
+/// parks the snapshot in the loop's ChangeZone frame.
+pub(crate) fn capture_pre_entry_snapshot_for_entry(
+    state: &mut GameState,
+    members: impl IntoIterator<Item = ObjectId>,
+    destination: Zone,
+) {
+    if let Some(snapshot) = pre_entry_snapshot_for_entry(state, members, destination) {
+        state.push_devour_change_zone_snapshot(snapshot);
+    }
+}
+
 /// CR 701.50a + CR 614.5 + CR 616.1f: drain a deferred connive whose leading
 /// Draw link parked a replacement-ordering choice. Runs only when the dedicated
 /// stack-owned Connive re-entry is set (the connive applier's parked-draw

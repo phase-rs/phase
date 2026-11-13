@@ -4750,6 +4750,31 @@ impl ResolvedAbility {
     /// complete owned authorities together; retaining either a source context
     /// or a definition occurrence would reintroduce object-identity drift.
     pub fn clear_trigger_identity_recursive(&mut self) {
+        self.clear_own_trigger_identity();
+        for (_, child) in self.child_links_mut() {
+            child.clear_trigger_identity_recursive();
+        }
+    }
+
+    /// [`Self::clear_trigger_identity_recursive`] for loop normalization, which
+    /// may still need one fact of a departed source: `carry` maps each node's
+    /// own source context (read before it is cleared) to the identity-free
+    /// context that node keeps instead of `None`. Every other identity field is
+    /// cleared exactly as in `clear_trigger_identity_recursive`.
+    pub(crate) fn clear_trigger_identity_carrying_source(
+        &mut self,
+        carry: &impl Fn(&TriggerSourceContext) -> Option<TriggerSourceContext>,
+    ) {
+        let carried = self.trigger_source.as_ref().and_then(carry);
+        self.clear_own_trigger_identity();
+        self.trigger_source = carried;
+        for (_, child) in self.child_links_mut() {
+            child.clear_trigger_identity_carrying_source(carry);
+        }
+    }
+
+    /// The node-local half of [`Self::clear_trigger_identity_recursive`].
+    fn clear_own_trigger_identity(&mut self) {
         self.source_id = ObjectId(0);
         self.source_incarnation = None;
         self.trigger_source = None;
@@ -4778,9 +4803,6 @@ impl ResolvedAbility {
         self.target_incarnations.clear();
         self.target_pins.clear();
         self.legacy_selected_target_incarnations.clear();
-        for (_, child) in self.child_links_mut() {
-            child.clear_trigger_identity_recursive();
-        }
     }
 
     /// CR 104.4b: Rewrites every `Effect::EpicCopy` handle on this chain (root,
