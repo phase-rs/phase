@@ -498,6 +498,12 @@ fn strip_non_copiable_state(copy: &mut GameObject) {
     // permanent, not to a new object built from its card.
     copy.reset_for_battlefield_exit();
 
+    // CR 707.2 + CR 722.3c: a Prepare copy acquires the prepare spell's
+    // characteristics, not the donor's live resolution effects. Face writers
+    // preserve those effects for same-object changes, so clear them here at the
+    // distinct-object construction boundary before installing the copied face.
+    copy.replacement_definitions.clear();
+
     // CR 707.2 + CR 110.5: status (tapped, flipped, face down, phased out),
     // counters and stickers are not copied.
     copy.tapped = false;

@@ -1277,6 +1277,87 @@ fn essence_burn_copy_source_does_not_donate_die_exile() {
     sacrifice_real(&mut r, source_rites, host, P0, Zone::Exile);
 }
 
+/// CR 707.2 + CR 722.3c: Lluwen's distinct Pest Friend copy receives only
+/// the prepare spell's characteristics. Its donor keeps Essence Burn's rider,
+/// but the newly created exile copy cannot inherit that live effect.
+#[test]
+fn essence_burn_prepare_copy_does_not_inherit_die_exile() {
+    let mut s = lifetime_board();
+    let host = real(&mut s, P0, "Lluwen, Exchange Student", Zone::Battlefield);
+    let essence = real(&mut s, P0, "Essence Burn", Zone::Hand);
+    let graveyard_creature = real(&mut s, P0, "Grizzly Bears", Zone::Graveyard);
+    let rites = real(&mut s, P0, "Village Rites", Zone::Hand);
+    let mut r = s.build();
+
+    assert!(
+        r.state().objects[&host].prepared.is_some(),
+        "Lluwen enters prepared and creates the first Pest Friend copy"
+    );
+    assert!(
+        r.state().objects[&host]
+            .color
+            .iter()
+            .any(|color| { matches!(color, ManaColor::Black | ManaColor::Green) }),
+        "printed Lluwen is a legal Essence Burn target"
+    );
+    let first_copy = r
+        .state()
+        .objects
+        .values()
+        .find(|copy| copy.prepared_copy_source == Some(host) && copy.zone == Zone::Exile)
+        .expect("prepared Lluwen has a linked copy in exile")
+        .id;
+    assert_eq!(r.state().objects[&first_copy].name, "Pest Friend");
+
+    r.act(GameAction::CastPreparedCopy { source: host })
+        .expect("cast Lluwen's prepared Pest Friend through the public action");
+    r.advance_until_stack_empty();
+    assert!(r.state().objects[&host].prepared.is_none());
+    assert!(matches!(r.state().waiting_for, WaitingFor::Priority { .. }));
+    assert!(r.state().stack.is_empty());
+
+    // Shielded Passage keeps Lluwen on the battlefield while Essence Burn
+    // installs its same-object death rider independently of damage.
+    burn_surviving_host(&mut r, essence, host);
+    r.activate(host, 0)
+        .pay_with(&[graveyard_creature])
+        .resolve();
+    assert_eq!(r.state().objects[&graveyard_creature].zone, Zone::Exile);
+    assert!(r.state().objects[&host].prepared.is_some());
+
+    let linked_copy = r
+        .state()
+        .objects
+        .values()
+        .find(|copy| copy.prepared_copy_source == Some(host) && copy.zone == Zone::Exile)
+        .expect("repreparing Lluwen creates a distinct linked copy")
+        .id;
+    assert_ne!(linked_copy, host);
+    assert_eq!(r.state().objects[&linked_copy].name, "Pest Friend");
+    assert_eq!(live_resolution_count(&r, host), 1);
+    assert_eq!(live_resolution_count(&r, linked_copy), 0);
+    assert!(r.state().objects[&linked_copy]
+        .replacement_definitions
+        .iter_all()
+        .all(|definition| !definition.is_resolution_installed()));
+
+    let cast = r
+        .act(GameAction::CastPreparedCopy { source: host })
+        .expect("casting the linked copy uses the normal prepared-copy path");
+    assert!(
+        !matches!(cast.waiting_for, WaitingFor::ReplacementChoice { .. }),
+        "the prepared copy offers no inherited death-replacement choice"
+    );
+    r.advance_until_stack_empty();
+    assert!(matches!(r.state().waiting_for, WaitingFor::Priority { .. }));
+    assert!(r.state().stack.is_empty());
+    assert!(r.state().objects[&host].prepared.is_none());
+
+    // CR 700.4: the donor still receives its own turn-bound rider on a later
+    // death after the unrelated prepared copy has resolved.
+    sacrifice_real(&mut r, rites, host, P0, Zone::Exile);
+}
+
 #[test]
 fn essence_burn_survives_nezumi_graverobber_flip() {
     let mut s = lifetime_board();

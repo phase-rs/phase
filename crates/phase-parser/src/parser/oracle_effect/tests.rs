@@ -7157,6 +7157,60 @@ fn named_damage_source_multi_recipient_chain_keeps_cant_block_rider() {
     );
 }
 
+/// SHAPE: Volcanic Vision's demonstrative names the returned card only for its
+/// mana-value amount; the printed spell remains the damage source.
+#[test]
+fn volcanic_vision_demonstrative_amount_does_not_rebind_damage_source() {
+    const ORACLE: &str = "Return target instant or sorcery card from your graveyard to your hand. \
+        Volcanic Vision deals damage equal to that card's mana value to each creature your opponents control. \
+        Exile Volcanic Vision.";
+    let parsed = parse_oracle_text(
+        ORACLE,
+        "Volcanic Vision",
+        &[],
+        &["Sorcery".to_string()],
+        &[],
+    );
+    assert_eq!(parsed.abilities.len(), 1);
+    let definition = &parsed.abilities[0];
+    assert!(
+        !ability_chain_has_unimplemented(definition),
+        "the printed ability must reach its damage clause: {definition:#?}"
+    );
+    let returned = definition
+        .sub_ability
+        .as_ref()
+        .expect("the printed return clause is parsed");
+    let damage = returned
+        .sub_ability
+        .as_ref()
+        .expect("the printed damage clause is parsed");
+    let Effect::DamageAll {
+        amount:
+            QuantityExpr::Ref {
+                qty:
+                    QuantityRef::ObjectManaValue {
+                        scope: ObjectScope::Demonstrative,
+                    },
+            },
+        target: TargetFilter::Typed(target),
+        damage_source,
+        ..
+    } = damage.effect.as_ref()
+    else {
+        panic!(
+            "expected Volcanic Vision's printed damage clause, got {:#?}",
+            damage.effect
+        );
+    };
+    assert_eq!(
+        *damage_source, None,
+        "the explicit self subject remains the spell source"
+    );
+    assert!(target.type_filters.contains(&TypeFilter::Creature));
+    assert_eq!(target.controller, Some(ControllerRef::Opponent));
+}
+
 /// CR 208.1 + issue #6208: Punishing Punch — "Target creature you control deals
 /// damage equal to TWICE its power to target creature an opponent controls." The
 /// multiplier form lowered "its power" via the CDA path to `Power{Source}` (which

@@ -312,13 +312,11 @@ fn target_damage_source(state: &GameState, ability: &ResolvedAbility) -> Option<
             Some(TargetRef::Object(id)) => *id,
             _ => return None,
         },
-        // No binding means this clause names its own subject rather than
-        // receiving one from a parent, and that subject is NOT necessarily a
-        // battlefield creature: Volcanic Vision's `Target` source is the
-        // instant card it just returned to hand. Such shapes carry no
-        // battlefield-creature precondition to enforce, so this arm keeps the
-        // historical lookup — first object anywhere in the list, ability source
-        // as the last resort — unchanged.
+        // No binding means this clause's target subject is local to the node,
+        // rather than inherited from an earlier effect. It is not subject to
+        // the battlefield-creature precondition used for a source bound through
+        // chain descent; this arm keeps the local-target lookup — first object
+        // anywhere in the list, ability source as the last resort — unchanged.
         None => {
             return Some(
                 ability

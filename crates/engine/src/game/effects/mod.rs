@@ -4601,16 +4601,14 @@ fn one_sided_fight_subject(
         // The child already leads with the subject — contract intact.
         Some(source) if first_object_target(&sub.targets) == Some(source) => None,
         // A FILTER-BASED batch child (`DamageAll`: Chandra's Ignition, Alpha
-        // Brawl, Volcanic Vision) carries no targets of its own. While the
-        // parent still HOLDS its subject, leave it to the generic parent-target
-        // propagation further down.
+        // Brawl, Volcanic Vision) carries no targets of its own. The parent
+        // target may remain as a quantity referent without being the damage
+        // source, so leave the child to generic parent-target propagation.
         //
-        // LOAD-BEARING, and measured: routing it to `Prepend` instead would
-        // stamp `Bound`, which subjects it to the creature-on-the-battlefield
-        // eligibility gate — correct for the one-sided-fight class, but wrong
-        // for Volcanic Vision, whose `Target` source is the INSTANT CARD it just
-        // returned to hand. Removing this arm fails
-        // `volcanic_vision_deals_returned_cards_mana_value_after_return_to_hand`.
+        // Routing it to `Prepend` instead stamps `Bound`, applying the
+        // creature-on-the-battlefield source gate used by one-sided-fight
+        // clauses. Volcanic Vision's returned instant is only the mana-value
+        // referent; the named spell remains the damage source.
         //
         // This arm is NOT what decides the illegal case: when the parent's
         // subject has been pruned there is no `Some(_)` to match, so an
@@ -36156,11 +36154,12 @@ mod tests {
             assert!(outcome.events().iter().any(|event| matches!(
                 event,
                 GameEvent::DamageDealt {
+                    source_id,
                     target: TargetRef::Object(damaged),
                     amount: 3,
                     is_combat: false,
                     ..
-                } if *damaged == target
+                } if *source_id == volcanic && *damaged == target
             )));
             assert_eq!(outcome.state().objects[&target].zone, Zone::Graveyard);
         }

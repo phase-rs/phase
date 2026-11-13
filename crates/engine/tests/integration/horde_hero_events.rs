@@ -377,9 +377,9 @@ fn in_pile(state: &GameState, seat: PlayerId, id: ObjectId, pile: Zone) -> bool 
 
 /// Enter the Horde's precombat main (firing `begin_wave`) and set an exact
 /// wave budget, so each test reveals exactly what it rigged.
-fn begin_wave_with_budget(runner: &mut GameRunner, budget: u32) {
-    runner.advance_to_phase(Phase::PreCombatMain);
+fn begin_wave_with_budget(runner: &mut GameRunner, budget: u32) -> Vec<GameEvent> {
     runner.state_mut().horde_wave_remaining = budget;
+    runner.advance_to_phase_collecting_events(Phase::PreCombatMain)
 }
 
 /// Drive the wave to completion (bounded): pass priority through, answering
@@ -679,14 +679,16 @@ fn baxter_banks_then_fires_on_the_next_wave_card() {
     let mut state = hero_event_game();
     let bear = add_hero_creature(&mut state, HERO1, "Hero Bear", 2);
     let baxter = add_library_event(&mut state, "Event: Baxter's Experiments");
-    add_library_event(&mut state, "Event: Bebop's Rampage");
+    let rampage = add_library_event(&mut state, "Event: Bebop's Rampage");
     let mut runner = GameRunner::from_state(state);
-    begin_wave_with_budget(&mut runner, 2);
+    let mut events = begin_wave_with_budget(&mut runner, 2);
     // No prompts: Baxter banks silently and Rampage is synchronous.
     let mut answers = vec![];
-    let events = drive_wave_with_answers_collecting(&mut runner, &mut answers, |runner| {
-        panic!("no prompt expected, got {:?}", runner.state().waiting_for)
-    });
+    events.extend(drive_wave_with_answers_collecting(
+        &mut runner,
+        &mut answers,
+        |runner| panic!("no prompt expected, got {:?}", runner.state().waiting_for),
+    ));
     assert_wave_settled(&runner);
     let st = runner.state();
     assert_eq!(
@@ -700,11 +702,12 @@ fn baxter_banks_then_fires_on_the_next_wave_card() {
             matches!(
                 event,
                 GameEvent::DamageDealt {
+                    source_id,
                     target: TargetRef::Object(id),
                     amount: 2,
                     is_combat: false,
                     ..
-                } if *id == bear
+                } if *source_id == rampage && *id == bear
             )
         })
         .collect();
@@ -720,6 +723,44 @@ fn baxter_banks_then_fires_on_the_next_wave_card() {
     assert!(
         st.baxter_set_aside.is_empty(),
         "the bank drained when it fired"
+    );
+}
+
+#[test]
+fn rampage_deals_once_without_baxter() {
+    let mut state = hero_event_game();
+    let bear = add_hero_creature(&mut state, HERO1, "Hero Bear", 2);
+    let rampage = add_library_event(&mut state, "Event: Bebop's Rampage");
+    let mut runner = GameRunner::from_state(state);
+    let mut events = begin_wave_with_budget(&mut runner, 1);
+    let mut answers = vec![];
+    events.extend(drive_wave_with_answers_collecting(
+        &mut runner,
+        &mut answers,
+        |runner| panic!("no prompt expected, got {:?}", runner.state().waiting_for),
+    ));
+
+    assert_wave_settled(&runner);
+    assert_eq!(runner.state().objects[&bear].zone, Zone::Graveyard);
+    let rampage_damage: Vec<_> = events
+        .iter()
+        .filter(|event| {
+            matches!(
+                event,
+                GameEvent::DamageDealt {
+                    source_id,
+                    target: TargetRef::Object(id),
+                    amount: 2,
+                    is_combat: false,
+                    ..
+                } if *source_id == rampage && *id == bear
+            )
+        })
+        .collect();
+    assert_eq!(
+        rampage_damage.len(),
+        1,
+        "Rampage deals exactly one 2-damage event without Baxter"
     );
 }
 

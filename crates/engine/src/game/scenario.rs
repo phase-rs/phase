@@ -1746,6 +1746,14 @@ impl GameRunner {
     /// Bounded loop: a turn has 12 phases/steps (CR 500.1), so a generous cap
     /// guards against an unexpectedly stuck transition rather than spinning.
     pub fn advance_to_phase(&mut self, phase: Phase) {
+        let _ = self.advance_to_phase_collecting_events(phase);
+    }
+
+    /// Advance the same production turn structure as [`Self::advance_to_phase`]
+    /// while retaining events emitted by automatic phase actions and public
+    /// priority passes. This is useful when a test's claim depends on those
+    /// events; it deliberately shares the single advancement loop.
+    pub fn advance_to_phase_collecting_events(&mut self, phase: Phase) -> Vec<GameEvent> {
         let mut events = Vec::new();
         let mut waiting = crate::game::turns::auto_advance(&mut self.state, &mut events);
         for _ in 0..32 {
@@ -1758,10 +1766,15 @@ impl GameRunner {
             let r1 = apply_as_current(&mut self.state, GameAction::PassPriority);
             let r2 = apply_as_current(&mut self.state, GameAction::PassPriority);
             match (r1, r2) {
-                (Ok(_), Ok(result)) => waiting = result.waiting_for,
+                (Ok(first), Ok(result)) => {
+                    events.extend(first.events);
+                    events.extend(result.events);
+                    waiting = result.waiting_for;
+                }
                 _ => break,
             }
         }
+        events
     }
 
     /// Advance to the declare-attackers step (CR 508). The engine surfaces

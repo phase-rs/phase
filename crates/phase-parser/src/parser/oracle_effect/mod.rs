@@ -27025,6 +27025,32 @@ fn explicit_any_target_clause(effect: &Effect, lower: &str) -> bool {
         && nom_primitives::scan_contains(lower, "any target")
 }
 
+/// CR 608.2c + CR 120.1: A demonstrative used by a damage amount does not
+/// turn a named/self damage subject into the earlier target. For example,
+/// Volcanic Vision's "~ deals damage equal to that card's mana value" keeps
+/// the spell as the source and reads the returned card only for its mana value.
+fn has_explicit_self_damage_subject(effect: &Effect, lower: &str) -> bool {
+    if !matches!(effect, Effect::DealDamage { .. } | Effect::DamageAll { .. }) {
+        return false;
+    }
+
+    preceded(
+        opt(tag::<_, _, OracleError<'_>>("then ")),
+        preceded(
+            alt((
+                tag::<_, _, OracleError<'_>>("~"),
+                tag("this creature"),
+                tag("this permanent"),
+                tag("this spell"),
+                tag("this card"),
+            )),
+            tag(" deals damage"),
+        ),
+    )
+    .parse(lower)
+    .is_ok()
+}
+
 fn rewrite_triggering_spell_controller_to_parent_target_controller(effect: &mut Effect) {
     each_target_filter_mut(effect, &mut |filter| {
         if matches!(filter, TargetFilter::TriggeringSpellController) {
@@ -49804,6 +49830,7 @@ fn parse_effect_chain_ir_body(
             && !condition
                 .as_ref()
                 .is_some_and(condition_measures_tracked_set)
+            && !has_explicit_self_damage_subject(&clause.effect, &text_lower)
             // CR 608.2k: only a GENUINE source-counter gate (no prior chosen
             // target — see `binds_source_counter_pronoun`) keeps the SelfRef
             // binding; a mis-scoped bare "it" over a prior typed target
@@ -49893,6 +49920,7 @@ fn parse_effect_chain_ir_body(
             && has_anaphoric_reference(&recipient_anaphor_lower)
             && !typed_trigger_subject
             && !explicit_any_target_clause(&clause.effect, &text_lower)
+            && !has_explicit_self_damage_subject(&clause.effect, &text_lower)
             && !replace_fight_subject_with_parent_if_anaphoric_subject(
                 &text_lower,
                 &mut clause.effect,
@@ -49925,6 +49953,7 @@ fn parse_effect_chain_ir_body(
             && has_anaphoric_reference(&recipient_anaphor_lower)
             && !typed_trigger_subject
             && !explicit_any_target_clause(&clause.effect, &text_lower)
+            && !has_explicit_self_damage_subject(&clause.effect, &text_lower)
             && !replace_fight_subject_with_parent_if_anaphoric_subject(
                 &text_lower,
                 &mut clause.effect,

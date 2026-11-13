@@ -52,11 +52,12 @@ fn ents_fury_fights_boosted_creature_against_opponent_creature() {
         outcome.events().iter().any(|event| matches!(
             event,
             GameEvent::DamageDealt {
+                source_id,
                 target: TargetRef::Object(target),
                 amount: 7,
                 is_combat: false,
                 ..
-            } if *target == wolf
+            } if *source_id == bear && *target == wolf
         )),
         "the boosted bear deals 7 noncombat fight damage to the wolf"
     );
@@ -65,11 +66,12 @@ fn ents_fury_fights_boosted_creature_against_opponent_creature() {
         outcome.events().iter().any(|event| matches!(
             event,
             GameEvent::DamageDealt {
+                source_id,
                 target: TargetRef::Object(target),
                 amount: 2,
                 is_combat: false,
                 ..
-            } if *target == bear
+            } if *source_id == wolf && *target == bear
         )),
         "the wolf deals 2 noncombat fight damage back to the bear"
     );
