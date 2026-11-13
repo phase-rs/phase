@@ -7,6 +7,7 @@ import {
   type GameAction,
   type MatchConfig,
   type MatchType,
+  type TokenImageRef,
   persistedGameStateView,
 } from "../adapter/types";
 import { AdapterError, AdapterErrorCode } from "../adapter/types";
@@ -100,7 +101,7 @@ import {
   TURTLE_TEAMUP_SURVIVOR_IDENTITIES,
   assignRandomAvatars,
   avatarCardNameForName,
-  scryfallPrintingImageUrl,
+  fetchBossAvatarUrl,
 } from "../services/playerAvatars";
 import type { PlayerAvatarIdentity } from "../services/playerAvatars";
 
@@ -208,8 +209,9 @@ function setupHordeAvatars(
     horde_seats?: readonly number[];
     command_zone?: readonly number[];
     players: readonly { id: number }[];
-    objects: Record<number, { name: string; is_horde_deck_token?: boolean; token_image_ref?: { scryfall_id: string } | null }>;
+    objects: Record<number, { name: string; is_horde_deck_token?: boolean; token_image_ref?: TokenImageRef | null }>;
   },
+  gameId: string,
 ): boolean {
   if (gameState.format_config?.format !== "Horde") return false;
   if (gameState.format_config?.horde_ruleset?.challenge_deck !== "TurtleTeamUpHorde") {
@@ -223,15 +225,11 @@ function setupHordeAvatars(
   const names = new Map<number, string>();
   const playerAvatars = new Map<number, PlayerAvatarIdentity>();
   const bossShortName = boss.name.split(",")[0].split(" //")[0];
-  const bossAvatar: PlayerAvatarIdentity | null = boss.token_image_ref?.scryfall_id
-    ? { kind: "external", url: scryfallPrintingImageUrl(boss.token_image_ref.scryfall_id) }
-    : null;
   let survivorIndex = 0;
   const seats = [...gameState.players].sort((a, b) => a.id - b.id);
   for (const player of seats) {
     if (hordeSeats.has(player.id)) {
       names.set(player.id, bossShortName);
-      if (bossAvatar) playerAvatars.set(player.id, bossAvatar);
       continue;
     }
     const turtle = TURTLE_TEAMUP_SURVIVOR_IDENTITIES[
@@ -242,6 +240,23 @@ function setupHordeAvatars(
     playerAvatars.set(player.id, { kind: "card", cardName: turtle.cardName });
   }
   useMultiplayerStore.setState({ playerNames: names, playerAvatars });
+  // Boss art resolves async through the token-image sidecar, so names never
+  // wait on it. Merged into the stored map when it lands, fenced on the
+  // game id (same fence as the draft-match seat branch): a late resolve
+  // must not paint a newer game's Horde seat. A sidecar miss leaves the
+  // seat without an avatar entry and the HUD renders the initial tile.
+  const bossRef = boss.token_image_ref;
+  if (bossRef?.scryfall_id) {
+    const hordeSeatIds = [...hordeSeats];
+    void fetchBossAvatarUrl(bossRef).then((url) => {
+      if (!url || useGameStore.getState().gameId !== gameId) return;
+      const next = new Map(useMultiplayerStore.getState().playerAvatars);
+      for (const seatId of hordeSeatIds) {
+        next.set(seatId, { kind: "external", url });
+      }
+      useMultiplayerStore.setState({ playerAvatars: next });
+    });
+  }
   return true;
 }
 
@@ -839,7 +854,7 @@ export function GameProvider({
     };
     const applyHordeAvatars = (state: ReturnType<typeof useGameStore.getState>) => {
       if (state.gameId !== gameId || !state.gameState) return false;
-      return setupHordeAvatars(state.gameState);
+      return setupHordeAvatars(state.gameState, gameId);
     };
     const applySeatIdentities = (state: ReturnType<typeof useGameStore.getState>) =>
       applyHordeAvatars(state) || applyCommanderAvatars(state);

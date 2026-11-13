@@ -1,12 +1,36 @@
 import { act } from "react";
-import { cleanup, render } from "@testing-library/react";
+import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("../../services/serverDetection.ts", () => ({
   detectServerUrl: vi.fn(() => new Promise<string>(() => {})),
 }));
 
+// Boss art resolves through the token-image sidecar, a static asset the
+// test environment does not serve. Stub the resolution so these tests pin
+// the stored identity — including its host — rather than image loading.
+const { fetchTokenImageAssetByRef } = vi.hoisted(() => ({
+  fetchTokenImageAssetByRef: vi.fn(),
+}));
+vi.mock("../../services/scryfall.ts", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../services/scryfall.ts")>()),
+  fetchTokenImageAssetByRef,
+}));
+
+// The rendered witness below mounts a real seat header; survivor card art
+// is irrelevant there, so the card-image hook stays stubbed like the
+// header's own visual-avatar suite stubs it.
+vi.mock("../../hooks/useCardImage.ts", () => ({
+  useCardImage: vi.fn(() => ({
+    src: null,
+    isLoading: false,
+    source: null,
+    advanceFailedSource: vi.fn(),
+  })),
+}));
+
 import type { HordeRuleset } from "../../adapter/types.ts";
+import { OpponentSeatHeader } from "../../components/board/OpponentSeatHeader.tsx";
 import { assignRandomAvatars } from "../../services/playerAvatars.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { useMultiplayerDraftStore } from "../../stores/multiplayerDraftStore.ts";
@@ -29,8 +53,10 @@ const TURTLE_TEAMUP_RULESET: HordeRuleset = {
 };
 
 const BOSS_PRINTING_ID = "9a2d23c4-d381-4a92-b4b1-0cf71948f941";
+// Sidecar-resolved art lives on the image CDN host the desktop CSP allows
+// as an image source; the Scryfall API host is fetch-only there.
 const BOSS_AVATAR_URL =
-  `https://api.scryfall.com/cards/${BOSS_PRINTING_ID}?format=image&version=art_crop`;
+  `https://cards.scryfall.io/art_crop/front/9/a/${BOSS_PRINTING_ID}.jpg`;
 
 function expectedRandom(playerCount: number, seed: string) {
   return new Map(
@@ -43,6 +69,8 @@ function expectedRandom(playerCount: number, seed: string) {
 
 describe("GameProvider Horde seat identities", () => {
   beforeEach(() => {
+    fetchTokenImageAssetByRef.mockReset();
+    fetchTokenImageAssetByRef.mockResolvedValue({ src: BOSS_AVATAR_URL, faceIndex: 0 });
     localStorage.clear();
     useMultiplayerStore.setState({
       playerNames: new Map(),
@@ -64,7 +92,7 @@ describe("GameProvider Horde seat identities", () => {
     vi.restoreAllMocks();
   });
 
-  it("installs Turtle and Boss identities for a Turtle Team-Up Horde game", () => {
+  it("installs Turtle and Boss identities for a Turtle Team-Up Horde game", async () => {
     const gameId = "horde-avatars-tmnt";
     render(
       <GameProvider gameId={gameId} mode="ai" playerCount={2}>
@@ -103,13 +131,24 @@ describe("GameProvider Horde seat identities", () => {
     expect(useMultiplayerStore.getState().playerNames).toEqual(
       new Map([[0, "Leonardo"], [1, "Shredder"]]),
     );
+    // Names land synchronously; the Boss portrait resolves async through
+    // the sidecar and merges into the stored map when it lands.
     expect(useMultiplayerStore.getState().playerAvatars).toEqual(new Map([
       [0, { kind: "card", cardName: "Leonardo, Sewer Samurai" }],
-      [1, { kind: "external", url: BOSS_AVATAR_URL }],
     ]));
+    expect(fetchTokenImageAssetByRef).toHaveBeenCalledWith(
+      expect.objectContaining({ scryfall_id: BOSS_PRINTING_ID }),
+      "art_crop",
+    );
+    await waitFor(() => {
+      expect(useMultiplayerStore.getState().playerAvatars).toEqual(new Map([
+        [0, { kind: "card", cardName: "Leonardo, Sewer Samurai" }],
+        [1, { kind: "external", url: BOSS_AVATAR_URL }],
+      ]));
+    });
   });
 
-  it("assigns Turtles in seat order across allied survivors", () => {
+  it("assigns Turtles in seat order across allied survivors", async () => {
     const gameId = "horde-avatars-allies";
     render(
       <GameProvider gameId={gameId} mode="ai" playerCount={3}>
@@ -151,6 +190,13 @@ describe("GameProvider Horde seat identities", () => {
       kind: "card",
       cardName: "Raphael, Ninja Destroyer",
     });
+    // Flush the async Boss merge so no late write escapes this test.
+    await waitFor(() => {
+      expect(useMultiplayerStore.getState().playerAvatars.get(1)).toEqual({
+        kind: "external",
+        url: BOSS_AVATAR_URL,
+      });
+    });
   });
 
   it("keeps the seeded identities for other challenge decks", () => {
@@ -185,7 +231,7 @@ describe("GameProvider Horde seat identities", () => {
     expect(useMultiplayerStore.getState().playerNames.get(0)).toBe("You");
   });
 
-  it("waits for the Boss when none is deployed yet, then applies", () => {
+  it("waits for the Boss when none is deployed yet, then applies", async () => {
     const gameId = "horde-avatars-late-boss";
     render(
       <GameProvider gameId={gameId} mode="ai" playerCount={2}>
@@ -231,9 +277,61 @@ describe("GameProvider Horde seat identities", () => {
     expect(useMultiplayerStore.getState().playerNames).toEqual(
       new Map([[0, "Leonardo"], [1, "Slash"]]),
     );
-    expect(useMultiplayerStore.getState().playerAvatars.get(1)).toEqual({
-      kind: "external",
-      url: BOSS_AVATAR_URL,
+    await waitFor(() => {
+      expect(useMultiplayerStore.getState().playerAvatars.get(1)).toEqual({
+        kind: "external",
+        url: BOSS_AVATAR_URL,
+      });
     });
+  });
+
+  it("renders the Horde portrait from a desktop-allowed host, never the Scryfall API", async () => {
+    const gameId = "horde-avatars-witness";
+    render(
+      <GameProvider gameId={gameId} mode="ai" playerCount={2}>
+        <div />
+      </GameProvider>,
+    );
+
+    act(() => {
+      useGameStore.setState({
+        gameId,
+        gameState: {
+          ...buildGameState({ players: buildPlayers([{ id: 0 }, { id: 1 }]) }),
+          format_config: buildFormatConfig({
+            format: "Horde",
+            horde_ruleset: TURTLE_TEAMUP_RULESET,
+          }),
+          horde_seats: [1],
+          command_zone: [100],
+          objects: {
+            100: {
+              name: "Shredder, Foot Clan Overlord",
+              owner: 1,
+              is_horde_deck_token: true,
+              token_image_ref: {
+                preset_id: "shredder-preset",
+                scryfall_id: BOSS_PRINTING_ID,
+                scryfall_oracle_id: "shredder-oracle",
+              },
+            },
+          },
+        } as never,
+      });
+    });
+    await waitFor(() => {
+      expect(useMultiplayerStore.getState().playerAvatars.get(1)).toEqual({
+        kind: "external",
+        url: BOSS_AVATAR_URL,
+      });
+    });
+
+    // The desktop CSP allows api.scryfall.com for fetches only — an <img>
+    // pointed there renders as initials. The stored portrait must already
+    // be the sidecar-resolved CDN URL when the HUD renders it.
+    render(<OpponentSeatHeader playerId={1} />);
+    const portrait = screen.getByRole("img", { name: "Shredder" });
+    expect(portrait).toHaveAttribute("src", BOSS_AVATAR_URL);
+    expect(portrait.getAttribute("src")).not.toContain("api.scryfall.com");
   });
 });

@@ -1,3 +1,6 @@
+import type { TokenImageRef } from "../adapter/types.ts";
+import { fetchTokenImageAssetByRef } from "./scryfall.ts";
+
 interface AvatarIdentity {
   name: string;
   cardName: string;
@@ -74,13 +77,21 @@ export function avatarCardNameForName(name: string): string | null {
 }
 
 /**
- * Direct art URL for a Scryfall printing id (a Boss avatar's pinned
- * `token_image_ref`). Bosses are token-layout cards with no card-database
- * entry, so the card-name path cannot resolve them — the printing id is the
- * only art channel. `art_crop` matches the square avatar tile.
+ * Boss avatar art for a pinned `token_image_ref`, resolved through the
+ * token-image sidecar. Bosses are token-layout cards with no card-database
+ * entry, so the card-name path cannot resolve them — the sidecar is the
+ * only art channel whose host the desktop CSP allows as an image source
+ * (`api.scryfall.com` is fetch-only there, so a direct `?format=image` URL
+ * renders as initials on desktop). `art_crop` matches the square avatar
+ * tile. Null when the sidecar misses: callers fall back to the initial
+ * tile, the same fallback every other name-based avatar already has.
  */
-export function scryfallPrintingImageUrl(scryfallId: string): string {
-  return `https://api.scryfall.com/cards/${scryfallId}?format=image&version=art_crop`;
+export async function fetchBossAvatarUrl(ref: TokenImageRef): Promise<string | null> {
+  try {
+    return (await fetchTokenImageAssetByRef(ref, "art_crop"))?.src ?? null;
+  } catch {
+    return null;
+  }
 }
 
 function hashStringToSeed(s: string): number {
