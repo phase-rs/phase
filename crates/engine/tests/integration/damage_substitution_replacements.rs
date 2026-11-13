@@ -4099,7 +4099,8 @@ fn deferred_damage_queue_survives_game_state_serde_round_trip() {
             .chain
             .context
             .deferred_damage_choices
-            .len(),
+            .as_ref()
+            .map_or(0, |choices| choices.len()),
         1,
         "reach: a choice is deferred"
     );

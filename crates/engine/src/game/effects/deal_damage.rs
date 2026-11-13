@@ -1740,6 +1740,7 @@ pub(crate) fn defer_choice_behind_earlier_players(
                 .context
                 .deferred_damage_choices
                 .iter()
+                .flat_map(|choices| choices.iter())
                 .map(|choice| player_rank(&order, choice.chooser)),
         )
         .min();
@@ -1760,6 +1761,7 @@ pub(crate) fn defer_choice_behind_earlier_players(
         .chain
         .context
         .deferred_damage_choices
+        .get_or_insert_with(Default::default)
         .push(choice);
     true
 }
@@ -1844,7 +1846,7 @@ pub(crate) fn park_damage_batch(
         ability,
     );
     let mut node = node;
-    node.context.deferred_damage_choices = deferred;
+    node.context.deferred_damage_choices = (!deferred.is_empty()).then(|| Box::new(deferred));
     let pending = PendingContinuation::new(Box::new(node), state);
     if state.resolution_stack.capture_child_boundary() > boundary {
         state
@@ -1965,7 +1967,12 @@ pub fn resolve_resume_damage_batch(
         })
         .collect();
     let kind = *kind;
-    let deferred = ability.context.deferred_damage_choices.clone();
+    let deferred = ability
+        .context
+        .deferred_damage_choices
+        .as_deref()
+        .cloned()
+        .unwrap_or_default();
     replacement::with_damage_batch(state, ability, |state| {
         run_damage_batch(state, ability, kind, replaced, portions, deferred, events)
     })
@@ -2088,7 +2095,7 @@ fn keep_chain_identity(
     // the batch read; nothing else is such a portion (`apply_parent_chain_context`).
     node.context.settled_damage_guards = replacement::settled_damage_guards(state);
     // CR 616.1 + CR 101.4: deferred choices belong to the batch that parks them only.
-    node.context.deferred_damage_choices = Vec::new();
+    node.context.deferred_damage_choices = None;
     node
 }
 

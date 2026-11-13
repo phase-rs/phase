@@ -1852,9 +1852,11 @@ pub struct SpellContext {
     pub settled_damage_guards: Vec<SettledDamageGuard>,
     /// CR 616.1 + CR 101.4: the replacement choices a parked two-phase damage batch
     /// (`Effect::ResumeDamageBatch`) deferred behind earlier players' outstanding choices.
-    /// Node-local, like `settled_damage_guards`.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub deferred_damage_choices: Vec<DeferredDamageChoice>,
+    /// Node-local, like `settled_damage_guards`. Boxed so the common empty case keeps every
+    /// `ResolvedAbility` one pointer wider, not a whole `Vec` (deep resolution chains carry
+    /// many of them on the stack).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deferred_damage_choices: Option<Box<Vec<DeferredDamageChoice>>>,
     /// Typed SearchLibrary intent for a face-down Exile destination.
     /// This is carried in the existing resolution context so it survives
     /// ordinary ability-chain handoffs without widening every ability literal.
