@@ -4,7 +4,6 @@ use engine::database::legality::LegalityFormat;
 use engine::game::gap_analysis::{gap_report_from_args, GapArgsError, GapClass, GapReport};
 
 fn main() {
-    eprintln!("Analyzing coverage...");
     let GapReport { analysis, retained } = match gap_report_from_args(std::env::args()) {
         Ok(report) => report,
         Err(GapArgsError::Usage) => {
