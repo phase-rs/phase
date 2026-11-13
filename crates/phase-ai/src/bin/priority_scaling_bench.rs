@@ -10,6 +10,12 @@
 //! parent commit's the same way; a ratio moving toward 4x rather than 2x points
 //! at quadratic work.
 //!
+//! The empty-hand rows rerun N = 1000 and 2000 with the AI holding nothing and
+//! controlling five Forests, so the decision takes the no-development shortcut
+//! (`large_board_main_phase_has_no_development_sources`) and must pass: compare
+//! each row's `min`, not their ratio, with the parent commit's; a battlefield
+//! walk nested inside the shortcut multiplies it.
+//!
 //! Build/run (measurement mode: node-bounded, no wall-clock cap, so the time
 //! reflects the work rather than the search deadline):
 //!   cargo run -p phase-ai --features scenario-benches --bin priority-scaling-bench
@@ -24,6 +30,7 @@ use std::time::{Duration, Instant};
 
 use engine::game::perf_counters;
 use engine::game::zones::create_object;
+use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
 use engine::types::game_state::{GameState, WaitingFor};
 use engine::types::identifiers::{CardId, ObjectId};
@@ -41,7 +48,13 @@ const P1: PlayerId = PlayerId(1);
 const LARGE_BOARD_OBJECTS: usize = 128;
 const REPS: u32 = 20;
 
-fn board(tokens: usize) -> GameState {
+#[derive(Clone, Copy)]
+enum Hand {
+    Bears,
+    Empty,
+}
+
+fn board(tokens: usize, hand: Hand) -> GameState {
     let mut state = GameState::new_two_player(42);
     state.turn_number = 2;
     state.phase = Phase::PreCombatMain;
@@ -66,6 +79,27 @@ fn board(tokens: usize) -> GameState {
         obj.base_power = obj.power;
         obj.base_toughness = obj.toughness;
         obj.entered_battlefield_turn = Some(1);
+    }
+
+    if let Hand::Empty = hand {
+        for _ in 0..5 {
+            let card_id = CardId(state.next_object_id);
+            let id = create_object(
+                &mut state,
+                card_id,
+                P0,
+                "Forest".to_string(),
+                Zone::Battlefield,
+            );
+            state
+                .objects
+                .get_mut(&id)
+                .unwrap()
+                .card_types
+                .core_types
+                .push(CoreType::Land);
+        }
+        return state;
     }
 
     let card_id = CardId(state.next_object_id);
@@ -105,13 +139,13 @@ fn board(tokens: usize) -> GameState {
     state
 }
 
-fn bench_n(n: usize) -> Duration {
-    let state = board(n);
+fn bench_n(n: usize, hand: Hand) -> Duration {
+    let state = board(n, hand);
     let objects = state.battlefield.len();
-    let route = if objects >= LARGE_BOARD_OBJECTS {
-        "fast"
-    } else {
-        "scored"
+    let route = match hand {
+        Hand::Empty => "no-dev",
+        Hand::Bears if objects >= LARGE_BOARD_OBJECTS => "fast",
+        Hand::Bears => "scored",
     };
     let config = create_config(AiDifficulty::Hard, Platform::Native).into_measurement(42);
 
@@ -125,6 +159,13 @@ fn bench_n(n: usize) -> Duration {
         fastest = fastest.min(rep_start.elapsed());
     }
     let c = perf_counters::snapshot();
+    if let Hand::Empty = hand {
+        assert_eq!(
+            action,
+            Some(GameAction::PassPriority),
+            "no-development shortcut must pass"
+        );
+    }
 
     println!(
         "N={n:5} battlefield={objects:5} route={route:6} min={fastest:>10.3?}  \
@@ -147,11 +188,15 @@ fn main() {
         cfg!(debug_assertions)
     );
     println!();
-    let one = bench_n(1);
-    let hundred = bench_n(100);
+    let one = bench_n(1, Hand::Bears);
+    let hundred = bench_n(100, Hand::Bears);
     print_ratio(1, 100, one, hundred);
 
-    let thousand = bench_n(1000);
-    let two_thousand = bench_n(2000);
+    let thousand = bench_n(1000, Hand::Bears);
+    let two_thousand = bench_n(2000, Hand::Bears);
+    print_ratio(1000, 2000, thousand, two_thousand);
+
+    let thousand = bench_n(1000, Hand::Empty);
+    let two_thousand = bench_n(2000, Hand::Empty);
     print_ratio(1000, 2000, thousand, two_thousand);
 }

@@ -7639,47 +7639,37 @@ mod tests {
         );
     }
 
+    /// CR 702.19b: lethal damage goes to the blocker first, so Wall of Roots
+    /// soaks 5 of Colossal Dreadmaw's 6 and 1 tramples over a life total of 4.
     #[test]
-    fn block_is_futile_does_not_fire_when_chump_saves() {
+    fn stabilize_survivable_trample_block_passes_futility_gate() {
         let mut state = setup();
-        state.players[1].life = 20;
-
-        // 1 trampler 6/6 vs 5 blockers (1/1 each): residual = 6 - 5 = 1 < 20.
-        // Not futile — existing chump-stabilize logic should engage.
-        let blocker_ids: Vec<ObjectId> = (0..5)
-            .map(|i| {
-                add_creature(
-                    &mut state,
-                    PlayerId(1),
-                    &format!("Blocker {i}"),
-                    1,
-                    1,
-                    vec![],
-                )
-            })
-            .collect();
-        let trampler = add_creature(
+        state.players[1].life = 4;
+        let wall = add_creature(
+            &mut state,
+            PlayerId(1),
+            "Wall of Roots",
+            0,
+            5,
+            vec![Keyword::Defender],
+        );
+        let dreadmaw = add_creature(
             &mut state,
             PlayerId(0),
-            "Modest Trampler",
+            "Colossal Dreadmaw",
             6,
             6,
             vec![Keyword::Trample],
         );
 
-        assert!(
-            !block_is_futile(&state, PlayerId(1), &[trampler], &blocker_ids),
-            "Five 1/1s soak 5 of the 6/6 trampler (residual 1 < life 20); not futile"
+        assert_eq!(
+            determine_block_objective(&state, PlayerId(1), &[dreadmaw], &AiProfile::default()),
+            CombatObjective::Stabilize
         );
         BLOCK_SEARCH_EVALUATIONS.with(|c| c.replace(0));
-        let _ = choose_blockers(&state, PlayerId(1), &[trampler]);
-        // Even though objective is PreserveAdvantage here (6 < 20), the block
-        // should not be skipped by the futility fast-path.
-        assert_eq!(
-            BLOCK_SEARCH_EVALUATIONS.with(|c| c.replace(0)),
-            6,
-            "Non-futile board must not be short-circuited"
-        );
+        let blockers = choose_blockers(&state, PlayerId(1), &[dreadmaw]);
+        assert_eq!(blockers, vec![(wall, dreadmaw)]);
+        assert_eq!(BLOCK_SEARCH_EVALUATIONS.with(|c| c.replace(0)), 2);
     }
 
     #[test]
