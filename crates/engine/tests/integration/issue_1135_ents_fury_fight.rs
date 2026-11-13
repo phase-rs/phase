@@ -12,6 +12,7 @@ use engine::types::phase::Phase;
 use engine::types::zones::Zone;
 
 use engine::types::ability::TargetRef;
+use engine::types::events::GameEvent;
 
 const ENTS_FURY_ORACLE: &str = "Put a +1/+1 counter on target creature you control if its power is 4 or greater. Then that creature gets +1/+1 until end of turn and fights target creature you don't control.";
 
