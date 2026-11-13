@@ -667,6 +667,9 @@ struct TriggerCollectionSession {
     /// session prepares each event batch with `ObserveEventBatch` and reads
     /// these sources instead of rebuilding them (`BulkMemberTriggerCollection`).
     bulk_member_sources: Option<Vec<OffZoneTriggerSourceCache>>,
+    /// CR 614.12a + CR 603.2: only an explicitly collected payment slice
+    /// observes the board before this entrant's simultaneous entry group.
+    payment_entrant: Option<ObjectId>,
 }
 
 impl TriggerCollectionSession {
@@ -676,6 +679,7 @@ impl TriggerCollectionSession {
             operation_journal: None,
             admitted_matches: 0,
             bulk_member_sources: None,
+            payment_entrant: None,
         }
     }
 
@@ -689,6 +693,7 @@ impl TriggerCollectionSession {
             operation_journal: Some(operation_journal),
             admitted_matches: 0,
             bulk_member_sources: None,
+            payment_entrant: None,
         }
     }
 
@@ -5299,8 +5304,8 @@ struct TriggerObservationBoard {
 }
 
 impl TriggerObservationBoard {
-    fn prepare(state: &GameState) -> Self {
-        let pre_entry = super::replacement::entry_group_payment_source(state).and_then(|entrant| {
+    fn prepare(state: &GameState, payment_entrant: Option<ObjectId>) -> Self {
+        let pre_entry = payment_entrant.and_then(|entrant| {
             let mut absent = super::effects::token_copy::entering_token_co_entrants(state, entrant);
             absent.push(entrant);
             match super::filter::pre_entry_board(state, &absent) {
@@ -5354,7 +5359,7 @@ fn collect_pending_triggers_with_collection(
     // occurrence-count == 1 for the placement that just fired. Same chokepoint as
     // the tap ledger, so effect, ETB, and ability counter placements all count.
     session.prepare(state, events);
-    let mut observation = TriggerObservationBoard::prepare(state);
+    let mut observation = TriggerObservationBoard::prepare(state, session.payment_entrant);
     let mut pending: Vec<PendingTriggerContext> = Vec::new();
     // CR 603.2c: Track which batched triggers (source_id, trig_idx) have already
     // fired in this pass so "one or more" triggers fire at most once per batch.
@@ -5390,8 +5395,9 @@ fn collect_pending_triggers_with_collection(
     // CR 614.12a + CR 603.2: an as-enters payment precedes the whole group's
     // entry even when earlier tokens have physically moved on a prior action.
     // Extend the same observation boundary used by both indexed and shadow
-    // scans; no event in this payment batch is inside their entry lifetime.
-    if let Some(entrant) = super::replacement::entry_group_payment_source(state) {
+    // scans only for the explicit payment slice. Earlier entry occurrences
+    // belong to the ordinary live-board scan (CR 603.6a).
+    if let Some(entrant) = session.payment_entrant {
         for source in super::effects::token_copy::entering_token_co_entrants(state, entrant)
             .into_iter()
             .chain(std::iter::once(entrant))
@@ -9197,6 +9203,25 @@ pub(crate) fn handle_order_triggers(
 /// if the continuation paused on a target.
 pub(crate) fn collect_triggers_into_deferred(state: &mut GameState, events: &[GameEvent]) {
     let pending = collect_pending_triggers(state, events);
+    state.deferred_triggers.extend(pending);
+}
+
+/// CR 614.12a + CR 603.2: collect only the occurrences emitted by an
+/// as-enters payment before its entry group exists. Ordinary entry events
+/// retain their live-board observers, even while this payment is parked.
+pub(crate) fn collect_entry_payment_triggers_into_deferred(
+    state: &mut GameState,
+    events: &[GameEvent],
+    entrant: ObjectId,
+) {
+    let mut session = TriggerCollectionSession::new(TriggerCollectionOverlay::default());
+    session.payment_entrant = Some(entrant);
+    let pending = collect_pending_triggers_with_collection(
+        state,
+        events,
+        LogicalZoneTriggerCollection::Ordinary,
+        &mut session,
+    );
     state.deferred_triggers.extend(pending);
 }
 

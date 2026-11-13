@@ -2720,3 +2720,138 @@ fn d8_direct_minion_resident_emperion() {
         "D8 resident Emperion",
     );
 }
+
+/// CR 603.6a + CR 603.2: simultaneous newcomers observe each other's entries,
+/// even when the last token parks for an as-enters payment.
+fn minion_payment_soul_warden(carry: PauseCarry, direct: bool) -> RowOutcome {
+    let minion = std::cell::Cell::new(None);
+    let warden = Donor {
+        name: "Soul Warden",
+        oracle: "Whenever another creature enters, you gain 1 life.",
+        power: 1,
+        toughness: 1,
+    };
+    let donors = if direct {
+        vec![warden, BEARS_DONOR]
+    } else {
+        vec![warden, BEARS_DONOR, GARGANTUAN_DONOR]
+    };
+    let (runner, answered) = clone_legion_carried(
+        &donors,
+        |scenario| {
+            minion.set(Some(
+                scenario
+                    .add_creature_to_hand_from_oracle(P0, MINION_NAME, 0, 0, MINION_OF_THE_WASTES)
+                    .with_mana_cost(ManaCost::generic(0))
+                    .id(),
+            ));
+        },
+        |runner| {
+            cast_minion_paying_three(runner, minion.get().unwrap());
+            if direct {
+                let donor = runner
+                    .state_mut()
+                    .objects
+                    .get_mut(&minion.get().unwrap())
+                    .unwrap();
+                donor.controller = P1;
+                donor.base_controller = Some(P1);
+            }
+            engine::game::layers::mark_layers_full(runner.state_mut());
+            engine::game::layers::flush_layers(runner.state_mut());
+        },
+        carry,
+        &Script {
+            pays: vec![5],
+            copy_targets: if direct {
+                vec![]
+            } else {
+                vec![CopyPick::card(MINION_NAME, P0)]
+            },
+            ..Script::default()
+        },
+        |runner, prompt| {
+            if let Prompt::PayAmount { player, min, max } = prompt {
+                assert_eq!((*player, *min, *max), (P0, 0, 17));
+                assert_eq!(runner.state().players[0].life, 17);
+                let proposed = &runner
+                    .state()
+                    .pending_replacement
+                    .as_ref()
+                    .unwrap()
+                    .proposed;
+                if direct {
+                    assert!(
+                        matches!(proposed, ProposedEvent::TokenEntry { .. }),
+                        "REACH-GUARD D8 Warden: direct TokenEntry park"
+                    );
+                } else {
+                    assert!(
+                        matches!(
+                            proposed,
+                            ProposedEvent::ZoneChange {
+                                from: Zone::Battlefield,
+                                to: Zone::Battlefield,
+                                ..
+                            }
+                        ),
+                        "REACH-GUARD G8 Warden: synthetic copy-surface park"
+                    );
+                }
+                for name in ["Soul Warden", BEARS_NAME] {
+                    let token = the_token(runner, name);
+                    assert_eq!(
+                        runner.state().objects[&token].zone,
+                        Zone::Battlefield,
+                        "REACH-GUARD D8 Warden: {name} token live before Minion payment"
+                    );
+                }
+            }
+        },
+    );
+    assert_eq!(
+        prompt_kinds(&answered.prompts),
+        if direct {
+            vec!["PayAmount"]
+        } else {
+            vec!["Replacement", "CopyTarget", "PayAmount"]
+        }
+    );
+    assert_settled(&runner, "Soul Warden simultaneous entries");
+    assert_eq!(
+        chosen_number(&runner, the_token(&runner, MINION_NAME)),
+        Some(5)
+    );
+    assert_eq!(
+        runner.state().players[0].life,
+        14,
+        "D8 Soul Warden: 20 - 3 - 5 + two simultaneous-entry triggers"
+    );
+    row_outcome(&runner, answered)
+}
+
+#[test]
+fn d8_direct_minion_soul_warden_observes_simultaneous_entries() {
+    minion_payment_soul_warden(PauseCarry::Live, true);
+}
+
+#[test]
+fn d8_direct_minion_soul_warden_observes_simultaneous_entries_across_save_and_restore() {
+    assert_restored_row_matches_live(
+        |carry| minion_payment_soul_warden(carry, true),
+        "D8 Soul Warden",
+    );
+}
+
+#[test]
+fn g8_copied_minion_soul_warden_observes_simultaneous_entries() {
+    minion_payment_soul_warden(PauseCarry::Live, false);
+}
+
+#[test]
+fn g8_copied_minion_soul_warden_observes_simultaneous_entries_across_save_and_restore() {
+    assert_restored_row_matches_live(
+        |carry| minion_payment_soul_warden(carry, false),
+        "G8 Soul Warden",
+    );
+}
