@@ -5037,42 +5037,33 @@ Mana of any type can be spent to cast those spells.";
         assert_restored_at_target_selection(&restored, CastTimingRoute::Permission);
     }
 
-    // CR 601.6 + CR 733.1: once Leyline is gone, only Primal Prayers' timing remains, which an
-    // evoked cast cannot use, so the incomplete cast is reversed.
-    #[test]
-    fn legacy_pending_cast_without_an_open_route_is_reversed() {
+    const NIMBUS_NAIAD: &str = "Bestow {4}{U} (If you cast this card for its bestow cost, it's \
+an Aura spell with enchant creature. It becomes a creature again if it's not attached.)\nFlying\n\
+Enchanted creature gets +2/+2 and has flying.";
+
+    const OPT: &str = "Scry 1. (Look at the top card of your library. You may put that card on \
+the bottom.)\nDraw a card.";
+
+    const SHOCK: &str = "Shock deals 2 damage to any target.";
+
+    /// P0's upkeep with Leyline of Anticipation and `pool` floating; `setup` adds the other cards
+    /// and returns the spell to cast.
+    fn leyline_upkeep(
+        pool: Vec<ManaUnit>,
+        setup: impl FnOnce(&mut GameScenario) -> ObjectId,
+    ) -> (GameRunner, ObjectId, ObjectId) {
         let mut scenario = GameScenario::new();
         scenario.at_phase(Phase::Upkeep);
         let leyline = scenario
             .add_enchantment_from_oracle(P0, "Leyline of Anticipation", LEYLINE_OF_ANTICIPATION)
             .id();
-        scenario.add_enchantment_from_oracle(P0, "Primal Prayers", PRIMAL_PRAYERS);
-        let wispmare = scenario
-            .add_creature_to_hand_from_oracle(P0, "Wispmare", 1, 3, WISPMARE)
-            .with_mana_cost(ManaCost::Cost {
-                shards: vec![ManaCostShard::White],
-                generic: 2,
-            })
-            .id();
-        scenario.with_mana_pool(P0, mana(ManaType::White, 1));
-        let mut runner = scenario.build();
-        runner.state_mut().players[P0.0 as usize].energy = 2;
+        let spell = setup(&mut scenario);
+        scenario.with_mana_pool(P0, pool);
+        (scenario.build(), leyline, spell)
+    }
 
-        cast(&mut runner, wispmare, CastPaymentMode::Manual);
-        assert!(
-            matches!(runner.state().waiting_for, WaitingFor::ManaPayment { .. }),
-            "{:?}",
-            runner.state().waiting_for
-        );
-        assert_eq!(
-            runner
-                .state()
-                .pending_cast
-                .as_deref()
-                .expect("the evoked cast is pending")
-                .casting_variant,
-            CastingVariant::Evoke
-        );
+    /// Removes Leyline from the paused cast's board, then restores the legacy save.
+    fn restore_without_leyline(mut runner: GameRunner, leyline: ObjectId) -> GameState {
         assert_eq!(
             pending_route(runner.state()),
             Some(CastTimingRoute::Permission)
@@ -5083,18 +5074,159 @@ Mana of any type can be spent to cast those spells.";
             Zone::Graveyard,
             &mut Vec::new(),
         );
+        restore(&legacy_save(runner.state(), "Permission"))
+    }
 
-        let restored = restore(&legacy_save(runner.state(), "Permission"));
+    fn assert_kept_paying(restored: &GameState, spell: ObjectId) {
+        assert!(
+            matches!(restored.waiting_for, WaitingFor::ManaPayment { .. }),
+            "{:?}",
+            restored.waiting_for
+        );
+        let pending = restored.pending_cast.as_deref().expect("the cast is kept");
+        assert_eq!(pending.object_id, spell);
+        assert_eq!(
+            pending.cast_timing_permission,
+            Some(CastTimingRoute::Permission)
+        );
+    }
+
+    // CR 601.3 + CR 733.1: with Leyline gone, nothing lets a bestowed Nimbus Naiad begin in the
+    // upkeep, so its open proposal is reversed.
+    #[test]
+    fn legacy_proposal_without_an_open_route_is_reversed() {
+        let (mut runner, leyline, naiad) = leyline_upkeep(mana(ManaType::Blue, 5), |scenario| {
+            scenario.add_creature(P0, "Grizzly Bears", 2, 2);
+            scenario.add_creature(P1, "Grizzly Bears", 2, 2);
+            let mut builder = scenario.add_creature_to_hand(P0, "Nimbus Naiad", 2, 2);
+            builder
+                .with_mana_cost(ManaCost::Cost {
+                    shards: vec![ManaCostShard::Blue],
+                    generic: 2,
+                })
+                .with_subtypes(vec!["Nymph"])
+                .from_oracle_text_with_keywords(&["Bestow", "Flying"], NIMBUS_NAIAD);
+            builder.id()
+        });
+        let naiad_object = runner.state_mut().objects.get_mut(&naiad).unwrap();
+        for types in [
+            &mut naiad_object.card_types.core_types,
+            &mut naiad_object.base_card_types.core_types,
+        ] {
+            types.push(engine::types::card_type::CoreType::Enchantment);
+        }
+        cast(&mut runner, naiad, CastPaymentMode::Auto);
+        assert!(
+            matches!(
+                runner.state().waiting_for,
+                WaitingFor::AlternativeCastChoice { .. }
+            ),
+            "{:?}",
+            runner.state().waiting_for
+        );
+        runner
+            .act(GameAction::ChooseAlternativeCast {
+                choice: engine::types::actions::AlternativeCastDecision::Alternative,
+            })
+            .expect("P0 bestows Nimbus Naiad");
+        assert!(
+            matches!(
+                runner.state().waiting_for,
+                WaitingFor::TargetSelection { .. }
+            ),
+            "{:?}",
+            runner.state().waiting_for
+        );
+
+        let restored = restore_without_leyline(runner, leyline);
         assert!(
             matches!(restored.waiting_for, WaitingFor::Priority { player } if player == P0),
             "{:?}",
             restored.waiting_for
         );
-        assert_eq!(restored.objects[&wispmare].zone, Zone::Hand);
+        assert_eq!(restored.objects[&naiad].zone, Zone::Hand);
         assert!(restored.stack.is_empty());
-        assert!(restored.pending_cast.is_none());
+        assert_eq!(restored.players[P0.0 as usize].mana_pool.total(), 5);
+    }
+
+    // CR 601.6: Wispmare's evoke cost is already being paid, so losing Leyline does not make the
+    // cast illegal.
+    #[test]
+    fn legacy_cast_paying_its_costs_keeps_going_without_an_open_route() {
+        let (mut runner, leyline, wispmare) =
+            leyline_upkeep(mana(ManaType::White, 1), |scenario| {
+                scenario.add_enchantment_from_oracle(P0, "Primal Prayers", PRIMAL_PRAYERS);
+                scenario
+                    .add_creature_to_hand_from_oracle(P0, "Wispmare", 1, 3, WISPMARE)
+                    .with_mana_cost(ManaCost::Cost {
+                        shards: vec![ManaCostShard::White],
+                        generic: 2,
+                    })
+                    .id()
+            });
+        runner.state_mut().players[P0.0 as usize].energy = 2;
+        cast(&mut runner, wispmare, CastPaymentMode::Manual);
+        assert_eq!(
+            runner
+                .state()
+                .pending_cast
+                .as_deref()
+                .expect("the evoked cast is pending")
+                .casting_variant,
+            CastingVariant::Evoke
+        );
+
+        let restored = restore_without_leyline(runner, leyline);
+        assert_kept_paying(&restored, wispmare);
         assert_eq!(restored.players[P0.0 as usize].mana_pool.total(), 1);
         assert_eq!(restored.players[P0.0 as usize].energy, 2);
+    }
+
+    // CR 304.1 + CR 601.6: Opt is an instant, so its cast never depended on Leyline.
+    #[test]
+    fn legacy_instant_paying_its_costs_keeps_going() {
+        let (mut runner, leyline, opt) = leyline_upkeep(mana(ManaType::Blue, 1), |scenario| {
+            scenario
+                .add_spell_to_hand_from_oracle(P0, "Opt", true, OPT)
+                .with_mana_cost(ManaCost::Cost {
+                    shards: vec![ManaCostShard::Blue],
+                    generic: 0,
+                })
+                .id()
+        });
+        cast(&mut runner, opt, CastPaymentMode::Manual);
+
+        let restored = restore_without_leyline(runner, leyline);
+        assert_kept_paying(&restored, opt);
+        assert_eq!(restored.players[P0.0 as usize].mana_pool.total(), 1);
+    }
+
+    // CR 304.1: Shock's proposal stays open after Leyline leaves, because an instant may begin in
+    // the upkeep anyway.
+    #[test]
+    fn legacy_instant_proposal_keeps_going() {
+        let (mut runner, leyline, shock) = leyline_upkeep(mana(ManaType::Red, 1), |scenario| {
+            scenario.add_creature(P1, "Grizzly Bears", 2, 2);
+            scenario
+                .add_spell_to_hand_from_oracle(P0, "Shock", true, SHOCK)
+                .with_mana_cost(ManaCost::Cost {
+                    shards: vec![ManaCostShard::Red],
+                    generic: 0,
+                })
+                .id()
+        });
+        cast(&mut runner, shock, CastPaymentMode::Auto);
+        assert!(
+            matches!(
+                runner.state().waiting_for,
+                WaitingFor::TargetSelection { .. }
+            ),
+            "{:?}",
+            runner.state().waiting_for
+        );
+
+        let restored = restore_without_leyline(runner, leyline);
+        assert_restored_at_target_selection(&restored, CastTimingRoute::Permission);
     }
 }
 

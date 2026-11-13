@@ -9,8 +9,8 @@ use crate::types::ability::{
 use crate::types::actions::GameAction;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
-    CollectEvidenceResume, GameState, PendingCast, PendingManaAbility, PersistedRestoreError,
-    PlayerDeckPool, SpellCastReversal, SpellCastUndo, WaitingFor,
+    CastTimingRoute, CollectEvidenceResume, GameState, PendingCast, PendingManaAbility,
+    PersistedRestoreError, PlayerDeckPool, SpellCastReversal, SpellCastUndo, WaitingFor,
 };
 use crate::types::identifiers::ObjectId;
 use crate::types::mana::ManaCost;
@@ -1569,8 +1569,8 @@ pub(super) fn cancel_pending_cast(
     Ok(WaitingFor::Priority { player })
 }
 
-/// CR 601.3 + CR 601.6: gives a pending cast that an old save recorded only as cast "as though it
-/// had flash" the first timing route open on the restored board, or reverses the cast.
+/// CR 601.2a–e + CR 601.6: gives a pending cast that an old save recorded only as cast "as
+/// though it had flash" a timing route, or reverses it while its proposal is still open.
 pub(crate) fn restore_legacy_cast_timing_routes(
     state: &mut GameState,
 ) -> Result<(), PersistedRestoreError> {
@@ -1586,6 +1586,30 @@ pub(crate) fn restore_legacy_cast_timing_routes(
     };
     // CR 601.2a: the caster, who need not control the card being cast.
     let player = pending.ability.controller;
+    // A legacy route is recovered from the proposal's own timing authority, and a cast is
+    // reversed only while its proposal (CR 601.2a–e) is still open and that authority finds no
+    // route; after the proposal, CR 601.6 keeps the cast.
+    let proposal_open = matches!(
+        state.waiting_for,
+        WaitingFor::ChooseXValue { .. }
+            | WaitingFor::TargetSelection { .. }
+            | WaitingFor::ModeChoice { .. }
+            | WaitingFor::OptionalCostChoice { .. }
+            | WaitingFor::ChooseGiftRecipient { .. }
+            | WaitingFor::SpliceOffer { .. }
+            | WaitingFor::ChooseAnnouncingOpponent { .. }
+    );
+    let timing_open_without_flash = state.objects.get(&pending.object_id).is_some_and(|obj| {
+        restrictions::check_spell_timing(
+            state,
+            player,
+            obj,
+            casting::combined_spell_ability_def(obj).as_ref(),
+            false,
+            pending.casting_variant,
+        )
+        .is_ok()
+    });
     match restrictions::open_flash_timing_routes(
         state,
         player,
@@ -1594,16 +1618,9 @@ pub(crate) fn restore_legacy_cast_timing_routes(
     )
     .first()
     {
-        Some(&route) => {
-            for owner in owners {
-                if let Some(live) = state.pending_cast_at_mut(owner) {
-                    live.cast_timing_permission = Some(route);
-                }
-            }
-        }
-        None => {
-            // CR 601.6 + CR 733.1: no route allows this cast any more, so the incomplete
-            // cast is reversed.
+        None if proposal_open && !timing_open_without_flash => {
+            // CR 601.3 + CR 733.1: nothing allows this cast to begin now, so the incomplete
+            // proposal is reversed.
             state.waiting_for = cancel_pending_cast(state, player, &pending, &mut Vec::new())
                 .map_err(|error| {
                     PersistedRestoreError::LegacyPendingCastNotReversible(error.to_string())
@@ -1612,6 +1629,15 @@ pub(crate) fn restore_legacy_cast_timing_routes(
                 return Err(PersistedRestoreError::LegacyPendingCastNotReversible(
                     "a pending cast owner survived the reversal".to_string(),
                 ));
+            }
+        }
+        route => {
+            // `Permission` adds no route-specific cost or target requirement to a kept cast.
+            let route = route.copied().unwrap_or(CastTimingRoute::Permission);
+            for owner in owners {
+                if let Some(live) = state.pending_cast_at_mut(owner) {
+                    live.cast_timing_permission = Some(route);
+                }
             }
         }
     }

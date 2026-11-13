@@ -18560,26 +18560,32 @@ pub fn handle_cast_spell_with_payment_mode(
         );
     }
 
-    if let Ok(normal) = prepare_casting_variant_on_face(
+    // CR 118.9a + CR 601.6: only the granted alternative cost lets this cast begin now,
+    // so it is cast with that cost and no other casting method is offered.
+    let alternative_cost_cast = casting_costs::payable_spell_alternative_cost_for_timing(
         state,
         player,
         object_id,
         CastingVariant::Normal,
-        CastingVariantFace::Current,
-        CastingMode::Actual,
-        None,
-    ) {
-        // CR 118.9a + CR 601.6: only the granted alternative cost lets this cast begin now,
-        // so it is cast with that cost and no other casting method is offered.
-        if normal.prepared.cast_timing_permission == Some(CastTimingRoute::AlternativeCost) {
-            return continue_with_prepared_casting_variant(
-                state,
-                player,
-                normal,
-                payment_mode,
-                events,
-            );
-        }
+        CastTimingPermission::AsThoughHadFlash,
+    )
+    .and_then(|_| {
+        prepare_casting_variant_on_face(
+            state,
+            player,
+            object_id,
+            CastingVariant::Normal,
+            CastingVariantFace::Current,
+            CastingMode::Actual,
+            None,
+        )
+        .ok()
+    })
+    .filter(|normal| {
+        normal.prepared.cast_timing_permission == Some(CastTimingRoute::AlternativeCost)
+    });
+    if let Some(normal) = alternative_cost_cast {
+        return continue_with_prepared_casting_variant(state, player, normal, payment_mode, events);
     }
 
     // CR 702.117a + CR 118.9 + CR 601.2b: Surge — the sole prepared option is the
