@@ -457,8 +457,10 @@ from the write) retires both sockets and settles the incumbent's work (an abort
 while the write receipt is still pending retires the candidate and releases the
 gate at once, and the receipt's fate, under the same bound, decides the
 incumbent); the
-bound defers once to a decode already in flight, whose own deadline then
-decides (a game reconnect can decode its bootstrap Full inside the interval; a
+bound defers once to a decode already in flight, for at most one further
+bound of its own that does not depend on the decode settling; the codec socket
+also bounds each decoder call itself, and a setup receipt the transport holds
+is not waited for past the bound or once the server has answered (a game reconnect can decode its bootstrap Full inside the interval; a
 draft reattach is answered by a plain frame first, so this server never puts a
 decode there). A draft `DraftActionRejected` adopts the candidate instead, as before:
 the server sends it both for refusals and after it has already moved the seat
