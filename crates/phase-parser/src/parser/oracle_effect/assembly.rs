@@ -4850,10 +4850,9 @@ fn refuse_unsupported_target_opponent_choice(def: &mut AbilityDefinition) {
         )
     });
     if is_target_opponent_permanent && bounces_parent {
-        let description = def
-            .description
-            .clone()
-            .unwrap_or_else(|| "unsupported target-opponent permanent choice".to_string());
+        let description =
+            "Target opponent chooses a permanent they control and returns it to its owner's hand."
+                .to_string();
         // Drop the executable return itself; promote any later sequential
         // siblings so the independently unsupported shuffle remains visible.
         let later = def
