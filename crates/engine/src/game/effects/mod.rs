@@ -5335,10 +5335,7 @@ fn settle_entries_at_boundary(
 /// entry event, so the next occurrence is an instruction boundary: the entries of the one before
 /// it are observed and collected before it runs. Every other repeated entering effect is a
 /// quantity expansion of one instruction ("For each nonland card discarded this way, create a
-/// 1/1 red Elemental creature token" is one simultaneous creation) and is not split. Only the
-/// boundary between two performances is handled here: the last performance is not separated
-/// from a later entering instruction of the same resolution, which reaches the action's scan
-/// with it.
+/// 1/1 red Elemental creature token" is one simultaneous creation) and is not split.
 fn settle_entries_before_repeat_occurrence(
     state: &mut GameState,
     events: &[GameEvent],
