@@ -28296,9 +28296,7 @@ impl GameStateDecode {
         }
         migrate_legacy_batched_zone_change_trigger_fired(&mut value)?;
         if let Some(config) = value.get_mut("format_config") {
-            crate::types::format::FormatConfig::migrate_persisted_brawl_commander_damage_threshold(
-                config,
-            );
+            crate::types::format::FormatConfig::migrate_persisted(config);
         }
         // Defaults must not turn unknown old attack authority into a recorded
         // ended relation. Preserve these input-presence facts through decoding.

@@ -10,6 +10,8 @@
 //! in that module's own `#[cfg(test)]` unit tests, which can reach those
 //! private items directly.
 
+use engine::game::replay::ReplayPlayer;
+use engine::game::scenario::{GameScenario, P0, P1};
 use engine::types::custom_format::{
     assert_no_lobby_save_sentinel_collision, bundled_presets, old_school_93_94, old_school_95,
     passes_legacy_axis_gate, passes_reprint_fidelity_gate, swedish_old_school,
@@ -22,8 +24,10 @@ use engine::types::format::{
     DeckCopyLimit, DeckSizeRule, FormatConfig, GameFormat, RangeOfInfluenceConfig, SelectedFormat,
     SideboardPolicy,
 };
-use engine::types::game_state::PersistedGameState;
+use engine::types::game_state::{GameState, PersistedGameState};
+use engine::types::match_config::MatchConfig;
 use engine::types::player::PlayerId;
+use engine::types::replay::{ReplayHeader, ReplayLog};
 use std::collections::{BTreeMap, BTreeSet};
 
 fn sample_structural() -> StructuralRules {
@@ -2928,4 +2932,153 @@ fn presets_with_ordinary_ids_pass_the_sentinel_guard() {
     // now over real entries rather than an empty vector, which is what makes
     // this a live check on the shipped presets.
     assert!(!engine::types::custom_format::custom_format_registry().is_empty());
+}
+
+fn custom_with_command_zone(
+    commander_damage_threshold: Option<u8>,
+    eligibility_rule: CommanderEligibilityRule,
+) -> FormatConfig {
+    let mut rules = sample_rules(91);
+    rules.structural.command_zone_mode = CommandZoneMode::Enabled {
+        commander_damage_threshold,
+        eligibility_rule,
+    };
+    FormatConfig::for_custom_rules(&rules)
+}
+
+/// Every Custom shape whose derived `uses_commander` changed, with the value an
+/// earlier engine wrote for it (`command_zone && threshold.is_some()`).
+fn legacy_custom_rows() -> Vec<(FormatConfig, bool)> {
+    [
+        (None, CommanderEligibilityRule::Standard, false),
+        (
+            None,
+            CommanderEligibilityRule::FreeformAnyCastableCard,
+            false,
+        ),
+        (None, CommanderEligibilityRule::BrawlColorIdentity, false),
+        (Some(21), CommanderEligibilityRule::TinyLeaders, true),
+        (
+            Some(30),
+            CommanderEligibilityRule::OathbreakerSignatureSpell,
+            true,
+        ),
+    ]
+    .into_iter()
+    .map(|(threshold, rule, previous)| {
+        let config = custom_with_command_zone(threshold, rule);
+        assert_ne!(config.uses_commander, previous, "{rule:?}");
+        (config, previous)
+    })
+    .collect()
+}
+
+/// A forged Custom config whose stored `uses_commander` matches neither derivation.
+fn forged_custom_config() -> serde_json::Value {
+    let config = custom_with_command_zone(Some(21), CommanderEligibilityRule::Standard);
+    assert!(config.uses_commander);
+    let mut json = serde_json::to_value(config).unwrap();
+    json["uses_commander"] = false.into();
+    json
+}
+
+fn with_uses_commander(config: &FormatConfig, uses_commander: bool) -> serde_json::Value {
+    let mut json = serde_json::to_value(config).unwrap();
+    json["uses_commander"] = uses_commander.into();
+    json
+}
+
+fn restore_save(save: serde_json::Value) -> Result<GameState, String> {
+    serde_json::from_value::<PersistedGameState>(save)
+        .map_err(|err| err.to_string())?
+        .into_game_state()
+        .map_err(|err| err.to_string())
+}
+
+#[test]
+fn legacy_custom_save_restores_under_either_commander_predicate() {
+    for (config, previous) in legacy_custom_rows() {
+        let label = format!(
+            "{:?}",
+            config
+                .custom_rules
+                .as_ref()
+                .map(|rules| &rules.structural.command_zone_mode)
+        );
+        let mut scenario = GameScenario::new_with_format(config.clone(), 2, 42);
+        let bears = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
+        scenario.with_life(P1, 17);
+        let saved = scenario.build().state().clone();
+        let trusted = serde_json::to_value(PersistedGameState::capture(saved.clone())).unwrap();
+        let raw = trusted["state"].clone();
+
+        for (shape, save) in [("trusted", trusted), ("raw", raw)] {
+            let label = format!("{label} {shape}");
+            let pointer = if shape == "trusted" {
+                "/state/format_config"
+            } else {
+                "/format_config"
+            };
+            assert!(restore_save(save.clone()).is_ok(), "{label}");
+
+            let mut legacy = save.clone();
+            *legacy.pointer_mut(pointer).unwrap() = with_uses_commander(&config, previous);
+            let restored = restore_save(legacy).unwrap_or_else(|err| panic!("{label}: {err}"));
+            assert_eq!(restored.format_config, config, "{label}");
+            assert!(restored.battlefield.contains(&bears), "{label}");
+            assert_eq!(restored.players[1].life, 17, "{label}");
+            assert_eq!(restored.turn_number, saved.turn_number, "{label}");
+            assert_eq!(restored.phase, saved.phase, "{label}");
+
+            let mut forged = save;
+            *forged.pointer_mut(pointer).unwrap() = forged_custom_config();
+            assert!(restore_save(forged).is_err(), "{label}: forgery");
+        }
+
+        let mut raw = serde_json::to_value(&saved).unwrap();
+        assert!(serde_json::from_value::<FormatConfig>(raw["format_config"].clone()).is_ok());
+        assert!(serde_json::from_value::<GameState>(raw.clone()).is_ok());
+        raw["format_config"] = with_uses_commander(&config, previous);
+        for err in [
+            serde_json::from_value::<FormatConfig>(raw["format_config"].clone())
+                .map(drop)
+                .unwrap_err(),
+            serde_json::from_value::<GameState>(raw)
+                .map(drop)
+                .unwrap_err(),
+        ] {
+            assert!(err.to_string().contains("custom_rules"), "{label}: {err}");
+        }
+    }
+}
+
+fn custom_replay_json(format_config: serde_json::Value) -> String {
+    let log = ReplayLog::new(ReplayHeader {
+        format_config: FormatConfig::standard(),
+        match_config: MatchConfig::default(),
+        player_count: 2,
+        first_player: Some(0),
+        seed: 7,
+        deck_data: None,
+    });
+    let mut json = serde_json::to_value(log).unwrap();
+    json["header"]["format_config"] = format_config;
+    json.to_string()
+}
+
+#[test]
+fn legacy_custom_replay_keeps_its_recorded_commander_predicate() {
+    let config = custom_with_command_zone(None, CommanderEligibilityRule::Standard);
+    for (stored, expected) in [(true, true), (false, false)] {
+        let log: ReplayLog =
+            serde_json::from_str(&custom_replay_json(with_uses_commander(&config, stored)))
+                .unwrap_or_else(|err| panic!("stored {stored}: {err}"));
+        let mut player = ReplayPlayer::load(log, None).unwrap();
+        let recorded = &player.seek(0).unwrap().format_config;
+        assert_eq!(recorded.uses_commander, expected);
+        assert_eq!(recorded.commander_damage_threshold, None);
+    }
+    assert!(
+        serde_json::from_str::<ReplayLog>(&custom_replay_json(forged_custom_config())).is_err()
+    );
 }

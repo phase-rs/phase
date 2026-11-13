@@ -3861,21 +3861,82 @@ fn legality_table_format(table: LegalityFormat) -> GameFormat {
     }
 }
 
+/// A persisted value that an earlier engine derived differently. `None` = not legacy.
+#[derive(Default)]
+struct LegacyFormatFields {
+    commander_damage_threshold: Option<u8>,
+    uses_commander: Option<bool>,
+}
+
 impl FormatConfig {
-    /// CR 903.12h: a save written while Brawl still carried CR 704.6c's
-    /// commander-damage threshold restores without it. Persistence and local
-    /// game-init ingress only; network payloads keep the strict validator.
-    pub fn migrate_persisted_brawl_commander_damage_threshold(config: &mut serde_json::Value) {
+    /// Persistence and local game-init ingress: a config an earlier engine wrote
+    /// decodes under today's rules. Network payloads keep the strict validator.
+    pub fn migrate_persisted(config: &mut serde_json::Value) {
+        Self::migrate_legacy_fields(config);
+    }
+
+    /// `ReplayHeader` ingress: a replay reconstructs the game it recorded, so
+    /// legacy values survive the strict decode.
+    pub(crate) fn deserialize_recorded<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<FormatConfig, D::Error> {
+        let mut value = serde_json::Value::deserialize(deserializer)?;
+        let legacy = Self::migrate_legacy_fields(&mut value);
+        let mut config: FormatConfig =
+            serde_json::from_value(value).map_err(serde::de::Error::custom)?;
+        if let Some(threshold) = legacy.commander_damage_threshold {
+            config.commander_damage_threshold = Some(threshold);
+        }
+        if let Some(uses_commander) = legacy.uses_commander {
+            config.uses_commander = uses_commander;
+        }
+        Ok(config)
+    }
+
+    /// Every persisted ingress routes here and network decode never does: the one
+    /// list of values earlier engines derived differently, swapped for today's.
+    fn migrate_legacy_fields(config: &mut serde_json::Value) -> LegacyFormatFields {
+        let mut legacy = LegacyFormatFields::default();
         let is_brawl = config
             .get("format")
             .and_then(|format| GameFormat::deserialize(format).ok())
             .is_some_and(|format| matches!(format, GameFormat::Brawl | GameFormat::HistoricBrawl));
-        if let Some(threshold) = config
+        // CR 903.12h: Brawl once carried CR 704.6c's threshold, admitted at any value >= 1.
+        if let Some(slot) = config
             .get_mut("commander_damage_threshold")
             .filter(|_| is_brawl)
         {
-            *threshold = serde_json::Value::Null;
+            if let Some(threshold) = slot
+                .as_u64()
+                .and_then(|threshold| u8::try_from(threshold).ok())
+                .filter(|&threshold| threshold >= 1)
+            {
+                legacy.commander_damage_threshold = Some(threshold);
+                *slot = serde_json::Value::Null;
+            }
         }
+        // A Custom config's uses_commander was once `command_zone && threshold.is_some()`.
+        if let Some(rules) = config
+            .get("custom_rules")
+            .and_then(|rules| CustomFormatRules::deserialize(rules).ok())
+        {
+            let previous = matches!(
+                rules.structural.command_zone_mode,
+                CommandZoneMode::Enabled {
+                    commander_damage_threshold: Some(_),
+                    ..
+                }
+            );
+            let current = Self::for_custom_rules(&rules).uses_commander;
+            if let Some(slot) = config
+                .get_mut("uses_commander")
+                .filter(|stored| previous != current && stored.as_bool() == Some(previous))
+            {
+                legacy.uses_commander = Some(previous);
+                *slot = serde_json::Value::Bool(current);
+            }
+        }
+        legacy
     }
 
     pub fn topology(&self) -> FormatTopology {
