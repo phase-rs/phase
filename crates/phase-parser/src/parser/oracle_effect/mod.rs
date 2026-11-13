@@ -56502,8 +56502,8 @@ mod resolution_time_division_parse_tests {
     /// number of those Wolves." — lowers to a CR 608.2d untargeted division: the
     /// source is the declared target (CR 120.1), "its power" is that target's
     /// (CR 608.2h; bound to `Target`, not the effect-context ladder), the
-    /// recipients are the Wolves tapped this way (the chain's tracked set,
-    /// CR 115.10a), the target's controller chooses, and no node is
+    /// recipients are the Wolves tapped this way (the chain's tracked set read
+    /// by its Tapped cause, CR 115.10a), the target's controller chooses, and no node is
     /// `Unimplemented`.
     #[test]
     fn master_of_the_wild_hunt_clause_three_is_a_resolution_time_division() {
@@ -56552,7 +56552,9 @@ mod resolution_time_division_parse_tests {
                     filter: Box::new(TargetFilter::Typed(TypedFilter::new(TypeFilter::Subtype(
                         "Wolf".to_string()
                     )))),
-                    caused_by: None,
+                    // "those Wolves" names the Wolves tapped this way, not a
+                    // Wolf the mass tap selected but left untapped.
+                    caused_by: Some(ThisWayCause::Tapped),
                 },
                 damage_source: Some(DamageSource::Target),
                 excess: None,

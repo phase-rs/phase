@@ -3746,6 +3746,52 @@ pub(super) fn resolve_those_tokens_anaphors(defs: &mut [AbilityDefinition]) {
     }
 }
 
+/// CR 608.2c: a typed "those <type>" anaphor names its nearest antecedent. When
+/// the previous instruction reads the chain set restricted to one "this way"
+/// action ("Each Wolf tapped this way deals damage ..."), a following "those
+/// Wolves" names those same members, so it reads the same action. A mass tap
+/// selects members it leaves unchanged too (CR 701.26a), so the bare set is
+/// wider than its "tapped this way" members (Master of the Wild Hunt).
+pub(super) fn inherit_this_way_cause_from_antecedent(defs: &mut [AbilityDefinition]) {
+    for i in 1..defs.len() {
+        let Some((antecedent_id, cause)) = this_way_operand(&defs[i - 1].effect) else {
+            continue;
+        };
+        if let Some(TargetFilter::TrackedSetFiltered {
+            id,
+            caused_by: caused_by @ None,
+            ..
+        }) = defs[i].effect.target_filter_mut()
+        {
+            if *id == antecedent_id {
+                *caused_by = Some(cause);
+            }
+        }
+    }
+}
+
+/// The chain-set operand an instruction acts on or from, when it is restricted
+/// to one "this way" action.
+fn this_way_operand(
+    effect: &Effect,
+) -> Option<(
+    crate::types::identifiers::TrackedSetId,
+    crate::types::ability::ThisWayCause,
+)> {
+    let operand = match effect {
+        Effect::EachSourceDealsDamage { sources, .. } => sources,
+        other => other.target_filter()?,
+    };
+    match operand {
+        TargetFilter::TrackedSetFiltered {
+            id,
+            caused_by: Some(cause),
+            ..
+        } => Some((*id, *cause)),
+        _ => None,
+    }
+}
+
 /// CR 701.60a + CR 608.2c: Resolve the plural population anaphor in
 /// "[mass P/T modification to a population]. ... they're no longer suspected"
 /// (Eliminate the Impossible: "Creatures your opponents control get -2/-0 ...
