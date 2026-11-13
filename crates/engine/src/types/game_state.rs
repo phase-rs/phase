@@ -4916,6 +4916,13 @@ pub struct PendingChangeZoneIteration {
     /// library" still suppresses auto-shuffle on resume.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub library_placement: Option<crate::types::ability::LibraryPosition>,
+    /// CR 701.24a + CR 730.3: whether `library_placement` is the transient
+    /// position of a terminal-shuffle operation, carried across the pause.
+    #[serde(
+        default,
+        skip_serializing_if = "crate::types::ability::LibraryShuffleMode::is_per_object"
+    )]
+    pub library_shuffle: crate::types::ability::LibraryShuffleMode,
     /// CR 303.4f: Pre-resolved Aura host carried across a paused ChangeZone loop.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub enter_attached_to: Option<AttachTarget>,
@@ -6970,6 +6977,13 @@ pub struct PendingBatchZoneMoveRequest {
     pub performed_by: Option<PlayerId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub library_placement: Option<LibraryPosition>,
+    /// CR 701.24a + CR 730.3: the parked move is part of a terminal-shuffle
+    /// operation (see `ProposedEvent::ZoneChange::library_shuffle`).
+    #[serde(
+        default,
+        skip_serializing_if = "crate::types::ability::LibraryShuffleMode::is_per_object"
+    )]
+    pub library_shuffle: crate::types::ability::LibraryShuffleMode,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exile_duration: Option<Duration>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -18300,6 +18314,14 @@ pub enum WaitingFor {
         /// preserves bottom/nth placement across the choice round-trip.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         library_position: Option<LibraryPosition>,
+        /// CR 701.24a + CR 730.3: the choice is the move component of a
+        /// terminal-shuffle operation, so `library_position` is transient and a
+        /// chosen merged permanent's components share it on resume.
+        #[serde(
+            default,
+            skip_serializing_if = "crate::types::ability::LibraryShuffleMode::is_per_object"
+        )]
+        library_shuffle: crate::types::ability::LibraryShuffleMode,
         /// Exact origin/identity snapshot for a fresh CR 401.4 owner
         /// library-order prompt: a `ChangeZoneAll` mass placement or an
         /// announced target set placed by `PutAtLibraryPosition`. The prompt's
@@ -27273,8 +27295,8 @@ fn migrate_legacy_graveyard_paid_cast_cleanup(value: &mut serde_json::Value) -> 
     visit(value, &receipts)
 }
 
-/// The trigger-event context a suspended chain resumes with, for the restore
-/// validator's attacked-referent check.
+/// The event authority carried by a suspended chain or an unplaced trigger
+/// blueprint. Restore validators choose which carrier phases they admit.
 #[derive(Clone, Copy)]
 enum SuspendedChainEvent<'a> {
     /// Resumes inside the current resolution, reading the ambient trigger event(s).
@@ -27292,6 +27314,8 @@ enum SuspendedChainEvent<'a> {
     /// Resumes with the trigger event and batch its own frame captured (an
     /// optional-effect frame parked inside a cost payment).
     Captured(Option<&'a GameEvent>, &'a [GameEvent]),
+    /// A collected trigger blueprint has not reached StackPush pin capture.
+    Unplaced(Option<&'a GameEvent>, &'a [GameEvent]),
 }
 
 type SuspendedChainVisitor<'v, 'a> =
@@ -27413,7 +27437,7 @@ fn visit_pending_cast_chain<'a>(
         for context in collection.pending_contexts() {
             f(
                 &context.pending.ability,
-                SuspendedChainEvent::Captured(
+                SuspendedChainEvent::Unplaced(
                     context.pending.trigger_event.as_ref(),
                     &context.trigger_events,
                 ),
@@ -28081,29 +28105,38 @@ fn validate_restored_attack_authority(
         SuspendedChainEvent::AmbientEventOnly => check(node, current_event, &[]),
         SuspendedChainEvent::Bound(event) => check(node, event, &[]),
         SuspendedChainEvent::Announcement => check(node, None, &[]),
-        SuspendedChainEvent::Captured(event, events) => check(node, event, events),
+        SuspendedChainEvent::Captured(event, events)
+        | SuspendedChainEvent::Unplaced(event, events) => check(node, event, events),
         SuspendedChainEvent::Context(context) => {
             check(node, context.event.as_ref(), &context.events)
         }
     };
+    visit_suspended_chains(state, &mut suspended)
+}
+
+/// Visit the existing typed resume roots with each carrier's event authority.
+fn visit_suspended_chains<'a>(
+    state: &'a GameState,
+    suspended: &mut SuspendedChainVisitor<'_, 'a>,
+) -> Result<(), String> {
     // CR 603.3b: the prompt that becomes live again once trigger ordering is done.
     if let Some(resume) = state
         .pending_trigger_order
         .as_ref()
         .and_then(|order| order.resume_after_ordering.as_deref())
     {
-        visit_waiting_for_chains(resume, &mut suspended)?;
+        visit_waiting_for_chains(resume, suspended)?;
     }
     if let Some(resume) = state.pending_cost_move_resume.as_ref() {
-        visit_cost_move_resume_chains(resume, &mut suspended)?;
+        visit_cost_move_resume_chains(resume, suspended)?;
     }
     if let Some(resume) = state.pending_deferred_life_cost_resume.as_ref() {
-        visit_deferred_life_cost_resume_chains(resume, &mut suspended)?;
+        visit_deferred_life_cost_resume_chains(resume, suspended)?;
     }
     // `pending_discard_for_cost` is `#[serde(skip)]`: it never reaches a persisted
     // payload, so a restored state cannot carry it and it needs no walk here.
     if let Some(pending) = state.pending_cast.as_deref() {
-        visit_pending_cast_chain(pending, &mut suspended)?;
+        visit_pending_cast_chain(pending, suspended)?;
     }
     // CR 701.23a + CR 608.2c: a scoped library search resumes its ability and
     // its "after the search" tail inside the current resolution.
@@ -28114,7 +28147,7 @@ fn validate_restored_attack_authority(
         }
     }
     if let Some(resume) = state.pending_library_search_delivery.as_ref() {
-        visit_library_search_delivery_resume_chains(resume, &mut suspended)?;
+        visit_library_search_delivery_resume_chains(resume, suspended)?;
     }
     // CR 101.4 + CR 608.2c: a per-player sacrifice choice or unless payment
     // resumes the effect it was collecting choices for.
@@ -28148,13 +28181,15 @@ fn validate_restored_attack_authority(
                     .flat_map(|batch| &batch.contexts),
             )
         {
-            check(
+            suspended(
                 &pending.pending.ability,
-                pending.pending.trigger_event.as_ref(),
-                &pending.trigger_events,
+                SuspendedChainEvent::Unplaced(
+                    pending.pending.trigger_event.as_ref(),
+                    &pending.trigger_events,
+                ),
             )?;
         }
-        visit_mana_trigger_fixed_point_resume_chains(&resume.outer_resume, &mut suspended)?;
+        visit_mana_trigger_fixed_point_resume_chains(&resume.outer_resume, suspended)?;
     }
     // CR 118.12 + CR 608.2c: a staged resolution payment resumes its root's
     // rider under the trigger context the transaction captured
@@ -28187,10 +28222,9 @@ fn validate_restored_attack_authority(
     }
     for frame in state.resolution_stack.iter() {
         match frame {
-            ResolutionFrame::OptionalEffect(frame) => check(
+            ResolutionFrame::OptionalEffect(frame) => suspended(
                 &frame.ability,
-                frame.trigger_event.as_ref(),
-                &frame.trigger_events,
+                SuspendedChainEvent::Captured(frame.trigger_event.as_ref(), &frame.trigger_events),
             )?,
             ResolutionFrame::AbilityContinuation(frame) => {
                 let context = frame
@@ -28200,32 +28234,38 @@ fn validate_restored_attack_authority(
                     .or(frame.choose_zone_trigger_context.as_ref());
                 let event = context.and_then(|context| context.event.as_ref());
                 let events = context.map_or(&[][..], |context| context.events.as_slice());
-                check(&frame.pending.chain, event, events)?;
+                suspended(
+                    &frame.pending.chain,
+                    SuspendedChainEvent::Captured(event, events),
+                )?;
                 // CR 608.2f + CR 608.2c: the detached "after each player" tail is
                 // the rest of the same ability; `drain_pending_continuation` keeps
                 // this frame's trigger context pushed until the tail has run, so it
                 // reads the same event.
                 if let Some(tail) = frame.pending.player_scope_tail.as_ref() {
-                    check(&tail.after_scope, event, events)?;
+                    suspended(
+                        &tail.after_scope,
+                        SuspendedChainEvent::Captured(event, events),
+                    )?;
                 }
             }
             ResolutionFrame::RepeatFor(frame) => {
-                check(&frame.ability, current_event, current_events)?
+                suspended(&frame.ability, SuspendedChainEvent::Ambient)?
             }
             ResolutionFrame::RepeatUntil(frame) => {
-                check(&frame.ability, current_event, current_events)?
+                suspended(&frame.ability, SuspendedChainEvent::Ambient)?
             }
             ResolutionFrame::RepeatedOptionalPayment(frame) => {
                 if let Some(pending) = &frame.pending {
-                    check(&pending.payment_unit, current_event, current_events)?;
-                    check(&pending.reflexive, current_event, current_events)?;
+                    suspended(&pending.payment_unit, SuspendedChainEvent::Ambient)?;
+                    suspended(&pending.reflexive, SuspendedChainEvent::Ambient)?;
                 }
             }
             ResolutionFrame::PerPlayerZoneChoice(frame) => {
-                check(&frame.ability, current_event, current_events)?
+                suspended(&frame.ability, SuspendedChainEvent::Ambient)?
             }
             ResolutionFrame::PerCategoryZoneChoice(frame) => {
-                check(&frame.pending.ability, current_event, current_events)?
+                suspended(&frame.pending.ability, SuspendedChainEvent::Ambient)?
             }
             ResolutionFrame::ChooseOneOf(frame) => {
                 if let Some(node) = &frame.continuation {
@@ -28237,7 +28277,7 @@ fn validate_restored_attack_authority(
             }
             ResolutionFrame::BatchDelivery(batch) => {
                 if let Some(completion) = batch.completion.as_ref() {
-                    visit_batch_completion_chains(completion, &mut suspended)?;
+                    visit_batch_completion_chains(completion, suspended)?;
                 }
             }
             ResolutionFrame::ChangeZone(_)
@@ -28261,8 +28301,49 @@ fn validate_restored_attack_authority(
             | ResolutionFrame::PostReplacement(_) => {}
         }
     }
-    visit_waiting_for_chains(&state.waiting_for, &mut suspended)?;
+    visit_waiting_for_chains(&state.waiting_for, suspended)?;
     Ok(())
+}
+
+/// CR 400.7 + CR 608.2k: admit constructed event-context phase instructions
+/// only when their live referents retain exact captured incarnation authority.
+pub(crate) fn validate_restored_event_context_pins(state: &GameState) -> Result<(), String> {
+    if state.viewer_projection.is_some() {
+        return Ok(());
+    }
+    let check = |ability: &ResolvedAbility, event: Option<&GameEvent>| {
+        crate::game::effects::phase_out::validate_event_context_pins(state, ability, event)
+    };
+    for entry in state
+        .stack
+        .iter()
+        .chain(state.resolving_stack_entry.iter())
+        .chain(
+            state
+                .departed_stack_spells
+                .values()
+                .flat_map(|records| records.values().map(|record| &record.entry)),
+        )
+        .chain(state.departed_activated_abilities.values())
+    {
+        if let Some(ability) = entry.ability() {
+            let event = match &entry.kind {
+                StackEntryKind::TriggeredAbility { trigger_event, .. } => trigger_event.as_ref(),
+                _ => None,
+            };
+            check(ability, event)?;
+        }
+    }
+    visit_suspended_chains(state, &mut |ability, event| match event {
+        SuspendedChainEvent::Announcement | SuspendedChainEvent::Unplaced(_, _) => Ok(()),
+        SuspendedChainEvent::Ambient | SuspendedChainEvent::AmbientEventOnly => {
+            check(ability, state.current_trigger_event.as_ref())
+        }
+        SuspendedChainEvent::Bound(event) | SuspendedChainEvent::Captured(event, _) => {
+            check(ability, event)
+        }
+        SuspendedChainEvent::Context(context) => check(ability, context.event.as_ref()),
+    })
 }
 
 impl GameStateDecode {
@@ -28390,6 +28471,7 @@ impl GameStateDecode {
         // projection marker, which the transport wire carries on purpose.
         reject_zero_bound_shortcut_offer(&state)?;
         reject_dangling_state_handles(&state, &state_handles)?;
+        validate_restored_event_context_pins(&state)?;
         #[cfg(debug_assertions)]
         debug_assert_runtime_resolution_invariants(&state);
         Ok(state)
@@ -42679,6 +42761,7 @@ mod tests {
             moved_count: None,
             face_down_profile: None,
             library_placement: None,
+            library_shuffle: crate::types::ability::LibraryShuffleMode::PerObject,
             enter_attached_to: None,
             effect_kind: EffectKind::ChangeZone,
         });
@@ -53662,6 +53745,7 @@ mod tests {
             conditional_enter_with_counters: vec![],
             count_param: 0,
             library_position: None,
+            library_shuffle: crate::types::ability::LibraryShuffleMode::PerObject,
             mass_library_order: None,
             is_cost_payment: false,
             enters_modified_if: None,
@@ -54576,6 +54660,7 @@ mod tests {
             conditional_enter_with_counters: vec![],
             count_param: 0,
             library_position: None,
+            library_shuffle: crate::types::ability::LibraryShuffleMode::PerObject,
             mass_library_order: Some(mass_library_order.clone()),
             is_cost_payment: false,
             enters_modified_if: None,
@@ -54858,6 +54943,7 @@ mod tests {
                 cause: crate::types::ability::FaceDownCause::Manifest,
             }),
             library_placement: None,
+            library_shuffle: crate::types::ability::LibraryShuffleMode::PerObject,
             effect_kind: crate::types::ability::EffectKind::ChangeZone,
             enter_attached_to: None,
         };
@@ -55375,6 +55461,7 @@ mod tests {
             conditional_enter_with_counters: vec![],
             count_param: 0,
             library_position: None,
+            library_shuffle: crate::types::ability::LibraryShuffleMode::PerObject,
             mass_library_order: None,
             is_cost_payment: false,
             enters_modified_if: None,
