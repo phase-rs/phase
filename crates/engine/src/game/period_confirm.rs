@@ -2153,15 +2153,16 @@ mod tests {
                     }
                     runner.act(GameAction::PassPriority).expect("pass priority");
                 }
-                // The trigger listed last goes on the stack last and resolves first: Animate
-                // Dead's, so the Dragon is back before the others resolve, as in the corpus.
+                // The trigger listed last goes on the stack last and resolves first. Animate
+                // Dead's is listed first, so every other trigger resolves before the Dragon is
+                // back and none is buried under the loop, as in the corpus.
                 WaitingFor::OrderTriggers { triggers, .. } => {
                     let mut order: Vec<usize> = (0..triggers.len()).collect();
                     order.sort_by_key(|&index| {
                         state
                             .objects
                             .get(&triggers[index].source_id)
-                            .is_some_and(|object| object.name == "Animate Dead")
+                            .is_none_or(|object| object.name != "Animate Dead")
                     });
                     runner
                         .act(GameAction::OrderTriggers { order })
@@ -2257,36 +2258,32 @@ mod tests {
         );
     }
 
-    /// CR 104.4b + CR 732.4 + CR 608.2k: the MANDATORY-REPLAY caller confirming a period,
-    /// with an undelimited counted take, while a real damage event waits under the loop for a
-    /// real reader of its recipient. Every card is the printed card from the card database except Matsu-Tribe
+    /// CR 104.4b + CR 732.2c + CR 732.4 + CR 608.2k: the MANDATORY-REPLAY caller settling a
+    /// take that PERFORMS, while a real damage event waits under the loop for a real reader of
+    /// its recipient. Every card is the printed card from the card database except Matsu-Tribe
     /// Sniper, which the test fixture lacks and which is built from its printed text and 1/1.
     ///
     /// P0's Animate Dead returns Grizzly Bears, then P0 casts Worldgorger Dragon ("When this
     /// creature enters, exile all other permanents you control. When this creature leaves the
     /// battlefield, return the exiled cards to the battlefield under their owners' control."),
-    /// which exiles both and P0's Wood Elves ("When this creature enters, search your library
-    /// for a Forest card, put that card onto the battlefield, then shuffle."), whose return
-    /// shuffles each cycle. P1's Matsu-Tribe Sniper ("{T}: This creature deals 1 damage to target
-    /// creature with flying. Whenever this creature deals damage to a creature, tap that
-    /// creature and it doesn't untap during its controller's next untap step.") pings the
+    /// which exiles the Bears, Animate Dead and P0's Soul Warden ("Whenever another creature
+    /// enters, you gain 1 life."). P1's Matsu-Tribe Sniper ("{T}: This creature deals 1 damage
+    /// to target creature with flying. Whenever this creature deals damage to a creature, tap
+    /// that creature and it doesn't untap during its controller's next untap step.") pings the
     /// Dragon; with the Sniper's trigger on the stack, P0 casts Murder on its own Dragon. The
     /// returned Animate Dead reanimates the Dragon, whose entry exiles it again: a loop with no
-    /// choice in it, above the Sniper's trigger, which it never reaches (CR 405.5). P1's
-    /// Mountain and Lightning Bolt are the out that turns the loop into an offer, declined
-    /// (CR 732.5) so play reaches a priority frame inside the loop. The visit counters are
-    /// reset there, then `mandatory_period_holds` replays the span and settles each replayed
-    /// frame against `take_boundary`.
+    /// choice in it, above the Sniper's trigger, which it never reaches (CR 405.5), and in
+    /// which the Warden gains life each cycle. P1's Mountain and Lightning Bolt are the out
+    /// that turns the loop into an offer, declined (CR 732.5) so play reaches a priority frame
+    /// inside the loop. The counters are reset there, then `mandatory_period_holds` replays the
+    /// span and settles each replayed frame against `take_boundary`.
     ///
-    /// What it shows: the period holds; the buried trigger owns the damage event and reads its
-    /// recipient, so the replay's projections read the damage history; and they read it at most
-    /// once per projection. It does NOT show a performed take: on every span frame of this
-    /// Murder-started loop (with or without the Sniper) the take is
-    /// `Unperformable(UndelimitedCover)`, so no replayed settle frame recurs against the
-    /// boundary. A performed take over real damage history is asserted by the corpus board
-    /// `WOOD_ELVES` with earlier Shocks, in `mandatory_loop_draws.rs`.
+    /// What it shows: the period holds and the take PERFORMS, so a replayed settle frame
+    /// recurred against the boundary; the buried trigger owns the damage event and reads its
+    /// recipient, so the replay's projections read the damage history play wrote; and they
+    /// read it at most once per projection.
     #[test]
-    fn mandatory_replay_holds_over_a_buried_damage_recipient_reader_reading_once_per_projection() {
+    fn mandatory_replay_performs_its_take_over_a_buried_damage_recipient_reader() {
         use crate::analysis::resource::{
             loop_detect_cost, reset_loop_detect_cost, DAMAGE_RECIPIENT_JOURNAL_VISITS,
         };
@@ -2308,7 +2305,7 @@ mod tests {
         let dragon = scenario.add_real_card(p0, "Worldgorger Dragon", Zone::Hand, db);
         // Its entry searches and shuffles P0's library each cycle: the loop's progress axis,
         // as in the corpus's Wood Elves board.
-        scenario.add_real_card(p0, "Wood Elves", Zone::Battlefield, db);
+        scenario.add_real_card(p0, "Soul Warden", Zone::Battlefield, db);
         // Not in the test card fixture: built from its printed Oracle text and its printed 1/1.
         let sniper = scenario
             .add_creature_from_oracle(
@@ -2344,9 +2341,18 @@ mod tests {
         let pass = |runner: &mut crate::game::scenario::GameRunner| {
             runner.act(GameAction::PassPriority).expect("pass priority");
         };
-        let settle = |runner: &mut crate::game::scenario::GameRunner| {
-            while !runner.state().stack.is_empty() {
-                runner.act(GameAction::PassPriority).expect("pass priority");
+        let settle = |runner: &mut crate::game::scenario::GameRunner| loop {
+            match &runner.state().waiting_for {
+                WaitingFor::OrderTriggers { triggers, .. } => {
+                    let order = (0..triggers.len()).collect();
+                    runner
+                        .act(GameAction::OrderTriggers { order })
+                        .expect("order the triggers");
+                }
+                _ if runner.state().stack.is_empty() => break,
+                _ => {
+                    runner.act(GameAction::PassPriority).expect("pass priority");
+                }
             }
         };
         drop(runner.cast(animate).target_object(bears).commit());
@@ -2417,10 +2423,8 @@ mod tests {
         let projections = loop_detect_cost().projected_clones as usize;
         assert_eq!(
             held.map(|held| held.counted_take),
-            Some(crate::analysis::loop_check::CountedTake::Unperformable(
-                crate::analysis::loop_check::UnperformableCause::UndelimitedCover
-            )),
-            "the period holds; no replayed settle frame recurs against the boundary"
+            Some(crate::analysis::loop_check::CountedTake::Performs),
+            "the period holds and a replayed settle frame recurs against the boundary"
         );
         assert!(
             scans >= rows,
