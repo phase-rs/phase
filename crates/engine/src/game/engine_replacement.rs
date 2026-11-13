@@ -2538,16 +2538,16 @@ fn collect_entry_group_payment_triggers(
     events: &[GameEvent],
     event_start: usize,
 ) {
-    if super::replacement::entry_group_payment_source(state).is_none() {
+    let Some(entrant) = super::replacement::entry_group_payment_source(state) else {
         return;
-    }
+    };
     let unconsumed = super::triggers::filter_already_collected_trigger_events_from(
         state,
         events,
         event_start,
         &state.consumed_before_priority_trigger_events,
     );
-    super::triggers::collect_triggers_into_deferred(state, &unconsumed);
+    super::triggers::collect_entry_payment_triggers_into_deferred(state, &unconsumed, entrant);
     super::triggers::claim_events_for_ordinary_collection(state, events, event_start);
 }
 
