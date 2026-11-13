@@ -46,20 +46,21 @@
 //! unblocked combat damage (and the attackers' poison triggers it fires);
 //! sub-lethal candidates stay card-local.
 
-use engine::game::ability_utils::build_resolved_from_def_with_targets;
+use engine::ai_support::legal_actions;
+use engine::game::ability_utils::{
+    assign_targets_in_chain, build_resolved_from_def_with_targets, build_target_slots,
+};
 use engine::game::combat::AttackTarget;
 use engine::game::combat_damage::preview_unblocked_combat_damage;
 use engine::game::effects::player_counter::{
     preview_player_counter_addition, PlayerCounterAdditionPreview,
 };
 use engine::game::effects::preview_resolution;
-use engine::game::effects::proliferate::apply_proliferate;
 use engine::game::players::{self, PoisonLossMeasure, PoisonLossScope};
-use engine::types::ability::{
-    AbilityDefinition, Effect, EffectKind, QuantityExpr, ResolvedAbility, TargetFilter, TargetRef,
-};
+use engine::game::sba::check_state_based_actions;
+use engine::types::ability::{AbilityDefinition, Effect, QuantityExpr, ResolvedAbility, TargetRef};
 use engine::types::actions::GameAction;
-use engine::types::game_state::{GameState, PendingEffectResolved};
+use engine::types::game_state::{GameState, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::player::{PlayerCounterKind, PlayerId};
 
@@ -92,7 +93,8 @@ struct PoisonPool {
 enum Delivery {
     /// The engine read the delivery, or the estimate is short of lethal and needs no read.
     Counted,
-    /// The engine could not read the delivery, so its estimate stops one counter short of lethal.
+    /// The delivery was not read, or it did not end with the seat out and the AI in, so its
+    /// estimate stops one counter short of lethal.
     Unread,
 }
 
@@ -120,7 +122,10 @@ enum PoisonContribution<'a> {
     },
     /// Proliferates (CR 701.34a) — only advances the clock on an already
     /// poisoned opponent.
-    Proliferate { source: ObjectId },
+    Proliferate {
+        source: ObjectId,
+        abilities: Vec<&'a AbilityDefinition>,
+    },
     /// CR 508.1: an attack declaration whose poison sources are pointed at a
     /// live opponent: the closest pool the declared attackers advance if the
     /// damage connects.
@@ -203,16 +208,14 @@ fn classify_abilities(
             abilities,
         }
     } else if proliferates_parts(abilities.iter().copied(), AbilityScope::Unconditional) {
-        PoisonContribution::Proliferate { source }
+        PoisonContribution::Proliferate { source, abilities }
     } else {
         PoisonContribution::None
     }
 }
 
-/// The poison-giving nodes of an already-scoped ability set, with each node's count and recipient.
-fn poison_nodes<'a>(
-    abilities: &'a [&'a AbilityDefinition],
-) -> impl Iterator<Item = (&'a AbilityDefinition, &'a QuantityExpr, &'a TargetFilter)> + 'a {
+/// The poison counters each recipient gets as printed; `None` when any count is dynamic.
+fn printed_poison(abilities: &[&AbilityDefinition]) -> Option<u32> {
     abilities
         .iter()
         .flat_map(|ability| collect_scoped_nodes(ability, AbilityScope::Unconditional))
@@ -220,69 +223,64 @@ fn poison_nodes<'a>(
             Effect::GivePlayerCounter {
                 counter_kind: PlayerCounterKind::Poison,
                 count,
-                target,
-            } => Some((node, count, target)),
+                ..
+            } => Some(count),
+            _ => None,
+        })
+        .try_fold(0u32, |total, count| match count {
+            QuantityExpr::Fixed { value } => {
+                Some(total.saturating_add(u32::try_from(*value).unwrap_or(0)))
+            }
             _ => None,
         })
 }
 
-/// The poison counters each recipient gets as printed; `None` when any count is dynamic.
-fn printed_poison(abilities: &[&AbilityDefinition]) -> Option<u32> {
-    poison_nodes(abilities).try_fold(0u32, |total, (_, count, _)| match count {
-        QuantityExpr::Fixed { value } => {
-            Some(total.saturating_add(u32::try_from(*value).unwrap_or(0)))
-        }
-        _ => None,
-    })
-}
-
-/// CR 608.2c: the board after the candidate's poison instructions resolve with `seat` as the AI's
-/// chosen player target; `None` when a recipient is bound only at resolution or a choice stops it.
-fn direct_delivery(
+/// CR 608.2c + CR 701.34a: the board after the candidate's whole ability resolves with `seat` in
+/// the slot that admits it and the AI's own legal choices elsewhere; `None` when a required slot
+/// has no legal target or another player owns a choice.
+fn ability_delivery(
     state: &GameState,
     ai_player: PlayerId,
     source: ObjectId,
     abilities: &[&AbilityDefinition],
     seat: PlayerId,
 ) -> Option<GameState> {
-    let resolved = poison_nodes(abilities)
-        .map(|(node, _, target)| {
-            // A scoped node binds each player itself; an announced target is the AI's choice.
-            let targets = if node.player_scope.is_some() {
-                Vec::new()
-            } else if !target.is_context_ref() {
-                vec![TargetRef::Player(seat)]
-            } else {
-                return None;
-            };
-            let mut node = node.clone();
-            node.sub_ability = None;
-            node.else_ability = None;
-            Some(build_resolved_from_def_with_targets(
-                &node, source, ai_player, targets,
-            ))
+    let chosen = TargetRef::Player(seat);
+    let resolved = abilities
+        .iter()
+        .map(|ability| {
+            let mut resolved =
+                build_resolved_from_def_with_targets(ability, source, ai_player, Vec::new());
+            // CR 115.1 + CR 702.11c: every target comes from its slot's legal set.
+            let targets = build_target_slots(state, &resolved)
+                .ok()?
+                .iter()
+                .map(|slot| match slot.chooser {
+                    Some(chooser) if chooser != ai_player => None,
+                    _ if slot.legal_targets.contains(&chosen) => Some(chosen.clone()),
+                    _ => slot.legal_targets.first().cloned(),
+                })
+                .collect::<Option<Vec<_>>>()?;
+            if !targets.is_empty() {
+                assign_targets_in_chain(state, &mut resolved, &targets).ok()?;
+            }
+            Some(resolved)
         })
         .collect::<Option<Vec<_>>>()?;
-    preview_resolution(state, &resolved)
-}
-
-/// CR 701.34a + CR 701.34b: the board after the AI proliferates choosing `seat` alone.
-fn proliferate_delivery(
-    state: &GameState,
-    ai_player: PlayerId,
-    source: ObjectId,
-    seat: PlayerId,
-) -> Option<GameState> {
-    let mut preview = state.clone();
-    let mut events = Vec::new();
-    apply_proliferate(
-        &mut preview,
-        ai_player,
-        &[TargetRef::Player(seat)],
-        PendingEffectResolved::new(EffectKind::Proliferate, source),
-        &mut events,
-    )
-    .then_some(preview)
+    preview_resolution(state, &resolved, |preview| match &preview.waiting_for {
+        WaitingFor::ProliferateChoice { player, eligible }
+            if *player == ai_player && eligible.contains(&chosen) =>
+        {
+            Some(GameAction::SelectTargets {
+                targets: vec![chosen.clone()],
+            })
+        }
+        // Only the AI's own prompts are answered; another player's choice withholds the read.
+        waiting_for if waiting_for.acting_player() == Some(ai_player) => {
+            legal_actions(preview).into_iter().next()
+        }
+        _ => None,
+    })
 }
 
 /// CR 702.70a: a trigger whose instructions give poison counters (Poisonous).
@@ -406,7 +404,7 @@ pub(crate) fn previewed_poison(
 /// (Solemnity) or a replacement (Vorinclex) can change every counter, so a lethal estimate is
 /// replaced by the pool's poison on the board `deliver` returns for its seat. `must_resolve`
 /// reads it even below lethal, for a count with no printed estimate. A delivery the engine
-/// could not read keeps its estimate and is marked `Delivery::Unread`.
+/// could not read, or that does not end with the seat out and the AI in, is `Delivery::Unread`.
 fn confirm_lethal(
     ai_player: PlayerId,
     mut pool: PoisonPool,
@@ -417,10 +415,29 @@ fn confirm_lethal(
     if !must_resolve && !reaches_lethal(pool.measure, pool.added) {
         return pool;
     }
-    let delivered =
-        deliver(pool.seat).and_then(|after| live_opponent_poison(&after, ai_player, pool.seat));
-    match delivered {
-        Some(after) => pool.added = after.count.saturating_sub(pool.measure.count),
+    let Some(mut after) = deliver(pool.seat) else {
+        pool.delivery = Delivery::Unread;
+        return pool;
+    };
+    check_state_based_actions(&mut after, &mut Vec::new());
+    // CR 704.3 + CR 104.4a: lethal is the seat out of the game and the AI still in it, since every
+    // remaining player losing at once is a draw.
+    if !players::is_alive(&after, pool.seat) {
+        if players::is_alive(&after, ai_player) {
+            pool.added = pool.added.max(headroom(pool.measure));
+        } else {
+            pool.delivery = Delivery::Unread;
+        }
+        return pool;
+    }
+    match live_opponent_poison(&after, ai_player, pool.seat) {
+        Some(measure) => {
+            pool.added = measure.count.saturating_sub(pool.measure.count);
+            // A seat still in the game at its threshold has not lost.
+            if reaches_lethal(pool.measure, pool.added) {
+                pool.delivery = Delivery::Unread;
+            }
+        }
         None => pool.delivery = Delivery::Unread,
     }
     pool
@@ -537,7 +554,7 @@ impl TacticalPolicy for PoisonClockPolicy {
                     ),
                 };
                 let deliver =
-                    |seat| direct_delivery(ctx.state, ctx.ai_player, source, &abilities, seat);
+                    |seat| ability_delivery(ctx.state, ctx.ai_player, source, &abilities, seat);
                 match closest_delivered(ctx.ai_player, pools, deliver, printed.is_none()) {
                     Some(pool) => score_clock(scalar, &pool, CRITICAL_MAX),
                     None => {
@@ -545,13 +562,14 @@ impl TacticalPolicy for PoisonClockPolicy {
                     }
                 }
             }
-            PoisonContribution::Proliferate { source } => {
+            PoisonContribution::Proliferate { source, abilities } => {
                 // CR 701.34b: one proliferate gives a shared-poison team a single counter.
                 // CR 701.34a: proliferate chooses among permanents and players
                 // that ALREADY have a counter. With no poisoned opponent it
                 // advances nothing, so it earns nothing on this axis.
                 let pools = seat_pools(ctx.state, ctx.ai_player, 1, |measure| measure.count > 0);
-                let deliver = |seat| proliferate_delivery(ctx.state, ctx.ai_player, source, seat);
+                let deliver =
+                    |seat| ability_delivery(ctx.state, ctx.ai_player, source, &abilities, seat);
                 match closest_delivered(ctx.ai_player, pools, deliver, false) {
                     Some(pool) => score_clock(scalar, &pool, CRITICAL_MAX),
                     None => PolicyVerdict::neutral(PolicyReason::new(

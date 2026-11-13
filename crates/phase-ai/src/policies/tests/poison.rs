@@ -11,7 +11,8 @@ use engine::game::combat::AttackTarget;
 use engine::game::zones::create_object;
 use engine::types::ability::ResolvedAbility;
 use engine::types::ability::{
-    AbilityCost, AbilityDefinition, AbilityKind, Effect, ModalChoice, QuantityExpr, TargetFilter,
+    AbilityCost, AbilityDefinition, AbilityKind, ControllerRef, Effect, ModalChoice, QuantityExpr,
+    TargetFilter, TypedFilter,
 };
 use engine::types::actions::GameAction;
 use engine::types::card_type::{CardType, CoreType};
@@ -92,6 +93,11 @@ fn poison_effect(target: TargetFilter) -> Effect {
         count: QuantityExpr::Fixed { value: 1 },
         target,
     }
+}
+
+/// "target opponent" as the parser types it (Pulse of the Hunter Maze).
+fn target_opponent() -> TargetFilter {
+    TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent))
 }
 
 fn draw_effect() -> Effect {
@@ -304,7 +310,7 @@ fn verdict_scores_lethal_direct_poison_as_critical() {
         1,
         vec![AbilityDefinition::new(
             AbilityKind::Spell,
-            poison_effect(TargetFilter::Opponent),
+            poison_effect(target_opponent()),
         )],
     );
 
@@ -344,7 +350,7 @@ fn verdict_scales_direct_poison_by_clock_progress() {
             1,
             vec![AbilityDefinition::new(
                 AbilityKind::Spell,
-                poison_effect(TargetFilter::Opponent),
+                poison_effect(target_opponent()),
             )],
         );
         let candidate = cast_candidate(spell);
@@ -397,7 +403,7 @@ fn verdict_floors_early_clock_progress_onto_a_plateau() {
             1,
             vec![AbilityDefinition::new(
                 AbilityKind::Spell,
-                poison_effect(TargetFilter::Opponent),
+                poison_effect(target_opponent()),
             )],
         );
         let candidate = cast_candidate(spell);
@@ -512,10 +518,7 @@ fn modal_ability() -> AbilityDefinition {
     });
     ability.mode_abilities = vec![
         AbilityDefinition::new(AbilityKind::Activated, draw_effect()),
-        AbilityDefinition::new(
-            AbilityKind::Activated,
-            poison_effect(TargetFilter::Opponent),
-        ),
+        AbilityDefinition::new(AbilityKind::Activated, poison_effect(target_opponent())),
     ];
     ability
 }
@@ -591,7 +594,7 @@ fn verdict_does_not_credit_a_modal_cast_before_mode_selection() {
         1,
         vec![
             AbilityDefinition::new(AbilityKind::Spell, draw_effect()),
-            AbilityDefinition::new(AbilityKind::Spell, poison_effect(TargetFilter::Opponent)),
+            AbilityDefinition::new(AbilityKind::Spell, poison_effect(target_opponent())),
         ],
     );
     state.objects.get_mut(&spell).unwrap().modal = Some(ModalChoice {
@@ -617,12 +620,19 @@ fn verdict_credits_a_non_modal_cast_with_the_same_effect() {
     let decision = priority_decision();
     let mut state = state_with_players(2);
     state.players[1].poison_counters = 9;
+    create_object(
+        &mut state,
+        CardId(2),
+        AI,
+        "Swamp".to_string(),
+        Zone::Library,
+    );
     let spell = spell_object(
         &mut state,
         1,
         vec![
             AbilityDefinition::new(AbilityKind::Spell, draw_effect()),
-            AbilityDefinition::new(AbilityKind::Spell, poison_effect(TargetFilter::Opponent)),
+            AbilityDefinition::new(AbilityKind::Spell, poison_effect(target_opponent())),
         ],
     );
 
@@ -696,7 +706,7 @@ fn verdict_caps_a_lethal_infect_attack_below_critical() {
         9,
         vec![AbilityDefinition::new(
             AbilityKind::Spell,
-            poison_effect(TargetFilter::Opponent),
+            poison_effect(target_opponent()),
         )],
     );
     let cast = cast_candidate(spell);
@@ -924,7 +934,7 @@ fn registry_skips_the_policy_for_an_uncommitted_deck() {
         1,
         vec![AbilityDefinition::new(
             AbilityKind::Spell,
-            poison_effect(TargetFilter::Opponent),
+            poison_effect(target_opponent()),
         )],
     );
 
@@ -952,7 +962,7 @@ fn registry_routes_cast_spell_to_the_policy() {
         1,
         vec![AbilityDefinition::new(
             AbilityKind::Spell,
-            poison_effect(TargetFilter::Opponent),
+            poison_effect(target_opponent()),
         )],
     );
     let decision = priority_decision();
@@ -998,10 +1008,7 @@ fn registry_routes_activate_ability_to_the_policy() {
     let source = creature_object(&mut state, 1, Vec::new(), 1);
     *Arc::make_mut(&mut state.objects.get_mut(&source).unwrap().abilities) = vec![
         AbilityDefinition::new(AbilityKind::Activated, draw_effect()),
-        AbilityDefinition::new(
-            AbilityKind::Activated,
-            poison_effect(TargetFilter::Opponent),
-        ),
+        AbilityDefinition::new(AbilityKind::Activated, poison_effect(target_opponent())),
     ];
     let decision = priority_decision();
 
@@ -1061,7 +1068,7 @@ fn registry_routes_modal_spell_mode_choice_to_the_policy() {
         1,
         vec![
             AbilityDefinition::new(AbilityKind::Spell, draw_effect()),
-            AbilityDefinition::new(AbilityKind::Spell, poison_effect(TargetFilter::Opponent)),
+            AbilityDefinition::new(AbilityKind::Spell, poison_effect(target_opponent())),
         ],
     );
     let modal = ModalChoice {
@@ -1120,7 +1127,8 @@ fn threshold(t: u8) -> FormatConfig {
     }
 }
 
-/// The row's cards are placed by `add`, then each `(seat, count)` in `poison` is seeded.
+/// The row's cards are placed by `add` beside a card in the AI's library, then each
+/// `(seat, count)` in `poison` is seeded.
 fn board(
     format: FormatConfig,
     players: u8,
@@ -1128,6 +1136,7 @@ fn board(
     add: impl FnOnce(&mut GameScenario) -> Vec<ObjectId>,
 ) -> (GameRunner, Vec<ObjectId>) {
     let mut scenario = GameScenario::new_with_format(format, players, 42);
+    scenario.with_library_top(AI, &["Swamp"]);
     let ids = add(&mut scenario);
     let mut runner = scenario.build();
     for &(seat, count) in poison {
@@ -1837,23 +1846,12 @@ fn dynamic_poison_count_is_resolved_before_it_is_scored() {
         ),
         (threshold(9), 8, "poison_clock_lethal", Some(1)),
     ] {
-        let (mut runner, ids) = board(format, 2, &[(OPPONENT, at)], |s| {
-            s.at_phase(Phase::PreCombatMain);
-            vec![s.add_real_card(
-                AI,
-                "Vraska, Betrayal's Sting",
-                Zone::Battlefield,
-                shared_integration_card_db(),
-            )]
-        });
+        let (mut runner, ids) = vraska_board(format, &[(OPPONENT, at)], |_| Vec::new());
         let vraska = ids[0];
-        let obj = runner.state_mut().objects.get_mut(&vraska).unwrap();
-        obj.loyalty = Some(9);
-        obj.counters.insert(CounterType::Loyalty, 9);
         let minus_nine = runner.state().objects[&vraska]
             .abilities
             .iter()
-            .position(|a| matches!(a.cost, Some(AbilityCost::Loyalty { amount: -9 })))
+            .position(loyalty(-9))
             .unwrap();
         let (delta, reason) = verdict_on(
             runner.state(),
@@ -1872,5 +1870,144 @@ fn dynamic_poison_count_is_resolved_before_it_is_scored() {
             "poison_clock_lethal" => assert!(delta > crate::policies::registry::STRONG_MAX),
             _ => assert!(delta > 0.0 && delta <= crate::policies::registry::STRONG_MAX),
         }
+    }
+}
+
+/// Activating `source`'s first ability that `pick` selects.
+fn activation_of(
+    state: &GameState,
+    source: ObjectId,
+    pick: impl Fn(&AbilityDefinition) -> bool,
+) -> CandidateAction {
+    let index = state.objects[&source]
+        .abilities
+        .iter()
+        .position(pick)
+        .unwrap();
+    activate_ability_candidate(source, index)
+}
+
+fn loyalty(amount: i32) -> impl Fn(&AbilityDefinition) -> bool {
+    move |ability| matches!(ability.cost, Some(AbilityCost::Loyalty { amount: cost }) if cost == amount)
+}
+
+/// Vraska, Betrayal's Sting at nine loyalty in a main phase, then the cards `extra` places.
+fn vraska_board(
+    format: FormatConfig,
+    poison: &[(PlayerId, u32)],
+    extra: impl FnOnce(&mut GameScenario) -> Vec<ObjectId>,
+) -> (GameRunner, Vec<ObjectId>) {
+    let (mut runner, ids) = board(format, 2, poison, |s| {
+        s.at_phase(Phase::PreCombatMain);
+        let vraska = s.add_real_card(
+            AI,
+            "Vraska, Betrayal's Sting",
+            Zone::Battlefield,
+            shared_integration_card_db(),
+        );
+        [vec![vraska], extra(s)].concat()
+    });
+    let obj = runner.state_mut().objects.get_mut(&ids[0]).unwrap();
+    obj.loyalty = Some(9);
+    obj.counters.insert(CounterType::Loyalty, 9);
+    (runner, ids)
+}
+
+/// Leyline of Sanctity: "You have hexproof." CR 702.11c: Vraska's −9 can't target that opponent,
+/// so the only legal target is the AI and the opponent gets nothing.
+#[test]
+fn hexproof_opponent_is_not_a_lethal_target() {
+    for (leyline, kind) in [
+        (false, "poison_clock_lethal"),
+        (true, "poison_clock_no_poison_loss"),
+    ] {
+        let (runner, ids) = vraska_board(threshold(9), &[(OPPONENT, 8)], |s| {
+            if leyline {
+                s.add_real_card(
+                    OPPONENT,
+                    "Leyline of Sanctity",
+                    Zone::Battlefield,
+                    shared_integration_card_db(),
+                );
+            }
+            Vec::new()
+        });
+        let candidate = activation_of(runner.state(), ids[0], loyalty(-9));
+        let (delta, reason) = verdict_on(runner.state(), &candidate);
+        assert_eq!(reason.kind, kind);
+        assert_eq!(delta > crate::policies::registry::STRONG_MAX, !leyline);
+        assert_eq!(delta == 0.0, leyline);
+    }
+}
+
+/// Vraska's 0: "You draw a card and lose 1 life. Proliferate." At 1 life the AI hits 0 life as the
+/// opponent reaches nine poison, a draw (CR 104.4a); at 2 life it wins.
+#[test]
+fn vraska_zero_is_lethal_only_when_the_ai_survives_it() {
+    for (life, kind) in [(1, "poison_clock_pressure"), (2, "poison_clock_lethal")] {
+        let (runner, ids) = vraska_board(threshold(9), &[(OPPONENT, 8)], |s| {
+            s.with_life(AI, life);
+            Vec::new()
+        });
+        let state = runner.state();
+        let (delta, reason) = verdict_on(state, &activation_of(state, ids[0], loyalty(0)));
+        assert_eq!(reason.kind, kind);
+        assert_eq!(fact(&reason, "poison_added"), Some(1));
+        assert_eq!(delta > crate::policies::registry::STRONG_MAX, life == 2);
+    }
+}
+
+const INFECTIOUS_BITE: &str = "Target creature you control deals damage equal to its power to target creature you don't control. Each opponent gets a poison counter.";
+const VRASKAS_FALL: &str =
+    "Each opponent sacrifices a creature or planeswalker of their choice and gets a poison counter.";
+
+fn grizzly_bears(scenario: &mut GameScenario, controller: PlayerId) {
+    scenario.add_real_card(
+        controller,
+        "Grizzly Bears",
+        Zone::Battlefield,
+        shared_integration_card_db(),
+    );
+}
+
+/// Infectious Bite's creature targets are the AI's own choices, so its counter is read: lethal at
+/// nine, not under Solemnity (CR 101.2) or at eight.
+#[test]
+fn ai_chosen_creature_targets_are_read_for_lethal() {
+    for (at, solemn, kind) in [
+        (9, false, "poison_clock_lethal"),
+        (9, true, "poison_clock_no_poison_loss"),
+        (8, false, "poison_clock_pressure"),
+    ] {
+        let (runner, ids) = board(FormatConfig::standard(), 2, &[(OPPONENT, at)], |s| {
+            grizzly_bears(s, AI);
+            grizzly_bears(s, OPPONENT);
+            if solemn {
+                solemnity(s);
+            }
+            vec![s
+                .add_spell_to_hand_from_oracle(AI, "Infectious Bite", true, INFECTIOUS_BITE)
+                .id()]
+        });
+        let (_, reason) = verdict_on(runner.state(), &cast_candidate(ids[0]));
+        assert_eq!(reason.kind, kind, "at {at}, solemnity {solemn}");
+    }
+}
+
+/// Vraska's Fall's opponent chooses which of two creatures to sacrifice, a choice the
+/// AI does not answer, so the counter is pressure; with one creature there is no choice to make.
+#[test]
+fn an_opponent_owned_choice_withholds_the_lethal_read() {
+    for (creatures, kind) in [(2, "poison_clock_pressure"), (1, "poison_clock_lethal")] {
+        let (runner, ids) = board(FormatConfig::standard(), 2, &[(OPPONENT, 9)], |s| {
+            for _ in 0..creatures {
+                grizzly_bears(s, OPPONENT);
+            }
+            vec![s
+                .add_spell_to_hand_from_oracle(AI, "Vraska's Fall", true, VRASKAS_FALL)
+                .id()]
+        });
+        let (_, reason) = verdict_on(runner.state(), &cast_candidate(ids[0]));
+        assert_eq!(reason.kind, kind, "{creatures} opposing creatures");
     }
 }

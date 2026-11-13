@@ -21108,15 +21108,31 @@ fn stamp_discovered_referent_onto_continuation(state: &mut GameState) {
     }
 }
 
-/// CR 608.2c: the board after these instructions resolve in order on a copy; None when one stops for a choice.
-pub fn preview_resolution(state: &GameState, abilities: &[ResolvedAbility]) -> Option<GameState> {
+/// An answer that never moves its prompt forward would otherwise loop the preview forever.
+const PREVIEW_RESOLUTION_MAX_ANSWERS: usize = 64;
+
+/// CR 608.2c: the board after these instructions resolve in order on a copy, each prompt they open
+/// answered by `answer` from the copy; None when a prompt goes unanswered or the answers run out.
+pub fn preview_resolution(
+    state: &GameState,
+    abilities: &[ResolvedAbility],
+    answer: impl Fn(&GameState) -> Option<crate::types::actions::GameAction>,
+) -> Option<GameState> {
     let mut preview = state.clone();
     let mut events = Vec::new();
+    let mut answers = 0..PREVIEW_RESOLUTION_MAX_ANSWERS;
     for ability in abilities {
         let progress = resolve_ability_chain_step(&mut preview, ability, &mut events, 0).ok()?;
-        // A prompt the resolution opened leaves the outcome to a player's choice.
-        if progress.is_pending() || preview.waiting_for != state.waiting_for {
-            return None;
+        let mut prompted = progress.is_pending() || preview.waiting_for != state.waiting_for;
+        while prompted {
+            if matches!(preview.waiting_for, WaitingFor::GameOver { .. }) {
+                return Some(preview);
+            }
+            answers.next()?;
+            let action = answer(&preview)?;
+            crate::game::engine::apply_as_current_for_simulation(&mut preview, action).ok()?;
+            // The answered resolution hands priority back once nothing else is left to choose.
+            prompted = !matches!(preview.waiting_for, WaitingFor::Priority { .. });
         }
     }
     Some(preview)
