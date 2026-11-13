@@ -2473,6 +2473,35 @@ fn a_payment_at_a_work_slice_boundary_survives_a_checked_restore() {
         refused.as_ref().err()
     );
 
+    // The same unsupported draw (its drawer is not the controller) written to
+    // the prompt and to the owner agrees with itself, and is refused for what
+    // it repeats: the payment authority would fail every owed instruction.
+    let unsupported_draw = AbilityCost::EffectCost {
+        effect: Box::new(Effect::Draw {
+            count: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::SelfRef,
+        }),
+    };
+    let mut forged = runner.state().clone();
+    let WaitingFor::UnlessPayment { cost, .. } = &mut forged.waiting_for else {
+        panic!("reach guard: the continuation prompt is open");
+    };
+    *cost = unsupported_draw.clone();
+    let Some(PendingCostMoveResume::CounterAdditionUnlessPayment { cost, .. }) =
+        forged.pending_cost_move_resume.as_mut()
+    else {
+        panic!("reach guard: the payment is parked");
+    };
+    *cost = unsupported_draw;
+    let refused = restore(&forged);
+    assert!(
+        refused.as_ref().is_err_and(|error| error
+            .to_string()
+            .contains("not a supported draw instruction")),
+        "a repeated cost the authority does not pay is refused: {:?}",
+        refused.as_ref().err()
+    );
+
     *runner.state_mut() = restore(runner.state()).expect("the boundary restores");
     assert_continuation_boundary(&mut runner, 2, "after the restore");
     let result = runner
@@ -2869,6 +2898,47 @@ fn accepting_dredge_after_a_departure_unmutes_hullbreacher_completes_the_payment
         runner.state().pending_cost_move_resume.is_none(),
         "nothing is owed"
     );
+}
+
+/// CR 616.1 + CR 800.4a: after the same departure, choosing Dredge's turn and
+/// then declining its "may" leaves the draw to Hullbreacher, the effect that
+/// was passed over: one Treasure, the Imp still in the graveyard, and the next
+/// instruction asks for the order of both effects again.
+#[test]
+fn declining_dredge_after_choosing_its_turn_leaves_the_draw_to_hullbreacher() {
+    let (mut runner, vortex, hullbreacher) = hullbreacher_unmuted_mid_payment();
+    let graveyard = ZoneSizes::of(&runner, P0).graveyard;
+    let index = candidate_position(&runner, hullbreacher, false);
+    runner
+        .act(GameAction::ChooseReplacement { index })
+        .expect("choosing Dredge's turn is never refused");
+    let declined = runner
+        .act(GameAction::ChooseReplacement {
+            index: DECLINE_REPLACEMENT,
+        })
+        .expect("declining Dredge is never refused");
+    assert_eq!(
+        treasures_of(&runner, P1),
+        1,
+        "Hullbreacher replaces the draw"
+    );
+    assert_eq!(
+        ZoneSizes::of(&runner, P0).graveyard,
+        graveyard,
+        "nothing was milled and the Imp stays in the graveyard"
+    );
+    assert_eq!(upkeep_resolutions(&declined.events, vortex), 0);
+    assert_replacement_choice(&runner, "the next instruction asks again");
+    let pending = runner
+        .state()
+        .pending_replacement
+        .as_ref()
+        .expect("the next draw is parked");
+    assert!(
+        !pending.is_optional && pending.candidates.len() == 2,
+        "the next draw offers the order of Dredge and Hullbreacher"
+    );
+    assert_eq!(parked_unpaid_suffix(&runner), owed_instructions(WORK_SLICE));
 }
 
 /// CR 616.1 + CR 702.24a + CR 800.4a: after the same departure, choosing
@@ -3275,7 +3345,23 @@ fn checked_restore_refuses_a_parked_payment_whose_payer_is_not_in_the_game() {
             };
             *cost = draw_counter_mana_cost();
         },
-        "not a draw instruction",
+        "not a supported draw instruction",
+    );
+    // A draw the payment authority does not pay (its drawer is not the
+    // controller) is refused as well, before any instruction is attempted.
+    refused_with(
+        &|owner| {
+            let PendingCostMoveResume::CounterAdditionUnlessPayment { cost, .. } = owner else {
+                panic!("reach guard: an unless payment is parked");
+            };
+            *cost = AbilityCost::EffectCost {
+                effect: Box::new(Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::SelfRef,
+                }),
+            };
+        },
+        "not a supported draw instruction",
     );
 
     *runner.state_mut() = restore(&saved).expect("the untouched save restores");

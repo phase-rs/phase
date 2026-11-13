@@ -16664,8 +16664,8 @@ impl GameState {
     ///   `engine_payment_choices::retire_parked_unless_payment_of_departing_players`),
     ///   so no instruction is performed for, and no continuation addressed to,
     ///   a seat that cannot answer;
-    /// - a repeated remainder counts copies of a draw instruction, the only
-    ///   cost paid that way (CR 702.24a);
+    /// - a repeated remainder counts copies of a draw instruction the payment
+    ///   authority supports, the only cost paid that way (CR 702.24a);
     /// - the players still to be polled are seats;
     /// - an unless-payment prompt saved over a repeated remainder is that
     ///   payment's continuation, derived from the owner and its exact owed
@@ -16699,15 +16699,21 @@ impl GameState {
                     suffix.payer
                 ));
             }
+            // CR 702.24a: the repeated form is paid one draw instruction at a
+            // time by the resolution authority, which pays only the draw leaf
+            // it supports (`AbilityCost::supports_effect_cost_payment`: the
+            // controller draws a fixed count). Any other cost there would fail
+            // inside a payment already chosen.
             if matches!(suffix.remainder, UnpaidCostRemainder::Repeated(_))
-                && !matches!(
-                    cost,
-                    AbilityCost::EffectCost { effect }
-                        if matches!(effect.as_ref(), super::ability::Effect::Draw { .. })
-                )
+                && !(cost.supports_effect_cost_payment()
+                    && matches!(
+                        cost,
+                        AbilityCost::EffectCost { effect }
+                            if matches!(effect.as_ref(), super::ability::Effect::Draw { .. })
+                    ))
             {
                 return Err(
-                    "parked unless payment repeats a cost that is not a draw instruction"
+                    "parked unless payment repeats a cost that is not a supported draw instruction"
                         .to_string(),
                 );
             }
@@ -23913,12 +23919,47 @@ pub struct ResolutionPaymentTransaction {
     pub recovered: Option<Box<PaymentRecoveryCheckpoint>>,
 }
 
+/// The persisted form of a recovery checkpoint's state. A bare `GameState`
+/// decodes through the transport ingress, which admits a viewer projection and
+/// has no saved-game authority checks; the checkpoint is installed as the game
+/// when its payment settles, so it is written by the raw persistence writer
+/// and read by the persistence ingress (`decode_persisted_resolution_state`):
+/// a projection is refused, and exact attack authority, replay keys and state
+/// handles are validated as for the outer saved game.
+mod persisted_checkpoint_state {
+    use super::{decode_persisted_resolution_state, GameState, ResolutionStateWire};
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    #[allow(clippy::borrowed_box)]
+    pub(super) fn serialize<S>(state: &Box<GameState>, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        ResolutionStateWire::from_game_state((**state).clone()).serialize(serializer)
+    }
+
+    pub(super) fn deserialize<'de, D>(deserializer: D) -> Result<Box<GameState>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        decode_persisted_resolution_state(value)
+            .map(Box::new)
+            .map_err(|error| serde::de::Error::custom(format!("recovery checkpoint: {error}")))
+    }
+}
+
 /// CR 614.17a + CR 118.12: the accepted prefix of a staged payment, with the
 /// descriptor removed, preserved across an outside action that changed the
 /// canonical base. Hidden like the transaction itself: projections strip the
 /// whole descriptor, and only a completed settlement publishes `events`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PaymentRecoveryCheckpoint {
+    /// Written and decoded as persisted state (`persisted_checkpoint_state`),
+    /// not as the transport form a bare `GameState` uses: a checkpoint is a
+    /// second executable game, so it crosses the persistence boundary through
+    /// the same ingress as the game that carries it.
+    #[serde(with = "persisted_checkpoint_state")]
     pub state: Box<GameState>,
     /// Events already emitted by the accepted prefix; published once on commit.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

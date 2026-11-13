@@ -2344,6 +2344,35 @@ fn checked_restore_refuses_a_stale_replacement_candidate() {
     );
 }
 
+/// A recovery checkpoint's state is read through the persistence ingress, as
+/// the saved game that carries it is. NOT a state the game produces: the valid
+/// Dredge checkpoint with its nested state marked as one player's view. A
+/// projection holds only what that player was shown, so the save is refused;
+/// the untouched save restores (`checked_restore_refuses_a_stale_replacement_candidate`
+/// and its neighbours restore the same fixture).
+#[test]
+fn checked_restore_refuses_a_checkpoint_that_is_a_viewer_projection() {
+    let runner = recovered_dredge_checkpoint();
+    checked_round_trip(runner.state()).expect("reach guard: the checkpoint restores");
+    let mut state = runner.state().clone();
+    state
+        .payment_transaction
+        .as_mut()
+        .and_then(|transaction| transaction.recovered.as_mut())
+        .expect("the departure parked a recovery checkpoint")
+        .state
+        .viewer_projection = Some(P0);
+    let saved = serde_json::to_string(&PersistedGameState::Raw(Box::new(state)))
+        .expect("the forged state serializes");
+    let refused = serde_json::from_str::<PersistedGameState>(&saved).map(|_| "decoded");
+    assert!(
+        refused
+            .as_ref()
+            .is_err_and(|error| error.to_string().contains("recovery checkpoint")),
+        "a projection-marked checkpoint is refused where it is decoded: {refused:?}"
+    );
+}
+
 /// CR 702.24a + CR 118.12: a recovery checkpoint is a second executable state,
 /// so a parked unless payment inside it is held to the outer state's rule. NOT
 /// a state the game produces: a staged payment's checkpoint never parks an
