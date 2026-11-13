@@ -2430,11 +2430,12 @@ impl CopyCountStatus {
 /// (see the PR #5834/#5836 review that requested this).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ParentTargetMissingReason {
-    /// CR 609.3 + CR 608.2c (issue #1365): A `Dig` (or `RevealTop`) looked at an empty library. Consulted
-    /// by exact `ParentTarget` no-op guards: the `PutAtLibraryPosition` Dig-tail
-    /// seam (`put_on_top.rs`) avoids the generic self-fallback, and optional
-    /// cast/play operations avoid offering a nonexistent card regardless of
-    /// whether their driver is immediate or lingering.
+    /// CR 609.3 + CR 608.2c (issue #1365): A `Dig` (or `RevealTop`) looked at an
+    /// empty library. Consulted by exact `ParentTarget` no-op guards: the
+    /// `PutAtLibraryPosition` Dig-tail seam (`put_on_top.rs`) avoids the generic
+    /// self-fallback, and optional cast/play operations avoid offering a
+    /// nonexistent card regardless of whether their driver is immediate or
+    /// lingering.
     /// Without the first guard, the Dig's own source (e.g. a reanimated
     /// Thassa's Oracle) would move into the library it just found empty.
     Dig,
