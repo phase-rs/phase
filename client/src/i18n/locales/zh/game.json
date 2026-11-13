@@ -223,6 +223,11 @@
     "splitAttacks": "分配攻击",
     "spread": "分散",
     "spreadEvenly": "均匀分散",
+    "targetTotal_few": "{{count}}个攻击者 · {{damage}}点伤害",
+    "targetTotal_many": "{{count}}个攻击者 · {{damage}}点伤害",
+    "targetTotal_one": "{{count}}个攻击者 · {{damage}}点伤害",
+    "targetTotal_other": "{{count}}个攻击者 · {{damage}}点伤害",
+    "totalsHeading": "攻击合计",
     "unassigned": "未分配",
     "unassignedRemaining_one": "{{count}}个未分配",
     "unassignedRemaining_other": "{{count}}个未分配",
@@ -276,7 +281,9 @@
     "pendingSpell": "下一个咒语",
     "poisonAriaLabel_one": "{{count}}个中毒指示物",
     "poisonAriaLabel_other": "{{count}}个中毒指示物",
-    "poisonTooltip": "中毒指示物：{{count}}\n拥有十个或更多中毒指示物的牌手输掉这盘游戏。",
+    "poisonTooltip": "中毒指示物：{{count}}",
+    "poisonLossPlayer": "拥有{{threshold}}个或更多中毒指示物的牌手输掉这盘游戏。",
+    "poisonLossTeam": "拥有{{threshold}}个或更多中毒指示物的队伍输掉这盘游戏。",
     "radAriaLabel_one": "{{count}}个辐射指示物",
     "radAriaLabel_other": "{{count}}个辐射指示物",
     "radTooltip": "辐射指示物：{{count}}\n在该牌手的战斗前主阶段开始时，该牌手磨等同于其辐射指示物数量的牌，然后每有一张以此法磨掉的非地牌，便失去1点生命。",
@@ -305,7 +312,8 @@
     "unboundedTokens": "衍生物",
     "unboundedTooltip": "无限{{resource}}（∞）",
     "unboundedTriggers": "触发",
-    "unboundedTurns": "回合"
+    "unboundedTurns": "回合",
+    "hordeRulesAriaLabel": "Horde deck rules"
   },
   "battleProtector": {
     "battleFallback": "战役",
@@ -473,7 +481,8 @@
       "tap": "横置",
       "target": "目标",
       "top": "牌库顶",
-      "untap": "竖置"
+      "untap": "竖置",
+      "destroy": "Destroy"
     },
     "behold": {
       "labelBehold": "请援",
@@ -510,7 +519,8 @@
       "searchLabel": "筛选",
       "searchPlaceholder": "牌名",
       "selectAll": "全选",
-      "sortLabel": "排序"
+      "sortLabel": "排序",
+      "counterChoose": "Choose {{selected}} of {{cap}}"
     },
     "buttons": {
       "collectCount": "搜证（{{total}}/{{minimum}}）",
@@ -933,6 +943,42 @@
       "subtitle": "选择一个要牺牲的永久物",
       "title_one": "守护 —— 牺牲一个永久物",
       "title_other": "守护 —— 牺牲{{count}}个永久物"
+    },
+    "heroEvent": {
+      "chromeOverload": {
+        "title": "Chrome Dome's Overload",
+        "subtitle": "Choose a tapped creature you control to sacrifice"
+      },
+      "krangStratagem": {
+        "title": "Krang's Stratagem",
+        "subtitleUpTo_one": "Choose up to {{count}} card to discard (team owes {{remaining}} total)",
+        "subtitleUpTo_other": "Choose up to {{count}} cards to discard (team owes {{remaining}} total)",
+        "subtitleMin_one": "Choose {{min}} to {{count}} card to discard (team owes {{remaining}} total)",
+        "subtitleMin_other": "Choose {{min}} to {{count}} cards to discard (team owes {{remaining}} total)",
+        "subtitleExact_one": "Choose {{count}} card to discard",
+        "subtitleExact_other": "Choose {{count}} cards to discard"
+      },
+      "smackdown": {
+        "title": "Leatherhead's Smackdown",
+        "subtitle": "As a team, choose a creature with the greatest power to destroy it"
+      },
+      "ratKingRevolution": {
+        "title": "Rat King's Revolution",
+        "subtitle": "Choose a creature you control to tap and stun"
+      },
+      "savantiCurse": {
+        "title": "Savanti Romero's Curse",
+        "subtitle_one": "Choose {{count}} creature you control to return to its owner's hand",
+        "subtitle_other": "Choose {{count}} creatures you control to return to their owners' hands"
+      },
+      "infiltration": {
+        "title": "Villain Infiltration",
+        "subtitle": "As a team, choose a creature with the greatest power to destroy it"
+      },
+      "villainMayhem": {
+        "title": "Villain Mayhem!",
+        "subtitle": "As a team, choose {{count}} creatures to spare — every other creature is destroyed"
+      }
     }
   },
   "cardDataMissing": {
@@ -1075,6 +1121,11 @@
     "assignDamageButton": "分配伤害",
     "assignDamageSubtitle": "{{name}} —— 剩余：{{remaining}}",
     "assignDamageTitle": "分配{{amount}}点战斗伤害",
+    "assignRemainingButton": "+{{amount}}",
+    "assignRemainingTo_few": "将剩余的{{count}}点伤害分配给{{target}}",
+    "assignRemainingTo_many": "将剩余的{{count}}点伤害分配给{{target}}",
+    "assignRemainingTo_one": "将剩余的{{count}}点伤害分配给{{target}}",
+    "assignRemainingTo_other": "将剩余的{{count}}点伤害分配给{{target}}",
     "attackAll": "全部攻击",
     "band": "组队",
     "bandBadge": "组队 {{n}}",
@@ -1565,7 +1616,10 @@
       "subtitleKeepWithBottom": "保留这手牌（你需将{{count}}张牌置于牌库底），或再次调度以获得全新的七张牌。",
       "subtitleOpeningFree": "保留这手牌，或进行一次免费调度（无需将牌置于牌库底）。",
       "subtitleOpeningOne": "保留这手牌，或调度以获得全新的七张牌（保留时你需将 1 张牌置于牌库底）。",
-      "usePowder": "使用{{name}}"
+      "usePowder": "使用{{name}}",
+      "onThePlay": "你先手",
+      "onTheDraw": "你后手",
+      "takeTurn": "你在第 {{turn}} 回合行动"
     },
     "opponentDisconnected": {
       "body": "等待对手重新连接…",
@@ -1598,6 +1652,11 @@
       "subtitle": "选择一张要展示并通联至该咒语的牌，或不使用通联直接施放。",
       "title": "通联古咒？",
       "unknownCard": "牌 #{{id}}"
+    },
+    "startingPlayer": {
+      "opponentChoosing": "{{name}} 正在选择先手玩家…",
+      "playerPlaysFirst": "{{name}} 先手",
+      "title": "选择先手玩家"
     },
     "toasts": {
       "gamePausedPlayerDisconnected": "游戏已暂停 —— {{name}}已断开连接",
@@ -1656,6 +1715,8 @@
     "cedhWarningUntagged": "未标记",
     "commanderNote": "指挥官：100 张单例套牌，指挥官伤害为 {{threshold}}",
     "config": {
+      "commanderDamage": "指挥官伤害",
+      "poisonCounters": "中毒指示物",
       "firstPlayer": {
         "draw": "后手",
         "play": "先手",
@@ -1693,7 +1754,12 @@
     "selectDeckPrompt": "选择套牌",
     "startMatch": "开始对局",
     "startMatchWithOpponents": "开始对局（{{count}}名对手）",
-    "title": "开始一场对局。"
+    "title": "开始一场对局。",
+    "hordeDeck": {
+      "title": "Horde Deck",
+      "subtitle": "The self-piloting deck your team faces. The engine supplies it — you don't need an AI deck.",
+      "selected": "Selected"
+    }
   },
   "giftRecipient": {
     "subtitle": "选择由哪位对手获得所承诺的赠礼。",
@@ -1748,7 +1814,9 @@
     "title": "将{{name}}移出？"
   },
   "lifeTotal": {
-    "playerLabel": "P{{seat}}"
+    "playerLabel": "P{{seat}}",
+    "libraryLabel": "CARDS",
+    "libraryTooltip": "The Horde has no life total. Damage and life loss mill it instead — it's defeated when its library runs out, so this count is its real clock."
   },
   "log": {
     "abilityActivated": "异能已起动（来源 {{sourceId}}）",
@@ -2142,7 +2210,6 @@
     "ringBearerTooltip": "持戒人",
     "sacrifice": "牺牲",
     "selectedCount": "已选{{count}}",
-    "target": "目标",
     "token": "衍生物",
     "tokenTooltip": "真实牌的衍生物复制品",
     "unblocked": "未被阻挡",
@@ -2263,6 +2330,14 @@
     "activateCost": "起动 —— {{cost}}",
     "altKey": "Alt",
     "altParsedAbilities": "Alt：已解析的异能",
+    "attacking": {
+      "battle": "正在攻击战役{{name}}",
+      "nothing": "正在攻击，但未攻击任何玩家、鹏洛客或战役",
+      "planeswalker": "正在攻击{{player}}的鹏洛客{{name}}",
+      "player": "正在攻击{{player}}",
+      "you": "正在攻击你",
+      "yourPlaneswalker": "正在攻击你的鹏洛客{{name}}"
+    },
     "basePT": "（基础{{power}}/{{toughness}}）",
     "chosen": {
       "entry": "{{kind}}：{{value}}",

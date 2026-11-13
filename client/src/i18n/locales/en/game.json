@@ -204,6 +204,14 @@
         "label": "Label",
         "fallback": "Choice"
       }
+    },
+    "attacking": {
+      "you": "Attacking you",
+      "player": "Attacking {{player}}",
+      "yourPlaneswalker": "Attacking your planeswalker {{name}}",
+      "planeswalker": "Attacking {{player}}'s planeswalker {{name}}",
+      "battle": "Attacking battle {{name}}",
+      "nothing": "Attacking, but not any player, planeswalker, or battle"
     }
   },
   "actionButton": {
@@ -346,7 +354,6 @@
     "pickNone": "None",
     "underAttack_one": "Attacked by {{count}} creature",
     "underAttack_other": "Attacked by {{count}} creatures",
-    "target": "Target",
     "sacrifice": "Sacrifice",
     "token": "Token",
     "tokenTooltip": "Token copy of a real card",
@@ -469,7 +476,12 @@
     "assignRemaining_other": "Assign {{count}} more",
     "confirmDistribute_one": "Declare {{count}} Attacker",
     "confirmDistribute_other": "Declare {{count}} Attackers",
-    "noCommonTarget": "No shared target — switch to Distribute to aim each attacker."
+    "noCommonTarget": "No shared target — switch to Distribute to aim each attacker.",
+    "totalsHeading": "Attack totals",
+    "targetTotal_few": "{{count}} attackers · {{damage}} damage",
+    "targetTotal_many": "{{count}} attackers · {{damage}} damage",
+    "targetTotal_one": "{{count}} attacker · {{damage}} damage",
+    "targetTotal_other": "{{count}} attackers · {{damage}} damage"
   },
   "fullControl": {
     "label": "Control",
@@ -482,7 +494,9 @@
     "done": "Done"
   },
   "lifeTotal": {
-    "playerLabel": "P{{seat}}"
+    "playerLabel": "P{{seat}}",
+    "libraryLabel": "CARDS",
+    "libraryTooltip": "The Horde has no life total. Damage and life loss mill it instead — it's defeated when its library runs out, so this count is its real clock."
   },
   "phaseStop": {
     "untapLabel": "Untap step",
@@ -573,6 +587,7 @@
     }
   },
   "badges": {
+    "hordeRulesAriaLabel": "Horde deck rules",
     "monarch": "Monarch",
     "monarchTooltip": "The Monarch — draws an extra card at end of turn",
     "initiative": "Initiative",
@@ -592,7 +607,9 @@
     "dungeonTooltip": "Venturing in {{name}}",
     "poisonAriaLabel_one": "{{count}} poison counter",
     "poisonAriaLabel_other": "{{count}} poison counters",
-    "poisonTooltip": "Poison counters: {{count}}\nA player with ten or more poison counters loses the game.",
+    "poisonTooltip": "Poison counters: {{count}}",
+    "poisonLossPlayer": "A player with {{threshold}} or more poison counters loses the game.",
+    "poisonLossTeam": "A team with {{threshold}} or more poison counters loses the game.",
     "energyAriaLabel_one": "{{count}} energy counter",
     "energyAriaLabel_other": "{{count}} energy counters",
     "energyTooltip": "Energy counters: {{count}}\nEnergy counters are a player-held resource spent by card abilities.",
@@ -852,7 +869,12 @@
     "lethalBadge": "Lethal",
     "planeswalkerLoyalty": "Planeswalker (loyalty: {{loyalty}})",
     "defendingPlayerTrample": "Defending Player (Trample)",
-    "pwControllerTrample": "PW Controller (Trample Over PW)"
+    "pwControllerTrample": "PW Controller (Trample Over PW)",
+    "assignRemainingButton": "+{{amount}}",
+    "assignRemainingTo_few": "Assign the remaining {{count}} damage to {{target}}",
+    "assignRemainingTo_many": "Assign the remaining {{count}} damage to {{target}}",
+    "assignRemainingTo_one": "Assign the remaining {{count}} damage to {{target}}",
+    "assignRemainingTo_other": "Assign the remaining {{count}} damage to {{target}}"
   },
   "cardTextReference": {
     "title": "Printed card text (reference)",
@@ -1197,6 +1219,11 @@
       "drawFirst": "Draw First",
       "drawFirstDescription": "Take the extra draw on your first turn"
     },
+    "startingPlayer": {
+      "title": "Choose Who Plays First",
+      "playerPlaysFirst": "{{name}} plays first",
+      "opponentChoosing": "{{name}} is choosing who plays first…"
+    },
     "mulligan": {
       "opponentDeciding": "Opponent is deciding their opening hand…",
       "londonTitle": "London Mulligan ({{count}} taken)",
@@ -1219,7 +1246,10 @@
       "subtitleKeepWithBottom": "Keep this hand (you'll put {{count}} on the bottom) or mulligan again for a fresh 7.",
       "subtitleKeepFree": "Keep this hand (free mulligan — no cards to the bottom) or mulligan again for a fresh 7.",
       "subtitleOpeningFree": "Keep this hand or take a free mulligan (no cards to the bottom).",
-      "subtitleOpeningOne": "Keep this hand or mulligan for a fresh 7 (you'll put 1 on the bottom when you keep)."
+      "subtitleOpeningOne": "Keep this hand or mulligan for a fresh 7 (you'll put 1 on the bottom when you keep).",
+      "onThePlay": "You're on the play",
+      "onTheDraw": "You're on the draw",
+      "takeTurn": "You take turn {{turn}}"
     },
     "companion": {
       "eyebrow": "Pre-Game",
@@ -1436,6 +1466,8 @@
     },
     "config": {
       "startingLife": "Starting Life",
+      "commanderDamage": "Commander Damage",
+      "poisonCounters": "Poison Counters",
       "players": "Players",
       "whoGoesFirst": "Who Goes First",
       "firstPlayer": {
@@ -1447,6 +1479,11 @@
     "noLegalAiDecks": {
       "withFormat": "Add or import a deck legal in {{format}} for the AI to use.",
       "generic": "Add or import a deck legal in this format for the AI to use."
+    },
+    "hordeDeck": {
+      "title": "Horde Deck",
+      "subtitle": "The self-piloting deck your team faces. The engine supplies it — you don't need an AI deck.",
+      "selected": "Selected"
     }
   },
   "cardChoice": {
@@ -1461,6 +1498,7 @@
       "choose": "Choose",
       "selected": "Selected",
       "keep": "Keep",
+      "destroy": "Destroy",
       "top": "Top",
       "bottom": "Bottom",
       "graveyard": "Graveyard",
@@ -1833,6 +1871,7 @@
       "searchCardsAria": "Filter cards by name",
       "counterDiscard": "Discard {{selected}} of {{cap}}",
       "counterKeep": "Keep {{selected}} of {{cap}}",
+      "counterChoose": "Choose {{selected}} of {{cap}}",
       "keepInstead": "Keep instead",
       "discardInstead": "Discard instead"
     },
@@ -1853,6 +1892,42 @@
       "subtitleExact_other": "Choose {{count}} cards to discard",
       "subtitleKeep_one": "Choose 1 card to keep — the rest are discarded",
       "subtitleKeep_other": "Choose {{count}} cards to keep — the rest are discarded"
+    },
+    "heroEvent": {
+      "chromeOverload": {
+        "title": "Chrome Dome's Overload",
+        "subtitle": "Choose a tapped creature you control to sacrifice"
+      },
+      "krangStratagem": {
+        "title": "Krang's Stratagem",
+        "subtitleUpTo_one": "Choose up to {{count}} card to discard (team owes {{remaining}} total)",
+        "subtitleUpTo_other": "Choose up to {{count}} cards to discard (team owes {{remaining}} total)",
+        "subtitleMin_one": "Choose {{min}} to {{count}} card to discard (team owes {{remaining}} total)",
+        "subtitleMin_other": "Choose {{min}} to {{count}} cards to discard (team owes {{remaining}} total)",
+        "subtitleExact_one": "Choose {{count}} card to discard",
+        "subtitleExact_other": "Choose {{count}} cards to discard"
+      },
+      "smackdown": {
+        "title": "Leatherhead's Smackdown",
+        "subtitle": "As a team, choose a creature with the greatest power to destroy it"
+      },
+      "ratKingRevolution": {
+        "title": "Rat King's Revolution",
+        "subtitle": "Choose a creature you control to tap and stun"
+      },
+      "savantiCurse": {
+        "title": "Savanti Romero's Curse",
+        "subtitle_one": "Choose {{count}} creature you control to return to its owner's hand",
+        "subtitle_other": "Choose {{count}} creatures you control to return to their owners' hands"
+      },
+      "infiltration": {
+        "title": "Villain Infiltration",
+        "subtitle": "As a team, choose a creature with the greatest power to destroy it"
+      },
+      "villainMayhem": {
+        "title": "Villain Mayhem!",
+        "subtitle": "As a team, choose {{count}} creatures to spare — every other creature is destroyed"
+      }
     },
     "harmonize": {
       "title": "Harmonize",

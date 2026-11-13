@@ -6,16 +6,17 @@ use std::collections::{HashMap, HashSet};
 use rand::seq::SliceRandom;
 
 use crate::types::ability::{
-    AbilityCost, ChoiceType, ChosenAttribute, DigRestOrder, DigRestSplitScope, Effect, EffectKind,
-    ForwardedResultContext, GuessOutcome, LibraryPosition, ParentTargetMissingReason, QuantityExpr,
-    QuantityRef, ReciprocalZoneChoiceRole, ResolvedAbility, TapCreaturesSelectionMode, TargetRef,
+    AbilityCost, ChoiceType, ChosenAttribute, CostPaidObjectSnapshot, DigRestOrder,
+    DigRestSplitScope, Effect, EffectKind, ForwardedResultContext, GuessOutcome, LibraryPosition,
+    ParentTargetMissingReason, QuantityExpr, QuantityRef, ReciprocalZoneChoiceRole,
+    ResolvedAbility, TapCreaturesSelectionMode, TargetRef,
 };
 use crate::types::actions::{GameAction, LearnOption, OutsideGameSelection};
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
     ActionResult, BatchCompletion, CastOfferKind, ChosenDamageSource, ContinuationXAnnouncement,
-    CopyChosenSelection, CostResume, GameState, OutsideGameChoiceSource, PayCostKind,
-    PayableResource, PendingContinuation, PendingPlayerScopeSacrificeCompletion,
+    CopyChosenSelection, CostResume, GameState, ManaAmountComposition, OutsideGameChoiceSource,
+    PayCostKind, PayableResource, PendingContinuation, PendingPlayerScopeSacrificeCompletion,
     PersistentAxisMaterialization, WaitingFor, ZoneOpponentChooserPurpose,
 };
 use crate::types::identifiers::ObjectId;
@@ -1173,6 +1174,7 @@ pub(super) fn handles(waiting_for: &WaitingFor) -> bool {
             | WaitingFor::DiscardToHandSize { .. }
             | WaitingFor::ConniveDiscard { .. }
             | WaitingFor::DiscardChoice { .. }
+            | WaitingFor::HeroEventChoice { .. }
             | WaitingFor::EffectZoneChoice { .. }
             | WaitingFor::DrawnThisTurnTopdeckChoice { .. }
             | WaitingFor::NamedChoice { .. }
@@ -2462,6 +2464,7 @@ pub(super) fn handle_resolution_choice(
                     EngineError::InvalidAction("No active coin-flip frame to resume".to_string())
                 })?;
             let entry_die = state.die_result_this_resolution;
+            let entry_publication = state.die_result_publication;
             // CR 608.2c + CR 400.7e: replay this owner's scope, including an
             // explicit empty scope, throughout its branch and continuation drain.
             let trigger_snapshot = pending.trigger_context.as_ref().map(|context| {
@@ -2480,6 +2483,7 @@ pub(super) fn handle_resolution_choice(
             let exit_die = if result.is_ok() {
                 state.die_result_this_resolution
             } else {
+                state.die_result_publication = entry_publication;
                 entry_die
             };
             if let Some(snapshot) = trigger_snapshot {
@@ -2558,6 +2562,7 @@ pub(super) fn handle_resolution_choice(
             // (`game/effects/effect.rs`), which reads the events slice and never
             // consults this field — that path is carried by emission ordering.
             let prev_die_result = state.die_result_this_resolution;
+            let entry_publication = state.die_result_publication;
             // CR 608.2c + CR 400.7e: restore the owning event channels before
             // any selected table row or dependent continuation executes.
             let trigger_snapshot = pending.trigger_context.as_ref().map(|context| {
@@ -2604,6 +2609,7 @@ pub(super) fn handle_resolution_choice(
             let exit_die = if result.is_ok() {
                 state.die_result_this_resolution
             } else {
+                state.die_result_publication = entry_publication;
                 prev_die_result
             };
             if let Some(snapshot) = trigger_snapshot {
@@ -3754,8 +3760,10 @@ pub(super) fn handle_resolution_choice(
                     // CR 107.3a + CR 601.2b via CR 602.2b: the announced X of a
                     // mana ability's `Pay X speed` (CR 702.179f) or `{X}` mana
                     // leg. The activation's own cost cursor pays the leg with X
-                    // concretized; nothing is deducted here.
-                    PayableResource::Speed | PayableResource::ManaGeneric { .. } => {
+                    // concretized; nothing is deducted here. A mana ability's
+                    // `{X}` leg announcement is always `ConcretizeX` (its only
+                    // minter, `mana_abilities`, writes that composition).
+                    PayableResource::Speed | PayableResource::Mana { .. } => {
                         pending.chosen_x = Some(amount)
                     }
                     other @ (PayableResource::Energy
@@ -4114,16 +4122,29 @@ pub(super) fn handle_resolution_choice(
                         });
                     }
                 }
-                PayableResource::ManaGeneric { base_cost } => {
-                    // CR 107.3f + CR 118.1 + CR 118.12: concretize the chosen
-                    // X into the ORIGINAL cost — any colored/generic pips
-                    // alongside the X shard (e.g. Elenda and Azor's
-                    // `{X}{W}{U}{B}`) survive concretization and are paid
-                    // here too. Paying a synthetic all-generic `{N}` cost
-                    // instead would silently drop the colored requirements
-                    // (#6410).
-                    let mut cost = base_cost.clone();
-                    cost.concretize_x(amount);
+                PayableResource::Mana {
+                    base_cost,
+                    composition,
+                } => {
+                    let cost = match composition {
+                        // CR 107.3f + CR 118.1 + CR 118.12: concretize the chosen
+                        // X into the ORIGINAL cost — any colored/generic pips
+                        // alongside the X shard (e.g. Elenda and Azor's
+                        // `{X}{W}{U}{B}`) survive concretization and are paid
+                        // here too. Paying a synthetic all-generic `{N}` cost
+                        // instead would silently drop the colored requirements
+                        // (#6410).
+                        ManaAmountComposition::ConcretizeX => {
+                            let mut cost = base_cost.clone();
+                            cost.concretize_x(amount);
+                            cost
+                        }
+                        // CR 107.1c + CR 118.1: "pay any amount of {R}" — the
+                        // one-unit base cost repeated `amount` times (Leyline
+                        // Tyrant). `concretize_x` would be a no-op here (the
+                        // unit carries no X shard) and pay the unit once.
+                        ManaAmountComposition::PerUnit => base_cost.scaled(amount),
+                    };
                     // CR 605.3b + CR 616.1: `pay_unless_cost` below has no resume
                     // root, so a mana source that would pause for a replacement
                     // choice cannot fund this payment.
@@ -5289,11 +5310,28 @@ pub(super) fn handle_resolution_choice(
                 end_reveal_for_cards_left_in_library(state, &unkept);
             }
             effects::publish_fresh_tracked_set(state, publish_set);
+            // CR 608.2c: For Demonstrative scope ("that card", "this way"),
+            // stamp the kept card as the effect context object so downstream
+            // sub_abilities (e.g., GainLife with ObjectManaValue scope) can
+            // resolve it. Only the first kept card is relevant for Reviving
+            // Vapors-style "put one of them into your hand" effects.
+            let effect_context_snapshot = kept.first().and_then(|first_kept| {
+                state.entering_or_live_object(*first_kept).map(|obj| {
+                    let lki = obj.snapshot_public_characteristics();
+                    CostPaidObjectSnapshot::capture(obj, lki)
+                })
+            });
             if let Some(frame) = state.active_ability_continuation_frame_mut() {
                 // CR 608.2c: ParentTarget continuations (Hideaway conceal, dig
                 // conditionals on the kept card) bind to the kept selection.
                 // Hand/bottom/exile tails route via TrackedSetFiltered instead.
                 bind_dig_continuation_targets(&mut frame.pending.chain, &kept);
+                if let Some(snapshot) = effect_context_snapshot {
+                    frame
+                        .pending
+                        .chain
+                        .set_effect_context_object_recursive(snapshot);
+                }
                 frame.pending.chain.context.optional_effect_performed = !kept.is_empty();
             }
             ResolutionChoiceOutcome::WaitingFor(finish_with_continuation(state, player, events))
@@ -6636,6 +6674,130 @@ pub(super) fn handle_resolution_choice(
             ResolutionChoiceOutcome::WaitingFor(waiting_for)
         }
         (
+            WaitingFor::HeroEventChoice {
+                player,
+                event: kind,
+                event_id,
+                cards,
+                count,
+                up_to,
+                min,
+                remaining_heroes,
+                answers,
+                copies_pending,
+                fired_baxters,
+            },
+            GameAction::SelectCards { cards: chosen },
+        ) => {
+            // Turtle Team-Up hero-choice answer: count + distinctness + offer
+            // membership, mirroring DiscardChoice. No zone-freshness check —
+            // answers don't apply until the queue drains, so nothing moves
+            // between the prompt and the answer; membership in the frozen
+            // offer suffices.
+            if up_to && chosen.len() > count {
+                return Err(EngineError::InvalidAction(format!(
+                    "Must choose at most {} card(s), got {}",
+                    count,
+                    chosen.len()
+                )));
+            }
+            if up_to && chosen.len() < min {
+                return Err(EngineError::InvalidAction(format!(
+                    "Must choose at least {} card(s), got {}",
+                    min,
+                    chosen.len()
+                )));
+            }
+            if !up_to && chosen.len() != count {
+                return Err(EngineError::InvalidAction(format!(
+                    "Must choose exactly {} card(s), got {}",
+                    count,
+                    chosen.len()
+                )));
+            }
+            let unique_chosen: HashSet<ObjectId> = chosen.iter().copied().collect();
+            if unique_chosen.len() != chosen.len() {
+                return Err(EngineError::InvalidAction(
+                    "Selected cards must be distinct".to_string(),
+                ));
+            }
+            for card_id in &chosen {
+                if !cards.contains(card_id) {
+                    return Err(EngineError::InvalidAction(
+                        "Selected card not in eligible set".to_string(),
+                    ));
+                }
+            }
+
+            // The Boss seat owns the resolving Event (Events are never owned
+            // by a hero), so ownership re-derives the seat for application.
+            let Some(horde) = state.objects.get(&event_id).map(|o| o.owner) else {
+                return Err(EngineError::InvalidAction(
+                    "Hero-event source left the game".to_string(),
+                ));
+            };
+
+            let events_before_effect = events.len();
+            let progress = super::boss::answer_hero_event_choice(
+                state,
+                horde,
+                event_id,
+                kind,
+                player,
+                chosen,
+                remaining_heroes,
+                answers,
+                fired_baxters,
+                copies_pending,
+                events,
+            );
+            if matches!(progress, super::boss::HeroEventProgress::Prompted) {
+                // The queue advanced (or a nested replacement prompt took
+                // over mid-batch): defer this answer's observer triggers
+                // across the pause, exactly like the discard pause path.
+                defer_observer_triggers_for_paused_choice(state, events, events_before_effect);
+                return Ok(action_result_outcome(events, state.waiting_for.clone()));
+            }
+            let events_after_move = events.len();
+
+            // The Event was the Horde's action, so priority returns to the
+            // active player (not the answering hero) — the post-spell shape —
+            // and any parked chain behind the prompt (Savanti's trigger rest)
+            // resumes through the continuation drain.
+            let active = state.active_player;
+            let waiting_for = finish_with_continuation(state, active, events);
+
+            // Batch this resolution's observer triggers (dies, discards, life)
+            // across the choice pause, like the DiscardChoice completion: the
+            // move slice plus the continuation slice drain together.
+            for (start, end) in [
+                (events_before_effect, events_after_move),
+                (events_after_move, events.len()),
+            ] {
+                if end <= start {
+                    continue;
+                }
+                let trigger_events: Vec<GameEvent> = events[start..end]
+                    .iter()
+                    .filter(|ev| !matches!(ev, GameEvent::PhaseChanged { .. }))
+                    .cloned()
+                    .collect();
+                if !trigger_events.is_empty() {
+                    super::triggers::collect_triggers_into_deferred(state, &trigger_events);
+                }
+            }
+
+            if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+                if let Some(wf) = super::triggers::drain_deferred_trigger_queue(state, events) {
+                    return Ok(ResolutionChoiceOutcome::WaitingFor(wf));
+                }
+                return Ok(ResolutionChoiceOutcome::WaitingForWithInlineTriggers(
+                    waiting_for,
+                ));
+            }
+            ResolutionChoiceOutcome::WaitingFor(waiting_for)
+        }
+        (
             WaitingFor::EffectZoneChoice {
                 player,
                 cards,
@@ -7353,7 +7515,7 @@ pub(super) fn handle_resolution_choice(
                             // DOWN with the specified characteristics instead of
                             // resuming face up and exposing the real object.
                             face_down_profile: face_down_profile.clone(),
-                            library_placement: None,
+                            library_placement: library_position.clone(),
                             enter_attached_to: None,
                         };
                         let anticipated_pause =
@@ -10331,9 +10493,11 @@ fn resume_free_cast_window_after_land_play(
 /// the instructions that follow it, keyed by the prompt the payment opened:
 /// * a "tap X untapped ..." payment (`TapCreaturesSelectionMode::VariableX`) announces the
 ///   count tapped; a fixed count or a power threshold (Crew/Saddle shape) announces nothing;
-/// * a "pay any amount of energy / life" or unannounced-X mana payment (CR 107.14, CR 119.4)
-///   announces the amount paid. A mana ability's own amount prompt (`pending_mana_ability`)
-///   and a loop-collapse count are not resolution-time payments of an effect.
+/// * a "pay any amount of energy / life" or mana payment (CR 107.14, CR 119.4) announces the
+///   amount paid — for mana, both an unannounced-X cost (`ManaAmountComposition::ConcretizeX`)
+///   and a per-unit "pay any amount of {R}" cost (`ManaAmountComposition::PerUnit`,
+///   CR 107.1c). A mana ability's own amount prompt (`pending_mana_ability`) and a
+///   loop-collapse count are not resolution-time payments of an effect.
 pub(crate) fn paused_payment_x_announcement(
     paying: &ResolvedAbility,
     waiting_for: &WaitingFor,
@@ -10357,7 +10521,8 @@ pub(crate) fn paused_payment_x_announcement(
         } => match resource {
             PayableResource::Energy
             | PayableResource::Life
-            | PayableResource::ManaGeneric { .. } => Some(ContinuationXAnnouncement::PaidAmount),
+            // Both mana compositions announce the amount paid.
+            | PayableResource::Mana { .. } => Some(ContinuationXAnnouncement::PaidAmount),
             PayableResource::Counters
             | PayableResource::Speed
             | PayableResource::LoopCollapse { .. } => None,
@@ -10456,6 +10621,17 @@ pub(crate) fn run_batch_completion(
         BatchCompletion::MilledDeliveryComplete { player_id, cards } => {
             effects::mill::complete_mill_delivery(state, player_id, cards, events)
         }
+        BatchCompletion::HordeMillFromLossDeliveryComplete {
+            player_id,
+            milled,
+            legendary_cohort,
+        } => crate::game::horde::complete_advanced_mill_from_loss(
+            state,
+            player_id,
+            milled,
+            legendary_cohort,
+            events,
+        ),
         BatchCompletion::ReturnAsAuraNoTargetComplete { source_id } => {
             effects::return_as_aura::complete_no_target_delivery(source_id, events)
         }
@@ -10957,6 +11133,24 @@ pub(crate) fn run_batch_completion(
             // its own completed outcome only after both tails have finished.
             let kept_completed = kept_delivery.completed_ids();
             let rest_completed = rest_delivery.completed_ids();
+            // CR 608.2c: a later instruction that reads the card this Dig put
+            // into its kept destination ("that card's mana value") names THAT
+            // card. Bind the settled kept selection here, ahead of the
+            // event-derived referent below: once the rest pile has also moved,
+            // the batch's events can describe a single REST card instead, and an
+            // event-derived snapshot would then hand the continuation the wrong
+            // object (a three-card reveal with two cards moved would yield no
+            // snapshot at all).
+            let settled_kept_snapshot = kept_delivery
+                .destination
+                .is_some()
+                .then(|| kept_delivery.completed_ids())
+                .and_then(|ids| ids.first().copied())
+                .and_then(|id| {
+                    state.entering_or_live_object(id).map(|obj| {
+                        CostPaidObjectSnapshot::capture(obj, obj.snapshot_public_characteristics())
+                    })
+                });
             if let Some(kept) = publish_tracked_set {
                 let published = if !kept.is_empty()
                     && rest_delivery.destination.is_some()
@@ -11026,7 +11220,9 @@ pub(crate) fn run_batch_completion(
                     subject: reveal_until_hit_snapshot,
                 });
             }
-            if let Some(snapshot) = effects::parent_referent_context_from_events(state, events) {
+            if let Some(snapshot) = settled_kept_snapshot
+                .or_else(|| effects::parent_referent_context_from_events(state, events))
+            {
                 if let Some(frame) = state.active_ability_continuation_frame_mut() {
                     frame
                         .pending
@@ -12844,6 +13040,7 @@ mod tests {
         let execute = AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: None,
                 destination,
                 target: TargetFilter::ParentTarget,
@@ -12939,6 +13136,7 @@ mod tests {
             .execute(AbilityDefinition::new(
                 AbilityKind::Spell,
                 Effect::ChangeZone {
+                    library_shuffle: Default::default(),
                     origin: None,
                     destination,
                     target: TargetFilter::Any,
@@ -13072,6 +13270,7 @@ mod tests {
         );
         let delivery = ResolvedAbility::new(
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Library),
                 destination: Zone::Exile,
                 target: TargetFilter::ParentTarget,
@@ -13750,6 +13949,7 @@ mod tests {
         );
         let delivery = ResolvedAbility::new(
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Library),
                 destination: Zone::Battlefield,
                 target: TargetFilter::ParentTarget,
@@ -14063,6 +14263,7 @@ mod tests {
         );
         let printed_destination = ResolvedAbility::new(
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Library),
                 destination: Zone::Hand,
                 target: TargetFilter::Any,
@@ -15738,7 +15939,7 @@ mod tests {
 #[cfg(test)]
 mod random_result_resolution_context_tests {
     use super::*;
-    use crate::game::scenario::{GameScenario, P0};
+    use crate::game::scenario::{GameRunner, GameScenario, P0};
     use crate::types::ability::{
         AbilityDefinition, AbilityKind, CoinFlipRun, DieResultBranch, EffectError, TargetFilter,
     };
@@ -15780,6 +15981,7 @@ mod random_result_resolution_context_tests {
         AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: Some(origin),
                 destination,
                 target: TargetFilter::SelfRef,
@@ -16274,6 +16476,166 @@ mod random_result_resolution_context_tests {
         state.resolution_stack.validate(&state.waiting_for).unwrap();
     }
 
+    /// Composed fixture: no printed card has this coin/continuation/context shape.
+    /// Box of Free-Range Goblins and Boing! anchor the die payload; Krark's Thumb
+    /// supplies the real keep prompt, answered through its production choice handler.
+    #[test]
+    fn coin_keep_continuation_drain_preserves_its_settled_die_result() {
+        let (mut state, source, _, mut ambient) = fixture(Boundary::Coin, gain(2));
+        let coin = state.take_active_coin_flip_frame().unwrap().unwrap();
+        *state
+            .active_ability_continuation_frame_mut()
+            .unwrap()
+            .pending
+            .chain = ResolvedAbility::new(
+            Effect::RollDie {
+                count: QuantityExpr::Fixed { value: 1 },
+                sides: 1,
+                modifier: None,
+                results: vec![DieResultBranch {
+                    min: 1,
+                    max: 1,
+                    effect: Box::new(gain(1)),
+                }],
+            },
+            vec![],
+            source,
+            P0,
+        );
+        state.push_coin_flip_frame(coin);
+        ambient.die_result = Some(11);
+        install(&mut state, &ambient);
+        let before = state.players[0].life;
+        let mut events = vec![];
+
+        resume(&mut state, Boundary::Coin, &mut events).unwrap();
+
+        assert_eq!(state.players[0].life, before + 3);
+        // CR 706.2 + CR 608.2c: the post-modifier result of a die settled by the coin's
+        // drain survives context restoration for the continuation.
+        assert_eq!(state.die_result_this_resolution, Some(1));
+        assert_scope(&state, &ambient);
+        assert!(state.resolution_stack.is_empty());
+        assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+        state.resolution_stack.validate(&state.waiting_for).unwrap();
+    }
+
+    /// Composed split-context control. Line Cutter/Command Performance anchor the
+    /// Attraction tail; Krark's Thumb supplies the public keep prompt.
+    #[test]
+    fn public_coin_keep_attraction_tail_does_not_publish_a_die_result() {
+        public_coin_keep_nonwriter_or_clear_tail(
+            Effect::RollToVisitAttractions,
+            EffectKind::RollToVisitAttractions,
+        );
+    }
+
+    /// Composed engine fail-safe: no printed card rolls a zero-sided die.
+    #[test]
+    fn public_coin_keep_prevented_die_tail_publishes_an_explicit_clear() {
+        public_coin_keep_nonwriter_or_clear_tail(
+            Effect::RollDie {
+                count: QuantityExpr::Fixed { value: 1 },
+                sides: 0,
+                modifier: None,
+                results: vec![],
+            },
+            EffectKind::RollDie,
+        );
+    }
+
+    fn public_coin_keep_nonwriter_or_clear_tail(effect: Effect, completion: EffectKind) {
+        let (mut state, source, _, mut ambient) = fixture(Boundary::Coin, gain(2));
+        if completion == EffectKind::RollToVisitAttractions {
+            let attraction = zones::create_object(
+                &mut state,
+                crate::types::identifiers::CardId(2),
+                P0,
+                "Context Attraction".into(),
+                Zone::Battlefield,
+            );
+            state
+                .objects
+                .get_mut(&attraction)
+                .unwrap()
+                .attraction_lights = vec![6];
+        }
+        let coin = state.take_active_coin_flip_frame().unwrap().unwrap();
+        let frame = state.active_ability_continuation_frame_mut().unwrap();
+        *frame.pending.chain = ResolvedAbility::new(effect, vec![], source, P0);
+        frame.pending.trigger_context.as_mut().unwrap().die_result = Some(7);
+        state.push_coin_flip_frame(coin);
+        let WaitingFor::CoinFlipKeepChoice {
+            player,
+            results,
+            keep_count,
+        } = &mut state.waiting_for
+        else {
+            panic!("Krark's Thumb must create the keep prompt");
+        };
+        assert_eq!(*player, P0);
+        assert_eq!(*keep_count, 1);
+        assert_eq!(results.len(), 2);
+        results[0] = true;
+        ambient.die_result = Some(11);
+        install(&mut state, &ambient);
+        // Both the scalar and synchronous authority are cleared at public ingress.
+        state.die_result_publication = Some(Some(89));
+        let before = state.players[0].life;
+        let mut runner = GameRunner::from_state(state);
+        let result = runner
+            .act(GameAction::SelectCoinFlips {
+                keep_indices: vec![0],
+            })
+            .unwrap();
+        let state = runner.state();
+
+        assert_eq!(state.players[0].life, before + 2);
+        if completion == EffectKind::RollDie {
+            assert!(result.events.iter().any(|event| matches!(
+                event,
+                GameEvent::EffectResolved { kind: EffectKind::RollDie, source_id, .. }
+                    if *source_id == source
+            )));
+            assert!(!result.events.iter().any(|event| matches!(
+                event,
+                GameEvent::DieRolled {
+                    result: Some(_),
+                    ..
+                }
+            )));
+            assert_eq!(state.die_result_publication, Some(None));
+        } else {
+            assert!(result.events.iter().any(|event| matches!(
+                event,
+                GameEvent::DieRolled {
+                    result: Some(_),
+                    ..
+                }
+            )));
+            assert!(result
+                .events
+                .iter()
+                .any(|event| matches!(event, GameEvent::AttractionsRolledToVisit { .. })));
+            assert_eq!(state.die_result_publication, None);
+        }
+        // The honest public expectation is post-ingress None, not pre-action 11.
+        assert_eq!(state.die_result_this_resolution, None);
+        assert_scope(state, &ambient);
+        assert!(state.stack.is_empty());
+        assert!(state.resolution_stack.is_empty());
+        assert!(state.resolving_stack_entry.is_none());
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::Priority { player: P0 }
+        ));
+        assert!(matches!(
+            result.waiting_for,
+            WaitingFor::Priority { player: P0 }
+        ));
+        state.resolution_stack.validate(&state.waiting_for).unwrap();
+    }
+
     #[test]
     fn random_resolution_repark_retains_empty_owned_and_legacy_authority() {
         for boundary in [Boundary::Coin, Boundary::DieKeep, Boundary::DieDrain] {
@@ -16326,15 +16688,27 @@ mod random_result_resolution_context_tests {
             for boundary in [Boundary::Coin, Boundary::DieKeep, Boundary::DieDrain] {
                 for owned_empty in [false, true] {
                     for links in [2, 22] {
+                        for entry_publication in [None, Some(None), Some(Some(83))] {
                         let mut branch = gain(1);
                         for _ in 0..links {
                             let mut parent = gain(1);
                             parent.sub_ability = Some(Box::new(branch));
                             branch = parent;
                         }
+                        // The coin itself does not publish: reach a real die writer
+                        // before the fallible chain so rollback authority is observable.
+                        if matches!(boundary, Boundary::Coin) {
+                            branch = AbilityDefinition::new(AbilityKind::Spell, Effect::RollDie {
+                                count: QuantityExpr::Fixed { value: 1 },
+                                sides: 1,
+                                modifier: None,
+                                results: vec![DieResultBranch { min: 1, max: 1, effect: Box::new(branch) }],
+                            });
+                        }
                         let (mut state, source, owned, ambient) = fixture(boundary, branch);
                         set_owned(&mut state, boundary, Some(if owned_empty { empty() } else { owned }));
                         install(&mut state, &ambient);
+                        state.die_result_publication = entry_publication;
                         assert_scope(&state, &ambient);
                         assert!(state.current_trigger_event.is_some());
                         let before = state.players[0].life;
@@ -16354,10 +16728,16 @@ mod random_result_resolution_context_tests {
                             assert!(state.players[0].life > before, "the error is reached inside the child chain");
                             assert!(state.players[0].life < before + 1000, "sentinel parent must not drain on error");
                             assert_eq!(state.die_result_this_resolution, Some(79));
+                            assert_eq!(state.die_result_publication, entry_publication);
+                            assert!(events.iter().any(|event| matches!(
+                                event, GameEvent::DieRolled { result: Some(_), .. }
+                            )), "the failed child published before reaching its error");
                             assert!(!events.iter().any(|event| matches!(event, GameEvent::EffectResolved { kind: EffectKind::RollDie, .. })));
                         } else {
                             result.unwrap();
                             assert_eq!(state.players[0].life, before + 1003);
+                            let child_result = if matches!(boundary, Boundary::DieDrain) { 3 } else { 1 };
+                            assert_eq!(state.die_result_publication, Some(Some(child_result)));
                             assert!(state.resolution_stack.is_empty());
                         }
                         assert_scope(&state, &ambient);
@@ -16369,6 +16749,7 @@ mod random_result_resolution_context_tests {
                         let before_consumer = state.players[0].life;
                         effects::resolve_ability_chain(&mut state, &consumer, &mut vec![], 0).unwrap();
                         assert_eq!(state.players[0].life, before_consumer + 17);
+                        }
                     }
                 }
             }

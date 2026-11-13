@@ -204,6 +204,14 @@
         "label": "Etykieta",
         "fallback": "Wybór"
       }
+    },
+    "attacking": {
+      "you": "Atakuje ciebie",
+      "player": "Atakuje: {{player}}",
+      "yourPlaneswalker": "Atakuje twojego planeswalkera {{name}}",
+      "planeswalker": "Atakuje planeswalkera {{name}} gracza {{player}}",
+      "battle": "Atakuje bitwę {{name}}",
+      "nothing": "Atakuje, ale żadnego gracza, planeswalkera ani bitwy"
     }
   },
   "actionButton": {
@@ -346,7 +354,6 @@
     "pickNone": "Nic",
     "underAttack_one": "Atakowany przez {{count}} stwora",
     "underAttack_other": "Atakowany przez {{count}} stworów",
-    "target": "Cel",
     "token": "Żeton",
     "tokenTooltip": "Żeton będący kopią prawdziwej karty",
     "copy": "Kopia",
@@ -436,7 +443,12 @@
     "assignRemaining_other": "Przydziel jeszcze {{count}}",
     "confirmDistribute_one": "Zadeklaruj {{count}} atakującego",
     "confirmDistribute_other": "Zadeklaruj {{count}} atakujących",
-    "noCommonTarget": "No shared target — switch to Distribute to aim each attacker."
+    "noCommonTarget": "No shared target — switch to Distribute to aim each attacker.",
+    "totalsHeading": "Sumy ataku",
+    "targetTotal_few": "{{count}} atakujących · obrażenia: {{damage}}",
+    "targetTotal_many": "{{count}} atakujących · obrażenia: {{damage}}",
+    "targetTotal_one": "{{count}} atakujący · obrażenia: {{damage}}",
+    "targetTotal_other": "{{count}} atakujących · obrażenia: {{damage}}"
   },
   "fullControl": {
     "label": "Kontrola",
@@ -449,7 +461,9 @@
     "done": "Gotowe"
   },
   "lifeTotal": {
-    "playerLabel": "G{{seat}}"
+    "playerLabel": "G{{seat}}",
+    "libraryLabel": "KARTY",
+    "libraryTooltip": "Horda nie ma punktów życia. Obrażenia i utrata życia zamiast tego mielą jej bibliotekę — zostaje pokonana, gdy skończą się jej karty, więc ta liczba to jej prawdziwy zegar."
   },
   "phaseStop": {
     "untapLabel": "Krok odwracania",
@@ -540,6 +554,7 @@
     }
   },
   "badges": {
+    "hordeRulesAriaLabel": "Zasady talii Hordy",
     "monarch": "Monarcha",
     "monarchTooltip": "Monarcha — dobiera dodatkową kartę na końcu tury",
     "initiative": "Inicjatywa",
@@ -559,7 +574,9 @@
     "dungeonTooltip": "Wyprawa w {{name}}",
     "poisonAriaLabel_one": "{{count}} znacznik trucizny",
     "poisonAriaLabel_other": "{{count}} znaczników trucizny",
-    "poisonTooltip": "Znaczniki trucizny: {{count}}\nGracz z co najmniej dziesięcioma znacznikami trucizny przegrywa grę.",
+    "poisonTooltip": "Znaczniki trucizny: {{count}}",
+    "poisonLossPlayer": "Gracz z co najmniej {{threshold}} znacznikami trucizny przegrywa grę.",
+    "poisonLossTeam": "Drużyna z co najmniej {{threshold}} znacznikami trucizny przegrywa grę.",
     "energyAriaLabel_one": "{{count}} znacznik energii",
     "energyAriaLabel_other": "{{count}} znaczników energii",
     "energyTooltip": "Znaczniki energii: {{count}}\nZnaczniki energii są zasobem gracza wydawanym przez zdolności kart.",
@@ -819,7 +836,12 @@
     "lethalBadge": "Śmiertelne",
     "planeswalkerLoyalty": "Wędrowiec (lojalność: {{loyalty}})",
     "defendingPlayerTrample": "Broniący gracz (Tratowanie)",
-    "pwControllerTrample": "Kontroler wędrowca (Tratowanie przez wędrowca)"
+    "pwControllerTrample": "Kontroler wędrowca (Tratowanie przez wędrowca)",
+    "assignRemainingButton": "+{{amount}}",
+    "assignRemainingTo_few": "Przydziel pozostałe {{count}} obrażenia do: {{target}}",
+    "assignRemainingTo_many": "Przydziel pozostałych {{count}} obrażeń do: {{target}}",
+    "assignRemainingTo_one": "Przydziel pozostałe {{count}} obrażenie do: {{target}}",
+    "assignRemainingTo_other": "Przydziel pozostałe {{count}} obrażenia do: {{target}}"
   },
   "cardTextReference": {
     "title": "Printed card text (reference)",
@@ -1164,6 +1186,11 @@
       "drawFirst": "Dobieraj pierwszy",
       "drawFirstDescription": "Wykonaj dodatkowe dobranie w swojej pierwszej turze"
     },
+    "startingPlayer": {
+      "title": "Wybierz, kto zaczyna",
+      "playerPlaysFirst": "{{name}} zaczyna",
+      "opponentChoosing": "{{name}} wybiera, kto zaczyna…"
+    },
     "mulligan": {
       "opponentDeciding": "Przeciwnik wybiera swoją rękę startową…",
       "londonTitle": "Mulligan londyński ({{count}} wziętych)",
@@ -1186,7 +1213,10 @@
       "subtitleKeepWithBottom": "Zatrzymaj tę rękę (położysz {{count}} na spód) lub zrób mulligan ponownie po świeże 7.",
       "subtitleKeepFree": "Zatrzymaj tę rękę (darmowy mulligan — brak kart na spód) lub zrób mulligan ponownie po świeże 7.",
       "subtitleOpeningFree": "Zatrzymaj tę rękę lub zrób darmowy mulligan (brak kart na spód).",
-      "subtitleOpeningOne": "Zatrzymaj tę rękę lub zrób mulligan po świeże 7 (gdy zatrzymasz, położysz 1 na spód)."
+      "subtitleOpeningOne": "Zatrzymaj tę rękę lub zrób mulligan po świeże 7 (gdy zatrzymasz, położysz 1 na spód).",
+      "onThePlay": "Zaczynasz",
+      "onTheDraw": "Dobierasz pierwszy",
+      "takeTurn": "Rozgrywasz turę {{turn}}"
     },
     "companion": {
       "eyebrow": "Przed grą",
@@ -1398,6 +1428,8 @@
     },
     "config": {
       "startingLife": "Życie początkowe",
+      "commanderDamage": "Obrażenia od dowódcy",
+      "poisonCounters": "Znaczniki trucizny",
       "players": "Gracze",
       "whoGoesFirst": "Kto zaczyna",
       "firstPlayer": {
@@ -1409,6 +1441,11 @@
     "noLegalAiDecks": {
       "withFormat": "Dodaj lub zaimportuj talię dozwoloną w formacie {{format}}, aby AI mogło jej użyć.",
       "generic": "Dodaj lub zaimportuj talię dozwoloną w tym formacie, aby AI mogło jej użyć."
+    },
+    "hordeDeck": {
+      "title": "Talia Hordy",
+      "subtitle": "Samogrająca talia, z którą mierzy się twoja drużyna. Dostarcza ją silnik — nie potrzebujesz talii SI.",
+      "selected": "Wybrano"
     }
   },
   "cardChoice": {
@@ -1442,7 +1479,8 @@
       "cast": "Rzuć",
       "crew": "Crew ({{power}})",
       "saddle": "Saddle ({{power}})",
-      "station": "Station (+{{power}})"
+      "station": "Station (+{{power}})",
+      "destroy": "Destroy"
     },
     "buttons": {
       "confirm": "Potwierdź",
@@ -1796,7 +1834,8 @@
       "counterDiscard": "Odrzuć {{selected}} z {{cap}}",
       "counterKeep": "Zatrzymaj {{selected}} z {{cap}}",
       "keepInstead": "Zatrzymaj zamiast tego",
-      "discardInstead": "Odrzuć zamiast tego"
+      "discardInstead": "Odrzuć zamiast tego",
+      "counterChoose": "Choose {{selected}} of {{cap}}"
     },
     "discard": {
       "title": "Odrzuć",
@@ -1895,6 +1934,42 @@
       "hint": "Przeciągnij, aby zmienić kolejność · pozycja 1 trafi na wierzch tego stosu",
       "moveLeft": "Przesuń w lewo",
       "moveRight": "Przesuń w prawo"
+    },
+    "heroEvent": {
+      "chromeOverload": {
+        "title": "Chrome Dome's Overload",
+        "subtitle": "Choose a tapped creature you control to sacrifice"
+      },
+      "krangStratagem": {
+        "title": "Krang's Stratagem",
+        "subtitleUpTo_one": "Choose up to {{count}} card to discard (team owes {{remaining}} total)",
+        "subtitleUpTo_other": "Choose up to {{count}} cards to discard (team owes {{remaining}} total)",
+        "subtitleMin_one": "Choose {{min}} to {{count}} card to discard (team owes {{remaining}} total)",
+        "subtitleMin_other": "Choose {{min}} to {{count}} cards to discard (team owes {{remaining}} total)",
+        "subtitleExact_one": "Choose {{count}} card to discard",
+        "subtitleExact_other": "Choose {{count}} cards to discard"
+      },
+      "smackdown": {
+        "title": "Leatherhead's Smackdown",
+        "subtitle": "As a team, choose a creature with the greatest power to destroy it"
+      },
+      "ratKingRevolution": {
+        "title": "Rat King's Revolution",
+        "subtitle": "Choose a creature you control to tap and stun"
+      },
+      "savantiCurse": {
+        "title": "Savanti Romero's Curse",
+        "subtitle_one": "Choose {{count}} creature you control to return to its owner's hand",
+        "subtitle_other": "Choose {{count}} creatures you control to return to their owners' hands"
+      },
+      "infiltration": {
+        "title": "Villain Infiltration",
+        "subtitle": "As a team, choose a creature with the greatest power to destroy it"
+      },
+      "villainMayhem": {
+        "title": "Villain Mayhem!",
+        "subtitle": "As a team, choose {{count}} creatures to spare — every other creature is destroyed"
+      }
     }
   },
   "specializeColor": {

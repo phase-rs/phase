@@ -24,7 +24,7 @@ use engine::game::{
 use engine::types::action_rejection::ActionRejection;
 use engine::types::actions::{DebugAction, GameAction};
 use engine::types::events::GameEvent;
-use engine::types::format::{validate_starting_life_bounds, FormatConfig};
+use engine::types::format::{validate_starting_life_bounds, FormatConfig, GameFormat};
 use engine::types::game_state::{GameState, PersistedGameState, PlayerDeckPool};
 use engine::types::identifiers::ObjectId;
 use engine::types::interaction::{
@@ -485,6 +485,15 @@ pub enum StartGameError {
     SeatDeckMissing {
         seat_index: u8,
     },
+    /// Horde Magic: the whole Horde roster (primary + co-Horde seats) must
+    /// land on one contiguous run of AI seats — a human seat given the
+    /// challenge library would be unplayable, and silently reassigning one
+    /// is worse than refusing to start. The host must rearrange the seats
+    /// (or add AI seats) so such a run exists.
+    HordeSeatsNotAi {
+        horde_seat_count: u8,
+        player_count: u8,
+    },
 }
 
 impl From<CedhBracketError> for StartGameError {
@@ -500,6 +509,13 @@ impl std::fmt::Display for StartGameError {
             StartGameError::SeatDeckMissing { seat_index } => write!(
                 f,
                 "Seat {seat_index} has no deck; the game cannot start until it does"
+            ),
+            StartGameError::HordeSeatsNotAi {
+                horde_seat_count,
+                player_count,
+            } => write!(
+                f,
+                "Horde needs {horde_seat_count} contiguous AI seats and this {player_count}-player table has no such run; the Horde roster cannot take a human seat"
             ),
         }
     }
@@ -968,8 +984,53 @@ impl GameSession {
         }
     }
 
+    /// Horde Magic: the lowest seat anchoring one contiguous run of AI
+    /// seats covering the whole Horde roster — `None` when the layout has
+    /// no such run. `GameState::new` designates seats
+    /// `archenemy..archenemy+N` as the Horde (N = the number of Horde
+    /// libraries; 1 for a single-Horde deck, 2 for the LOTR "Two Towers"
+    /// pairing), and those seats must ALL be AI: the survivors are the
+    /// humans. There is deliberately no lowest-AI-seat fallback — anchoring
+    /// a partial run would load the challenge library onto a human seat.
+    /// The same rule runs on the P2P path (client-side start); both reject
+    /// the layout instead of reassigning a human seat.
+    fn horde_anchor(&self, player_count: u8) -> Option<PlayerId> {
+        let horde_seat_count = self
+            .state
+            .format_config
+            .horde_ruleset
+            .as_ref()
+            .map_or(1, |r| r.horde_decks().len()) as u8;
+        (0..player_count)
+            .find(|&s| {
+                (0..horde_seat_count)
+                    .all(|offset| self.ai_seats.contains(&PlayerId(s.saturating_add(offset))))
+            })
+            .map(PlayerId)
+    }
+
     fn rebuild_pregame_state(&mut self, player_count: u8) {
-        let format_config = self.state.format_config.clone();
+        let mut format_config = self.state.format_config.clone();
+        // Horde Magic: the Horde is the self-piloting deck, which is played by an
+        // AI seat — not the host (seat 0), who is a survivor. The default
+        // `FormatConfig::horde()` points `archenemy_player` at seat 0; remap it to
+        // the anchor of the lowest contiguous AI run covering the roster so the
+        // engine designates those seats as the Horde — loading the challenge-deck
+        // libraries there, seating the humans as the survivor team, and giving
+        // the survivors the first turn.
+        if format_config.format == GameFormat::Horde {
+            match self.horde_anchor(player_count) {
+                Some(anchor) => {
+                    format_config.archenemy_player = Some(anchor);
+                }
+                // No AI run covers the roster: clear the default anchor so the
+                // pregame state designates nothing, and let `start_game` reject
+                // the layout — never silently take a human seat.
+                None => {
+                    format_config.archenemy_player = None;
+                }
+            }
+        }
         let match_config = self.state.match_config;
         self.state = GameState::new(format_config, player_count, rand::rng().random());
         // CR 732.2a: re-read the immutable match config (incl. the combo-detector
@@ -1296,6 +1357,25 @@ impl GameSession {
                 .collect::<Vec<_>>();
             validate_cedh_bracket(&deck_refs)?;
         }
+        // Horde Magic: every designated Horde seat must be an AI seat. A
+        // layout with no contiguous AI run covering the roster (e.g. Two
+        // Towers at [human, AI, human]) is rejected here, before the rebuild
+        // — designating it would load the challenge library onto a human
+        // seat. Same rule as the P2P path's client-side start.
+        if self.state.format_config.format == GameFormat::Horde
+            && self.horde_anchor(self.player_count).is_none()
+        {
+            let horde_seat_count = self
+                .state
+                .format_config
+                .horde_ruleset
+                .as_ref()
+                .map_or(1, |r| r.horde_decks().len()) as u8;
+            return Err(StartGameError::HordeSeatsNotAi {
+                horde_seat_count,
+                player_count: self.player_count,
+            });
+        }
 
         let player_deck = self.decks[0].clone().unwrap_or_default();
         let opponent_deck = self.decks[1].clone().unwrap_or_default();
@@ -1337,7 +1417,8 @@ impl GameSession {
         // joiners/reconnects do not re-see the dice.
         let result = start_game(&mut self.state);
         // `start_game` advances `waiting_for` from the pregame Priority state
-        // to the first real interaction (normally the two-seat mulligan).
+        // to the first real interaction (the CR 103.1 choice, or the mulligan
+        // for a fixed-starter format).
         // Rebind the same trusted session after that transition so the
         // authority slots match the newly active semantic owners before the
         // first public projection.
@@ -1347,10 +1428,10 @@ impl GameSession {
         self.game_log
             .write_game_log_entries(&self.game_code, &result.log_entries);
         // Deliberately NOT a turn-rewind capture site, unlike the four
-        // transition handlers. These events never reach a transition handler,
-        // and turn 1's opening state sits adjacent to the mulligan flow —
-        // rewinding to it would land a player somewhere the rollback machine
-        // was never designed to resume from. An exclusion, not an omission.
+        // transition handlers. The batch is the CR 103.1 contest alone and
+        // announces no turn: turn 1 begins in the chooser's answer, which runs
+        // through `handle_action` and is captured there, as game two's
+        // `ChoosePlayDraw` is.
         self.start_events = result.events;
         self.game_started = true;
         self.advance_state_revision();
@@ -2922,6 +3003,7 @@ mod tests {
     };
     use engine::types::card::CardFace;
     use engine::types::card_type::{CardType, CoreType};
+    use engine::types::format::ChallengeDeck;
     use engine::types::game_state::{
         AutoPassMode, CastPaymentMode, PersistedGameState, StackEntry, StackEntryKind,
         StackResolutionAutoPassOverlay, StackResolutionBudget, StackResolutionEntryFence,
@@ -2929,7 +3011,7 @@ mod tests {
     };
     use engine::types::interaction::{
         InteractionAvailability, InteractionChoiceId, InteractionReasonCode, InteractionResponse,
-        MAX_INTERACTION_LIST_LEN,
+        InteractionSlotKind, MAX_INTERACTION_LIST_LEN,
     };
     use engine::types::mana::ManaCost;
     use engine::types::phase::{Phase, PhaseStop, PhaseStopScope};
@@ -7921,6 +8003,87 @@ mod tests {
         assert!(!session.game_started);
     }
 
+    /// R2-#4: Two Towers at [human, AI, human] has no contiguous AI run for
+    /// the 2-seat Horde roster, so `start_game` rejects the layout instead
+    /// of designating seat 2 — a human — as a Horde seat carrying the
+    /// challenge library.
+    #[test]
+    fn horde_two_towers_split_layout_is_rejected_at_start() {
+        let db = Arc::new(CardDatabase::default());
+        let mut mgr = SessionManager::new();
+        let two_towers = FormatConfig::horde(ChallengeDeck::LotrTwoTowersHorde.default_ruleset());
+        let (code, _token0) = mgr
+            .create_game_n_players(
+                make_deck(),
+                None,
+                "Host".to_string(),
+                None,
+                3,
+                MatchConfig::default(),
+                Some(two_towers),
+            )
+            .expect("3-player Horde room creates");
+        let (_token1, _) = join_game(&mut mgr, &code, make_deck(), None).unwrap();
+        let (_token2, _) = join_game(&mut mgr, &code, make_deck(), None).unwrap();
+
+        // Seat 1 is the lone AI seat between two humans.
+        let mut session = mgr.try_session(&code).unwrap();
+        session.ai_seats.insert(PlayerId(1));
+
+        let result = session.start_game(&db);
+        assert!(
+            matches!(
+                result,
+                Err(StartGameError::HordeSeatsNotAi {
+                    horde_seat_count: 2,
+                    player_count: 3,
+                })
+            ),
+            "split layout must be rejected, got: {result:?}",
+        );
+        assert!(!session.game_started);
+    }
+
+    /// R2-#4: the Horde anchor is the lowest seat starting a full-AI run
+    /// covering the roster; without one the rebuild clears the default
+    /// anchor so the pregame state designates nothing (and `start_game`
+    /// rejects — see the test above).
+    #[test]
+    fn horde_anchor_requires_a_full_ai_run() {
+        let mut mgr = SessionManager::new();
+        let two_towers = FormatConfig::horde(ChallengeDeck::LotrTwoTowersHorde.default_ruleset());
+        let (code, _token0) = mgr
+            .create_game_n_players(
+                make_deck(),
+                None,
+                "Host".to_string(),
+                None,
+                3,
+                MatchConfig::default(),
+                Some(two_towers),
+            )
+            .expect("3-player Horde room creates");
+        let (_token1, _) = join_game(&mut mgr, &code, make_deck(), None).unwrap();
+        let (_token2, _) = join_game(&mut mgr, &code, make_deck(), None).unwrap();
+
+        let mut session = mgr.try_session(&code).unwrap();
+        // Contiguous AI run on seats 1+2: anchor 1, both Horde libraries
+        // land on AI seats.
+        session.ai_seats.insert(PlayerId(1));
+        session.ai_seats.insert(PlayerId(2));
+        session.rebuild_pregame_state(3);
+        assert_eq!(
+            session.state.format_config.archenemy_player,
+            Some(PlayerId(1))
+        );
+
+        // Lone AI seat between two humans: no anchor, and the default
+        // seat-0 anchor is cleared rather than left pointing at the host.
+        session.ai_seats.remove(&PlayerId(2));
+        session.rebuild_pregame_state(3);
+        assert_eq!(session.state.format_config.archenemy_player, None);
+    }
+
     /// CR 701.22a / CR 701.25a: a reordered (and partial-2+) scry keep-on-top
     /// selection is a legal freeform selection that `select_cards_variants` does
     /// not enumerate. Before the freeform-skip change it was rejected as
@@ -10267,12 +10430,50 @@ mod tests {
     fn starting_two_seat_room_rebinds_first_interaction_projection() {
         let db = lands_db();
         let data = name_deck("Forest", 40);
-        let (mut mgr, code) = seated_room(&db, &data);
+        let mut mgr = SessionManager::new();
+        // Chooser P1 discriminates: `GameState::new` binds `(P0, Single)` for its
+        // pregame `Priority { player: P0 }`, so a missing post-start rebind
+        // leaves a P0 slot.
+        let (code, ()) = started_with_chooser(&mut mgr, PlayerId(1), |mgr| {
+            let code = seat_room_in(mgr, &db, &data);
+            mgr.try_session(&code)
+                .unwrap()
+                .start_game(&db)
+                .expect("a fully decked room starts");
+            (code, ())
+        });
 
         let session = mgr
             .session_exclusive(&code)
             .expect("a freshly seated room is still solely owned by the manager");
-        session.start_game(&db).expect("a fully decked room starts");
+        // CR 103.1: the first interaction is the choice, bound to the chooser.
+        assert_eq!(session.state.active_interaction_slots.len(), 1);
+        let slot = &session.state.active_interaction_slots[0];
+        assert_eq!(slot.semantic_owner, 1);
+        assert_eq!(slot.slot_kind, InteractionSlotKind::Single);
+        let chooser_view = derive_viewer_interaction(
+            &session.state,
+            &filter_state_for_player(&session.state, PlayerId(1)),
+            PlayerId(1),
+        );
+        assert!(chooser_view.can_submit);
+        assert!(!chooser_view.opportunities.is_empty());
+        let other_view = derive_viewer_interaction(
+            &session.state,
+            &filter_state_for_player(&session.state, PlayerId(0)),
+            PlayerId(0),
+        );
+        assert!(!other_view.can_submit);
+
+        let chooser_token = session.player_tokens[1].clone();
+        session
+            .handle_action(
+                &chooser_token,
+                GameAction::ChooseStartingPlayer {
+                    player: PlayerId(1),
+                },
+            )
+            .expect("the chooser elects to play first");
         assert_eq!(session.state.active_interaction_slots.len(), 2);
         for player in [PlayerId(0), PlayerId(1)] {
             let filtered = filter_state_for_player(&session.state, player);
@@ -10440,13 +10641,13 @@ mod tests {
 
     // ── Restore ────────────────────────────────────────────────────────────
 
-    /// A two-seat room with only the host seated, its deck recorded the way
-    /// the create path records it.
-    fn hosted_room(
+    /// A two-seat room in `mgr` with only the host seated, its deck recorded
+    /// the way the create path records it.
+    fn host_room_in(
+        mgr: &mut SessionManager,
         db: &CardDatabase,
         data: &crate::starter_decks::DeckData,
-    ) -> (SessionManager, String) {
-        let mut mgr = SessionManager::new();
+    ) -> String {
         let (code, _token) = mgr
             .create_game_n_players(
                 crate::resolve_deck(db, data).unwrap(),
@@ -10458,6 +10659,35 @@ mod tests {
                 None,
             )
             .unwrap();
+        code
+    }
+
+    /// `host_room_in` with the second seat joined, both decks re-resolvable.
+    fn seat_room_in(
+        mgr: &mut SessionManager,
+        db: &CardDatabase,
+        data: &crate::starter_decks::DeckData,
+    ) -> String {
+        let code = host_room_in(mgr, db, data);
+        join_game_with_name(
+            mgr,
+            &code,
+            crate::resolve_deck(db, data).unwrap(),
+            Some(DeckChoice::DeckList(Box::new(data.clone()))),
+            "Guest".to_string(),
+        )
+        .unwrap();
+        code
+    }
+
+    /// A two-seat room with only the host seated, its deck recorded the way
+    /// the create path records it.
+    fn hosted_room(
+        db: &CardDatabase,
+        data: &crate::starter_decks::DeckData,
+    ) -> (SessionManager, String) {
+        let mut mgr = SessionManager::new();
+        let code = host_room_in(&mut mgr, db, data);
         (mgr, code)
     }
 
@@ -10466,16 +10696,167 @@ mod tests {
         db: &CardDatabase,
         data: &crate::starter_decks::DeckData,
     ) -> (SessionManager, String) {
-        let (mut mgr, code) = hosted_room(db, data);
-        join_game_with_name(
-            &mut mgr,
-            &code,
-            crate::resolve_deck(db, data).unwrap(),
-            Some(DeckChoice::DeckList(Box::new(data.clone()))),
-            "Guest".to_string(),
-        )
-        .unwrap();
+        let mut mgr = SessionManager::new();
+        let code = seat_room_in(&mut mgr, db, data);
         (mgr, code)
+    }
+
+    /// CR 103.1: `GameSession::start_game` rolls the contest on an OS-random seed
+    /// (`rebuild_pregame_state`), so a test that needs a particular chooser starts
+    /// fresh sessions until one waits on that seat. A two-seat contest names each
+    /// seat with probability at least (1 − 20⁻¹⁶)/2, so 64 attempts all miss with
+    /// probability at most ((1 + 20⁻¹⁶)/2)⁶⁴ ≈ 2⁻⁶⁴. Every session not kept is removed.
+    fn started_with_chooser<T>(
+        mgr: &mut SessionManager,
+        chooser: PlayerId,
+        mut start: impl FnMut(&mut SessionManager) -> (String, T),
+    ) -> (String, T) {
+        for _ in 0..64 {
+            let (code, kept) = start(mgr);
+            let found = matches!(
+                mgr.try_session(&code).unwrap().state.waiting_for,
+                WaitingFor::ChooseStartingPlayer { player, .. } if player == chooser
+            );
+            if found {
+                return (code, kept);
+            }
+            mgr.remove_game(&code);
+        }
+        panic!("64 fresh sessions never made {chooser:?} the chooser");
+    }
+
+    /// CR 103.1: a server game reaches the choice, and its answer starts the
+    /// game, for a human chooser and for an AI chooser.
+    #[test]
+    fn server_game_one_waits_for_the_chooser() {
+        // (a) Two humans: the chooser names the other seat.
+        let db = lands_db();
+        let data = name_deck("Forest", 40);
+        let mut mgr = SessionManager::new();
+        let code = seat_room_in(&mut mgr, &db, &data);
+        let mut session = mgr.try_session(&code).unwrap();
+        session.start_game(&db).expect("a fully decked room starts");
+        let WaitingFor::ChooseStartingPlayer {
+            player: chooser, ..
+        } = session.state.waiting_for
+        else {
+            panic!("the start rests at the CR 103.1 choice");
+        };
+        assert!(
+            matches!(
+                session.start_events.as_slice(),
+                [GameEvent::StartingPlayerContest { .. }]
+            ),
+            "the start batch is the contest alone: {:?}",
+            session.start_events
+        );
+        let other = PlayerId(1 - chooser.0);
+        let chooser_token = session.player_tokens[usize::from(chooser.0)].clone();
+        let other_token = session.player_tokens[usize::from(other.0)].clone();
+
+        assert!(
+            session
+                .handle_action(
+                    &other_token,
+                    GameAction::ChooseStartingPlayer { player: other },
+                )
+                .is_err(),
+            "only the chooser may answer"
+        );
+        assert!(
+            matches!(
+                session.state.waiting_for,
+                WaitingFor::ChooseStartingPlayer { player, .. } if player == chooser
+            ),
+            "the refused answer leaves the prompt in place"
+        );
+
+        session
+            .handle_action(
+                &chooser_token,
+                GameAction::ChooseStartingPlayer { player: other },
+            )
+            .expect("the chooser names the other seat");
+        assert_eq!(session.state.current_starting_player, other);
+        assert!(matches!(
+            session.state.waiting_for,
+            WaitingFor::MulliganDecision { .. }
+        ));
+        drop(session);
+
+        // (b) An AI chooser answers through the session's AI driver.
+        let db = Arc::new(CardDatabase::default());
+        let mut mgr = SessionManager::new();
+        let (code, _token) = started_with_chooser(&mut mgr, PlayerId(1), |mgr| {
+            mgr.create_game_with_ai(
+                make_deck(),
+                DeckChoice::Random,
+                "Host".to_string(),
+                None,
+                MatchConfig::default(),
+                vec![ai_setup(1, AiDifficulty::Easy, make_deck())],
+                Vec::new(),
+                None,
+                &db,
+            )
+            .expect("supported format config")
+        });
+        let mut session = mgr.try_session(&code).unwrap();
+        session.run_ai();
+        assert_eq!(session.state.turn_number, 1);
+        assert_eq!(session.state.current_starting_player, PlayerId(1));
+        assert!(!matches!(
+            session.state.waiting_for,
+            WaitingFor::ChooseStartingPlayer { .. }
+        ));
+    }
+
+    /// Single-user hosting offers game one's opening rewind boundary once the
+    /// CR 103.1 choice starts turn 1, as game two's `ChoosePlayDraw` does, and
+    /// the chooser's answer is an action-ring takeback point.
+    #[test]
+    fn game_one_opening_boundary_is_offered_after_the_choice() {
+        let db = lands_db();
+        let data = name_deck("Forest", 40);
+        let mut mgr = SessionManager::new();
+        let code = seat_room_in(&mut mgr, &db, &data);
+        let mut session = mgr.try_session(&code).unwrap();
+        session.start_game(&db).expect("a fully decked room starts");
+        session.set_hosting(HostingMode::SingleUser);
+        let WaitingFor::ChooseStartingPlayer {
+            player: chooser, ..
+        } = session.state.waiting_for
+        else {
+            panic!("the start rests at the CR 103.1 choice");
+        };
+        let starter = PlayerId(1 - chooser.0);
+        assert!(session.rewind_options().is_empty());
+        assert_eq!(session.takeback.history().len(), 0);
+
+        let chooser_token = session.player_tokens[usize::from(chooser.0)].clone();
+        session
+            .handle_action(
+                &chooser_token,
+                GameAction::ChooseStartingPlayer { player: starter },
+            )
+            .expect("the chooser names the other seat");
+
+        assert_eq!(
+            session.rewind_options(),
+            vec![RewindOption {
+                turn_number: 1,
+                active_player: starter,
+            }]
+        );
+        let history: Vec<_> = session.takeback.history().collect();
+        assert_eq!(history.len(), 1, "the answer is one takeback point");
+        let (actor, point) = history[0];
+        assert_eq!(actor, chooser);
+        assert!(matches!(
+            point.waiting_for,
+            WaitingFor::ChooseStartingPlayer { .. }
+        ));
+        assert_eq!(point.turn_number, 0);
     }
 
     fn install_ai_seat(
@@ -11105,8 +11486,8 @@ mod tests {
         for ai_opts in [0, 1] {
             let mut mgr = SessionManager::new();
             let db = Arc::new(CardDatabase::default());
-            let (code, token) = mgr
-                .create_game_with_ai(
+            let (code, token) = started_with_chooser(&mut mgr, PlayerId(0), |mgr| {
+                mgr.create_game_with_ai(
                     pile.clone(),
                     DeckChoice::Random,
                     "Host".to_string(),
@@ -11121,8 +11502,19 @@ mod tests {
                     Some(engine::types::format::FormatConfig::dandan()),
                     &db,
                 )
-                .unwrap();
+                .unwrap()
+            });
             let mut session = mgr.try_session(&code).unwrap();
+            // CR 103.1: the human chooser elects to play first, the starter
+            // `pin_dandan_hands` writes.
+            session
+                .handle_action(
+                    &token,
+                    GameAction::ChooseStartingPlayer {
+                        player: PlayerId(0),
+                    },
+                )
+                .expect("the human chooses to play first");
             pin_dandan_hands(&mut session.state, 0, ai_opts);
             assert!(
                 legal_actions_for_viewer(&session.state, PlayerId(1))

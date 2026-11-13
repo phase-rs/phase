@@ -970,6 +970,7 @@ fn classify(action: &GameAction, prompt: &WaitingFor) -> Choice {
         | GameAction::TurnFaceUp { .. }
         | GameAction::SubmitSideboard { .. }
         | GameAction::ChoosePlayDraw { .. }
+        | GameAction::ChooseStartingPlayer { .. }
         | GameAction::ChooseOption { .. }
         | GameAction::SubmitVoteCandidate { .. }
         | GameAction::SubmitSpellbookDraft { .. }
@@ -1138,6 +1139,11 @@ fn answer_optionality(prompt: &WaitingFor, answer: Answer) -> AnswerOptionality 
         WaitingFor::OutsideGameChoice { up_to, .. }
         | WaitingFor::ChooseFromZoneChoice { up_to, .. }
         | WaitingFor::DiscardChoice { up_to, .. } => optional_if(*up_to),
+        // A floored hero-event prompt (Krang's minimum) cannot be declined
+        // to zero, so it is mandatory like an exact prompt.
+        WaitingFor::HeroEventChoice { up_to, min, .. } => {
+            optional_if(*up_to && *min == 0)
+        }
         WaitingFor::RevealChoice { optional, .. } => optional_if(*optional),
         // CR 732.2a + CR 104.4b: the shortcut and Resolve All negotiations are not instructions.
         WaitingFor::ResolveAllConsent { .. }
@@ -1182,6 +1188,7 @@ fn answer_optionality(prompt: &WaitingFor, answer: Answer) -> AnswerOptionality 
         | WaitingFor::ManifestDreadChoice { .. }
         | WaitingFor::BetweenGamesSideboard { .. }
         | WaitingFor::BetweenGamesChoosePlayDraw { .. }
+        | WaitingFor::ChooseStartingPlayer { .. }
         | WaitingFor::NamedChoice { .. }
         | WaitingFor::OpponentGuess { .. }
         | WaitingFor::SpellbookDraft { .. }

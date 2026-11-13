@@ -14,12 +14,14 @@ import { Trans, useTranslation } from "react-i18next";
 import type { ParseKeys, TFunction } from "i18next";
 
 import type {
+  ChallengeDeck,
   CompanionRevealChoice,
   DeckCardCount,
   FormatConfig,
   GameFormat,
   MatchConfig,
   ObjectId,
+  PlayDrawPosition,
   SerializedAbilityCost,
   AiDecisionDiagnosticReceipt,
   TakebackEvent,
@@ -192,6 +194,7 @@ import {
   type PlayerSlot,
 } from "../stores/multiplayerStore.ts";
 import { formatMetadata, isSetupFormat } from "../data/formatRegistry.ts";
+import { withChallengeDeck } from "../data/challengeDeckRegistry.ts";
 import { useMultiplayerDraftStore } from "../stores/multiplayerDraftStore.ts";
 import { SpectatorChrome } from "../components/spectator/SpectatorChrome.tsx";
 import { useSpectatorMode } from "../hooks/useSpectatorMode.ts";
@@ -293,6 +296,8 @@ export function GamePage() {
   const difficulty = searchParams.get("difficulty") ?? "Medium";
   const joinCode = searchParams.get("code") ?? "";
   const formatParam = searchParams.get("format") as GameFormat | null;
+  // Which self-piloting Horde deck the survivors face (Horde format only).
+  const hordeDeckParam = searchParams.get("hordeDeck") as ChallengeDeck | null;
   const playersParam = searchParams.get("players");
   const matchParam = searchParams.get("match");
   const loopParam = searchParams.get("loop");
@@ -329,14 +334,21 @@ export function GamePage() {
   // treats as new). The explicit memo makes the stability guarantee
   // self-documenting.
   const formatConfig = useMemo(() => {
-    if (isDirectSoloRouteMode(rawMode)) {
-      if (savedFormatConfig && isDirectSetupFormat(savedFormatConfig.format)) {
-        return savedFormatConfig;
+    const base = (() => {
+      if (isDirectSoloRouteMode(rawMode)) {
+        if (savedFormatConfig && isDirectSetupFormat(savedFormatConfig.format)) {
+          return savedFormatConfig;
+        }
+        return setupFormatConfig ?? directSetupFormatConfig(formatParam);
       }
-      return setupFormatConfig ?? directSetupFormatConfig(formatParam);
-    }
-    return savedFormatConfig ?? (formatParam ? FORMAT_DEFAULTS[formatParam] : undefined);
-  }, [formatParam, rawMode, savedFormatConfig, setupFormatConfig]);
+      return savedFormatConfig ?? (formatParam ? FORMAT_DEFAULTS[formatParam] : undefined);
+    })();
+    // Horde: apply the challenge deck picked on the setup screen. The engine owns
+    // each deck's rules, so this swaps in that deck's whole `HordeRuleset` (wave
+    // policy, setup turns, life deltas) rather than only the deck id — see
+    // `withChallengeDeck`. No-ops for non-Horde formats and unknown decks.
+    return base && hordeDeckParam ? withChallengeDeck(base, hordeDeckParam) : base;
+  }, [formatParam, rawMode, savedFormatConfig, setupFormatConfig, hordeDeckParam]);
   // CR 103.1: 0 = play first, 1 = draw first, undefined = random
   const firstPlayer = firstParam === "play" ? 0 : firstParam === "draw" ? 1 : undefined;
   const matchConfig = useMemo<MatchConfig>(
@@ -989,25 +1001,15 @@ function GamePageContent({
   // identity-ref latch makes the consume idempotent under React StrictMode's
   // double-invoke and after the clear (the re-run sees `null`).
   const startingContest = useGameStore((s) => s.startingContest);
-  const openingTurnOrder = useGameStore((s) => s.gameState?.derived?.turn_order);
-  const openingViewerTurnNumber = useGameStore(
-    (s) => s.gameState?.derived?.viewer_turn_number,
-  );
   const consumedContestRef = useRef<typeof startingContest>(null);
   useEffect(() => {
     if (!startingContest || consumedContestRef.current === startingContest) return;
     consumedContestRef.current = startingContest;
-    flashStartingPlayerContest(
-      startingContest.events,
-      startingContest.startingPlayer,
-      openingTurnOrder,
-      openingViewerTurnNumber,
-    );
+    flashStartingPlayerContest(startingContest.events);
     useGameStore.getState().clearStartingContest();
-  }, [openingTurnOrder, openingViewerTurnNumber, startingContest]);
+  }, [startingContest]);
   // CR 103.1 before CR 103.5: the starting-player contest must finish before the
-  // mulligan UI appears (the roll determines who's on the play, which precedes
-  // drawing opening hands). True from `initGame` setting the carrier through the
+  // mulligan UI appears (the roll-off precedes drawing opening hands). True from `initGame` setting the carrier through the
   // dice overlay's full life — the store hands `startingContest` off to
   // `uiStore.diceRoll` atomically, so there's no gap. Degrades to `false`
   // immediately for instant speed and explicit play/draw (no contest).
@@ -1084,6 +1086,8 @@ function GamePageContent({
   );
   const debugPanelOpen = useUiStore((s) => s.debugPanelOpen);
   const debugClickModeButtonVisible = useUiStore((s) => s.debugClickModeButtonVisible);
+  const debugInteractionMode = useUiStore((s) => s.debugInteractionMode);
+  const toggleDebugInteractionMode = useUiStore((s) => s.toggleDebugInteractionMode);
   const logPanelOpen = useUiStore((s) => s.logPanelOpen);
   const toggleDebugClickModeButtonVisible = useUiStore(
     (s) => s.toggleDebugClickModeButtonVisible,
@@ -1264,7 +1268,8 @@ function GamePageContent({
     navigate("/");
   }, [isOnlineMode, gameId, handleConcede, navigate]);
 
-  useKeyboardShortcuts();
+  const sandboxToolsAvailable = mode === "ai" || mode === "local" || isSandboxGame;
+  useKeyboardShortcuts({ sandboxToolsAvailable });
 
   // Priority-attention cues: one controller writes the store; each cue reads it.
   usePriorityAttentionController();
@@ -1848,8 +1853,10 @@ function GamePageContent({
             : undefined
         }
         takebackAudience={hasRemoteHumans(storeGameMode) ? "table" : "solo"}
-        showSandboxTools={mode === "ai" || mode === "local" || isSandboxGame}
+        showSandboxTools={sandboxToolsAvailable}
         onSandboxToolsClick={() => useUiStore.getState().openSandboxTools()}
+        debugInteractionMode={debugInteractionMode}
+        onToggleDebugInteractionMode={sandboxToolsAvailable ? toggleDebugInteractionMode : undefined}
         debugClickModeButtonVisible={debugClickModeButtonVisible}
         onToggleDebugClickModeButtonVisible={toggleDebugClickModeButtonVisible}
         showReportCard={canReportCard}
@@ -2313,7 +2320,7 @@ function GamePageContent({
             })()}
 
           {waitingFor?.type === "BetweenGamesChoosePlayDraw" &&
-            waitingFor.data.player === playerId && (
+            canActForWaitingState && (
               <ChoiceModal
                 title={t("gamePage.playDraw.title", { gameNumber: waitingFor.data.game_number })}
                 subtitle={t("gamePage.playDraw.matchScore", {
@@ -2334,6 +2341,48 @@ function GamePageContent({
                 ]}
                 onChoose={(id) => handleChoosePlayDraw(id === "play")}
               />
+            )}
+
+          {/* CR 103.1: the chooser names the seat that takes the first turn, once
+              the starting-player contest has finished. */}
+          {waitingFor?.type === "ChooseStartingPlayer" &&
+            !startingContestActive &&
+            canActForWaitingState && (
+              <ChoiceModal
+                title={t("gamePage.startingPlayer.title")}
+                options={waitingFor.data.candidates.map((seat) =>
+                  seat === playerId
+                    ? {
+                        id: String(seat),
+                        label: t("gamePage.playDraw.playFirst"),
+                        description: t("gamePage.playDraw.playFirstDescription"),
+                      }
+                    : {
+                        id: String(seat),
+                        label: t("gamePage.startingPlayer.playerPlaysFirst", {
+                          name: getOpponentDisplayName(seat),
+                        }),
+                      },
+                )}
+                onChoose={(id) =>
+                  dispatch({ type: "ChooseStartingPlayer", data: { player: Number(id) } })
+                }
+              />
+            )}
+
+          {waitingFor?.type === "ChooseStartingPlayer" &&
+            !startingContestActive &&
+            !canActForWaitingState && (
+              <div className="fixed inset-0 z-50 flex items-center justify-center">
+                <div className="absolute inset-0 bg-[radial-gradient(circle_at_top,rgba(31,41,55,0.55),rgba(2,6,23,0.92)_58%,rgba(2,6,23,0.98))]" />
+                <div className="relative text-center">
+                  <p className="text-base font-semibold text-white">
+                    {t("gamePage.startingPlayer.opponentChoosing", {
+                      name: getOpponentDisplayName(waitingFor.data.player),
+                    })}
+                  </p>
+                </div>
+              </div>
             )}
 
           {/* Multiplayer UX overlays */}
@@ -2438,6 +2487,31 @@ interface MulliganDecisionPromptProps {
   onChoose: (id: string) => void;
 }
 
+// CR 103.1: engine-provided play/draw label keys; `satisfies` makes a new
+// engine variant a type error here.
+const PLAY_DRAW_LABEL_KEYS = {
+  OnThePlay: "gamePage.mulligan.onThePlay",
+  OnTheDraw: "gamePage.mulligan.onTheDraw",
+} as const satisfies Record<PlayDrawPosition, ParseKeys<"game">>;
+
+/** The viewer's engine-provided opening turn position (CR 103.1). Formats only. */
+function OpeningTurnPosition() {
+  const { t } = useTranslation("game");
+  const playDraw = useGameStore((s) => s.gameState?.derived?.viewer_play_draw);
+  const turnNumber = useGameStore((s) => s.gameState?.derived?.viewer_turn_number);
+  const label = playDraw
+    ? t(PLAY_DRAW_LABEL_KEYS[playDraw])
+    : turnNumber != null
+      ? t("gamePage.mulligan.takeTurn", { turn: turnNumber })
+      : null;
+  if (!label) return null;
+  return (
+    <div className="mt-1 inline-flex w-fit items-center rounded-full border border-cyan-400/30 bg-cyan-400/10 px-2.5 py-0.5 text-xs font-semibold text-cyan-200">
+      {label}
+    </div>
+  );
+}
+
 interface MulliganPanelProps {
   eyebrow: string;
   title: string;
@@ -2490,6 +2564,7 @@ function MulliganPanel({
               <p className="modal-subtitle max-w-2xl text-slate-400">
                 {subtitle}
               </p>
+              <OpeningTurnPosition />
             </div>
 
             <div className="flex flex-1 flex-col px-2 py-2 lg:px-5 lg:py-5">{children}</div>

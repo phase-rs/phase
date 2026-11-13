@@ -204,6 +204,14 @@
         "label": "Libellé",
         "fallback": "Choix"
       }
+    },
+    "attacking": {
+      "you": "Vous attaque",
+      "player": "Attaque {{player}}",
+      "yourPlaneswalker": "Attaque votre planeswalker {{name}}",
+      "planeswalker": "Attaque le planeswalker {{name}} de {{player}}",
+      "battle": "Attaque la bataille {{name}}",
+      "nothing": "Attaque, mais aucun joueur, planeswalker ni bataille"
     }
   },
   "actionButton": {
@@ -346,7 +354,6 @@
     "pickNone": "Aucun",
     "underAttack_one": "Attaqué par {{count}} créature",
     "underAttack_other": "Attaqué par {{count}} créatures",
-    "target": "Cible",
     "token": "Jeton",
     "tokenTooltip": "Jeton qui est une copie d'une vraie carte",
     "copy": "Copie",
@@ -436,7 +443,12 @@
     "assignRemaining_other": "Assigner {{count}} de plus",
     "confirmDistribute_one": "Déclarer {{count}} attaquant",
     "confirmDistribute_other": "Déclarer {{count}} attaquants",
-    "noCommonTarget": "No shared target — switch to Distribute to aim each attacker."
+    "noCommonTarget": "No shared target — switch to Distribute to aim each attacker.",
+    "totalsHeading": "Totaux d'attaque",
+    "targetTotal_few": "{{count}} attaquants · {{damage}} blessures",
+    "targetTotal_many": "{{count}} attaquants · {{damage}} blessures",
+    "targetTotal_one": "{{count}} attaquant · {{damage}} blessures",
+    "targetTotal_other": "{{count}} attaquants · {{damage}} blessures"
   },
   "fullControl": {
     "label": "Contrôle",
@@ -449,7 +461,9 @@
     "done": "Terminé"
   },
   "lifeTotal": {
-    "playerLabel": "J{{seat}}"
+    "playerLabel": "J{{seat}}",
+    "libraryLabel": "CARTES",
+    "libraryTooltip": "La Horde n'a pas de total de points de vie. Les blessures et les pertes de points de vie la font meuler à la place — elle est vaincue lorsque sa bibliothèque est épuisée, donc ce nombre est son véritable compte à rebours."
   },
   "phaseStop": {
     "untapLabel": "Étape de dégagement",
@@ -540,6 +554,7 @@
     }
   },
   "badges": {
+    "hordeRulesAriaLabel": "Règles du deck de la Horde",
     "monarch": "Monarque",
     "monarchTooltip": "Le Monarque — pioche une carte supplémentaire en fin de tour",
     "initiative": "Initiative",
@@ -559,7 +574,9 @@
     "dungeonTooltip": "Aventure dans {{name}}",
     "poisonAriaLabel_one": "{{count}} marqueur poison",
     "poisonAriaLabel_other": "{{count}} marqueurs poison",
-    "poisonTooltip": "Marqueurs poison : {{count}}\nUn joueur avec dix marqueurs poison ou plus perd la partie.",
+    "poisonTooltip": "Marqueurs poison : {{count}}",
+    "poisonLossPlayer": "Un joueur avec {{threshold}} marqueurs poison ou plus perd la partie.",
+    "poisonLossTeam": "Une équipe avec {{threshold}} marqueurs poison ou plus perd la partie.",
     "energyAriaLabel_one": "{{count}} marqueur énergie",
     "energyAriaLabel_other": "{{count}} marqueurs énergie",
     "energyTooltip": "Marqueurs énergie : {{count}}\nLes marqueurs énergie sont une ressource détenue par un joueur et dépensée par des capacités de cartes.",
@@ -819,7 +836,12 @@
     "lethalBadge": "Létal",
     "planeswalkerLoyalty": "Planeswalker (loyauté : {{loyalty}})",
     "defendingPlayerTrample": "Joueur défenseur (Piétinement)",
-    "pwControllerTrample": "Contrôleur du PW (Piétinement sur PW)"
+    "pwControllerTrample": "Contrôleur du PW (Piétinement sur PW)",
+    "assignRemainingButton": "+{{amount}}",
+    "assignRemainingTo_few": "Assigner les {{count}} blessures restantes à {{target}}",
+    "assignRemainingTo_many": "Assigner les {{count}} blessures restantes à {{target}}",
+    "assignRemainingTo_one": "Assigner la {{count}} blessure restante à {{target}}",
+    "assignRemainingTo_other": "Assigner les {{count}} blessures restantes à {{target}}"
   },
   "cardTextReference": {
     "title": "Printed card text (reference)",
@@ -1164,6 +1186,11 @@
       "drawFirst": "Piocher en premier",
       "drawFirstDescription": "Prenez la pioche supplémentaire à votre premier tour"
     },
+    "startingPlayer": {
+      "title": "Choisissez qui joue en premier",
+      "playerPlaysFirst": "{{name}} joue en premier",
+      "opponentChoosing": "{{name}} choisit qui joue en premier…"
+    },
     "mulligan": {
       "opponentDeciding": "L'adversaire décide de sa main de départ…",
       "londonTitle": "Mulligan de Londres ({{count}} pris)",
@@ -1186,7 +1213,10 @@
       "subtitleKeepWithBottom": "Gardez cette main (vous placerez {{count}} en dessous) ou refaites un mulligan pour 7 cartes fraîches.",
       "subtitleKeepFree": "Gardez cette main (mulligan gratuit — aucune carte en dessous) ou refaites un mulligan pour 7 cartes fraîches.",
       "subtitleOpeningFree": "Gardez cette main ou prenez un mulligan gratuit (aucune carte en dessous).",
-      "subtitleOpeningOne": "Gardez cette main ou faites un mulligan pour 7 cartes fraîches (vous placerez 1 carte en dessous quand vous gardez)."
+      "subtitleOpeningOne": "Gardez cette main ou faites un mulligan pour 7 cartes fraîches (vous placerez 1 carte en dessous quand vous gardez).",
+      "onThePlay": "Vous jouez en premier",
+      "onTheDraw": "Vous piochez en premier",
+      "takeTurn": "Vous jouez au tour {{turn}}"
     },
     "companion": {
       "eyebrow": "Avant-partie",
@@ -1398,6 +1428,8 @@
     },
     "config": {
       "startingLife": "Points de vie de départ",
+      "commanderDamage": "Blessures de commandant",
+      "poisonCounters": "Marqueurs poison",
       "players": "Joueurs",
       "whoGoesFirst": "Qui commence",
       "firstPlayer": {
@@ -1409,6 +1441,11 @@
     "noLegalAiDecks": {
       "withFormat": "Ajoutez ou importez un deck légal en {{format}} pour que l'IA l'utilise.",
       "generic": "Ajoutez ou importez un deck légal dans ce format pour que l'IA l'utilise."
+    },
+    "hordeDeck": {
+      "title": "Deck de la Horde",
+      "subtitle": "Le deck autonome affronté par votre équipe. Le moteur le fournit — vous n'avez pas besoin de deck IA.",
+      "selected": "Sélectionné"
     }
   },
   "cardChoice": {
@@ -1442,7 +1479,8 @@
       "cast": "Lancer",
       "crew": "Équipage ({{power}})",
       "saddle": "Seller ({{power}})",
-      "station": "Station (+{{power}})"
+      "station": "Station (+{{power}})",
+      "destroy": "Destroy"
     },
     "buttons": {
       "confirm": "Confirmer",
@@ -1796,7 +1834,8 @@
       "counterDiscard": "Défausser {{selected}} sur {{cap}}",
       "counterKeep": "Garder {{selected}} sur {{cap}}",
       "keepInstead": "Garder plutôt",
-      "discardInstead": "Défausser plutôt"
+      "discardInstead": "Défausser plutôt",
+      "counterChoose": "Choose {{selected}} of {{cap}}"
     },
     "discard": {
       "title": "Défausser",
@@ -1895,6 +1934,42 @@
       "hint": "Faites glisser pour réorganiser · la position 1 se retrouve au-dessus de ce tas",
       "moveLeft": "Déplacer vers la gauche",
       "moveRight": "Déplacer vers la droite"
+    },
+    "heroEvent": {
+      "chromeOverload": {
+        "title": "Chrome Dome's Overload",
+        "subtitle": "Choose a tapped creature you control to sacrifice"
+      },
+      "krangStratagem": {
+        "title": "Krang's Stratagem",
+        "subtitleUpTo_one": "Choose up to {{count}} card to discard (team owes {{remaining}} total)",
+        "subtitleUpTo_other": "Choose up to {{count}} cards to discard (team owes {{remaining}} total)",
+        "subtitleMin_one": "Choose {{min}} to {{count}} card to discard (team owes {{remaining}} total)",
+        "subtitleMin_other": "Choose {{min}} to {{count}} cards to discard (team owes {{remaining}} total)",
+        "subtitleExact_one": "Choose {{count}} card to discard",
+        "subtitleExact_other": "Choose {{count}} cards to discard"
+      },
+      "smackdown": {
+        "title": "Leatherhead's Smackdown",
+        "subtitle": "As a team, choose a creature with the greatest power to destroy it"
+      },
+      "ratKingRevolution": {
+        "title": "Rat King's Revolution",
+        "subtitle": "Choose a creature you control to tap and stun"
+      },
+      "savantiCurse": {
+        "title": "Savanti Romero's Curse",
+        "subtitle_one": "Choose {{count}} creature you control to return to its owner's hand",
+        "subtitle_other": "Choose {{count}} creatures you control to return to their owners' hands"
+      },
+      "infiltration": {
+        "title": "Villain Infiltration",
+        "subtitle": "As a team, choose a creature with the greatest power to destroy it"
+      },
+      "villainMayhem": {
+        "title": "Villain Mayhem!",
+        "subtitle": "As a team, choose {{count}} creatures to spare — every other creature is destroyed"
+      }
     }
   },
   "specializeColor": {

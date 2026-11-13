@@ -41,10 +41,6 @@ patterns = [
   "crates/phase-server/src/main.rs",
 ]
 
-[requested_changes]
-warning_after_days = 7
-close_after_warning_days = 7
-
 [hard_stops]
 patterns = [
   ".agents/skills/**",

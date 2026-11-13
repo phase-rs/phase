@@ -6300,6 +6300,13 @@ mod granted_caster_reference {
     fn foo_bar_gaps(oracle: &str, card_type: &str) -> (Vec<String>, String) {
         let parsed = parse_oracle_text(oracle, "Foo Bar", &[], &[card_type.to_string()], &[]);
         let json = serde_json::to_string(&parsed).expect("ParsedAbilities serializes");
+        // Merge MTGJSON keywords (empty for synthetic cards) with parser-extracted keywords,
+        // mirroring `merge_extracted_keywords` in synthesis.
+        let mut keywords: Vec<engine::types::keywords::Keyword> = Vec::new();
+        engine::database::synthesis::merge_extracted_keywords(
+            &mut keywords,
+            parsed.extracted_keywords,
+        );
         let gaps = engine::game::coverage::card_face_gaps(&engine::types::card::CardFace {
             name: "Foo Bar".to_string(),
             oracle_text: Some(oracle.to_string()),
@@ -6307,6 +6314,9 @@ mod granted_caster_reference {
             triggers: parsed.triggers,
             static_abilities: parsed.statics,
             replacements: parsed.replacements,
+            keywords,
+            additional_cost: parsed.additional_cost,
+            parse_warnings: parsed.parse_warnings,
             ..Default::default()
         });
         (gaps, json)

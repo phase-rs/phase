@@ -23,6 +23,8 @@ use crate::analysis::decision_template::{
     DecisionTemplate, IterationIndex,
 };
 use crate::game::game_object::GameObject;
+use crate::game::players::{self, PoisonLossScope};
+use crate::game::topology;
 use crate::types::ability::{
     AbilityCondition, AbilityDefinition, AbilityUseTally, ActivationRestriction, CastingPermission,
     DamageModification, QuantityRef, TargetRef,
@@ -856,7 +858,9 @@ mod map_key_pairs {
 /// it finds here, the second asks whether the period charges this point's slot — and each binds
 /// the magnitude to `_`. The **magnitude** is read by
 /// [`PeriodicDelta::declared_seat_life_charges`], which charges a seat every slot a declaration
-/// may newly land on it (the AI's bounded-declare veto is its production caller). It is also the
+/// may newly land on it (in production, the engine's `PeriodicDelta::seat_crossing` and the AI's
+/// bounded-declare veto both read those charges through
+/// [`PeriodicDelta::declared_seat_life_crossing`]). It is also the
 /// wire witness of the mint's magnitude derivation, the only place
 /// [`ResourceVector::worst_seat_life_loss`]' output is observable off the certificate, and the
 /// accepted row pinning that derivation asserts against it. Narrowing the shape to a slot list
@@ -1055,7 +1059,7 @@ impl CleanupPair {
     fn repetitions(self, state: &GameState, caster: PlayerId) -> Option<i64> {
         let max_hand = crate::game::turns::maximum_hand_size(state, caster)? as i64;
         let hand = state.players.iter().find(|p| p.id == caster)?.hand.len() as i64;
-        ResourceVector::narrowed_repetitions(&[(
+        ResourceVector::narrowed_repetitions([(
             max_hand - (hand + self.to_cleanup) + self.growth,
             self.growth,
         )])
@@ -1200,12 +1204,12 @@ impl PeriodicDelta {
     /// inside `k` reaches `remaining_life`: CR 704.3 checks CR 704.5a whenever a player would get
     /// priority, including the beats INSIDE a repetition, so a repetition that nets nothing can
     /// still take a total to zero on the way — which is why the two terms are not one number.
-    /// There is no division on this axis and therefore no net-versus-dip divisor to choose.
     ///
     /// TAKES THE CHARGE STREAM, NOT ITS INGREDIENTS, and holds no receiver: the charges are
     /// [`PeriodicDelta::declared_seat_life_charges`]' answer and are never re-derived here, so the
-    /// two authorities cannot disagree about what one repetition costs while this one owns when it
-    /// becomes lethal.
+    /// two authorities cannot disagree about what one repetition costs while this one, and
+    /// `first_life_crossing_by_stretch` (its stretch-at-a-time reading, held equal to it by
+    /// `a_life_crossing_read_by_stretch_is_the_stepping_walks`), own when it becomes lethal.
     ///
     /// `horizon` IS MANDATORY, AND IT IS A TERMINATION REQUIREMENT rather than a convenience.
     /// That producer returns a LAZY, UNBOUNDED iterator, and a seat the declaration never charges
@@ -1352,6 +1356,33 @@ impl PeriodicDelta {
         bound: ChargeBound,
         lead: AnnouncedLead<'a>,
     ) -> impl Iterator<Item = DeclaredLifeCharge> + 'a {
+        (0..).map(self.declared_seat_life_charge_at(
+            seat,
+            declaration,
+            observed,
+            points,
+            state,
+            bound,
+            lead,
+        ))
+    }
+
+    /// The charge of [`Self::declared_seat_life_charges`] at one iteration index: repetition
+    /// `index + 1`'s. A function of the index alone, so a caller may read any repetition's charge
+    /// without walking to it.
+    // Each parameter is a separate authority the caller states, for the reason
+    // `PeriodicDelta::seat_crossing` gives.
+    #[allow(clippy::too_many_arguments)]
+    fn declared_seat_life_charge_at<'a>(
+        &'a self,
+        seat: PlayerId,
+        declaration: Option<&'a DecisionTemplate>,
+        observed: Option<&'a DecisionTemplate>,
+        points: &'a [DecisionPoint],
+        state: &'a GameState,
+        bound: ChargeBound,
+        lead: AnnouncedLead<'a>,
+    ) -> impl Fn(IterationIndex) -> DeclaredLifeCharge + 'a {
         let charge_on_seat = |charges: &[(PlayerId, i64)]| {
             charges
                 .iter()
@@ -1384,7 +1415,9 @@ impl PeriodicDelta {
         // leads by nothing, one index behind for a slot that leads.
         let resolves_own = !one_template && slots.iter().any(|&(.., leads)| leads == 0);
         let resolves_behind = slots.iter().any(|&(.., leads)| leads > 0);
-        (0..).map(move |iteration: IterationIndex| {
+        move |iteration: IterationIndex| {
+            #[cfg(feature = "test-support")]
+            crate::game::perf_counters::record_declared_life_charge_read();
             // With no charged slot there is no pin to read and every repetition is alike.
             let resolve_at = |template: Option<&DecisionTemplate>, index: IterationIndex| {
                 template
@@ -1492,7 +1525,131 @@ impl PeriodicDelta {
                     }
                 }
             }
-        })
+        }
+    }
+
+    /// CR 704.3 + CR 704.5a: [`Self::first_life_crossing`] over
+    /// [`Self::declared_seat_life_charges`], the same answer for every input, computed without
+    /// stepping through repetitions whose charge cannot differ from the one before.
+    ///
+    /// On one board a repetition's charge depends on its index only through the two templates'
+    /// resolutions and, for a slot that leads, the latched aim its first repetition reads and the
+    /// declaration it reads one index behind (CR 603.3d + CR 601.2c); a resolution changes only at
+    /// a pre-declared switch point (`DecisionTemplate::resolution_change_points`). Between two
+    /// such points every repetition carries one charge, so `Self::first_life_crossing_by_stretch`
+    /// reads one charge per stretch where the stepping walk reads one per repetition up to
+    /// `horizon`. A seat the declaration never charges, on a board whose horizon is a life total in
+    /// the billions, is read once per stretch instead of once per point of that total.
+    ///
+    /// A template with no finite list of switch points (a round robin of two or more) is walked
+    /// repetition by repetition, as [`Self::first_life_crossing`] walks any stream. That is a
+    /// stated limit: no engine producer builds such a schedule, and it arrives only in input the
+    /// engine did not write: a hand-written `DeclareShortcut`, a remote client's included (the
+    /// server's payload guard bounds the schedule's length and passes it through), or a restored
+    /// save, whose offer declaration and proposal template deserialize their pins verbatim.
+    ///
+    /// `pub` so `phase-ai`'s proposer veto (`cycles_to_proposer_elimination`) asks this reader as
+    /// `PeriodicDelta::seat_crossing` does, rather than stepping through the charges itself: the
+    /// veto and the cascade's life axis are one reduction.
+    // Each parameter is a separate authority the caller states, for the reason
+    // `PeriodicDelta::seat_crossing` gives.
+    #[allow(clippy::too_many_arguments)]
+    pub fn declared_seat_life_crossing(
+        &self,
+        seat: PlayerId,
+        declaration: Option<&DecisionTemplate>,
+        observed: Option<&DecisionTemplate>,
+        points: &[DecisionPoint],
+        state: &GameState,
+        bound: ChargeBound,
+        lead: AnnouncedLead<'_>,
+        remaining_life: i64,
+        horizon: u32,
+    ) -> Option<u32> {
+        let charge_at = self.declared_seat_life_charge_at(
+            seat,
+            declaration,
+            observed,
+            points,
+            state,
+            bound,
+            lead,
+        );
+        // With no charged slot no template is read, so the stream never changes.
+        let mut changes: BTreeSet<IterationIndex> = BTreeSet::new();
+        if !self.victim_slot.is_empty() {
+            for template in [declaration, observed].into_iter().flatten() {
+                let Some(switches) = template.resolution_change_points() else {
+                    return Self::first_life_crossing(
+                        (0..).map(charge_at),
+                        remaining_life,
+                        horizon,
+                    );
+                };
+                for switch in switches {
+                    // A leading slot reads the declaration one index behind, so its change
+                    // lands one index later. A point too many only splits a stretch in two.
+                    changes.insert(switch);
+                    changes.insert(switch.saturating_add(AnnouncedLead::LEADING));
+                }
+            }
+            // The latched aims answer only the leading repetition.
+            changes.insert(AnnouncedLead::LEADING);
+        }
+        Self::first_life_crossing_by_stretch(charge_at, &changes, remaining_life, horizon)
+    }
+
+    /// CR 704.3 + CR 704.5a: [`Self::first_life_crossing`]'s answer for a stream given by
+    /// `charge_at` (the charge of the repetition after `index` earlier ones) that changes only
+    /// at the indices in `changes`, read one charge per stretch.
+    ///
+    /// Within a stretch that starts after `netted` life is gone, repetition `j` of the stretch
+    /// (from 0) is fatal when `netted + j * net + dip` reaches `remaining_life`. So it is the
+    /// first repetition of the stretch when its dip alone reaches, otherwise the least `j` with
+    /// `j * net >= remaining_life - netted - dip` when the stretch nets anything, and no
+    /// repetition of the stretch otherwise. `changes` may hold indices at which nothing changes:
+    /// a stretch split in two gives the same answer.
+    fn first_life_crossing_by_stretch(
+        charge_at: impl Fn(IterationIndex) -> DeclaredLifeCharge,
+        changes: &BTreeSet<IterationIndex>,
+        remaining_life: i64,
+        horizon: u32,
+    ) -> Option<u32> {
+        let mut netted = 0i64;
+        // The index of the stretch's first repetition, which is also how many came before it.
+        let mut start: IterationIndex = 0;
+        let ends = changes
+            .iter()
+            .copied()
+            .filter(|point| *point > 0)
+            .map(Some)
+            .chain([None]);
+        for end in ends {
+            // Indices `start..end` are repetitions `start + 1 ..= end`.
+            let last = end.map_or(horizon, |end| end.min(horizon));
+            if last <= start {
+                continue;
+            }
+            let charge = charge_at(start);
+            let run = i64::from(last - start);
+            let short = remaining_life
+                .saturating_sub(netted)
+                .saturating_sub(charge.dip);
+            let steps = if short <= 0 {
+                Some(0)
+            } else if charge.net > 0 {
+                // Rounded up: the least `j` with `j * net >= short`.
+                Some((short + charge.net - 1) / charge.net)
+            } else {
+                None
+            };
+            if let Some(steps) = steps.filter(|steps| *steps < run) {
+                return u32::try_from(i64::from(start) + 1 + steps).ok();
+            }
+            netted = netted.saturating_add(run.saturating_mul(charge.net));
+            start = last;
+        }
+        None
     }
 
     /// CR 119.3: the one domain seat whose observed loss is wholly the period's single charged
@@ -1551,25 +1708,31 @@ impl PeriodicDelta {
     ///
     /// # The arithmetic is the existing arithmetic, per seat, over its own charge stream
     ///
-    /// The life axis has no divisor (there is nothing to divide): the crossing comes from
-    /// [`PeriodicDelta::first_life_crossing`] over
-    /// [`PeriodicDelta::declared_seat_life_charges`], whose `net`/`dip` pair is what CR 704.3's
+    /// The life crossing is [`PeriodicDelta::first_life_crossing`]'s answer over
+    /// [`PeriodicDelta::declared_seat_life_charges`], read by `declared_seat_life_crossing` one
+    /// charge per stretch between the declarations' switch points, with one rounded-up division
+    /// inside the stretch that crosses. The charges' `net`/`dip` pair is what CR 704.3's
     /// per-priority-beat sweep requires. The poison and library axes have a constant per-period
     /// magnitude, so their crossing is [`ResourceVector::narrowed_repetitions`]' strict answer
     /// plus one — the least count PAST the threshold. The seat's crossing is the minimum of the
     /// three.
     ///
-    /// ONE PASS PER SEAT OVER THE WHOLE STREAM, and that IS the per-departure walk rather than a
-    /// short cut around it. `declared_seat_life_charges` resolves the declaration's pin ONCE PER
-    /// REPETITION, at that repetition's index less the lead its caller states for each slot, so a
-    /// declaration that re-aims at a later repetition — the witness below is exactly that shape —
-    /// already charges each seat what that repetition charges it. Spending
-    /// a segment's repetitions out of a seat's headroom and re-dividing the remainder would
-    /// restate the same accumulation with a second rounding step, and the horizon is the seat's
-    /// own remaining headroom for the reason D4 gives: `net` and `dip` are non-negative, so a
-    /// repetition that does not advance the accumulation never brings the crossing nearer. That
-    /// premise survives both [`ChargeBound`]s because the attributable direction clamps its net
-    /// term rather than letting an over-estimated magnitude carry a negative into this walk.
+    /// ONE READING PER SEAT, A STRETCH AT A TIME, and that IS the per-departure walk rather than a
+    /// short cut around it. `declared_seat_life_charges` resolves the declaration's pin at each
+    /// repetition's index less the lead its caller states for each slot, so a declaration that
+    /// re-aims at a later repetition — the witness below is exactly that shape — already charges
+    /// each seat what that repetition charges it. A resolution changes only at a pre-declared
+    /// switch point ([`DecisionTemplate::resolution_change_points`]), so
+    /// `declared_seat_life_crossing` reads one charge per stretch between two of them, carries the
+    /// life netted so far across each switch point exactly as the stepping walk does, and rounds
+    /// only inside the stretch that crosses: one division there, never a second rounding step on a
+    /// remainder. The horizon is the walk's, [`cascade_horizon`]'s sum of the living seats'
+    /// headrooms, not each seat's own: a declaration may defer a seat's charge to a later segment,
+    /// so a seat's own headroom is not an upper bound on the repetition its crossing lands on.
+    /// Both `net` and `dip` are non-negative, so a repetition that does not advance the
+    /// accumulation never brings the crossing nearer. That premise survives both [`ChargeBound`]s
+    /// because the attributable direction clamps its net term rather than letting an
+    /// over-estimated magnitude carry a negative into this walk.
     ///
     /// # The magnitude-constancy premise, stated rather than claimed
     ///
@@ -1661,9 +1824,10 @@ impl PeriodicDelta {
     /// crosses a CR 704 threshold under `declaration`, or `None` when no axis takes it there.
     ///
     /// The minimum over the three axes, each measured against the headroom its own rule leaves:
-    /// the seat's whole life total (CR 704.5a: 0 or less loses), one short of ten poison
-    /// (CR 704.5c), and the whole remaining library (CR 104.3c + CR 121.4: an empty library is
-    /// lethal at the next DRAW ATTEMPT and not on state alone, so every card left is headroom).
+    /// the seat's whole life total (CR 704.5a: 0 or less loses), one short of the poison-loss
+    /// threshold the SBA applies to this seat ([`ResourceVector::poison_axis`]), and the whole
+    /// remaining library (CR 104.3c + CR 121.4: an empty library is lethal at the next DRAW
+    /// ATTEMPT and not on state alone, so every card left is headroom).
     ///
     /// `horizon` is the WALK's, not this seat's, for the reason
     /// [`PeriodicDelta::elimination_cascade`] states where it derives it.
@@ -1688,32 +1852,26 @@ impl PeriodicDelta {
         // non-negativity holds under both `ChargeBound`s, and under `Attributable` it is the
         // producer's clamp that keeps it.
         let remaining_life = i64::from(p.life);
-        let life = Self::first_life_crossing(
-            self.declared_seat_life_charges(
-                p.id,
-                declaration,
-                observed,
-                points,
-                state,
-                bound,
-                lead,
-            ),
+        let life = self.declared_seat_life_crossing(
+            p.id,
+            declaration,
+            observed,
+            points,
+            state,
+            bound,
+            lead,
             remaining_life,
             horizon,
         );
         // The strict answer is the largest count after which no axis has crossed, so the
         // crossing is the next one — `narrowed_repetitions` is the same division
         // `seat_headroom_bound` performs, over these two axes' own headrooms.
-        let non_life = ResourceVector::narrowed_repetitions(&[
-            (
-                9 - i64::from(p.poison_counters),
-                self.delta.poison.get(&p.id).copied().unwrap_or(0),
-            ),
-            (
+        let non_life = ResourceVector::narrowed_repetitions(
+            self.delta.poison_axis(state, p).into_iter().chain([(
                 state.library_of(p.id).len() as i64,
                 -self.delta.library_delta.get(&p.id).copied().unwrap_or(0),
-            ),
-        ])
+            )]),
+        )
         .and_then(|strict| u32::try_from(strict.saturating_add(1)).ok());
         [life, non_life].into_iter().flatten().min()
     }
@@ -2918,11 +3076,36 @@ impl ResourceVector {
     /// ONE STATEMENT OF THE ARITHMETIC, over explicit pairs rather than over a seat, because the
     /// headroom a caller divides is not always the seat's full one — a walk that has already
     /// spent repetitions divides what is LEFT through the same division.
-    fn narrowed_repetitions(axes: &[(i64, i64)]) -> Option<i64> {
-        axes.iter()
-            .filter(|(_, magnitude)| *magnitude > 0)
-            .map(|&(headroom, magnitude)| headroom.max(0) / magnitude)
+    fn narrowed_repetitions(axes: impl IntoIterator<Item = (i64, i64)>) -> Option<i64> {
+        axes.into_iter()
+            .filter(|&(_, magnitude)| magnitude > 0)
+            .map(|(headroom, magnitude)| headroom.max(0) / magnitude)
             .min()
+    }
+
+    /// CR 704.5c / CR 704.6b: `p`'s poison axis as a [`ResourceVector::narrowed_repetitions`]
+    /// pair, measured on the poison-loss rule the SBA applies
+    /// ([`players::poison_loss_measure`]): the headroom one short of that rule's threshold, and
+    /// the per-period gain of the count it measures. `None` when no poison-loss rule applies to
+    /// `p`, so the axis is unarmed.
+    ///
+    /// CR 810.10: poison counters a team shares rise by every member's own gain, so a
+    /// shared-poison seat's magnitude is its team's summed gain, over the same members
+    /// [`players::team_poison_total`] counts.
+    fn poison_axis(&self, state: &GameState, p: &Player) -> Option<(i64, i64)> {
+        let measure = players::poison_loss_measure(state, p)?;
+        let gain = |seat: &PlayerId| self.poison.get(seat).copied().unwrap_or(0);
+        let magnitude = match measure.scope {
+            PoisonLossScope::Player => gain(&p.id),
+            PoisonLossScope::Team => topology::shared_poison_members(state, p.id)
+                .iter()
+                .map(gain)
+                .sum(),
+        };
+        Some((
+            i64::from(measure.threshold) - 1 - i64::from(measure.count),
+            magnitude,
+        ))
     }
 
     /// CR 704.5a / CR 704.5c / CR 104.3c + CR 121.4: ONE seat's strict headroom in whole
@@ -2961,21 +3144,18 @@ impl ResourceVector {
             .iter()
             .find(|(seat, _)| *seat == p.id)
             .map_or(0, |(_, magnitude)| *magnitude);
-        Self::narrowed_repetitions(&[
-            (p.life as i64 - 1, life_magnitude),
-            // CR 704.5c (ten or more poison counters lose): a positive poison delta is the
-            // per-period gain.
-            (
-                9 - p.poison_counters as i64,
-                self.poison.get(&p.id).copied().unwrap_or(0),
-            ),
-            // CR 104.3c + CR 121.4 (drawing from an empty library loses): a negative
-            // library delta is the per-period drain.
-            (
-                state.library_of(p.id).len() as i64,
-                -self.library_delta.get(&p.id).copied().unwrap_or(0),
-            ),
-        ])
+        Self::narrowed_repetitions(
+            [(p.life as i64 - 1, life_magnitude)]
+                .into_iter()
+                // CR 704.5c / CR 704.6b: the poison-loss rule the SBA applies to this seat.
+                .chain(self.poison_axis(state, p))
+                // CR 104.3c + CR 121.4 (drawing from an empty library loses): a negative
+                // library delta is the per-period drain.
+                .chain([(
+                    state.library_of(p.id).len() as i64,
+                    -self.library_delta.get(&p.id).copied().unwrap_or(0),
+                )]),
+        )
     }
 
     /// CR 732.2a: **controller-scoped** net-progress. Returns true iff the cycle makes
@@ -6662,8 +6842,21 @@ fn grown_objects_are_inert(current: &GameState, grown: &HashSet<ObjectId>) -> bo
 ///
 /// WHICH axes those are is `impl PartialEq for GameState`'s own decision, and
 /// `_gamestate_partition_is_total`'s doc is the single authority on what its totality guard
-/// buys. The two hand conjuncts at the end of this function are where this gate compensates
-/// for an axis that decision left out; each states its own one-sided-safety argument.
+/// buys. The three hand conjuncts at the end of this function are where this gate compensates
+/// for an axis that decision left out; each states its own one-sided-safety argument. The
+/// shield conjunct is `game_state::pending_shields_loop_eq` — the SAME predicate
+/// `loop_states_equal` uses, so the cover adds no second shield semantics. It narrows only:
+/// alongside `PartialEq` it can never turn an unequal pair equal. What it tolerates is
+/// identical LIVE-shield growth, and it ignores spent shields entirely, because a consumed
+/// definition (CR 615.3 + CR 614.3) can never apply to a later damage event and so is not
+/// part of the game position. That is exactly why the pinned cover row
+/// `loop_period_remade_token_source::copy_effects_used_up_inside_each_spawn_period_leave_the_periods_covered`
+/// passes: its periods append only used-up `Mystic Reflection` copies — each naming a
+/// DIFFERENT per-period Spawn token in its inline `execute`
+/// (`Effect::BecomeCopy { target: SpecificObject { id } }`) — so the raw registries grow and
+/// differ while the live position recurs. Its two production callers
+/// (`loop_states_cover_modulo_object_growth`, `fodder_growth_cover_refusals`) therefore both
+/// refuse a period whose frames differ in live shield content.
 ///
 /// Tracked object sets are an append-only arena: each resolution that says "this way" (CR 608.2c)
 /// or "until" (CR 610.3) allocates its own, so the later frame's sets allocated inside the window
@@ -6749,6 +6942,11 @@ fn eq_except_growable(pa: &GameState, pb: &GameState, grown: &HashSet<ObjectId>)
     a == b
         && a.post_replacement_token_substitution_count
             == b.post_replacement_token_substitution_count
+        // CR 104.4b + CR 615.3: `PartialEq` skips the floating registry, so this gate asks
+        // the same `pending_shields_loop_eq` as `loop_states_equal`; it compares only LIVE
+        // shields (a spent one can never apply again, CR 615.3 + CR 614.3), so identical
+        // live growth covers and any differing live shield does not.
+        && crate::types::game_state::pending_shields_loop_eq(&a, &b)
 }
 
 /// CR 603.7a + CR 603.7b: a one-shot delayed trigger for a step after the frame's, whose every
@@ -8385,6 +8583,7 @@ fn project_out_player_consumables(p: &mut Player) {
         contraption_crank_sprocket: _,
         sticker_sheets: _,
         has_drawn_this_turn: _,
+        has_no_life_total: _,
         lands_played_this_turn: _,
         life_lost_last_turn: _,
 
@@ -8710,6 +8909,7 @@ fn projected_player_axes(p: &Player) -> Vec<i64> {
         contraption_crank_sprocket: _,
         sticker_sheets: _,
         has_drawn_this_turn: _,
+        has_no_life_total: _,
         lands_played_this_turn: _,
         life_lost_last_turn: _,
         cards_drawn_last_turn: _,
@@ -8771,6 +8971,7 @@ fn projected_player_maps(
         contraption_crank_sprocket: _,
         sticker_sheets: _,
         has_drawn_this_turn: _,
+        has_no_life_total: _,
         lands_played_this_turn: _,
         life_lost_last_turn: _,
         cards_drawn_last_turn: _,
@@ -9011,6 +9212,116 @@ fn ability_has_per_game_activation_gate(state: &GameState, key: &(ObjectId, usiz
 mod tests {
     use crate::game::game_object::ObjectIncarnationRefExt;
     use std::sync::Arc;
+
+    /// CR 704.3 + CR 704.5a: reading a charge stream one stretch at a time gives the answer of
+    /// stepping through it one repetition at a time
+    /// (`PeriodicDelta::first_life_crossing_by_stretch` against
+    /// `PeriodicDelta::first_life_crossing`), for every stream below, `i64::MIN` and life totals
+    /// from -2 to 45, and every horizon up to 60, with the stream's own change points and with spare points
+    /// at which nothing changes. The streams: a seat never charged, a constant charge, a dip
+    /// above its net, a dip that nets nothing, a charge that starts late, one that stops, and
+    /// two that change three times. The stretch reading reads at most one charge per stretch.
+    /// With a life total and a horizon in the billions, which the stepping walk cannot be asked,
+    /// a seat never charged crosses nowhere and a seat charged 1 a repetition crosses at the
+    /// repetition equal to its life.
+    #[test]
+    fn a_life_crossing_read_by_stretch_is_the_stepping_walks() {
+        use super::{DeclaredLifeCharge, PeriodicDelta};
+        use crate::analysis::decision_template::IterationIndex;
+        use std::cell::Cell;
+        use std::collections::BTreeSet;
+
+        // Each stream as its stretches: (first index, net, dip), the first at index 0.
+        let streams: &[&[(IterationIndex, i64, i64)]] = &[
+            &[(0, 0, 0)],
+            &[(0, 1, 1)],
+            &[(0, 2, 2)],
+            &[(0, 3, 5)],
+            &[(0, 0, 4)],
+            &[(0, 0, 0), (3, 2, 2)],
+            &[(0, 2, 2), (4, 0, 0)],
+            &[(0, 1, 3), (1, 0, 0), (5, 2, 2), (9, 0, 6)],
+            &[(0, 5, 5), (2, 1, 1), (7, 0, 0), (8, 3, 4)],
+        ];
+        let charge_of = |stretches: &[(IterationIndex, i64, i64)], index: IterationIndex| {
+            let &(_, net, dip) = stretches
+                .iter()
+                .rev()
+                .find(|(first, ..)| *first <= index)
+                .expect("index 0 starts a stretch");
+            DeclaredLifeCharge { net, dip }
+        };
+        let (mut crossed, mut survived, mut crossed_after_a_change) = (0, 0, 0);
+        for stretches in streams {
+            let own: BTreeSet<IterationIndex> =
+                stretches.iter().map(|(first, ..)| *first).collect();
+            let spare: BTreeSet<IterationIndex> = own.iter().copied().chain([1, 6, 40]).collect();
+            for remaining_life in (-2..=45).chain([i64::MIN]) {
+                for horizon in 0..=60u32 {
+                    let stepped = PeriodicDelta::first_life_crossing(
+                        (0..).map(|index| charge_of(stretches, index)),
+                        remaining_life,
+                        horizon,
+                    );
+                    for changes in [&own, &spare] {
+                        let reads = Cell::new(0usize);
+                        let by_stretch = PeriodicDelta::first_life_crossing_by_stretch(
+                            |index| {
+                                reads.set(reads.get() + 1);
+                                charge_of(stretches, index)
+                            },
+                            changes,
+                            remaining_life,
+                            horizon,
+                        );
+                        assert_eq!(
+                            by_stretch, stepped,
+                            "stream {stretches:?}, life {remaining_life}, horizon {horizon}, \
+                             change points {changes:?}"
+                        );
+                        assert!(
+                            reads.get() <= changes.len() + 1,
+                            "one read per stretch at most: {} reads over {changes:?}",
+                            reads.get()
+                        );
+                    }
+                    match stepped {
+                        Some(repetition) => {
+                            crossed += 1;
+                            if own.iter().any(|first| *first > 0 && *first < repetition) {
+                                crossed_after_a_change += 1;
+                            }
+                        }
+                        None => survived += 1,
+                    }
+                }
+            }
+        }
+        assert!(
+            crossed > 1000 && survived > 1000 && crossed_after_a_change > 100,
+            "REACH-GUARD: the table holds crossings ({crossed}), survivals ({survived}) and \
+             crossings past a change point ({crossed_after_a_change})"
+        );
+
+        // A horizon the stepping walk cannot be asked: one read answers.
+        let life = i64::from(i32::MAX);
+        let never = |_| DeclaredLifeCharge { net: 0, dip: 0 };
+        let one = |_| DeclaredLifeCharge { net: 1, dip: 1 };
+        let none = BTreeSet::new();
+        assert_eq!(
+            PeriodicDelta::first_life_crossing_by_stretch(never, &none, life, u32::MAX),
+            None
+        );
+        assert_eq!(
+            PeriodicDelta::first_life_crossing_by_stretch(one, &none, life, u32::MAX),
+            Some(i32::MAX as u32)
+        );
+        assert_eq!(
+            PeriodicDelta::first_life_crossing_by_stretch(one, &none, life, i32::MAX as u32 - 1),
+            None,
+            "a crossing one repetition past the horizon is not found"
+        );
+    }
 
     /// CR 508.1d + CR 604.1: only a LIVE required-defender class is a growing-class
     /// read. `Fixed`/`Permanent` are frozen ids and stay read-free; `Matching`
@@ -11230,10 +11541,11 @@ mod tests {
     // ===================================================================
 
     use crate::types::ability::{
-        AbilityCondition, Comparator, ControllerRef, CountScope, Effect, FilterProp, PlayerScope,
-        PtStat, PtValueScope, QuantityExpr, QuantityRef, ReplacementCondition,
-        ReplacementDefinition, ResolvedAbility, StaticCondition, StaticDefinition, TargetFilter,
-        TargetRef, TriggerCondition, TriggerDefinition, TypedFilter,
+        AbilityCondition, Comparator, ControllerRef, CopyRecipient, CountScope, Effect, FilterProp,
+        PlayerScope, PreventionAmount, PtStat, PtValueScope, QuantityExpr, QuantityRef,
+        ReplacementCondition, ReplacementDefinition, ResolvedAbility, RestrictionExpiry,
+        StaticCondition, StaticDefinition, TargetFilter, TargetRef, TriggerCondition,
+        TriggerDefinition, TypedFilter,
     };
     use crate::types::counter::CounterMatch;
     use crate::types::player::PlayerCounterKind;
@@ -17846,6 +18158,201 @@ mod tests {
             )
             .nth(iteration)
             .expect("the per-repetition charges are unbounded")
+    }
+
+    /// CR 704.3 + CR 704.5a: [`PeriodicDelta::declared_seat_life_crossing`] answers as the
+    /// stepping walk does over the same stream ([`PeriodicDelta::first_life_crossing`] over
+    /// [`PeriodicDelta::declared_seat_life_charges`]), for both seats, both [`ChargeBound`]s,
+    /// every life total from 0 to 24 and every horizon up to 30. One board, one slot: P0's
+    /// trigger announces a player-target slot that may name P0 or P1, and the period was observed
+    /// draining P1 by 2. The declarations keep that aim, move it to P0, switch between the two
+    /// seats at one and at two pre-declared points, and alternate them in a round robin, which
+    /// has no finite list of change points and is stepped. Each is read with no leading
+    /// repetition and with the slot's first repetition latched onto either seat (CR 603.3d), and
+    /// under two observations: the observed aim on P1, and one that switches from P1 to P0 at
+    /// index 3, which on a declaration that changes nowhere is the only pre-declared switch point.
+    ///
+    /// REVERT-PROBES: drop the change points a leading slot adds (the latched first repetition,
+    /// and each switch point read one index behind) ⇒ a latched row answers differently from the
+    /// stepping walk ⇒ FAILS. Read a round robin as changing nowhere ⇒ its rows FAIL. Gather the
+    /// change points from the declaration alone ⇒ a row under the switching observation on a
+    /// declaration that changes nowhere answers differently from the stepping walk ⇒ FAILS.
+    #[test]
+    fn a_declared_life_crossing_is_the_stepping_walks_across_switch_points_and_a_lead() {
+        use crate::analysis::decision_template::{
+            AnnouncementSubject, ConcreteTarget, DecisionGroupKey, DecisionKind, IterationCount,
+            PinnedDecision, Ranking, ReplayMode, TargetPin, TargetSchedule,
+        };
+        let (p0, p1) = (PlayerId(0), PlayerId(1));
+        let mut board = bound_board(&[18, 20]);
+        let slot = announced_target_slot(&mut board, 500);
+        let charges = vec![SlotCharge {
+            slot: slot.clone(),
+            magnitude: 2,
+            reaches: vec![p0, p1],
+            aimed_at: Some(p1),
+        }];
+        let delta = life_loss_delta(&[(1, 2)]);
+        let published = delta.seat_life_charges(&charges);
+        let period = PeriodicDelta {
+            frames_per_period: 1,
+            delta,
+            victim_slot: vec![(slot.clone(), 2)],
+            declarable_victims: SlotCharge::declarable_victims(&charges),
+            seat_life_charge: published,
+            cleanup: None,
+        };
+        let points = [seat_point(&slot, &[0, 1])];
+        let observed = seat_schedule_declaration(&[(&slot, &[1])]);
+        let piecewise = |steps: &[(u32, u8)]| DecisionTemplate {
+            owner: p0,
+            decisions: vec![PinnedDecision::Targets {
+                slot: slot.clone(),
+                targets: vec![TargetPin::Scheduled(TargetSchedule::Piecewise(
+                    steps
+                        .iter()
+                        .map(|&(start, seat)| {
+                            (
+                                start,
+                                Ranking::one(AnnouncementSubject::Seat(PlayerId(seat))),
+                            )
+                        })
+                        .collect(),
+                ))],
+            }],
+            replay: ReplayMode::Scheduled {
+                count: IterationCount::Fixed(9),
+            },
+            key: DecisionGroupKey::from_sources(
+                std::slice::from_ref(&slot.source),
+                DecisionKind::LoopChoice,
+            ),
+        };
+        let observations = [
+            ("observed on P1", observed.clone()),
+            (
+                "observed on P1, then on P0 from index 3",
+                piecewise(&[(0, 1), (3, 0)]),
+            ),
+        ];
+        let declarations = [
+            ("aimed at P1", observed),
+            ("aimed at P0", seat_schedule_declaration(&[(&slot, &[0])])),
+            ("P1, then P0 from index 3", piecewise(&[(0, 1), (3, 0)])),
+            ("P0, then P1 from index 4", piecewise(&[(0, 0), (4, 1)])),
+            (
+                "P1, P0 from index 2, P1 from index 6",
+                piecewise(&[(0, 1), (2, 0), (6, 1)]),
+            ),
+            (
+                "a round robin of P0 and P1",
+                seat_schedule_declaration(&[(&slot, &[0, 1])]),
+            ),
+        ];
+        let latched = |seat: PlayerId| {
+            vec![ConcreteDecision::Targets {
+                slot: slot.clone(),
+                targets: vec![ConcreteTarget::Player(seat)],
+            }]
+        };
+        let (onto_p0, onto_p1) = (latched(p0), latched(p1));
+        let leads = [
+            ("no lead", AnnouncedLead::None),
+            (
+                "latched onto P0",
+                AnnouncedLead::LeadingRepetition(&onto_p0),
+            ),
+            (
+                "latched onto P1",
+                AnnouncedLead::LeadingRepetition(&onto_p1),
+            ),
+        ];
+        let (mut crossed_past_a_switch, mut moved_by_the_lead) = (0, 0);
+        let mut moved_by_the_observed_switch = 0;
+        for (name, declaration) in &declarations {
+            let switches = declaration.resolution_change_points();
+            let changes_nowhere = switches
+                .as_ref()
+                .is_some_and(|switches| switches.is_empty());
+            for seat in [p0, p1] {
+                for bound in [ChargeBound::Ceiling, ChargeBound::Attributable] {
+                    for remaining_life in 0..=24i64 {
+                        for horizon in 0..=30u32 {
+                            let mut unled = None;
+                            for (lead_name, lead) in leads {
+                                // The stepping walk's answer under each observation, held equal
+                                // to the stretch reading's under the same one.
+                                let [stepped, switched] =
+                                    observations.each_ref().map(|(seen_name, seen)| {
+                                        let stepped = PeriodicDelta::first_life_crossing(
+                                            period.declared_seat_life_charges(
+                                                seat,
+                                                Some(declaration),
+                                                Some(seen),
+                                                &points,
+                                                &board,
+                                                bound,
+                                                lead,
+                                            ),
+                                            remaining_life,
+                                            horizon,
+                                        );
+                                        assert_eq!(
+                                            period.declared_seat_life_crossing(
+                                                seat,
+                                                Some(declaration),
+                                                Some(seen),
+                                                &points,
+                                                &board,
+                                                bound,
+                                                lead,
+                                                remaining_life,
+                                                horizon,
+                                            ),
+                                            stepped,
+                                            "{name}, {seen_name}, {lead_name}, {seat:?}, \
+                                             {bound:?}, life {remaining_life}, horizon {horizon}"
+                                        );
+                                        stepped
+                                    });
+                                // The two observations resolve alike before index 3, so an answer
+                                // they disagree on is one the observation's switch moved.
+                                if changes_nowhere && switched != stepped {
+                                    moved_by_the_observed_switch += 1;
+                                }
+                                if matches!(lead, AnnouncedLead::None) {
+                                    unled = stepped;
+                                } else if stepped != unled {
+                                    moved_by_the_lead += 1;
+                                }
+                                let past_a_switch = switches.as_ref().is_some_and(|switches| {
+                                    stepped.is_some_and(|repetition| {
+                                        switches.iter().any(|at| *at > 0 && *at < repetition)
+                                    })
+                                });
+                                if past_a_switch {
+                                    crossed_past_a_switch += 1;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert!(
+            declarations[5].1.resolution_change_points().is_none(),
+            "REACH-GUARD: the round robin row has no finite list of change points"
+        );
+        assert!(
+            crossed_past_a_switch > 100 && moved_by_the_lead > 100,
+            "REACH-GUARD: crossings past a switch point ({crossed_past_a_switch}) and answers \
+             the latched repetition moves ({moved_by_the_lead})"
+        );
+        assert!(
+            moved_by_the_observed_switch > 100,
+            "REACH-GUARD: answers on a declaration that changes nowhere that the observation's \
+             switch at index 3 moves ({moved_by_the_observed_switch})"
+        );
     }
 
     /// CR 119.3 + CR 704.5a: **a declaration charges a seat a slot only where its pin moves
@@ -28861,6 +29368,98 @@ mod tests {
         );
     }
 
+    /// CR 704.5c + CR 732.2a: the cascade's poison crossing is measured against the poison-loss
+    /// rule the SBA applies (`players::poison_loss_measure`), so the count a bounded shortcut
+    /// offers moves with the format's configured threshold, and a format with no individual
+    /// threshold arms no poison axis at all.
+    ///
+    /// CR 704.6b + CR 810.10: a shared-poison seat is measured on its team's total against
+    /// fifteen, and the team's total rises by every member's per-period gain.
+    ///
+    /// # Discrimination
+    ///
+    /// Restore the literal ten-counter headroom and every leg answers 10: the 15 and 5 legs fire,
+    /// the `None` leg finds a crossing where no rule makes one, and the Two-Headed Giant leg
+    /// answers 10 where the team crosses at 8. Measure the shared team's count but divide by one
+    /// member's gain and that leg answers 15.
+    #[test]
+    fn the_cascades_poison_crossing_reads_the_configured_loss_threshold() {
+        // One poison counter per period on each victim and nothing else, so poison is the only
+        // axis.
+        let poisoned = |victims: &[u8]| {
+            let mut delta = ResourceVector::default();
+            for &seat in victims {
+                delta.poison.insert(PlayerId(seat), 1);
+            }
+            charged_signature(delta, &[], &[])
+        };
+        let cascade = |state: &GameState, victims: &[u8]| {
+            poisoned(victims)
+                .elimination_cascade(
+                    state,
+                    PlayerId(0),
+                    None,
+                    None,
+                    &[],
+                    ChargeBound::Ceiling,
+                    AnnouncedLead::None,
+                )
+                .map(|cascade| (cascade.count, cascade.entries))
+        };
+        let departs = |repetition: u32, seats: &[u8]| {
+            vec![PredictedDeparture {
+                repetition,
+                seats: seats.iter().copied().map(PlayerId).collect(),
+            }]
+        };
+        let with_threshold = |threshold: Option<u8>| {
+            let mut state = bound_board(&[40, 40]);
+            state.format_config.poison_counter_threshold = threshold;
+            state
+        };
+
+        assert_eq!(
+            bound_board(&[40, 40])
+                .format_config
+                .poison_counter_threshold,
+            Some(10),
+            "REACH-GUARD: the default board carries the CR 704.5c threshold of ten"
+        );
+        assert_eq!(
+            cascade(&with_threshold(Some(10)), &[1]),
+            Some((10, departs(10, &[1]))),
+            "CR 704.5c: the tenth counter arrives on the tenth repetition"
+        );
+        assert_eq!(
+            cascade(&with_threshold(Some(15)), &[1]),
+            Some((15, departs(15, &[1]))),
+            "a fifteen-counter house threshold keeps P1 in the game until the fifteenth"
+        );
+        assert_eq!(
+            cascade(&with_threshold(Some(5)), &[1]),
+            Some((5, departs(5, &[1]))),
+            "a five-counter house threshold takes P1 out on the fifth"
+        );
+        assert_eq!(
+            cascade(&with_threshold(None), &[1]),
+            None,
+            "no individual poison-loss rule, so poison is no CR 704 axis and nothing is measured"
+        );
+
+        // CR 704.6b + CR 810.10: each opponent gets a counter, so the opposing team's shared
+        // total rises by two a period: 14 of headroom under fifteen is 7 strict, crossing on 8.
+        let giant = GameState::new(crate::types::format::FormatConfig::two_headed_giant(), 4, 7);
+        assert_eq!(
+            giant.format_config.poison_counter_threshold, None,
+            "REACH-GUARD: the shared-poison format has no individual threshold"
+        );
+        assert_eq!(
+            cascade(&giant, &[2, 3]),
+            Some((8, departs(8, &[2, 3]))),
+            "the opposing team crosses together when its shared total reaches fifteen"
+        );
+    }
+
     /// **T5** — the subtraction is inert unless the declaration pinned a charged slot with a
     /// `Targets` pin.
     ///
@@ -29368,6 +29967,7 @@ mod tests {
     fn a_stack_entry_is_scanned_under_the_loop_firewall() {
         use crate::types::ability::{Effect, TargetFilter, TypedFilter};
         let particular_move = Effect::ChangeZone {
+            library_shuffle: Default::default(),
             origin: Some(Zone::Exile),
             destination: Zone::Battlefield,
             target: TargetFilter::ParentTarget,
@@ -30017,30 +30617,349 @@ mod tests {
         );
     }
 
+    /// CR 615.5: the `GainLife` rider the floating shields in this section name.
+    fn gain_life_rider(amount: i32) -> ResolvedAbility {
+        ResolvedAbility::new(
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: amount },
+                player: TargetFilter::Controller,
+            },
+            vec![],
+            ObjectId(1),
+            PlayerId(0),
+        )
+    }
+
     /// CR 615.5: a floating prevention shield naming `rider` through a freshly
     /// installed arena entry, after `padding` earlier entries.
     fn floating_rider_frame(padding: usize, rider_amount: i32) -> GameState {
-        let rider = |amount| {
-            crate::types::ability::ResolvedAbility::new(
-                Effect::GainLife {
-                    amount: QuantityExpr::Fixed { value: amount },
-                    player: TargetFilter::Controller,
-                },
-                vec![],
-                ObjectId(1),
-                PlayerId(0),
-            )
-        };
         let mut state = GameState::new_two_player(42);
         for _ in 0..padding {
-            state.install_replacement_continuation(rider(rider_amount));
+            state.install_replacement_continuation(gain_life_rider(rider_amount));
         }
-        let id = state.install_replacement_continuation(rider(rider_amount));
+        let id = state.install_replacement_continuation(gain_life_rider(rider_amount));
         state.pending_damage_replacements.push(
             ReplacementDefinition::new(crate::types::replacements::ReplacementEvent::DamageDone)
                 .runtime_execute(id),
         );
         state
+    }
+
+    /// CR 615.5: [`floating_rider_frame`] plus `extra` further shields of the same content,
+    /// each naming a FRESH arena position — so two frames hold the same shields by value at
+    /// different allocation history.
+    fn floating_rider_growth(padding: usize, rider_amount: i32, extra: usize) -> GameState {
+        let mut state = floating_rider_frame(padding, rider_amount);
+        for _ in 0..extra {
+            let id = state.install_replacement_continuation(gain_life_rider(rider_amount));
+            state.pending_damage_replacements.push(
+                ReplacementDefinition::new(
+                    crate::types::replacements::ReplacementEvent::DamageDone,
+                )
+                .runtime_execute(id),
+            );
+        }
+        state
+    }
+
+    /// CR 615.7: the class printed amount-shield cards install — a floating `Next(n)`
+    /// prevention for the rest of the turn, unconsumed, with no rider.
+    fn prevention_shield(amount: u32) -> ReplacementDefinition {
+        ReplacementDefinition::new(crate::types::replacements::ReplacementEvent::DamageDone)
+            .prevention_shield(PreventionAmount::Next(amount))
+            .expiry(RestrictionExpiry::EndOfTurn)
+    }
+
+    /// A frame whose ENTIRE floating replacement registry is `defs`: `new_two_player` is
+    /// otherwise empty, so a difference between two such frames is the registry's alone.
+    fn shield_frames(defs: &[ReplacementDefinition]) -> GameState {
+        let mut state = GameState::new_two_player(42);
+        state.pending_damage_replacements = defs.to_vec();
+        state
+    }
+
+    /// CR 104.4b + CR 732.2a: both comparators refuse the pair. The `PartialEq` reach-guard
+    /// proves the refusal is the shield conjunct's — `PartialEq` skips the whole registry — and
+    /// the registry `assert_ne!` proves the rows are not degenerate.
+    fn assert_shield_frames_differ(a: &GameState, b: &GameState) {
+        assert_eq!(a, b, "reach-guard: `PartialEq` skips the registry");
+        assert_ne!(
+            a.pending_damage_replacements, b.pending_damage_replacements,
+            "reach-guard: the registries really differ"
+        );
+        assert!(
+            !loop_states_equal(&a.normalize_for_loop(), &b.normalize_for_loop()),
+            "`loop_states_equal` must refuse a differing LIVE floating shield"
+        );
+        assert!(
+            !eq_except_growable(a, b, &HashSet::new()),
+            "`eq_except_growable` must refuse a differing LIVE floating shield"
+        );
+    }
+
+    /// CR 104.4b: both comparators accept the pair.
+    fn assert_shield_frames_match(a: &GameState, b: &GameState) {
+        assert!(
+            loop_states_equal(&a.normalize_for_loop(), &b.normalize_for_loop()),
+            "`loop_states_equal` must accept equal floating shields"
+        );
+        assert!(
+            eq_except_growable(a, b, &HashSet::new()),
+            "`eq_except_growable` must accept equal floating shields"
+        );
+    }
+
+    /// CR 614.3 + CR 732.2a: synthetic spent-entry fixture with an inline `execute` naming
+    /// `id`. It isolates the differing inline-payload axis of the Mystic Reflection cover
+    /// regression, not that card's event/filter definition. The caller marks each definition
+    /// consumed before comparison; the fixture is never applied to an event.
+    fn copy_effect_naming(id: ObjectId) -> ReplacementDefinition {
+        ReplacementDefinition::new(crate::types::replacements::ReplacementEvent::DamageDone)
+            .execute(AbilityDefinition::new(
+                crate::types::ability::AbilityKind::Spell,
+                Effect::BecomeCopy {
+                    target: TargetFilter::SpecificObject { id },
+                    recipient: CopyRecipient::Source,
+                    duration: None,
+                    mana_value_limit: None,
+                    additional_modifications: Vec::new(),
+                },
+            ))
+    }
+
+    /// CR 615.3 + CR 614.3: the same definition, USED UP — `find_applicable_replacements`
+    /// skips it, so it is not part of the position either comparator reads.
+    fn spent(mut def: ReplacementDefinition) -> ReplacementDefinition {
+        def.is_consumed = true;
+        def
+    }
+
+    /// CR 615.7: a shield's AMOUNT is content — "the next 5 damage" and "the next
+    /// 3 damage" are different loop positions.
+    #[test]
+    fn loop_comparators_refuse_a_differing_floating_shield_amount() {
+        let a = shield_frames(&[prevention_shield(5)]);
+        let b = shield_frames(&[prevention_shield(3)]);
+        assert_shield_frames_differ(&a, &b);
+    }
+
+    /// CR 615.3 + CR 614.3: a SPENT shield is not part of the position. Both comparators
+    /// ignore consumed entries — the live-only reading `analysis::resource::replacement_def_is_live`
+    /// gives the loop firewall — so two registries whose spent entries differ in content are
+    /// the same loop point, and so is a spent entry against an empty registry. `PartialEq`
+    /// skips the registry entirely, and the `assert_ne!` proves the raw registries really
+    /// differ, so the verdict cannot pass vacuously.
+    #[test]
+    fn loop_comparators_ignore_a_spent_floating_shield() {
+        let a = shield_frames(&[spent(prevention_shield(5))]);
+        let b = shield_frames(&[spent(prevention_shield(3))]);
+        assert_eq!(a, b, "reach-guard: `PartialEq` skips the registry");
+        assert_ne!(
+            a.pending_damage_replacements, b.pending_damage_replacements,
+            "reach-guard: the spent entries differ in content"
+        );
+        assert_shield_frames_match(&a, &b);
+
+        let empty = shield_frames(&[]);
+        assert_eq!(empty, a, "reach-guard: `PartialEq` skips the registry");
+        assert_shield_frames_match(&empty, &a);
+    }
+
+    /// CR 615.3 + CR 614.3: mixed registries compare as if only their LIVE entries existed.
+    /// A spent entry beside live ones is invisible; a differing LIVE entry still refuses
+    /// through the common-prefix compare. The two comparators share the predicate, so both
+    /// verdicts are pinned by the shared helpers.
+    #[test]
+    fn loop_comparators_compare_mixed_registries_by_their_live_shields() {
+        let live = prevention_shield(5);
+        let a = shield_frames(std::slice::from_ref(&live));
+        let b = shield_frames(&[
+            spent(prevention_shield(3)),
+            live,
+            spent(prevention_shield(7)),
+        ]);
+        assert_eq!(a, b, "reach-guard: `PartialEq` skips the registry");
+        assert_ne!(
+            a.pending_damage_replacements, b.pending_damage_replacements,
+            "reach-guard: the registries really differ"
+        );
+        assert_shield_frames_match(&a, &b);
+
+        // The live half is still content: same live count, differing amount.
+        let a = shield_frames(&[prevention_shield(5), spent(prevention_shield(5))]);
+        let b = shield_frames(&[spent(prevention_shield(5)), prevention_shield(3)]);
+        assert_shield_frames_differ(&a, &b);
+    }
+
+    /// Engine comparison policy for CR 104.4b, not a CR 615.7 equivalence rule: the fail-closed
+    /// lone-install rule reads the LIVE sequence, so one live shield against a registry whose
+    /// entries are all spent still refuses (the live registry is
+    /// empty on one side), while two identical live instalments accept.
+    #[test]
+    fn loop_comparators_refuse_a_live_floating_shield_against_a_spent_only_registry() {
+        let spent_only = shield_frames(&[spent(prevention_shield(5))]);
+        let once = shield_frames(&[prevention_shield(5)]);
+        let twice = shield_frames(&[
+            spent(prevention_shield(5)),
+            prevention_shield(5),
+            prevention_shield(5),
+        ]);
+        assert_shield_frames_differ(&spent_only, &once);
+        assert_shield_frames_match(&spent_only, &twice);
+    }
+
+    /// CR 514.2 + CR 611.2a: "this turn" versus no expiry is content.
+    #[test]
+    fn loop_comparators_refuse_a_differing_floating_shield_expiry() {
+        let mut persistent = prevention_shield(5);
+        persistent.expiry = None;
+        let a = shield_frames(&[prevention_shield(5)]);
+        let b = shield_frames(&[persistent]);
+        assert_shield_frames_differ(&a, &b);
+    }
+
+    /// Loop-comparison policy: the installing source anchors the shield's attribution, so it is
+    /// compared as content (no single rule requires the anchor; CR 615.5 keeps the rider with it).
+    #[test]
+    fn loop_comparators_refuse_a_differing_floating_shield_source() {
+        let mut from_first = prevention_shield(5);
+        from_first.source_object = Some(ObjectId(3));
+        let mut from_second = prevention_shield(5);
+        from_second.source_object = Some(ObjectId(4));
+        let a = shield_frames(&[from_first]);
+        let b = shield_frames(&[from_second]);
+        assert_shield_frames_differ(&a, &b);
+    }
+
+    /// CR 615.5 + CR 614.6: "that many" / follow-up riders are content. Both shields name arena
+    /// position 0, so the difference cannot be blamed on allocation history — only on the
+    /// resolved riders (`GainLife{3}` vs `GainLife{5}`).
+    #[test]
+    fn loop_comparators_refuse_floating_shields_whose_riders_differ() {
+        let a = floating_rider_frame(0, 3);
+        let b = floating_rider_frame(0, 5);
+        assert_eq!(
+            a.pending_damage_replacements[0].runtime_execute,
+            b.pending_damage_replacements[0].runtime_execute,
+            "reach-guard: both shields name arena position 0"
+        );
+        assert_ne!(
+            a.replacement_rider(&a.pending_damage_replacements[0]),
+            b.replacement_rider(&b.pending_damage_replacements[0]),
+            "reach-guard: the resolved riders differ by value (GainLife 3 vs GainLife 5)"
+        );
+        assert_eq!(a, b, "reach-guard: `PartialEq` skips the registry");
+        assert!(
+            !loop_states_equal(&a.normalize_for_loop(), &b.normalize_for_loop()),
+            "`loop_states_equal` must refuse differing riders"
+        );
+        assert!(
+            !eq_except_growable(&a, &b, &HashSet::new()),
+            "`eq_except_growable` must refuse differing riders"
+        );
+    }
+
+    /// CR 104.4b: re-installing an identical shield is allocation history, not content, even
+    /// when the fresh copy names a new arena position.
+    #[test]
+    fn loop_comparators_accept_floating_shields_whose_riders_differ_only_in_arena_position() {
+        let a = floating_rider_frame(1, 5);
+        let b = floating_rider_growth(0, 5, 1);
+        assert_eq!(a.pending_damage_replacements.len(), 1);
+        assert_eq!(b.pending_damage_replacements.len(), 2);
+        assert_ne!(
+            a.pending_damage_replacements[0].runtime_execute,
+            b.pending_damage_replacements[0].runtime_execute,
+            "reach-guard: the first shields name different arena positions"
+        );
+        assert_eq!(
+            a.pending_damage_replacements[0].runtime_execute,
+            b.pending_damage_replacements[1].runtime_execute,
+            "reach-guard: the appended shield names the arena position the single one names"
+        );
+        assert_shield_frames_match(&a, &b);
+    }
+
+    /// Engine comparison policy for CR 104.4b, not a CR 615.7 equivalence rule: one identical
+    /// live shield growing into two is accepted by the loop comparator's multiplicity policy.
+    /// Both comparators must accept it, and `PartialEq` (blind to the whole registry) already does.
+    #[test]
+    fn loop_comparators_accept_an_identical_floating_shield_multiplicity() {
+        let shield = prevention_shield(5);
+        let a = shield_frames(std::slice::from_ref(&shield));
+        let b = shield_frames(&[shield.clone(), shield]);
+        assert_eq!(a, b, "reach-guard: `PartialEq` skips the registry");
+        assert_eq!(a.pending_damage_replacements.len(), 1);
+        assert_eq!(b.pending_damage_replacements.len(), 2);
+        assert_shield_frames_match(&a, &b);
+    }
+
+    /// Engine comparison policy for CR 104.4b, not a CR 615.7 equivalence rule: an appended LIVE
+    /// shield of a DIFFERENT class breaks the recurrence — the tail rule only tolerates repeats
+    /// of the class the shorter live registry ended on.
+    #[test]
+    fn loop_comparators_refuse_an_appended_differing_floating_shield() {
+        let a = shield_frames(&[prevention_shield(5)]);
+        let b = shield_frames(&[prevention_shield(5), prevention_shield(3)]);
+        assert_shield_frames_differ(&a, &b);
+    }
+
+    /// Engine comparison policy for CR 104.4b, not a CR 615.7 equivalence rule: with no live
+    /// shield observed yet the comparator cannot infer a class, so a single install is refused
+    /// (fail-closed, delays a draw by at most one cycle) while two identical installs are accepted.
+    /// Empty versus empty is the regression row for the
+    /// short-circuit: without it every shield-free loop in the engine would stop drawing.
+    #[test]
+    fn loop_comparators_refuse_a_lone_floating_shield_against_an_empty_registry() {
+        let empty = shield_frames(&[]);
+        let once = shield_frames(&[prevention_shield(5)]);
+        let twice = shield_frames(&[prevention_shield(5), prevention_shield(5)]);
+        assert_shield_frames_differ(&empty, &once);
+        assert_shield_frames_match(&empty, &twice);
+        assert_shield_frames_match(&empty, &shield_frames(&[]));
+    }
+
+    /// Engine comparison policy for CR 104.4b, not a CR 615.7 equivalence rule: the comparator
+    /// conservatively preserves live registry order. Growth that repeats the last class is
+    /// still accepted.
+    #[test]
+    fn loop_comparators_refuse_reordered_floating_shields() {
+        let a = shield_frames(&[prevention_shield(5), prevention_shield(3)]);
+        let b = shield_frames(&[prevention_shield(3), prevention_shield(5)]);
+        assert_shield_frames_differ(&a, &b);
+        let grown = shield_frames(&[
+            prevention_shield(5),
+            prevention_shield(3),
+            prevention_shield(3),
+        ]);
+        assert_shield_frames_match(&a, &grown);
+    }
+
+    /// CR 614.3 + CR 615.3 + CR 732.2a: the differing spent-payload axis of the pinned
+    /// `Mystic Reflection` regression — each period appends one more USED-UP copy effect whose
+    /// inline `execute` names a DIFFERENT per-period Spawn token, so the raw registries grow in
+    /// length AND differ in content.
+    /// Neither difference is part of the position: the appended definitions are spent
+    /// (CR 615.3 + CR 614.3), so the live sequences are empty on both sides and both
+    /// comparators accept. This is the unit-level discriminator for the pinned integration
+    /// row `loop_period_remade_token_source::copy_effects_used_up_inside_each_spawn_period_leave_the_periods_covered`.
+    #[test]
+    fn loop_comparators_ignore_growth_of_spent_floating_copy_effects() {
+        let a = shield_frames(&[spent(copy_effect_naming(ObjectId(10)))]);
+        let b = shield_frames(&[
+            spent(copy_effect_naming(ObjectId(10))),
+            spent(copy_effect_naming(ObjectId(11))),
+        ]);
+        assert_eq!(a, b, "reach-guard: `PartialEq` skips the registry");
+        assert_ne!(
+            a.pending_damage_replacements[0].execute, b.pending_damage_replacements[1].execute,
+            "reach-guard: the appended effect names a different per-period object"
+        );
+        assert_ne!(
+            a.pending_damage_replacements, b.pending_damage_replacements,
+            "reach-guard: the raw registries grow and differ"
+        );
+        assert_shield_frames_match(&a, &b);
     }
 
     /// CR 104.4b: two loop samples taken after 3 and 4 iterations, each of which

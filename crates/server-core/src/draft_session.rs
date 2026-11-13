@@ -1423,6 +1423,91 @@ mod tests {
         )
     }
 
+    /// The names of the cards draft seat 0 brings to its spawned game in `round`.
+    fn seat_zero_card_names(
+        mgr: &mut DraftSessionManager,
+        code: &str,
+        db: &std::sync::Arc<CardDatabase>,
+        round: u8,
+    ) -> Vec<String> {
+        let mut games = SessionManager::new();
+        let spawns = mgr
+            .spawn_match_games_for_round(code, &mut games, db, round)
+            .unwrap();
+        let (spawn, player) = spawns
+            .iter()
+            .find_map(|spawn| {
+                [&spawn.player_a, &spawn.player_b]
+                    .into_iter()
+                    .find(|player| player.draft_seat == 0)
+                    .map(|player| (spawn, player))
+            })
+            .expect("seat 0 is paired this round");
+        let game = games.try_session(&spawn.game_code).unwrap();
+        game.state
+            .objects
+            .values()
+            .filter(|object| object.owner == player.game_player)
+            .map(|object| object.name.clone())
+            .collect()
+    }
+
+    #[test]
+    fn casual_between_rounds_revision_reaches_the_next_rounds_spawned_game() {
+        let db = printing_database();
+        let (mut mgr, code, tokens) = printing_pod(DraftKind::Premier);
+        mgr.sessions
+            .get_mut(&code)
+            .unwrap()
+            .session
+            .config
+            .pod_policy = PodPolicy::Casual;
+        for token in &tokens {
+            submit_printing_frame(&mut mgr, &code, token, vec!["Plains".into(); 40], None).unwrap();
+        }
+        mgr.ensure_pairings_generated(&code).unwrap();
+
+        // Reach guard: round 1 plays the original submission.
+        let round_one = seat_zero_card_names(&mut mgr, &code, &db, 1);
+        assert_eq!(round_one, vec!["Plains".to_string(); 40]);
+
+        let pairings = mgr.sessions[&code].session.pairings.clone();
+        for pairing in pairings {
+            mgr.apply_system_action(
+                &code,
+                DraftAction::ReportMatchResult {
+                    match_id: pairing.match_id,
+                    winner_seat: Some(pairing.players[0].0),
+                },
+                None,
+            )
+            .unwrap();
+        }
+        assert_eq!(
+            mgr.sessions[&code].session.status,
+            DraftStatus::RoundComplete
+        );
+
+        // MTR 7.3: the revision arrives through the client wire between rounds.
+        submit_printing_frame(&mut mgr, &code, &tokens[0], vec!["Island".into(); 40], None)
+            .unwrap();
+        assert_eq!(
+            mgr.sessions[&code].session.status,
+            DraftStatus::RoundComplete,
+            "a revision never advances the round"
+        );
+        mgr.handle_draft_action(&code, &tokens[0], DraftAction::AdvanceRound, None)
+            .unwrap();
+        mgr.ensure_pairings_generated(&code).unwrap();
+
+        let round_two = seat_zero_card_names(&mut mgr, &code, &db, 2);
+        assert_eq!(
+            round_two,
+            vec!["Island".to_string(); 40],
+            "the next round's game is built from the revised submission"
+        );
+    }
+
     #[test]
     fn submitted_printings_reach_actual_draft_and_sealed_pairing_objects() {
         use engine::types::card_printing::CardPrinting;

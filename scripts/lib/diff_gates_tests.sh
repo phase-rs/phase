@@ -82,6 +82,24 @@ run_gate() {
     OUT="$(cd "$FIXTURE" && "$BASH_BIN" "scripts/$GATE" "$BASE" 2>&1)"
     RC=$?
 }
+# $1 = label. Run after a planted violation is committed past BASE.
+expect_base_refused() {
+    local real="$BASE"
+    run_gate; expect_rc "$1: the real base sees the planted line" 1
+    local expected_listed
+    expected_listed="$(listed)"
+    BASE=':/baseline'; run_gate
+    expect_rc "$1: a valid commit-message selector preserves the verdict" 1
+    if [ "$(listed)" = "$expected_listed" ]; then
+        ok "$1: a valid commit-message selector preserves the listed violation"
+    else
+        fail "$1: a valid commit-message selector preserves the listed violation"
+    fi
+    BASE=nosuchref; run_gate
+    expect_rc "$1: an unresolvable base fails closed" 2
+    expect_out "$1: the refusal names the base" "base ref 'nosuchref' does not resolve to a commit"
+    BASE="$real"
+}
 # shellcheck disable=SC2016 # $BASH_VERSION expands in the child shell.
 printf 'driving the real diff gates under %s (%s)\n' "$BASH_BIN" "$("$BASH_BIN" -c 'echo "$BASH_VERSION"')"
 
@@ -257,6 +275,12 @@ run_gate
 expect_rc 'authority: rename plus a planted line fails' 1
 expect_listed 'authority: only the planted line is listed' "  crates/engine/src/game/combat/mod.rs:
     $A_PLANTED"
+expect_base_refused authority
+A_BASE="$BASE"
+BASE="$(git -C "$FIXTURE" rev-parse "$BASE^{tree}")"
+run_gate
+expect_rc 'authority: a base naming a tree, not a commit, fails closed' 2
+BASE="$A_BASE"
 
 # D-3: an excluded authority file is outside the gate's view, so its deletions
 # exempt nothing. As a post-filter allowlist the file would be in the view, and
@@ -342,6 +366,7 @@ commit planted
 run_gate
 expect_rc 'card-data: rename plus a planted load fails' 1
 expect_listed 'card-data: only the planted load is listed, at its line' "  crates/engine/tests/integration/combat_damage.rs:5:$C_PLANTED"
+expect_base_refused card-data
 
 new_fixture check-test-card-data-load.sh
 put crates/engine/tests/integration/support.rs 'fn load() {' "$C_FROZEN" '}'
@@ -432,6 +457,7 @@ run_gate
 expect_rc 'legacy-quantity: rename plus a planted call fails' 1
 expect_listed 'legacy-quantity: only the planted call is listed' "  crates/engine/src/parser/oracle_cost/mod.rs:
     +$L_PLANTED"
+expect_base_refused legacy-quantity
 
 # crates/phase-parser/src/parser is in the gate's scope beside the old path: the
 # parser move's whole-file renames are moves, and a call planted at the new path
@@ -449,6 +475,43 @@ run_gate
 expect_rc 'legacy-quantity: a call planted in phase-parser fails' 1
 expect_listed 'legacy-quantity: only the call planted in phase-parser is listed' "  crates/phase-parser/src/parser/oracle_cost.rs:
     +$L_PLANTED"
+
+
+# --- check-parser-combinators.sh: family (D) detector failure --------------
+# A detector that cannot run is an INSTRUMENT error, not "no findings": before
+# #10351 the call was `... || true` with stderr discarded, so any detector
+# failure (an import error, a malformed record) silently passed the gate. The
+# stub below stands in for that failure and the gate must fail loud.
+P_BENIGN='fn added_by_the_fixture() { let _ = 1; }'
+parser_fixture
+put crates/engine/src/parser/clause.rs 'use super::*;' 'fn other() {}'
+# The (D0) seam suite imports the detector; stub that too so the ONLY failure is family D.
+put scripts/lib/detect_cross_product_alts_tests.py 'import sys' 'sys.exit(0)'
+put scripts/lib/detect-cross-product-alts.py \
+    'import sys' \
+    'sys.stderr.write("stub detector: cannot import zone_authority_census\n")' \
+    'sys.exit(3)'
+commit_base
+put crates/engine/src/parser/clause.rs 'use super::*;' "$P_BENIGN" 'fn other() {}'
+commit 'added parser line'
+run_gate
+expect_rc 'parser: a family-D detector failure fails the gate' 1
+expect_out 'parser: the detector failure names the file' \
+    'crates/engine/src/parser/clause.rs: family D cross-product detector failed'
+expect_out 'parser: the detector failure reports its exit code' 'failed (exit 3)'
+expect_out 'parser: the detector failure surfaces the detector stderr' \
+    'stub detector: cannot import zone_authority_census'
+
+# Exit 0 with empty output is still "no findings": the same fixture with the
+# real detector passes, which keeps the passing format unchanged.
+parser_fixture
+put crates/engine/src/parser/clause.rs 'use super::*;' 'fn other() {}'
+commit_base
+put crates/engine/src/parser/clause.rs 'use super::*;' "$P_BENIGN" 'fn other() {}'
+commit 'added parser line'
+run_gate
+expect_rc 'parser: a clean family-D run still passes' 0
+expect_out 'parser: the clean run reaches Gate A PASS' 'Gate A PASS head='
 
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]

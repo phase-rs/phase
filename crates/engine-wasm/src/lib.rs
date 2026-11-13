@@ -400,6 +400,7 @@ mod external_format_config_tests {
                     team_based: false,
                     sideboard_policy: SideboardPolicy::Unlimited,
                     default_deck_copy_limit: DeckCopyLimit::UpTo(4),
+                    poison_counter_threshold: 10,
                 },
                 legality: LegalityRules {
                     legal_sets: None,
@@ -1382,6 +1383,13 @@ pub fn is_card_commander_eligible_for_format(name: &str, format: JsValue) -> boo
             GameFormat::TinyLeaders => is_tiny_leader_eligible(face),
             GameFormat::Oathbreaker => face.is_oathbreaker,
             GameFormat::Brawl | GameFormat::HistoricBrawl => is_brawl_commander_eligible(face),
+            // Horde is per-config (Commander-format survivors designate a
+            // standard-EDH-eligible commander; Constructed survivors have no
+            // commander slot and never consult this). Answer the EDH
+            // predicate: the only caller that can exist is the Commander
+            // horde's deck builder, and `false` here would silently tell it
+            // no card can be its commander.
+            GameFormat::Horde => is_commander_eligible(face),
             // CR 903.3's commander eligibility test applies unchanged —
             // planar doesn't change eligibility.
             GameFormat::PlanechaseCommander => is_commander_eligible(face),
@@ -1589,6 +1597,16 @@ pub fn sideboard_policy_for_format(format_config: JsValue) -> Result<JsValue, Js
 #[wasm_bindgen(js_name = getFormatRegistry)]
 pub fn get_format_registry() -> JsValue {
     to_js(&GameFormat::registry())
+}
+
+/// Return the authoritative list of selectable Horde challenge decks as a typed
+/// array. The Horde deck picker renders this directly, so adding a new challenge
+/// deck is a single engine-side change — the client never maintains a mirrored
+/// deck list. Each entry bundles the deck's `HordeRuleset`, so the client can
+/// build the complete `FormatConfig` for the picked deck without a second call.
+#[wasm_bindgen(js_name = getChallengeDeckRegistry)]
+pub fn get_challenge_deck_registry() -> JsValue {
+    to_js(&engine::types::format::ChallengeDeck::registry())
 }
 
 /// Evaluate deck compatibility and format legality using the loaded card database.
@@ -1991,7 +2009,17 @@ fn validate_deck_list_seats(
     match_type: Option<MatchType>,
     player_count: usize,
 ) -> Option<Vec<String>> {
-    for (seat, deck) in labelled_seats(deck_list) {
+    // Horde seats run the engine-supplied challenge library, never a
+    // player-built deck: the local path submits an empty seat for them, which
+    // must not face the survivor deck-shape check (an empty submission is
+    // only exempt for non-`PlayerBuilt` supplies, and Horde is `PlayerBuilt`
+    // for its survivors). Skip the designated Horde seats; every survivor
+    // seat is still validated. Empty for non-Horde formats — a no-op there.
+    let horde_seats = format_config.horde_designated_seats();
+    for (seat_idx, (seat, deck)) in labelled_seats(deck_list).enumerate() {
+        if horde_seats.contains(&PlayerId(seat_idx as u8)) {
+            continue;
+        }
         if let Err(reasons) = validate_name_deck_for_format_full(
             db,
             &deck.main_deck,
@@ -7909,6 +7937,7 @@ mod tests {
 #[cfg(test)]
 mod replay_bridge_tests {
     use super::*;
+    use engine::game::start_game_winner_plays_first;
     use engine::types::game_state::WaitingFor;
 
     #[test]
@@ -7959,7 +7988,7 @@ mod replay_bridge_tests {
         clear_replay_playback();
 
         let mut state = GameState::new_two_player(99);
-        let start_result = start_game(&mut state);
+        let start_result = start_game_winner_plays_first(&mut state);
         let _ = start_result;
 
         let header = ReplayHeader {
@@ -8016,6 +8045,82 @@ mod replay_bridge_tests {
             0,
             "clear_replay_playback should drop the loaded replay"
         );
+        clear_game_state();
+    }
+
+    /// CR 103.1: a local game started by the engine's own contest rests at the
+    /// choice; the chooser's answer starts it, is recorded like any other
+    /// action, and a reloaded recording replays it to the same start.
+    #[test]
+    fn wasm_local_game_records_the_starting_player_choice() {
+        clear_game_state();
+        clear_replay_playback();
+
+        // Mirrors `initialize_game_impl`'s `first_player: None` start with no
+        // deck data: `start_game`, the replay header, the interaction bind and
+        // the install.
+        let mut state = GameState::new_two_player(99);
+        let _ = start_game(&mut state);
+        let WaitingFor::ChooseStartingPlayer { player: winner, .. } = state.waiting_for else {
+            panic!("the start rests at the CR 103.1 choice");
+        };
+        let starter = PlayerId(1 - winner.0);
+        let header = ReplayHeader {
+            format_config: state.format_config.clone(),
+            match_config: state.match_config,
+            player_count: state.players.len() as u8,
+            first_player: None,
+            seed: state.rng_seed,
+            deck_data: None,
+        };
+        REPLAY_LOG.with(|cell| cell.set(Some(ReplayLog::new(header))));
+        bind_interaction_session(&mut state);
+        install_game_state(Some(state));
+        assert!(
+            matches!(
+                with_installed_state(|state| state.waiting_for.clone()),
+                Ok(WaitingFor::ChooseStartingPlayer { .. })
+            ),
+            "reach: the installed game waits on the choice"
+        );
+
+        let submitted =
+            submit_action_inner(winner, GameAction::ChooseStartingPlayer { player: starter })
+                .expect("a game is installed");
+        assert!(
+            matches!(submitted, SubmittedAction::Applied { .. }),
+            "the chooser's answer applies"
+        );
+        let live = with_installed_state(GameState::clone).expect("a game is installed");
+        assert_eq!(live.turn_number, 1);
+        assert_eq!(live.current_starting_player, starter);
+        assert!(!matches!(
+            live.waiting_for,
+            WaitingFor::ChooseStartingPlayer { .. }
+        ));
+
+        let replay_json = export_replay_log().expect("the recording survives the answer");
+        assert!(
+            replay_json.contains("ChooseStartingPlayer"),
+            "the answer is a recorded action"
+        );
+        let length =
+            load_replay_for_playback(&replay_json).expect("exported replay should load back");
+        let replayed = REPLAY_PLAYER.with(|cell| {
+            let mut player = cell.take().expect("a replay is loaded");
+            let replayed = player
+                .seek(length)
+                .expect("the recorded answer replays")
+                .clone();
+            cell.set(Some(player));
+            replayed
+        });
+        assert_eq!(replayed.current_starting_player, starter);
+        assert_eq!(replayed.turn_number, live.turn_number);
+        assert_eq!(replayed.phase, live.phase);
+        assert_eq!(replayed.waiting_for, live.waiting_for);
+
+        clear_replay_playback();
         clear_game_state();
     }
 
@@ -9008,6 +9113,7 @@ mod deck_list_seat_validation_tests {
     use engine::types::card::CardFace;
     use engine::types::card_type::{CardType, CoreType, Supertype};
     use engine::types::custom_format::CustomFormatId;
+    use engine::types::format::ChallengeDeck;
     use engine::types::mana::ManaColor;
     use std::collections::BTreeMap;
 
@@ -9196,6 +9302,62 @@ mod deck_list_seat_validation_tests {
         )
         .expect("Standard refuses an empty deck");
         assert!(refused[0].starts_with("Player deck:"), "{refused:?}");
+    }
+
+    /// Commander-survivor Hordes initialize: the full local payload carries a
+    /// 100-card EDH deck on the survivor seat and an EMPTY seat for the
+    /// designated Horde seat (seat 1, the engine-supplied challenge library).
+    /// The Horde seat must not face the survivor deck-shape check.
+    ///
+    /// Revert guard: validating every seat refuses the empty Horde seat for
+    /// the 100-card Commander shape — the `None` flips to `Some`.
+    #[test]
+    fn horde_skips_designated_seats_and_validates_survivors() {
+        let db = test_db();
+        let mut config = FormatConfig::horde(ChallengeDeck::SauronHorde.default_ruleset());
+        // Production anchors the Horde at seat 1 (the `opponent` slot).
+        config.archenemy_player = Some(PlayerId(1));
+        assert_eq!(
+            config.horde_designated_seats(),
+            vec![PlayerId(1)],
+            "reach-guard: Sauron designates exactly the Horde seat"
+        );
+
+        let mut main_deck = n_plains(99);
+        let _ = main_deck.pop();
+        main_deck.push(LEGEND_B.to_string());
+        let survivor = PlayerDeckList {
+            main_deck,
+            commander: vec![LEGEND_A.to_string()],
+            ..Default::default()
+        };
+        let list = DeckList {
+            player: survivor,
+            opponent: PlayerDeckList::default(),
+            ..Default::default()
+        };
+        assert_eq!(
+            validate_deck_list_seats(&db, &list, &config, None, 2),
+            None,
+            "a valid survivor deck plus an empty Horde seat initializes"
+        );
+
+        // The skip is seat-scoped: a 60-card survivor is still refused.
+        let bad = DeckList {
+            player: plains_seat(60),
+            opponent: PlayerDeckList::default(),
+            ..Default::default()
+        };
+        let refused = validate_deck_list_seats(&db, &bad, &config, None, 2)
+            .expect("a 60-card survivor deck is refused for Sauron");
+        assert!(
+            refused[0].starts_with("Player deck:"),
+            "the SURVIVOR seat refuses, got {refused:?}"
+        );
+        assert!(
+            refused.iter().any(|r| r.contains("exactly 100 cards")),
+            "the Commander shape check fires, got {refused:?}"
+        );
     }
 
     #[test]

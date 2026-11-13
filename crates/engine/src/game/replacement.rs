@@ -38,8 +38,8 @@ use crate::types::player::PlayerId;
 use crate::types::proposed_event::{
     AppliedReplacementKey, BoundSearchFoundCandidate, BoundSearchFoundDisposition,
     BoundSearchFoundGrant, CopyTokenSpec, CounterMoveStage, CounterPlacement, DrawEventStage,
-    EtbTapState, ProposedEvent, ReplacementId, SearchFoundDisposition, TokenAttackRequest,
-    TokenBatch,
+    EnterWithGrant, EtbTapState, ProposedEvent, ReplacementId, SearchFoundDisposition,
+    TokenAttackRequest, TokenBatch,
 };
 use crate::types::replacements::ReplacementEvent;
 use crate::types::zones::Zone;
@@ -959,6 +959,10 @@ pub enum ApplyResult {
 /// keeps an un-dispatchable drain from pinning `has_ready()` true forever. That they
 /// are stashed at all is the real defect (issue #5676). See [`ResidentDrainPolicy`]
 /// for the measured census.
+///
+/// Battlefield-entry "and with …" grants are NOT stashed here anymore: the
+/// apply path lifts them onto the event (`enter_with_grants`) and delivery
+/// installs every one, so same-entry riders never collide on this slot.
 fn stash_post_replacement_continuation(
     state: &mut GameState,
     continuation: PostReplacementContinuation,
@@ -1035,6 +1039,90 @@ pub(super) fn ability_tree_copies_tokens(def: &AbilityDefinition) -> bool {
             .else_ability
             .as_deref()
             .is_some_and(ability_tree_copies_tokens)
+}
+
+/// CR 614.1c + CR 611.2a: is this chain link a strippable "and with …" entry
+/// grant — the exact shape `compose_enters_with_entry_grants` emits? A
+/// `GenericEffect` carrying only `static_abilities` with
+/// `Duration::UntilHostLeavesPlay` for `SelfRef`, no `else_ability` of its
+/// own (the chain tail is classified separately), every granted static
+/// unconditional and self-affecting. Anything else — a conditioned grant, a
+/// non-self target, an end cost — stays post-replacement work, exactly as
+/// before; the predicate only ever narrows what the entry fold owns.
+fn is_entry_grant_link(link: &AbilityDefinition) -> bool {
+    if link.else_ability.is_some() {
+        return false;
+    }
+    let Effect::GenericEffect {
+        static_abilities,
+        duration,
+        target,
+        end_cost,
+    } = &*link.effect
+    else {
+        return false;
+    };
+    if static_abilities.is_empty()
+        || *duration != Some(Duration::UntilHostLeavesPlay)
+        || *target != Some(TargetFilter::SelfRef)
+        || end_cost.is_some()
+    {
+        return false;
+    }
+    static_abilities.iter().all(|static_def| {
+        static_def.affected == Some(TargetFilter::SelfRef) && static_def.condition.is_none()
+    })
+}
+
+/// CR 614.1c + CR 616.1: split a battlefield-entry execute chain into the
+/// chain the event fold classifies plus the entry grants that ride the event.
+/// Grant links are lifted out (cloned without their chain tail, which the
+/// fold classifies on its own); every other link is kept in order. `None`
+/// when the chain holds no grant link — the fast path, with zero behavior
+/// change and zero allocation. The filtered chain is `None` when nothing but
+/// grants remains, in which case the fold finds no residual work and no
+/// continuation is stashed: the grants install at delivery instead.
+fn strip_entry_grant_links(
+    ability: Option<&AbilityDefinition>,
+) -> Option<(Option<AbilityDefinition>, Vec<AbilityDefinition>)> {
+    // Fast path FIRST: walk the chain by reference to learn whether it holds
+    // a grant link before collecting or cloning anything, so ordinary
+    // no-grant entry stays allocation-free. The grant case walks twice; the
+    // common case allocates nothing.
+    let mut probe = ability;
+    let mut has_grant = false;
+    while let Some(link) = probe {
+        if is_entry_grant_link(link) {
+            has_grant = true;
+            break;
+        }
+        probe = link.sub_ability.as_deref();
+    }
+    if !has_grant {
+        return None;
+    }
+    let mut links: Vec<&AbilityDefinition> = Vec::new();
+    let mut current = ability;
+    while let Some(link) = current {
+        links.push(link);
+        current = link.sub_ability.as_deref();
+    }
+    let mut grants = Vec::new();
+    let mut filtered_tail: Option<AbilityDefinition> = None;
+    for link in links.into_iter().rev() {
+        if is_entry_grant_link(link) {
+            let mut grant = link.clone();
+            grant.sub_ability = None;
+            // else_ability is None by the predicate.
+            grants.push(grant);
+        } else {
+            let mut kept = link.clone();
+            kept.sub_ability = filtered_tail.map(Box::new);
+            filtered_tail = Some(kept);
+        }
+    }
+    grants.reverse();
+    Some((filtered_tail, grants))
 }
 
 // CR 614.12a + issue #4886 (review #6): must classify the WHOLE ability tree,
@@ -2182,6 +2270,7 @@ fn discard_applier(
             enter_tapped: EtbTapState::Unspecified,
             enters_attacking: false,
             enter_with_counters: Vec::new(),
+            enter_with_grants: Vec::new(),
             controller_override: None,
             enter_transformed: false,
             face_down_profile: None,
@@ -6006,6 +6095,7 @@ fn bind_search_found_definition(
         conditional_enter_with_counters,
         face_down_profile,
         enters_modified_if,
+        library_shuffle: _,
     } = execute.effect.as_ref()
     else {
         return None;
@@ -10273,7 +10363,7 @@ fn apply_single_replacement(
     // the same resolution step, right after the ZoneChange completes. Without this,
     // the chooser would never be prompted. Optional replacements set
     // `post_replacement_continuation` in `continue_replacement` when the player accepts.
-    let (event_key, modifiers, mandatory_post_effect, consume_on_apply, entry_copy) =
+    let (event_key, modifiers, mandatory_post_effect, consume_on_apply, entry_copy, entry_grants) =
         match repl_def_ref {
             Some(repl_def) => {
                 let replacement_controller = replacement_ability_controller(state, rid, repl_def);
@@ -10302,6 +10392,27 @@ fn apply_single_replacement(
                     ReplacementBranch::Execute => repl_def.execute.as_deref(),
                     ReplacementBranch::Decline => replacement_mode_decline(&repl_def.mode),
                 };
+                // CR 614.1c + CR 616.1: on a mandatory battlefield-entry
+                // execute, lift "and with …" grant links out of the
+                // classified chain — they ride the event and install at
+                // delivery, so every same-entry rider survives instead of
+                // only the first stashed continuation. Decline branches,
+                // optional accepts (stashed whole downstream), and non-entry
+                // events keep today's behavior exactly.
+                let stripped_entry_grants = (branch == ReplacementBranch::Execute
+                    && matches!(repl_def.mode, ReplacementMode::Mandatory)
+                    && matches!(
+                        proposed,
+                        ProposedEvent::ZoneChange {
+                            to: Zone::Battlefield,
+                            ..
+                        }
+                    ))
+                .then(|| strip_entry_grant_links(ability))
+                .flatten();
+                let ability = stripped_entry_grants
+                    .as_ref()
+                    .map_or(ability, |(filtered, _)| filtered.as_ref());
                 // CR 510.2 + CR 615.5: All-damage and one-shot prevention shields
                 // created by resolving spells capture a `runtime_execute` rider
                 // and fire it once post-batch against the
@@ -10363,7 +10474,13 @@ fn apply_single_replacement(
                         if let Some(runtime) = state.replacement_rider(repl_def).cloned() {
                             Some(PostReplacementContinuation::Resolved(Box::new(runtime)))
                         } else {
-                            repl_def.execute.as_deref().and_then(|def| {
+                            // `ability` (not `repl_def.execute`): on a gated
+                            // battlefield entry this is the grant-stripped
+                            // chain, so a pure grants-plus-modifiers execute
+                            // finds no residual work and stashes nothing. It
+                            // is identical to `repl_def.execute` everywhere
+                            // the gate does not apply.
+                            ability.and_then(|def| {
                                 // CR 608.2c + CR 121.6b: the applier replaces the
                                 // current individual event with count zero. Run the
                                 // full Draw-plus-rider ability as a nested child so
@@ -10687,12 +10804,28 @@ fn apply_single_replacement(
                     ReplacementBranch::Execute => repl_def.enters_under.clone(),
                     ReplacementBranch::Decline => None,
                 };
+                // CR 614.1c + CR 611.2a: package stripped entry grants with
+                // the granting replacement's controller (CR 109.5) for the
+                // event ride; delivery resolves each through the same chain
+                // authority the post-entry drain uses.
+                let entry_grants: Vec<EnterWithGrant> = stripped_entry_grants
+                    .map(|(_, grants)| {
+                        grants
+                            .into_iter()
+                            .map(|grant| EnterWithGrant {
+                                grant,
+                                controller: replacement_controller,
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
                 (
                     repl_def.event.clone(),
                     modifiers,
                     post_effect,
                     repl_def.consume_on_apply,
                     entry_copy,
+                    entry_grants,
                 )
             }
             None => return Ok(proposed),
@@ -10896,6 +11029,20 @@ fn apply_single_replacement(
                             .enter_with_counters
                             .extend(modifiers.etb_counters.iter().cloned()),
                         _ => {}
+                    }
+                }
+                // CR 614.1c + CR 611.2a: stripped entry grants ride the
+                // battlefield entry in application (CR 616.1) order, like
+                // counters — every same-entry rider survives, not just the
+                // first stashed continuation. Delivery installs them after
+                // CR 400.7's reset (and drops them with the counters when
+                // the entry never reaches the battlefield).
+                if !entry_grants.is_empty() {
+                    if let ProposedEvent::ZoneChange {
+                        enter_with_grants, ..
+                    } = &mut new_event
+                    {
+                        enter_with_grants.extend(entry_grants.iter().cloned());
                     }
                 }
                 // CR 614.5 + CR 609.7b: a `Modified` result that left the
@@ -14433,6 +14580,7 @@ mod tests {
         AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: None,
                 destination,
                 target: TargetFilter::ParentTarget,
@@ -14686,6 +14834,7 @@ mod tests {
             .execute(AbilityDefinition::new(
                 AbilityKind::Spell,
                 Effect::ChangeZone {
+                    library_shuffle: Default::default(),
                     origin: None,
                     destination,
                     target: TargetFilter::SelfRef,
@@ -15884,6 +16033,7 @@ mod tests {
             enter_tapped: EtbTapState::Unspecified,
             enters_attacking: false,
             enter_with_counters: Vec::new(),
+            enter_with_grants: Vec::new(),
             controller_override: None,
             enter_transformed: false,
             enter_as_copy: None,
@@ -15913,6 +16063,7 @@ mod tests {
         ReplacementDefinition::new(ReplacementEvent::Moved).execute(AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: None,
                 destination,
                 target: TargetFilter::SelfRef,
@@ -18186,6 +18337,7 @@ mod tests {
         let return_to_hand = AbilityDefinition::new(
             crate::types::ability::AbilityKind::Spell,
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Graveyard),
                 destination: Zone::Hand,
                 target: TargetFilter::SelfRef,
@@ -19939,6 +20091,7 @@ mod tests {
             enter_tapped: EtbTapState::Unspecified,
             enters_attacking: false,
             enter_with_counters: Vec::new(),
+            enter_with_grants: Vec::new(),
             controller_override: None,
             enter_transformed: false,
             enter_as_copy: None,
@@ -20262,6 +20415,7 @@ mod tests {
             .execute(AbilityDefinition::new(
                 AbilityKind::Spell,
                 Effect::ChangeZone {
+                    library_shuffle: Default::default(),
                     destination: Zone::Exile,
                     origin: None,
                     target: TargetFilter::Any,
@@ -21414,6 +21568,7 @@ mod tests {
             enter_tapped: EtbTapState::Tapped,
             enters_attacking: false,
             enter_with_counters: Vec::new(),
+            enter_with_grants: Vec::new(),
             controller_override: None,
             enter_transformed: false,
             enter_as_copy: None,
@@ -24823,6 +24978,7 @@ mod tests {
             enter_tapped: EtbTapState::Unspecified,
             enters_attacking: false,
             enter_with_counters: Vec::new(),
+            enter_with_grants: Vec::new(),
             controller_override: None,
             enter_transformed: false,
             enter_as_copy: None,
@@ -24875,6 +25031,7 @@ mod tests {
             enter_tapped: EtbTapState::Unspecified,
             enters_attacking: false,
             enter_with_counters: Vec::new(),
+            enter_with_grants: Vec::new(),
             controller_override: None,
             enter_transformed: false,
             enter_as_copy: None,
@@ -26918,6 +27075,7 @@ mod tests {
             .execute(AbilityDefinition::new(
                 AbilityKind::Spell,
                 Effect::ChangeZone {
+                    library_shuffle: Default::default(),
                     origin: None,
                     destination: Zone::Library,
                     target: TargetFilter::SelfRef,
@@ -26950,6 +27108,7 @@ mod tests {
             .execute(AbilityDefinition::new(
                 AbilityKind::Spell,
                 Effect::ChangeZone {
+                    library_shuffle: Default::default(),
                     origin: None,
                     destination: Zone::Library,
                     target: TargetFilter::SelfRef,

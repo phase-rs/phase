@@ -1387,6 +1387,7 @@ mod tests {
         let put_in_play = AbilityDefinition::new(
             AbilityKind::Activated,
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Library),
                 destination: Zone::Battlefield,
                 target: TargetFilter::Typed(TypedFilter::land()),

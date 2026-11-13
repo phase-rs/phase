@@ -1075,6 +1075,31 @@ jobs:
           bun scripts/protocol-versions.mjs generate
           bun test scripts/card-bot
 
+  pr-review-tooling-test:
+    name: PR review tooling (python tests)
+    # Advisory leaf: not in rust-check's needs, so no required context covers it.
+    # Skipped on push: deploy.yml and nightly-release.yml act on this workflow's
+    # push-run conclusion, which a non-required job must not decide.
+    if: github.event_name != 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Two parser-gate tests diff HEAD~1..HEAD, so depth 1 fails them. Full
+          # history, not depth 2: pr_review_tests.py checks card-data-gate's
+          # depth-2 fetch by substring, and a second copy would mask it.
+          fetch-depth: 0
+          # The tests read local git only.
+          persist-credentials: false
+
+      - name: PR review script tests
+        # Hermetic: no network or gh; state lives in temporary directories.
+        run: python3 scripts/pr_review_tests.py
+
+      - name: PR flow metrics tests
+        run: python3 scripts/pr_flow_metrics_tests.py
+
   frontend:
     name: Frontend (lint, type-check, test)
     runs-on: ubuntu-latest
