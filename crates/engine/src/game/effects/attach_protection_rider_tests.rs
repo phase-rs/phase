@@ -855,6 +855,81 @@ fn own_static_rider_uses_its_own_identity() {
     }
 }
 
+/// CR 707.2 + CR 702.16n ("If the creature has other instances of protection
+/// from the same quality, those instances affect Auras as normal."): a later
+/// copy effect replaces the keywords an earlier one retained, so the retained
+/// protection is not an instance any more and must not remove White Ward
+/// ("Enchanted creature has protection from white. This effect doesn't remove
+/// this Aura."). Synthetic: both copy effects are raw layer effects on Grizzly
+/// Bears. The first copies Grizzly Bears and retains Black Knight's other
+/// abilities ("First strike / Protection from white"); the nearest printed
+/// shape is Sakashima of a Thousand Faces, whose production copy folds the
+/// retained abilities into the copied values instead. The second is a plain
+/// copy of Grizzly Bears with a later timestamp.
+#[test]
+fn later_copy_drops_the_retained_protections_provenance() {
+    let mut s = scenario();
+    let host = grizzly_bears(&mut s, P0);
+    let knight = s.add_real_card(P0, "Black Knight", Zone::Battlefield, db());
+    let ward = s.add_real_card(P0, "White Ward", Zone::Hand, db());
+    let mut runner = s.build();
+    let state = runner.state_mut();
+    let bears_values = crate::game::printed_cards::intrinsic_copiable_values(&state.objects[&host]);
+    let white = Keyword::Protection(ProtectionTarget::Color(ManaColor::White));
+    state
+        .add_transient_continuous_effect(
+            knight,
+            P0,
+            Duration::Permanent,
+            TargetFilter::SpecificObject { id: host },
+            vec![
+                ContinuousModification::CopyValues {
+                    values: Box::new(bears_values.clone()),
+                    display: Default::default(),
+                },
+                ContinuousModification::RetainAllOtherAbilitiesFromSource,
+            ],
+            None,
+        )
+        .expect("the retaining copy must register");
+    evaluate_protection_layers(state);
+    assert!(
+        state.objects[&host].keywords.contains(&white),
+        "reach guard: the first copy retains Black Knight's protection from white"
+    );
+    assert_eq!(
+        white_riders(state, host),
+        vec![None],
+        "reach guard: the retained instance is recorded, rider-less"
+    );
+
+    state
+        .add_transient_continuous_effect(
+            host,
+            P0,
+            Duration::Permanent,
+            TargetFilter::SpecificObject { id: host },
+            vec![ContinuousModification::CopyValues {
+                values: Box::new(bears_values),
+                display: Default::default(),
+            }],
+            None,
+        )
+        .expect("the later copy must register");
+    evaluate_protection_layers(state);
+    assert!(
+        !state.objects[&host].keywords.contains(&white),
+        "reach guard: the later copy replaced the retained protection"
+    );
+
+    cast(&mut runner, P0, ward, Some(host), None);
+    assert!(
+        runner.state().objects[&host].keywords.contains(&white),
+        "reach guard: White Ward grants protection from white"
+    );
+    attached(&runner, ward, host);
+}
+
 /// CR 707.2 + CR 702.16n: a copy of Flickering Ward acquires its ridered static
 /// as its own, so "this Aura" is the copy. The copy effect is synthetic (the
 /// printed analogue is an enchantment entering as a copy, e.g. Copy

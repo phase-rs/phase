@@ -3869,6 +3869,16 @@ impl GameObject {
         self.protection_provenance.clear();
     }
 
+    /// CR 613.1a + CR 707.2: replace the live keyword set with another
+    /// object's or face's values, and drop the provenance that described the
+    /// replaced set. A later copy effect in the same pass can overwrite a
+    /// protection keyword an earlier one retained; its provenance must not
+    /// outlive it. `protection_start_grants` is kept, as in `clear_keywords`.
+    pub(crate) fn replace_keywords(&mut self, keywords: Vec<Keyword>) {
+        self.keywords = keywords;
+        self.protection_provenance.clear();
+    }
+
     /// CR 613.1f: keep only the live keywords `keep` accepts, and drop the
     /// provenance of every protection instance it removed.
     pub(crate) fn retain_keywords(&mut self, keep: impl Fn(&Keyword) -> bool) {
