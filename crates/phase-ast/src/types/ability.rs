@@ -7076,13 +7076,14 @@ pub enum FilterProp {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         controller: Option<ControllerRef>,
     },
-    /// Matches any object that is NOT the trigger source (for "another creature" triggers).
+    /// Matches any object other than the recipient bound in the filter context (a layer's
+    /// affected object, an attachment's host, a chosen object); with none bound, other than the ability source.
     Another,
     /// CR 702.95b: Matches objects that are not paired with another creature.
     Unpaired,
     /// CR 603.4 + CR 109.3: Matches any object that is NOT the object that caused
     /// the currently-evaluating trigger to fire (the "triggering object"). Distinct
-    /// from `Another`, which excludes the *ability source*. Used for intervening-if
+    /// from `Another`, which excludes the *ability source* or a bound recipient. Used for intervening-if
     /// count predicates like Valakut, the Molten Pinnacle's "if you control at
     /// least five other Mountains" — here "other" means "other than the newly-
     /// entered Mountain," not "other than Valakut." Resolves against
@@ -7308,7 +7309,7 @@ pub enum FilterProp {
     /// `DistinctFrom { reference: ParentTarget }` with
     /// `SharesQuality { Color, reference: ParentTarget }` so the fan-out damages
     /// every color-sharer EXCEPT the already-damaged target. Distinct from
-    /// [`FilterProp::Another`] (excludes the ability *source*) and
+    /// [`FilterProp::Another`] (excludes the ability *source* or a bound recipient) and
     /// [`FilterProp::OtherThanTriggerObject`] (excludes the *triggering* object).
     DistinctFrom {
         reference: Box<TargetFilter>,
