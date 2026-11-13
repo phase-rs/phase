@@ -3711,7 +3711,17 @@ fn surface_copy_entry_pause(
             .expect("the checked copy owner exists")
     });
     let child_stack_start = state.resolution_stack.capture_child_boundary();
-    let waiting_for = producer(state);
+    // CR 614.12a: the held owner's earlier tokens still belong to this entry
+    // group while the producer determines a copied choice or payment's terms.
+    let waiting_for = if let Some(owner) = owner.as_ref() {
+        super::effects::token_copy::publish_committed_copy_tokens(
+            state,
+            owner.created_ids.clone(),
+            producer,
+        )
+    } else {
+        producer(state)
+    };
     if waiting_for.is_some() {
         park_copy_entry_post_actions(state, source_id, post_actions.to_vec(), child_stack_start);
     }
