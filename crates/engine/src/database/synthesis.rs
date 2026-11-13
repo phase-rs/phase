@@ -10223,7 +10223,7 @@ fn extracted_supersedes_base(existing: &Keyword, extracted: &Keyword) -> bool {
 /// applies them and then appends the authoritative parser-recovered keywords.
 /// Fallback: if the parser found zero occurrences of a keyword, no rule runs for
 /// it, so the single MTGJSON copy is preserved.
-pub(crate) fn merge_extracted_keywords(base: &mut Vec<Keyword>, extracted: Vec<Keyword>) {
+pub fn merge_extracted_keywords(base: &mut Vec<Keyword>, extracted: Vec<Keyword>) {
     for extracted_kw in &extracted {
         base.retain(|existing| !extracted_supersedes_base(existing, extracted_kw));
     }

@@ -22,7 +22,7 @@ use crate::types::game_state::{
     CastingVariant, ConvokeMode, CostResume, CounterCostRootSubtree, DistributionScope,
     DistributionUnit, GameState, LandPlayRecord, LoopDetectionMode, ManaAbilityResume,
     MayTriggerAutoChoiceKey, PayCostKind, PendingCostMoveCompletion, PendingCostMoveResume,
-    PendingCounterPostAction, PendingEffectResolved, PersistedRestoreError,
+    PendingCounterPostAction, PendingEffectResolved, PendingManaAbility, PersistedRestoreError,
     PostReplacementDrainStack, ResolveAllConsentParticipant, ResolveAllConsentRun,
     ResolveAllPrioritySnapshot, RetargetScope, RetargetSlotAddress, StackEntry, StackEntryKind,
     StackResolutionAutoPassOverlay, StackResolutionBudget, StackResolutionEntryFence,
@@ -12841,6 +12841,10 @@ fn apply_action(
                 .suspended_mana_abilities()
                 .next()
                 .is_some() => {}
+        // CR 605.3b: confirming a mana ability's own payment resolves a mana
+        // ability; it commits no play.
+        GameAction::PassPriority
+            if matches!(state.waiting_for, WaitingFor::ManaAbilityManaPayment { .. }) => {}
         GameAction::PassPriority
         | GameAction::PlayLand { .. }
         | GameAction::CastSpell { .. }
@@ -13223,7 +13227,7 @@ fn apply_non_priority_pass_action(
                     .card_types
                     .core_types
                     .contains(&crate::types::card_type::CoreType::Land);
-                let wf = mana_abilities::activate_mana_ability(
+                let wf = mana_abilities::activate_mana_ability_with_payment_mode(
                     state,
                     source_id,
                     *player,
@@ -13232,6 +13236,7 @@ fn apply_non_priority_pass_action(
                     &mut events,
                     crate::types::game_state::ManaAbilityResume::Priority,
                     None,
+                    payment_mode,
                 )?;
                 // CR 605.3b: Track land mana taps for undo (UntapLandForMana),
                 // matching the TapLandForMana path so dual lands are undoable
@@ -15038,13 +15043,14 @@ fn apply_non_priority_pass_action(
             GameAction::ActivateAbility {
                 source_id,
                 ability_index,
-                ..
+                payment_mode,
             },
         ) => engine_payment_choices::handle_unless_payment_activate_ability(
             state,
             waiting_for.clone(),
             source_id,
             ability_index,
+            payment_mode,
             &mut events,
         )?,
         // CR 702.21a: Player selected a card to discard as ward cost payment.
@@ -15092,6 +15098,57 @@ fn apply_non_priority_pass_action(
             pending_mana_ability.resume.clone(),
             &mut events,
         )?,
+        // CR 118.3a: pin a pool unit to pay a manual mana ability's mana cost.
+        (
+            WaitingFor::ManaAbilityManaPayment {
+                player,
+                pending_mana_ability,
+            },
+            GameAction::SpendPoolMana { pip_id },
+        ) => WaitingFor::ManaAbilityManaPayment {
+            player: *player,
+            pending_mana_ability: Box::new(handle_spend_pool_mana_for_mana_ability(
+                state,
+                *player,
+                pending_mana_ability,
+                pip_id,
+            )?),
+        },
+        // CR 118.3a: remove a pin from a manual mana ability's payment.
+        (
+            WaitingFor::ManaAbilityManaPayment {
+                player,
+                pending_mana_ability,
+            },
+            GameAction::UnspendPoolMana { pip_id },
+        ) => WaitingFor::ManaAbilityManaPayment {
+            player: *player,
+            pending_mana_ability: Box::new(handle_unspend_pool_mana_for_mana_ability(
+                pending_mana_ability,
+                pip_id,
+            )?),
+        },
+        // CR 601.2h via CR 602.2b: the player confirms a manual mana ability's
+        // payment, which is paid from the pool as it stands.
+        (
+            WaitingFor::ManaAbilityManaPayment {
+                pending_mana_ability,
+                ..
+            },
+            GameAction::PassPriority,
+        ) => {
+            let wf = mana_abilities::confirm_manual_mana_ability_payment(
+                state,
+                (**pending_mana_ability).clone(),
+                &mut events,
+            )?;
+            if let Some(order_wf) =
+                super::triggers::preserve_order_triggers_resume(state, wf.clone())
+            {
+                return Ok(ActionResult::applied(events, order_wf));
+            }
+            wf
+        }
         (WaitingFor::ManaPayment { player, .. }, GameAction::CancelCast) => {
             // CR 601.2i: Cancelling at mana payment rolls back the cast — pop
             // the stack entry placed at announcement and return the object to
@@ -15604,7 +15661,7 @@ fn apply_non_priority_pass_action(
             GameAction::ActivateAbility {
                 source_id,
                 ability_index,
-                ..
+                payment_mode,
             },
         ) => {
             let (player, resume) =
@@ -15617,7 +15674,9 @@ fn apply_non_priority_pass_action(
                 && mana_abilities::is_mana_ability(&obj.abilities[ability_index])
             {
                 let ability_def = obj.abilities[ability_index].clone();
-                let wf = mana_abilities::activate_mana_ability(
+                // CR 605.3a + CR 117.1d: a mana ability activated while paying is itself
+                // an activation whose own mana cost the player may direct.
+                let wf = mana_abilities::activate_mana_ability_with_payment_mode(
                     state,
                     source_id,
                     player,
@@ -15626,6 +15685,7 @@ fn apply_non_priority_pass_action(
                     &mut events,
                     resume,
                     None,
+                    payment_mode,
                 )?;
                 // CR 605.4a: no outer scan. `activate_mana_ability`
                 // builds a real typed cursor here, and its completed frame has
@@ -17057,6 +17117,18 @@ fn apply_non_priority_pass_action(
             GameAction::ChoosePlayDraw { play_first },
         ) => match_flow::handle_choose_play_draw(state, *player, play_first, &mut events)
             .map_err(EngineError::InvalidAction)?,
+        // CR 103.1: the chooser names the seat that takes the first turn.
+        (
+            WaitingFor::ChooseStartingPlayer { player, candidates },
+            GameAction::ChooseStartingPlayer { player: chosen },
+        ) => match_flow::handle_choose_starting_player(
+            state,
+            *player,
+            candidates,
+            chosen,
+            &mut events,
+        )
+        .map_err(EngineError::InvalidAction)?,
         (
             waiting_for @ WaitingFor::AbilityModeChoice { .. },
             GameAction::SelectModes { indices },
@@ -20032,17 +20104,6 @@ pub(super) fn handle_spend_pool_mana(
     player: PlayerId,
     pip_id: crate::types::mana::ManaPipId,
 ) -> Result<(), EngineError> {
-    // The unit must currently exist in the player's pool.
-    let unit = state
-        .players
-        .iter()
-        .find(|p| p.id == player)
-        .and_then(|p| p.mana_pool.shape_of_pip(pip_id))
-        .cloned()
-        .ok_or_else(|| {
-            EngineError::ActionNotAllowed("No such mana unit in pool to pin".to_string())
-        })?;
-
     let pending = state.pending_cast.as_ref().ok_or_else(|| {
         EngineError::ActionNotAllowed("No pending cast to pin mana for".to_string())
     })?;
@@ -20072,17 +20133,7 @@ pub(super) fn handle_spend_pool_mana(
             .map(crate::types::mana::PaymentContext::Spell)
     };
 
-    let mana_spend_permission = super::casting::player_mana_spend_permission_for_payment(
-        state,
-        player,
-        Some(object_id),
-        ctx.as_ref(),
-    );
-    if !mana_unit_eligible_for_cost(&unit, &cost, ctx.as_ref(), mana_spend_permission) {
-        return Err(EngineError::ActionNotAllowed(
-            "Mana unit cannot pay any part of this cost".to_string(),
-        ));
-    }
+    ensure_pool_unit_can_pay(state, player, pip_id, object_id, &cost, ctx.as_ref())?;
 
     if let Some(pc) = state.pending_cast.as_mut() {
         if !pc.pinned_pool_units.contains(&pip_id) {
@@ -20090,6 +20141,88 @@ pub(super) fn handle_spend_pool_mana(
         }
     }
     Ok(())
+}
+
+/// CR 118.3a + CR 106.6: `pip_id` names a unit in `player`'s pool that could
+/// pay part of `cost` under `ctx`; a pin that could never be honored is refused.
+fn ensure_pool_unit_can_pay(
+    state: &GameState,
+    player: PlayerId,
+    pip_id: crate::types::mana::ManaPipId,
+    source: ObjectId,
+    cost: &crate::types::mana::ManaCost,
+    ctx: Option<&crate::types::mana::PaymentContext<'_>>,
+) -> Result<(), EngineError> {
+    // The unit must currently exist in the player's pool.
+    let unit = state
+        .players
+        .iter()
+        .find(|p| p.id == player)
+        .and_then(|p| p.mana_pool.shape_of_pip(pip_id))
+        .ok_or_else(|| {
+            EngineError::ActionNotAllowed("No such mana unit in pool to pin".to_string())
+        })?;
+    let mana_spend_permission =
+        super::casting::player_mana_spend_permission_for_payment(state, player, Some(source), ctx);
+    if !mana_unit_eligible_for_cost(unit, cost, ctx, mana_spend_permission) {
+        return Err(EngineError::ActionNotAllowed(
+            "Mana unit cannot pay any part of this cost".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+/// CR 118.3a: pin a pool unit to pay a manual mana ability's mana sub-cost. A
+/// pin is offered only by the manual window, and only a unit that could pay
+/// part of that cost under the activation's context is accepted (CR 106.6).
+fn handle_spend_pool_mana_for_mana_ability(
+    state: &GameState,
+    player: PlayerId,
+    pending: &PendingManaAbility,
+    pip_id: crate::types::mana::ManaPipId,
+) -> Result<PendingManaAbility, EngineError> {
+    ensure_manual_mana_ability_payment(pending)?;
+    let cost = mana_abilities::pending_mana_sub_cost(state, pending)?.ok_or_else(|| {
+        EngineError::InvalidAction("This mana ability has no mana cost to pay".to_string())
+    })?;
+    let activation_context =
+        casting::activation_payment_context(state, pending.source_id, pending.ability_index);
+    ensure_pool_unit_can_pay(
+        state,
+        player,
+        pip_id,
+        pending.source_id,
+        &cost,
+        Some(&activation_context.as_payment_context()),
+    )?;
+    let mut updated = pending.clone();
+    if !updated.pinned_pool_units.contains(&pip_id) {
+        updated.pinned_pool_units.push(pip_id);
+    }
+    Ok(updated)
+}
+
+/// CR 118.3a: remove a pin from a manual mana ability's payment.
+fn handle_unspend_pool_mana_for_mana_ability(
+    pending: &PendingManaAbility,
+    pip_id: crate::types::mana::ManaPipId,
+) -> Result<PendingManaAbility, EngineError> {
+    ensure_manual_mana_ability_payment(pending)?;
+    let mut updated = pending.clone();
+    updated.pinned_pool_units.retain(|id| *id != pip_id);
+    Ok(updated)
+}
+
+/// CR 601.2g via CR 602.2b: only a manually paid mana ability directs its pool
+/// units; an automatic one's window is paid by activating mana abilities alone.
+fn ensure_manual_mana_ability_payment(pending: &PendingManaAbility) -> Result<(), EngineError> {
+    if casting::payment_mode_pays_mana_manually(pending.payment_mode) {
+        Ok(())
+    } else {
+        Err(EngineError::ActionNotAllowed(
+            "Pool mana is directed only in a manual mana-ability payment".to_string(),
+        ))
+    }
 }
 
 /// CR 118.3a: Remove a previously-recorded pin. Always legal — a no-op if the
@@ -21032,27 +21165,26 @@ fn build_contest_rounds(
 
 /// Start game with mulligan flow. If no cards in libraries, skips mulligan.
 ///
-/// CR 103.1: At the start of game 1 of a match the players determine who takes
-/// the first turn "using any mutually agreeable method (flipping a coin,
-/// rolling dice, etc.)". This engine models that determination as an
+/// CR 103.1: At the start of game 1 of a match the players determine which one
+/// of them will choose who takes the first turn, "using any mutually agreeable
+/// method (flipping a coin, rolling dice, etc.)". This engine's method is an
 /// authoritative d20 high-roll contest — one d20 per seat using the game's
 /// seeded RNG (CR 706, rolling a die) — with ties rerolled among the tied top
-/// group. NOTE ON FIDELITY: the literal CR 103.1 sequence is "contest winner
-/// *chooses* who takes the first turn"; this engine collapses that to "contest
-/// winner *becomes* the starting player" (it does not present a play/draw
-/// choice here), an existing, accepted simplification — the annotation does not
-/// claim the choose-step is implemented. Subsequent games in a multi-game match
-/// route through `match_flow::start_next_game`, which uses `next_game_chooser`
-/// instead, so this function is always the game-1 path.
+/// group. The contest determines **who chooses**: the function ends at
+/// `WaitingFor::ChooseStartingPlayer`, and the chooser's answer
+/// (`match_flow::handle_choose_starting_player`) starts the game. Subsequent
+/// games in a multi-game match route through `match_flow::start_next_game`,
+/// which uses `next_game_chooser` instead, so this function is always the
+/// game-1 path.
 ///
 /// The contest is surfaced as a single authoritative
 /// `GameEvent::StartingPlayerContest` carrying the full round structure (round
 /// 1 = all seats, each later round = the prior round's tied-max reroll group)
 /// plus the engine's authoritative `winner`, so downstream consumers render the
-/// contest round by round without re-deriving anything. It is inserted at the
-/// front of the result, ahead of `GameStarted` → `TurnStarted`. This replaces
-/// the prior flat per-roll `DieRolled` batch; in-game die rolls still emit
-/// `DieRolled`.
+/// contest round by round without re-deriving anything. It is the only event
+/// of the start batch; `GameStarted` → `TurnStarted` follow in the answer's
+/// batch. This replaces the prior flat per-roll `DieRolled` batch; in-game die
+/// rolls still emit `DieRolled`.
 ///
 /// DETERMINISM: the contest draws only from `state.rng` (the seeded
 /// `ChaCha20Rng`), never thread/global RNG, so replays and AI search stay
@@ -21061,11 +21193,12 @@ fn build_contest_rounds(
 /// representation change introduces ZERO determinism shift relative to the
 /// prior `DieRolled`-batch implementation. (It still differs from the original
 /// single `random_range(0..len)` pick that predated the contest, an earlier,
-/// accepted shift.)
+/// accepted shift.) The choice itself draws nothing from `state.rng`.
 ///
 /// Callers that need a deterministic starter (tests, fixed scenarios) must use
 /// `start_game_with_starting_player` directly — that path runs no contest and
-/// emits no `StartingPlayerContest` event.
+/// emits no `StartingPlayerContest` event. Callers that predate the choice and
+/// are not about it use `start_game_winner_plays_first`.
 pub fn start_game(state: &mut GameState) -> ActionResult {
     let before = state.clone();
     if state.seat_order.is_empty() {
@@ -21091,11 +21224,11 @@ pub fn start_game(state: &mut GameState) -> ActionResult {
         return start_game_with_starting_player(state, first);
     }
 
-    // CR 103.1 / CR 706: roll one d20 per seat; the high roller becomes the
-    // starting player. Draw order/count is identical to the prior
+    // CR 103.1 / CR 706: roll one d20 per seat; the high roller chooses who
+    // takes the first turn. Draw order/count is identical to the prior
     // implementation — one `random_range(1..=20)` per contender, in seat order.
     let seat_order = state.seat_order.clone();
-    let (rounds, starting_player) = build_contest_rounds(&seat_order, |contenders| {
+    let (rounds, winner) = build_contest_rounds(&seat_order, |contenders| {
         contenders
             .iter()
             .map(|&seat| {
@@ -21107,15 +21240,42 @@ pub fn start_game(state: &mut GameState) -> ActionResult {
             .collect()
     });
 
-    let mut result = start_game_with_starting_player(state, starting_player);
-    // CR 103.1: StartingPlayerContest → GameStarted → TurnStarted.
-    result.events.insert(
-        0,
-        GameEvent::StartingPlayerContest {
-            rounds,
-            winner: starting_player,
-        },
-    );
+    // CR 103.1: the contest decides who chooses; the chooser names the starting
+    // player. CR 103.1a: under shared team turns the chooser and the candidates
+    // are side representatives, so the choice names a starting team.
+    normalize_match_type(state);
+    let events = vec![GameEvent::StartingPlayerContest { rounds, winner }];
+    let waiting_for = WaitingFor::ChooseStartingPlayer {
+        player: super::topology::normalize_shared_turn_recipient(state, winner),
+        candidates: super::topology::turn_representatives(state),
+    };
+    state.waiting_for = waiting_for.clone();
+    bump_state_revision(state);
+    mark_public_state_all_dirty(state);
+    finalize_public_state(state);
+    let log_entries = super::log::resolve_log_entries(&events, &before, state);
+    ActionResult::applied(events, waiting_for).with_log_entries(log_entries)
+}
+
+/// CR 103.1 with the contest winner electing to take the first turn:
+/// `start_game`, then the raw roll winner starts, in every format (under
+/// shared team turns too, where it may be a team's second seat). The single
+/// migration authority for routes that predate the game-one choice (replay
+/// formats 2–3) and for harnesses whose subject is not the choice. Archenemy,
+/// Horde and seatless starts emit no contest and pass through, since
+/// `start_game` already started them.
+pub fn start_game_winner_plays_first(state: &mut GameState) -> ActionResult {
+    let before = state.clone();
+    let mut result = start_game(state);
+    let Some(winner) = result.events.iter().find_map(|event| match event {
+        GameEvent::StartingPlayerContest { winner, .. } => Some(*winner),
+        _ => None,
+    }) else {
+        return result; // Archenemy / Horde / seatless: already started
+    };
+    let start = start_game_with_starting_player(state, winner);
+    result.events.extend(start.events);
+    result.waiting_for = start.waiting_for;
     result.log_entries = super::log::resolve_log_entries(&result.events, &before, state);
     result
 }
@@ -21128,6 +21288,22 @@ fn match_type_within(configured: MatchType, ceiling: MatchType) -> MatchType {
             MatchType::Bo1
         }
     }
+}
+
+/// The match type this game plays: Bo3 only for two-player or Archenemy
+/// games, and never longer than the format's ceiling. Idempotent.
+fn normalize_match_type(state: &mut GameState) {
+    if state.match_config.match_type == MatchType::Bo3
+        && state.players.len() != 2
+        && super::topology::archenemy(state).is_none()
+    {
+        state.match_config.match_type = MatchType::Bo1;
+    }
+    // The ceiling is read from the format, so no host-supplied match config can raise it.
+    state.match_config.match_type = match_type_within(
+        state.match_config.match_type,
+        state.format_config.format.best_of_three_ceiling(),
+    );
 }
 
 /// Start game with a specific player taking the first turn.
@@ -21148,17 +21324,7 @@ pub fn start_game_with_starting_player(
         super::topology::archenemy(state).unwrap_or(starting_player)
     };
 
-    if state.match_config.match_type == MatchType::Bo3
-        && state.players.len() != 2
-        && super::topology::archenemy(state).is_none()
-    {
-        state.match_config.match_type = MatchType::Bo1;
-    }
-    // The ceiling is read from the format, so no host-supplied match config can raise it.
-    state.match_config.match_type = match_type_within(
-        state.match_config.match_type,
-        state.format_config.format.best_of_three_ceiling(),
-    );
+    normalize_match_type(state);
 
     events.push(GameEvent::GameStarted);
 
