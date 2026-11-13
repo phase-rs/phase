@@ -3568,6 +3568,7 @@ fn try_parse_die_exile_rider(lower: &str, kind: AbilityKind) -> Option<AbilityDe
         .parse(lower)
         .ok()?;
     let (rest, _) = alt((
+        tag::<_, _, OracleError<'_>>("that permanent"),
         tag::<_, _, OracleError<'_>>("that creature or planeswalker"),
         tag("that creature"),
         tag("that planeswalker"),
@@ -57906,5 +57907,122 @@ mod iteration_destination_rebinding_tests {
             destination_of(&folded(TokenAttackDestination::ControllerChooses, &qty)),
             &TokenAttackDestination::ControllerChooses
         );
+    }
+}
+
+#[cfg(test)]
+mod essence_burn_parser_tests {
+    use super::*;
+    use crate::parser::oracle::parse_oracle_text;
+
+    const ESSENCE_BURN: &str = "Essence Burn deals 5 damage to target black or green creature or planeswalker. If that permanent would die this turn, exile it instead.";
+
+    #[test]
+    fn essence_burn_full_document_parse_keeps_all_four_targets_and_rider() {
+        let parsed = parse_oracle_text(
+            ESSENCE_BURN,
+            "Essence Burn",
+            &[],
+            &["Instant".to_string()],
+            &[],
+        );
+        assert!(
+            parsed.parse_warnings.is_empty(),
+            "the exact Oracle text must have no swallowed-clause warning: {:?}",
+            parsed.parse_warnings
+        );
+        assert_eq!(parsed.abilities.len(), 1, "one spell ability");
+        let damage = &parsed.abilities[0];
+        let Effect::DealDamage { amount, target, .. } = damage.effect.as_ref() else {
+            panic!(
+                "the first clause must be DealDamage, got {:?}",
+                damage.effect
+            );
+        };
+        assert_eq!(
+            amount,
+            &crate::types::ability::QuantityExpr::Fixed { value: 5 }
+        );
+        let TargetFilter::Or { filters } = target else {
+            panic!("the target must retain its color/type alternatives, got {target:?}");
+        };
+        assert_eq!(filters.len(), 4, "exactly four type/color legs");
+        let expected = [
+            (TypeFilter::Creature, crate::types::mana::ManaColor::Black),
+            (TypeFilter::Creature, crate::types::mana::ManaColor::Green),
+            (
+                TypeFilter::Planeswalker,
+                crate::types::mana::ManaColor::Black,
+            ),
+            (
+                TypeFilter::Planeswalker,
+                crate::types::mana::ManaColor::Green,
+            ),
+        ];
+        for (type_filter, color) in expected {
+            assert!(
+                filters.iter().any(|leg| {
+                    let TargetFilter::Typed(typed) = leg else {
+                        return false;
+                    };
+                    typed.type_filters == vec![type_filter.clone()]
+                        && typed.properties.contains(&FilterProp::HasColor { color })
+                }),
+                "missing target combination {type_filter:?} / {color:?}: {filters:?}"
+            );
+        }
+
+        let rider = damage
+            .sub_ability
+            .as_deref()
+            .expect("the die-exile clause must be absorbed by the damage ability");
+        let Effect::AddTargetReplacement { replacement, .. } = rider.effect.as_ref() else {
+            panic!(
+                "the second clause must install a replacement, got {:?}",
+                rider.effect
+            );
+        };
+        assert_eq!(replacement.event, ReplacementEvent::Moved);
+        assert_eq!(replacement.valid_card, Some(TargetFilter::SelfRef));
+        assert_eq!(replacement.expiry, Some(RestrictionExpiry::EndOfTurn));
+        assert!(replacement.consume_on_apply);
+        let exile = replacement
+            .execute
+            .as_deref()
+            .expect("the replacement must redirect the matching move");
+        assert!(matches!(
+            exile.effect.as_ref(),
+            Effect::ChangeZone {
+                origin: Some(Zone::Battlefield),
+                destination: Zone::Exile,
+                target: TargetFilter::SelfRef,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn ordinary_creature_die_exile_rider_remains_supported() {
+        let parsed = parse_oracle_text(
+            "Lava Coil deals 4 damage to target creature. If that creature would die this turn, exile it instead.",
+            "Lava Coil",
+            &[],
+            &["Sorcery".to_string()],
+            &[],
+        );
+        assert!(
+            parsed.parse_warnings.is_empty(),
+            "{:?}",
+            parsed.parse_warnings
+        );
+        let damage = parsed.abilities.first().expect("spell ability");
+        assert!(matches!(damage.effect.as_ref(), Effect::DealDamage { .. }));
+        assert!(matches!(
+            damage
+                .sub_ability
+                .as_deref()
+                .map(|rider| rider.effect.as_ref()),
+            Some(Effect::AddTargetReplacement { .. })
+        ));
     }
 }

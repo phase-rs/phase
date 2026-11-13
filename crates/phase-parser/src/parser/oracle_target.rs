@@ -5644,9 +5644,11 @@ fn finalize_or_disjunction(combined: TargetFilter, shared_props: &[FilterProp]) 
 
 /// CR 105.2 + CR 205.2a: "<color> or <type> <noun>" ("black or artifact
 /// creature") joins two kinds of the same noun: the noun of that color, or the
-/// noun with that type. `left_props` hold the color-only left leg, `right` is
+/// noun with that type. When the right side is itself a shared noun disjunction
+/// ("black or green creature or planeswalker"), distribute the color choices
+/// across each noun leg. `left_props` hold the color-only left leg, `right` is
 /// the parsed right leg and `right_text` its lowercase source. Returns `None`
-/// unless the left leg is a color and the right leg leads with a type word.
+/// unless the left leg is a color and the right leg starts with a type phrase.
 ///
 /// Skips `distribute_core_type_to_or`: backfilling the color-only leg with the
 /// right leg's whole type list would include the type adjective and make the
@@ -5656,37 +5658,87 @@ fn parse_color_or_type_union(
     right: &TargetFilter,
     right_text: &str,
 ) -> Option<TargetFilter> {
-    if !left_props
+    let left_colors: Vec<ManaColor> = left_props
         .iter()
-        .any(|prop| matches!(prop, FilterProp::HasColor { .. }))
-    {
+        .filter_map(|prop| match prop {
+            FilterProp::HasColor { color } => Some(*color),
+            _ => None,
+        })
+        .collect();
+    if left_colors.is_empty() {
         return None;
     }
-    let TargetFilter::Typed(right_typed) = right else {
-        return None;
-    };
-    let (_, adjective) = nom_target::parse_type_filter_word(right_text).ok()?;
-    let mut noun = right_typed
-        .type_filters
-        .iter()
-        .filter(|type_filter| **type_filter != adjective)
-        .cloned();
-    let left = typed(
-        noun.next().unwrap_or(TypeFilter::Any),
-        None,
-        left_props.to_vec(),
-        noun.collect(),
-    );
-    let shared: Vec<FilterProp> = left_props
-        .iter()
-        .filter(|prop| !is_adjective_prefix_prop(prop))
-        .cloned()
-        .collect();
-    let combined = distribute_controller_to_or(TargetFilter::Or {
-        filters: vec![left, right.clone()],
-    });
-    let combined = distribute_shared_properties(combined, &shared);
-    Some(distribute_properties_to_or(combined))
+    match right {
+        TargetFilter::Typed(right_typed) => {
+            let (_, adjective) = nom_target::parse_type_filter_word(right_text).ok()?;
+            let mut noun = right_typed
+                .type_filters
+                .iter()
+                .filter(|type_filter| **type_filter != adjective)
+                .cloned();
+            let left = typed(
+                noun.next().unwrap_or(TypeFilter::Any),
+                None,
+                left_props.to_vec(),
+                noun.collect(),
+            );
+            let shared: Vec<FilterProp> = left_props
+                .iter()
+                .filter(|prop| !is_adjective_prefix_prop(prop))
+                .cloned()
+                .collect();
+            let combined = distribute_controller_to_or(TargetFilter::Or {
+                filters: vec![left, right.clone()],
+            });
+            let combined = distribute_shared_properties(combined, &shared);
+            Some(distribute_properties_to_or(combined))
+        }
+        TargetFilter::Or { filters }
+            if left_props
+                .iter()
+                .all(|prop| matches!(prop, FilterProp::HasColor { .. })) =>
+        {
+            let mut product = Vec::new();
+            for leg in filters {
+                let TargetFilter::Typed(typed_leg) = leg else {
+                    return None;
+                };
+                if typed_leg.type_filters.is_empty()
+                    || typed_leg.type_filters.contains(&TypeFilter::Any)
+                {
+                    return None;
+                }
+                let leg_colors: Vec<ManaColor> = typed_leg
+                    .properties
+                    .iter()
+                    .filter_map(|prop| match prop {
+                        FilterProp::HasColor { color } => Some(*color),
+                        _ => None,
+                    })
+                    .collect();
+                let common_properties: Vec<FilterProp> = typed_leg
+                    .properties
+                    .iter()
+                    .filter(|prop| !matches!(prop, FilterProp::HasColor { .. }))
+                    .cloned()
+                    .collect();
+                let mut colors = left_colors.clone();
+                for color in leg_colors {
+                    if !colors.contains(&color) {
+                        colors.push(color);
+                    }
+                }
+                for color in colors {
+                    let mut colored_leg = typed_leg.clone();
+                    colored_leg.properties = common_properties.clone();
+                    colored_leg.properties.push(FilterProp::HasColor { color });
+                    product.push(TargetFilter::Typed(colored_leg));
+                }
+            }
+            (!product.is_empty()).then_some(TargetFilter::Or { filters: product })
+        }
+        _ => None,
+    }
 }
 
 /// CR 609.7 + CR 702.72a: Read a reader's whole "X or Y" qualifier ("red or
@@ -25494,6 +25546,24 @@ mod color_or_type_union {
             vec![
                 (vec![TypeFilter::Creature], vec![ManaColor::Black]),
                 (vec![TypeFilter::Artifact, TypeFilter::Creature], vec![]),
+            ]
+        );
+    }
+
+    /// CR 105.2 + CR 205.2a: shared color alternatives distribute over each
+    /// noun alternative, so the phrase names exactly the four valid pairs.
+    #[test]
+    fn shared_color_alternatives_cross_with_noun_alternatives() {
+        let phrase = "black or green creature or planeswalker";
+        let (filter, rest) = parse_type_phrase_folding(phrase);
+        assert_eq!(rest, "", "the full grammar phrase must be consumed");
+        assert_eq!(
+            legs(&filter),
+            vec![
+                (vec![TypeFilter::Creature], vec![ManaColor::Black]),
+                (vec![TypeFilter::Creature], vec![ManaColor::Green]),
+                (vec![TypeFilter::Planeswalker], vec![ManaColor::Black]),
+                (vec![TypeFilter::Planeswalker], vec![ManaColor::Green]),
             ]
         );
     }

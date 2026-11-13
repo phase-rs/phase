@@ -123,6 +123,7 @@ mod escape_tunnel_landfall;
 mod esix_fractal_bloom;
 mod esper_origins_flashback_transform;
 mod esper_terra_saga_token_lore;
+mod essence_burn;
 mod etb_rider_onset;
 mod etb_trigger_entry_time_characteristics;
 mod etb_trigger_order_mana_window;

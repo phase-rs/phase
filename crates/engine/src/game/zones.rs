@@ -1419,6 +1419,12 @@ pub fn apply_resolved_zone_change(
         .objects
         .get_mut(&command.object.object_id)
         .expect("validated zone command object remains live");
+    // CR 400.7: replay bypasses the live exit cleanup, so clear battlefield-only
+    // state on the same real departure. A same-zone ordering change is not a new
+    // battlefield object and keeps its state.
+    if command.from == Zone::Battlefield && command.to != Zone::Battlefield {
+        object.reset_for_battlefield_exit();
+    }
     object.zone = command.to;
     if command.rebound_from.is_some() {
         install_rebound_owner(object, command.owner);
@@ -1434,6 +1440,15 @@ pub fn apply_resolved_zone_change(
     // CR 400.7: the same object-bound grant lifetime as the live cleanup
     // (issue #8795), through the shared authority.
     prune_object_bound_effects_on_exit(state, command.object.object_id, command.from, command.to);
+    if command.from == Zone::Battlefield && command.to != Zone::Battlefield {
+        // CR 400.7 + CR 613.1: the live move restores the printed baseline after
+        // pruning battlefield-bound effects. This also ends resolution-installed
+        // riders from the departing object before a later re-entry.
+        if let Some(object) = state.objects.get_mut(&command.object.object_id) {
+            object.revert_layered_characteristics_to_base();
+        }
+        state.layers_dirty.mark_full();
+    }
     let object = state
         .objects
         .get_mut(&command.object.object_id)
