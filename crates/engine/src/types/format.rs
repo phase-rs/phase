@@ -3863,11 +3863,9 @@ fn legality_table_format(table: LegalityFormat) -> GameFormat {
 
 impl FormatConfig {
     /// CR 903.12h: a save written while Brawl still carried CR 704.6c's
-    /// commander-damage threshold restores without it. Persistence ingress only;
-    /// network payloads keep the strict validator.
-    pub(crate) fn migrate_persisted_brawl_commander_damage_threshold(
-        config: &mut serde_json::Value,
-    ) {
+    /// commander-damage threshold restores without it. Persistence and local
+    /// game-init ingress only; network payloads keep the strict validator.
+    pub fn migrate_persisted_brawl_commander_damage_threshold(config: &mut serde_json::Value) {
         let is_brawl = config
             .get("format")
             .and_then(|format| GameFormat::deserialize(format).ok())

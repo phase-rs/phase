@@ -265,6 +265,13 @@ fn resolve_and_validate_initialize_format_config(
     Ok(format_config)
 }
 
+/// A local start-fresh may replay a config persisted before Brawl lost its
+/// commander-damage threshold, so it takes the persisted-save migration.
+fn decode_initialize_format_config(mut config: serde_json::Value) -> Result<FormatConfig, String> {
+    FormatConfig::migrate_persisted_brawl_commander_damage_threshold(&mut config);
+    serde_json::from_value(config).map_err(|error| error.to_string())
+}
+
 fn parse_initialize_format_config(
     decoded: Result<FormatConfig, String>,
 ) -> Result<FormatConfig, serde_json::Value> {
@@ -462,6 +469,37 @@ mod external_format_config_tests {
             resolve_and_validate_initialize_format_config(Some(commander_draft), 2)
                 .expect_err("2 players is outside CommanderDraft's 3-8 registry range")
                 .contains("player_count")
+        );
+    }
+
+    fn with_damage_threshold(config: FormatConfig) -> serde_json::Value {
+        let mut value = serde_json::to_value(config).expect("config serializes");
+        value["commander_damage_threshold"] = serde_json::json!(21);
+        value
+    }
+
+    #[test]
+    fn initialize_drops_a_legacy_brawl_commander_damage_threshold() {
+        for config in [FormatConfig::brawl(), FormatConfig::historic_brawl()] {
+            let decoded = decode_initialize_format_config(with_damage_threshold(config))
+                .expect("a persisted legacy Brawl config starts a fresh game");
+            assert_eq!(decoded.commander_damage_threshold, None);
+        }
+    }
+
+    #[test]
+    fn initialize_keeps_commander_damage_threshold_outside_brawl() {
+        let decoded =
+            decode_initialize_format_config(with_damage_threshold(FormatConfig::commander()))
+                .expect("Commander keeps its threshold");
+        assert_eq!(decoded.commander_damage_threshold, Some(21));
+    }
+
+    #[test]
+    fn direct_format_config_decode_still_rejects_a_brawl_damage_threshold() {
+        assert!(
+            serde_json::from_value::<FormatConfig>(with_damage_threshold(FormatConfig::brawl()))
+                .is_err()
         );
     }
 
@@ -2067,8 +2105,9 @@ fn initialize_game_impl(
 
     let decoded_format_config = if !format_config_js.is_null() && !format_config_js.is_undefined() {
         match parse_initialize_format_config(
-            serde_wasm_bindgen::from_value::<FormatConfig>(format_config_js)
-                .map_err(|error| error.to_string()),
+            serde_wasm_bindgen::from_value::<serde_json::Value>(format_config_js)
+                .map_err(|error| error.to_string())
+                .and_then(decode_initialize_format_config),
         ) {
             Ok(config) => Some(config),
             Err(error) => return to_js(&error),
