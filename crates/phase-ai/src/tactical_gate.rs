@@ -31,6 +31,8 @@ use engine::game::quantity::{
     static_definition_is_cast_stable_for_pre_cast, trigger_definition_is_cast_stable_for_pre_cast,
     try_resolve_quantity_in_source_context,
 };
+#[cfg(test)]
+use engine::game::scenario_db::GameScenarioDbExt;
 use engine::game::stack::stack_object_controller;
 use engine::game::targeting::find_legal_targets;
 use engine::game::triggers::{
@@ -10297,7 +10299,6 @@ mod tests {
         gev_controller: PlayerId,
         bears_controller: PlayerId,
     ) -> (bool, bool, Vec<bool>) {
-        use engine::game::scenario_db::GameScenarioDbExt;
         let db = crate::test_support::shared_integration_card_db();
         let mut scenario = match format {
             Some(format) => GameScenario::new_with_format(format, 4, 7),

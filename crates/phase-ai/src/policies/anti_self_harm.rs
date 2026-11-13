@@ -11,6 +11,10 @@ use engine::game::keywords;
 use engine::game::life_safety::{preview_candidate_life_safety, CandidateLifeSafety};
 use engine::game::mana_abilities;
 use engine::game::quantity::resolve_quantity;
+#[cfg(test)]
+use engine::game::scenario::GameScenario;
+#[cfg(test)]
+use engine::game::scenario_db::GameScenarioDbExt;
 use engine::game::targeting::find_legal_targets;
 use engine::game::turn_control;
 #[cfg(test)]
@@ -6766,8 +6770,6 @@ mod tests {
         gev_controller: PlayerId,
         bears_controller: PlayerId,
     ) -> (f64, f64) {
-        use engine::game::scenario::GameScenario;
-        use engine::game::scenario_db::GameScenarioDbExt;
         let db = crate::test_support::shared_integration_card_db();
         let mut scenario = match format {
             Some(format) => GameScenario::new_with_format(format, 4, 7),
