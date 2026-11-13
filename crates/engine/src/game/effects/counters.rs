@@ -3595,10 +3595,15 @@ pub fn resolve_remove(
                 })
                 .unwrap_or_default();
             // `obj.counters` is a `HashMap`, whose iteration order changes from run
-            // to run, and the printed instruction fixes no order among the kinds it
-            // removes. Walk the kinds in `CounterType` order so the event order and
-            // the finite budget's pick are deterministic.
-            counters.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+            // to run, and the printed instruction fixes no order among the kinds a
+            // remove-all removes. Walk the kinds in `CounterType` order so the event
+            // order is deterministic. A finite untyped single removal ("remove a
+            // counter from target permanent", Thrull Parasite) is not remove-all
+            // processing: CR 608.2d gives its kind choice to the player, so this
+            // ordering must not decide which kind its budget removes.
+            if scope == EffectScope::All || raw_count < 0 {
+                counters.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+            }
             if raw_count < 0 {
                 counters
             } else {

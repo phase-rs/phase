@@ -376,3 +376,119 @@ fn heartmender_upkeep_removes_one_counter_from_each_of_your_creatures() {
         "the opponent's creature is not one you control"
     );
 }
+
+const PROTEAN_HYDRA: &str = "This creature enters with X +1/+1 counters on it.\n\
+If damage would be dealt to this creature, prevent that damage and remove that many +1/+1 counters from it.\n\
+Whenever a +1/+1 counter is removed from this creature, put two +1/+1 counters on it at the beginning of the next end step.";
+const GLORIOUS_ANTHEM: &str = "Creatures you control get +1/+1.";
+const THRULL_PARASITE: &str = "{T}, Pay 2 life: Remove a counter from target nonland permanent.";
+
+/// F1 (CR 603.2c): one `CounterRemoved { count: 2 }` event holds two occurrences,
+/// so Protean Hydra's "Whenever a +1/+1 counter is removed from this creature"
+/// fires twice (ruling: "If multiple +1/+1 counters are removed from Protean
+/// Hydra at once, its last ability will trigger that many times"). Glorious
+/// Anthem keeps the 0/0 Hydra alive once Aether Snap strips its two counters;
+/// each firing creates its own delayed trigger, restoring 2 + 2 counters.
+#[test]
+fn aether_snap_triggers_protean_hydra_once_per_counter_removed() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let hydra = scenario
+        .add_creature_from_oracle(P0, "Protean Hydra", 0, 0, PROTEAN_HYDRA)
+        .id();
+    scenario.with_counter(hydra, CounterType::Plus1Plus1, 2);
+    scenario.add_enchantment_from_oracle(P0, "Glorious Anthem", GLORIOUS_ANTHEM);
+    let snap = scenario
+        .add_spell_to_hand_from_oracle(P0, "Aether Snap", false, AETHER_SNAP)
+        .with_mana_cost(ManaCost::generic(0))
+        .id();
+    let mut runner = scenario.build();
+
+    let outcome = runner.cast(snap).resolve();
+    let removed = removals(outcome.events());
+    assert_eq!(
+        removed,
+        vec![(hydra, CounterType::Plus1Plus1, 2)],
+        "the mass removal emits one aggregate event for the two counters"
+    );
+    assert_eq!(count_of(&runner, hydra, &CounterType::Plus1Plus1), 0);
+    assert!(
+        runner.state().objects.contains_key(&hydra)
+            && runner.state().objects[&hydra].zone == Zone::Battlefield,
+        "Glorious Anthem keeps the Hydra alive"
+    );
+    runner.advance_until_stack_empty();
+    assert_eq!(
+        runner.state().delayed_triggers.len(),
+        2,
+        "one Hydra firing per counter removed (CR 603.2c), each creating its own end-step delayed trigger"
+    );
+    // Drive to the end step: decline to attack, then pass priority until both
+    // delayed triggers have fired and resolved.
+    for _ in 0..60 {
+        if count_of(&runner, hydra, &CounterType::Plus1Plus1) == 4 {
+            break;
+        }
+        match runner.state().waiting_for.clone() {
+            WaitingFor::Priority { .. } => {
+                runner.act(GameAction::PassPriority).expect("pass priority");
+            }
+            WaitingFor::DeclareAttackers { .. } => {
+                runner
+                    .act(GameAction::DeclareAttackers {
+                        attacks: vec![],
+                        bands: vec![],
+                    })
+                    .expect("declare no attackers");
+            }
+            // Two identical Hydra delayed triggers fire together: the
+            // controller orders them (CR 603.3b); any order is the same.
+            WaitingFor::OrderTriggers { triggers, .. } => {
+                assert_eq!(triggers.len(), 2, "both Hydra delayed triggers are ordered");
+                runner
+                    .act(GameAction::OrderTriggers { order: vec![0, 1] })
+                    .expect("order triggers");
+            }
+            other => panic!("unexpected prompt before the end step: {other:?}"),
+        }
+    }
+    assert_eq!(
+        count_of(&runner, hydra, &CounterType::Plus1Plus1),
+        4,
+        "two delayed triggers each put two +1/+1 counters on the Hydra"
+    );
+}
+
+/// F2 (CR 608.2d): a finite untyped single removal ("Remove a counter from target
+/// nonland permanent", Thrull Parasite) is not remove-all processing, so the
+/// `CounterType` ordering of the mass resolver must not decide which kind it
+/// removes. Every run removes exactly one counter in total, and across runs
+/// (each object's `HashMap` is independently seeded) both kinds are removed at
+/// least once; a fixed lowest-kind pick would remove only the +1/+1 counter.
+#[test]
+fn thrull_parasite_finite_removal_is_not_pinned_to_the_lowest_counter_kind() {
+    let mut removed_plus1 = 0u32;
+    let mut removed_ice = 0u32;
+    for _ in 0..24 {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let parasite = scenario
+            .add_creature_from_oracle(P0, "Thrull Parasite", 1, 1, THRULL_PARASITE)
+            .id();
+        let victim = scenario.add_creature(P1, "Their Bear", 3, 3).id();
+        scenario.with_counter(victim, CounterType::Plus1Plus1, 1);
+        scenario.with_counter(victim, ice(), 1);
+        let mut runner = scenario.build();
+
+        runner.activate(parasite, 0).target_object(victim).resolve();
+        let plus1 = count_of(&runner, victim, &CounterType::Plus1Plus1);
+        let ice_left = count_of(&runner, victim, &ice());
+        assert_eq!(plus1 + ice_left, 1, "exactly one counter is removed");
+        removed_plus1 += u32::from(plus1 == 0);
+        removed_ice += u32::from(ice_left == 0);
+    }
+    assert!(
+        removed_plus1 > 0 && removed_ice > 0,
+        "both kinds are removable by a finite single removal: +1/+1 removed {removed_plus1}x, ice removed {removed_ice}x"
+    );
+}
