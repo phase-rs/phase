@@ -2222,12 +2222,18 @@ pub(crate) fn parse_trigger_line_with_index_ir(
                 }
                 let (stripped_text, disposition) =
                     extract_illegal_targets_disposition(&effect_for_parse);
-                // CR 118.12: a hoisted unless-payment with a targeted payer is
-                // stamped back on the root and announced before the body's
-                // own target, so the body is no proven single-role root.
-                let body_root = if unless_pay.as_ref().is_some_and(|modifier| {
-                    crate::types::ability::payer_is_declared_target(&modifier.payer)
-                }) {
+                // The body is no proven single mandatory-role root when a
+                // trigger-level modifier is stamped on the root after it is
+                // parsed:
+                // - CR 118.12: a hoisted unless-payment with a targeted payer is
+                //   announced before the body's own target;
+                // - CR 603.3d + CR 115.6: the body-wide optional-target phrasing
+                //   (`has_up_to`, from an "up to one" anywhere in the body)
+                //   makes the root's own target declinable.
+                let body_root = if has_up_to
+                    || unless_pay.as_ref().is_some_and(|modifier| {
+                        crate::types::ability::payer_is_declared_target(&modifier.payer)
+                    }) {
                     ResolvedChainRoot::Unproven
                 } else {
                     ResolvedChainRoot::Proven
@@ -2493,10 +2499,10 @@ pub(crate) fn reflexive_event_trigger(
 /// ([`ResolvedChainRoot`]). The proof is cleared afterwards even when the parse
 /// never reached a chain body, because `ctx` outlives this one parse.
 ///
-/// `root` is `Unproven` when the trigger hoisted an unless-payment whose payer
-/// is a declared target (CR 118.12): lowering stamps that payer back on the
-/// root, where it is announced before the body's own target, so the body's
-/// single-role proof would not hold.
+/// `root` is `Unproven` when lowering will stamp a trigger-level modifier on
+/// the root that breaks the body's single mandatory-role proof: a hoisted
+/// unless-payment whose payer is a declared target (CR 118.12), or the
+/// body-wide optional-target phrasing (CR 603.3d + CR 115.6).
 fn parse_trigger_body_chain_ir(
     text: &str,
     ctx: &mut ParseContext,

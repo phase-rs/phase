@@ -12859,6 +12859,48 @@ mod tests {
         }
     }
 
+    /// CR 603.3d + CR 115.6: an "up to one" anywhere in a trigger body makes
+    /// trigger lowering stamp `optional_targeting` on the root, so the gated
+    /// root's own target becomes declinable and the single mandatory-role
+    /// proof no longer holds; the suffix is not bound. Skulking Killer's
+    /// printed trigger followed by a synthetic unconditional "Up to one target
+    /// creature you control gets +2/+2 until end of turn." (printed witness of
+    /// the stamp: Blue Dragon's later "up to one other target creature"). The
+    /// reach guards: the printed trigger alone binds with a mandatory target,
+    /// and the extended trigger's root target is stamped optional.
+    #[test]
+    fn target_controller_suffix_under_a_body_wide_optional_target_is_not_bound() {
+        let killer = "When this creature enters, target creature an opponent controls gets \
+                      -2/-2 until end of turn if that opponent controls no other creatures.";
+        let execute = |text: &str| {
+            let parsed = parse_oracle_text(text, "Synthetic", &[], &["Creature".to_owned()], &[]);
+            let [trigger] = parsed.triggers.as_slice() else {
+                panic!("{text}: expected one trigger: {parsed:?}");
+            };
+            trigger.execute.as_deref().cloned().expect("trigger body")
+        };
+        let plain = execute(killer);
+        assert!(
+            plain.condition.is_some(),
+            "reach guard: the printed trigger binds"
+        );
+        assert!(
+            !plain.optional_targeting,
+            "reach guard: its target is mandatory"
+        );
+
+        let extended = execute(&format!(
+            "{killer} Up to one target creature you control gets +2/+2 until end of turn."
+        ));
+        assert!(
+            extended.optional_targeting,
+            "reach guard: the later \"up to one\" makes the root target declinable"
+        );
+        for def in std::iter::once(&extended).chain(sub_chain(&extended)) {
+            assert_eq!(def.condition, None, "{:?}", def.effect);
+        }
+    }
+
     /// CR 118.12 + CR 608.2c: a trigger-level unless-payment with a targeted
     /// payer is hoisted before the body is parsed and stamped back on the
     /// root, where the payer is announced before the body's own target; a
