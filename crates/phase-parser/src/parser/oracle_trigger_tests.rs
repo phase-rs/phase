@@ -42985,6 +42985,53 @@ fn peel_trailing_cast_mana_source_splits_only_a_trailing_self_reference() {
     );
 }
 
+/// SHAPE — CR 603.2 + CR 201.2a: both halves of Kai Winn's cast-or-activate
+/// trigger are narrowed to the chosen name; neither half fires on every spell
+/// or every activation.
+#[test]
+fn chosen_name_cast_or_activate_halves_carry_has_chosen_name() {
+    let triggers = parse_trigger_lines(
+        "Whenever an opponent casts a spell with the chosen name or activates an ability of a source with the chosen name, that player loses 3 life.",
+        "Kai Winn, Faithless Leader",
+    );
+    assert_eq!(triggers.len(), 2, "one definition per trigger event");
+    fn has_chosen_name(filter: &TargetFilter) -> bool {
+        match filter {
+            TargetFilter::HasChosenName => true,
+            TargetFilter::And { filters } => filters.iter().any(has_chosen_name),
+            _ => false,
+        }
+    }
+    let cast = &triggers[0];
+    assert_eq!(cast.mode, TriggerMode::SpellCast);
+    assert!(
+        cast.valid_card.as_ref().is_some_and(has_chosen_name),
+        "cast half must keep the chosen-name filter, got {:?}",
+        cast.valid_card
+    );
+    let activate = &triggers[1];
+    assert_eq!(activate.mode, TriggerMode::AbilityActivated);
+    assert_eq!(activate.valid_card, Some(TargetFilter::HasChosenName));
+    for t in &triggers {
+        assert!(matches!(
+            t.valid_target,
+            Some(TargetFilter::Typed(ref tf)) if tf.controller == Some(ControllerRef::Opponent)
+        ));
+    }
+}
+
+/// SHAPE — a bare "a spell" still leaves `valid_card` unset (every spell):
+/// Memory Erosion's verbatim trigger.
+#[test]
+fn opponent_casts_bare_spell_keeps_valid_card_unset() {
+    let triggers = parse_trigger_lines(
+        "Whenever an opponent casts a spell, that player mills two cards.",
+        "Memory Erosion",
+    );
+    assert_eq!(triggers[0].mode, TriggerMode::SpellCast);
+    assert_eq!(triggers[0].valid_card, None);
+}
+
 /// Q, Stacking the Deck (verbatim Scryfall Oracle text). Three trigger-level
 /// readings the granted quoted ability must not disturb:
 /// - CR 201.5c: the one-letter short name "Q" is a self-reference, so the

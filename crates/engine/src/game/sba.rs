@@ -1126,10 +1126,8 @@ fn perform_creature_deaths(
                 }
                 performed_ids.push(object_id);
             }
-            zones::mark_simultaneous_departures(
-                events,
-                &zones::departed_subset(state, &performed_ids),
-            );
+            let departed = zones::departed_subset(state, &performed_ids);
+            zones::stamp_simultaneous_departures(state, events, &departed);
             return;
         }
 
@@ -1276,7 +1274,8 @@ fn perform_creature_deaths(
     // co-departing dies/LTB observers (Blood Artist) observe each other.
     // CR 701.19a/b: a creature whose destruction was Prevented (regeneration)
     // stays on the battlefield, so `departed_subset` excludes it from the group.
-    zones::mark_simultaneous_departures(events, &zones::departed_subset(state, &performed_ids));
+    let departed = zones::departed_subset(state, &performed_ids);
+    zones::stamp_simultaneous_departures(state, events, &departed);
 }
 
 /// CR 704.5j: A legendary permanent is exempt from the legend rule while an
@@ -1492,7 +1491,8 @@ fn check_legend_rule_pre_m14(
     // CR 603.10a + CR 704.3: state-based actions are performed simultaneously,
     // so these permanents left the battlefield together — record the group so
     // co-departing leaves-the-battlefield/dies observers observe each other.
-    zones::mark_simultaneous_departures(events, &zones::departed_subset(state, &performed_ids));
+    let departed = zones::departed_subset(state, &performed_ids);
+    zones::stamp_simultaneous_departures(state, events, &departed);
     SbaPassControl::Continue
 }
 
@@ -1948,7 +1948,8 @@ fn check_world_rule(
     // CR 603.10a + CR 704.3: state-based actions are performed simultaneously, so
     // these permanents left the battlefield together — record the group so
     // co-departing leaves-the-battlefield/dies observers observe each other.
-    zones::mark_simultaneous_departures(events, &zones::departed_subset(state, &performed_ids));
+    let departed = zones::departed_subset(state, &performed_ids);
+    zones::stamp_simultaneous_departures(state, events, &departed);
 }
 
 /// CR 704.5i + CR 306.9: A planeswalker with loyalty 0 is put into its owner's graveyard.
@@ -1984,7 +1985,8 @@ fn check_zero_loyalty(
     // CR 603.10a + CR 704.3: state-based actions are performed simultaneously, so
     // these permanents left the battlefield together — record the group so
     // co-departing leaves-the-battlefield/dies observers observe each other.
-    zones::mark_simultaneous_departures(events, &zones::departed_subset(state, &performed_ids));
+    let departed = zones::departed_subset(state, &performed_ids);
+    zones::stamp_simultaneous_departures(state, events, &departed);
 }
 
 /// CR 704.5s + CR 704.5v + CR 704.6f + CR 603.3 + CR 704.3: is `source` the
@@ -2081,7 +2083,8 @@ fn check_zero_defense(
     // CR 603.10a + CR 704.3: state-based actions are performed simultaneously, so
     // these permanents left the battlefield together — record the group so
     // co-departing leaves-the-battlefield/dies observers observe each other.
-    zones::mark_simultaneous_departures(events, &zones::departed_subset(state, &performed_ids));
+    let departed = zones::departed_subset(state, &performed_ids);
+    zones::stamp_simultaneous_departures(state, events, &departed);
 }
 
 /// CR 704.5p (+ CR 310.10 for the battle half): the full "this permanent may not

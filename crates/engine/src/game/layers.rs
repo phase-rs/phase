@@ -9298,6 +9298,29 @@ fn transient_effect_passes_other_gates(state: &GameState, tce: &TransientContinu
     true
 }
 
+/// CR 603.2d + CR 611.2c: whether `modification` of `tce` is a resolved
+/// `DoubleTriggers` bound to one object ("if a triggered ability of that
+/// creature triggers, that ability triggers an additional time" — Lwaxana
+/// Troi, Charming Guest). It modifies the rules, not the creature: the
+/// transient gather never grafts it, and `triggers::active_trigger_doublers`
+/// reads it off the TCE, one doubler per effect. Grafted onto the creature,
+/// two resolutions would collapse into one structurally equal static, and the
+/// effect would vanish with the creature before its look-back dies trigger is
+/// counted. A resolved doubler with any other affected shape is not this class
+/// and keeps the ordinary grant path.
+pub(crate) fn is_object_bound_trigger_doubler(
+    tce: &TransientContinuousEffect,
+    modification: &ContinuousModification,
+) -> bool {
+    matches!(
+        modification,
+        ContinuousModification::AddStaticMode {
+            mode: StaticMode::DoubleTriggers { .. },
+        }
+    ) && (tce.affected_recipient.is_some()
+        || matches!(tce.affected, TargetFilter::SpecificObject { .. }))
+}
+
 /// Appends the effects of every live transient continuous effect (the full
 /// transient gather).
 pub(crate) fn gather_transient_continuous_effects(
@@ -9373,6 +9396,9 @@ fn gather_transient_continuous_effects_with(
             // `iter_cast_free_permission_source_ids`, giving one grant two
             // sources. CR 701.15b: `Goaded` is likewise a designation, not
             // an ability on the recipient; combat reads the live TCE directly.
+            // CR 603.2d + CR 611.2c: an object-bound resolved `DoubleTriggers`
+            // (`is_object_bound_trigger_doubler`) is likewise read directly off
+            // the TCE by `triggers::active_trigger_doublers`.
             if matches!(
                 modification,
                 ContinuousModification::AddStaticMode {
@@ -9381,7 +9407,8 @@ fn gather_transient_continuous_effects_with(
                         | StaticMode::CastFromHandFree { .. }
                         | StaticMode::Goaded,
                 }
-            ) {
+            ) || is_object_bound_trigger_doubler(tce, modification)
+            {
                 continue;
             }
             // After both skips above and before `layer()` below: a narrowed

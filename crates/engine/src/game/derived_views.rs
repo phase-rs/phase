@@ -6695,6 +6695,7 @@ mod tests {
                 is_suspected: false,
                 was_prepared: false,
                 departure: crate::types::game_state::ZoneDeparture::Moved,
+                trigger_doublers: Vec::new(),
             }),
         };
         let ability = ResolvedAbility::new(

@@ -1,0 +1,7 @@
+{
+  "surfaces": [
+    "full",
+    "wire"
+  ],
+  "reason": "LatchedTriggerDoubler carries a TriggerDoublerOrigin (static ability or resolved continuous effect) instead of a flat source/affected pair, and ZoneChangeRecord gains trigger_doublers, so a resolved trigger doubler keeps its own identity and still counts for its object's look-back triggers"
+}
