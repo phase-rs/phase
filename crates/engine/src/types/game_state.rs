@@ -18289,6 +18289,13 @@ pub enum WaitingFor {
         game_number: u8,
         score: MatchScore,
     },
+    /// CR 103.1: the player chosen to decide who takes the first turn chooses
+    /// one of `candidates` (seats in seat order). CR 103.1a: under shared team
+    /// turns the choice names the starting team.
+    ChooseStartingPlayer {
+        player: PlayerId,
+        candidates: Vec<PlayerId>,
+    },
     /// Player must choose from a named set of options (creature type, color, etc.).
     NamedChoice {
         player: PlayerId,
@@ -20494,6 +20501,7 @@ impl WaitingFor {
             WaitingFor::TriggerTargetSelection { .. } => "TriggerTargetSelection",
             WaitingFor::BetweenGamesSideboard { .. } => "BetweenGamesSideboard",
             WaitingFor::BetweenGamesChoosePlayDraw { .. } => "BetweenGamesChoosePlayDraw",
+            WaitingFor::ChooseStartingPlayer { .. } => "ChooseStartingPlayer",
             WaitingFor::NamedChoice { .. } => "NamedChoice",
             WaitingFor::OpponentGuess { .. } => "OpponentGuess",
             WaitingFor::SpellbookDraft { .. } => "SpellbookDraft",
@@ -20662,6 +20670,7 @@ impl WaitingFor {
             | WaitingFor::TriggerTargetSelection { player, .. }
             | WaitingFor::BetweenGamesSideboard { player, .. }
             | WaitingFor::BetweenGamesChoosePlayDraw { player, .. }
+            | WaitingFor::ChooseStartingPlayer { player, .. }
             | WaitingFor::NamedChoice { player, .. }
             | WaitingFor::OpponentGuess { player, .. }
             | WaitingFor::SpellbookDraft { player, .. }
@@ -21031,6 +21040,7 @@ impl WaitingFor {
             | WaitingFor::TriggerTargetSelection { .. }
             | WaitingFor::BetweenGamesSideboard { .. }
             | WaitingFor::BetweenGamesChoosePlayDraw { .. }
+            | WaitingFor::ChooseStartingPlayer { .. }
             | WaitingFor::NamedChoice { .. }
             | WaitingFor::OpponentGuess { .. }
             | WaitingFor::SpellbookDraft { .. }
@@ -21239,6 +21249,7 @@ impl WaitingFor {
             | WaitingFor::TriggerTargetSelection { .. }
             | WaitingFor::BetweenGamesSideboard { .. }
             | WaitingFor::BetweenGamesChoosePlayDraw { .. }
+            | WaitingFor::ChooseStartingPlayer { .. }
             | WaitingFor::NamedChoice { .. }
             | WaitingFor::OpponentGuess { .. }
             | WaitingFor::SpellbookDraft { .. }
@@ -27412,6 +27423,7 @@ fn visit_waiting_for_chains<'a>(
         | WaitingFor::TriggerTargetSelection { .. }
         | WaitingFor::BetweenGamesSideboard { .. }
         | WaitingFor::BetweenGamesChoosePlayDraw { .. }
+        | WaitingFor::ChooseStartingPlayer { .. }
         | WaitingFor::NamedChoice { .. }
         | WaitingFor::OpponentGuess { .. }
         | WaitingFor::SpellbookDraft { .. }

@@ -691,7 +691,7 @@ pub fn unsupported_protocol_capabilities() -> &'static [UnsupportedCapability] {
 /// `upstream.` = the protocol has no primitive for something the engine can do.
 /// `local.` = the protocol has the primitive but this engine cannot source it,
 /// or a documented adapter-local extension is intentionally in use.
-static UNSUPPORTED_PROTOCOL_CAPABILITIES: [UnsupportedCapability; 95] = [
+static UNSUPPORTED_PROTOCOL_CAPABILITIES: [UnsupportedCapability; 96] = [
     UnsupportedCapability {
         code: "upstream.object-selection-missing",
         area: "prompts",
@@ -1148,6 +1148,12 @@ static UNSUPPORTED_PROTOCOL_CAPABILITIES: [UnsupportedCapability; 95] = [
         area: "actions",
         reason: "CR 103.1: before the first turn a player chooses whether to play or draw. Phase models it (GameAction::ChoosePlayDraw). It is a two-option choice and ChooseBoolean fits, but the framing matters — a boolean's confirm/deny labels would have to read 'Play'/'Draw', which is exactly what confirm_label and deny_label are for. Unmapped, not unrepresentable.",
         suggested_protocol_extension: "None needed upstream — ChooseBoolean with explicit labels. Adapter work.",
+    },
+    UnsupportedCapability {
+        code: "local.starting-player-unsupported",
+        area: "actions",
+        reason: "CR 103.1: the player chosen to decide who takes the first turn names the starting player. Phase models the answer (GameAction::ChooseStartingPlayer { player }). Naming one seat among the candidates is a player choice, which is ChooseBoardTargets with TargetKind::Player — the same shape local.clash-unsupported and the other opponent-picker codes describe. Unmapped, not unrepresentable.",
+        suggested_protocol_extension: "None needed upstream — ChooseBoardTargets carries player candidates. This is adapter work.",
     },
     UnsupportedCapability {
         code: "local.planar-die-unsupported",
@@ -2888,6 +2894,9 @@ pub fn convert_available_action(
         }
         GameAction::ChoosePlayDraw { .. } => {
             AvailableActionConversion::Unsupported("local.play-draw-unsupported")
+        }
+        GameAction::ChooseStartingPlayer { .. } => {
+            AvailableActionConversion::Unsupported("local.starting-player-unsupported")
         }
         GameAction::ChooseOption { .. }
         | GameAction::SubmitVoteCandidate { .. }
@@ -9033,13 +9042,13 @@ mod tests {
     #[test]
     fn unsupported_capability_registry_is_well_formed() {
         let capabilities = unsupported_protocol_capabilities();
-        assert_eq!(capabilities.len(), 95);
+        assert_eq!(capabilities.len(), 96);
 
         let codes: HashSet<_> = capabilities
             .iter()
             .map(|capability| capability.code)
             .collect();
-        assert_eq!(codes.len(), 95, "capability codes must be unique");
+        assert_eq!(codes.len(), 96, "capability codes must be unique");
 
         for capability in capabilities {
             assert!(

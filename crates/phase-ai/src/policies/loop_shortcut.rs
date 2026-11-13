@@ -454,8 +454,7 @@ fn cycles_to_proposer_elimination(
         .map(i64::from);
 
     // CR 704.5c / CR 704.6b: the first repetition inside the declared count after which the
-    // proposer's poison pool holds ten counters, fifteen where the team shares them, off the
-    // engine's own per-repetition authority.
+    // proposer's poison pool reaches its threshold, off the engine's own per-repetition authority.
     let poison_fatal = period
         .first_poison_crossing(state, proposer, declared)
         .map(i64::from);

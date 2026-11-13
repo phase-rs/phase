@@ -571,7 +571,9 @@
     "dungeonTooltip": "Wagt sich in {{name}} vor",
     "poisonAriaLabel_one": "{{count}} Giftmarke",
     "poisonAriaLabel_other": "{{count}} Giftmarken",
-    "poisonTooltip": "Giftmarken: {{count}}\nEin Spieler mit zehn oder mehr Giftmarken verliert das Spiel.",
+    "poisonTooltip": "Giftmarken: {{count}}",
+    "poisonLossPlayer": "Ein Spieler mit {{threshold}} oder mehr Giftmarken verliert das Spiel.",
+    "poisonLossTeam": "Ein Team mit {{threshold}} oder mehr Giftmarken verliert das Spiel.",
     "energyAriaLabel_one": "{{count}} Energiemarke",
     "energyAriaLabel_other": "{{count}} Energiemarken",
     "energyTooltip": "Energiemarken: {{count}}\nEnergiemarken sind eine spielerbezogene Ressource, die von Kartenfähigkeiten ausgegeben wird.",
@@ -1181,6 +1183,11 @@
       "drawFirst": "Zuerst ziehen",
       "drawFirstDescription": "Nimm den zusätzlichen Zug in deinem ersten Zug"
     },
+    "startingPlayer": {
+      "title": "Wähle, wer beginnt",
+      "playerPlaysFirst": "{{name}} beginnt",
+      "opponentChoosing": "{{name}} wählt, wer beginnt…"
+    },
     "mulligan": {
       "opponentDeciding": "Der Gegner entscheidet über seine Starthand…",
       "londonTitle": "London-Mulligan ({{count}} genommen)",
@@ -1419,6 +1426,7 @@
     "config": {
       "startingLife": "Startleben",
       "commanderDamage": "Kommandeurschaden",
+      "poisonCounters": "Giftmarken",
       "players": "Spieler",
       "whoGoesFirst": "Wer beginnt",
       "firstPlayer": {

@@ -987,7 +987,7 @@ pub enum LossReason {
     LifeTotal,
     /// CR 704.5b: they attempted to draw from an empty library.
     DrewFromEmptyLibrary,
-    /// CR 704.5c / CR 704.6b: ten or more poison counters (fifteen shared, in Two-Headed Giant).
+    /// CR 704.5c / CR 704.6b: poison counters at the threshold `players::poison_loss_measure` applies.
     Poison,
     /// CR 704.6c: 21 or more combat damage from one commander.
     CommanderDamage,
@@ -1923,9 +1923,11 @@ pub enum GameEvent {
     /// CR 103.1 / CR 706: The game-1 starting-player roll-off, emitted as one
     /// authoritative structured event so the contest can be rendered round by
     /// round (including tie rerolls) with no downstream re-derivation. `rounds`
-    /// preserves the round boundaries the engine computes; `winner` is the
-    /// engine's authoritative starting player (unique max of the final round, or
-    /// the lowest-seat fallback when tied at the reroll cap). Replaces the prior
+    /// preserves the round boundaries the engine computes; `winner` is the roll
+    /// winner (unique max of the final round, or the lowest-seat fallback when
+    /// tied at the reroll cap), who chooses who takes the first turn (CR 103.1);
+    /// under shared team turns the choice passes to that seat's side
+    /// representative (CR 103.1a). Replaces the prior
     /// flat per-roll `DieRolled` batch on the starting-player contest path; in-game
     /// die rolls still emit `DieRolled`.
     StartingPlayerContest {

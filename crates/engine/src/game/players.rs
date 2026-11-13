@@ -1,3 +1,5 @@
+use serde::{Deserialize, Serialize};
+
 use crate::types::ability::{AggregateFunction, ControllerRef, PlayerRelation, SeatDirection};
 use crate::types::events::{GameEvent, PlayerActionKind};
 use crate::types::game_state::GameState;
@@ -5,7 +7,7 @@ use crate::types::game_state::StackEntry;
 use crate::types::game_state::{LinkedExileSnapshot, TriggerSourceContext};
 use crate::types::identifiers::ObjectId;
 use crate::types::phase::TurnDirection;
-use crate::types::player::PlayerId;
+use crate::types::player::{Player, PlayerId};
 use crate::types::zones::Zone;
 
 /// Returns true if the player exists in the game and is not eliminated.
@@ -537,6 +539,65 @@ pub fn team_poison_total(state: &GameState, player: PlayerId) -> u32 {
         .sum()
 }
 
+/// CR 704.5c / CR 704.6b + CR 810.8d / CR 904.13c: whose poison counters a
+/// poison loss is measured on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PoisonLossScope {
+    /// CR 704.5c / CR 904.13c: the player's own counters.
+    Player,
+    /// CR 704.6b + CR 810.10: the team's shared counters.
+    Team,
+}
+
+/// CR 704.6b / CR 810.8d: fifteen shared poison counters.
+pub const TEAM_POISON_LOSS_THRESHOLD: u32 = 15;
+
+/// The poison count that decides a player's poison loss and the threshold it
+/// is checked against, as returned by [`poison_loss_measure`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PoisonLossMeasure {
+    pub scope: PoisonLossScope,
+    pub count: u32,
+    pub threshold: u32,
+}
+
+impl PoisonLossMeasure {
+    /// CR 704.5c / CR 704.6b: "… or more poison counters" — the count reaching
+    /// the threshold is a loss.
+    pub fn is_lethal(self) -> bool {
+        self.count >= self.threshold
+    }
+}
+
+/// The poison count that decides `player`'s poison loss and the threshold it
+/// is checked against: the team's shared total against fifteen where poison
+/// is shared (`topology::has_shared_poison`), else the player's own counters
+/// against the format's individual threshold. `None` when no poison-loss rule
+/// applies to `player` (individual branch with `poison_counter_threshold:
+/// None`). The single authority: `LossPool::poison` and the HUD's
+/// `DerivedViews.poison_loss` read it.
+pub fn poison_loss_measure(state: &GameState, player: &Player) -> Option<PoisonLossMeasure> {
+    if super::topology::has_shared_poison(state, player.id) {
+        // CR 704.6b + CR 810.8d / CR 810.10: the team's shared total.
+        Some(PoisonLossMeasure {
+            scope: PoisonLossScope::Team,
+            count: team_poison_total(state, player.id),
+            threshold: TEAM_POISON_LOSS_THRESHOLD,
+        })
+    } else {
+        // CR 704.5c / CR 904.13c: the player's own counters against the
+        // format's individual threshold.
+        state
+            .format_config
+            .poison_counter_threshold
+            .map(|threshold| PoisonLossMeasure {
+                scope: PoisonLossScope::Player,
+                count: player.poison_counters,
+                threshold: u32::from(threshold),
+            })
+    }
+}
+
 /// CR 704.5a + CR 704.5c + CR 704.6a + CR 704.6b: the seats whose life or poison one state-based
 /// loss is checked against together, and how far that total still is from it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -561,20 +622,16 @@ impl LossPool {
         })
     }
 
-    /// CR 704.5c / CR 704.6b: ten or more poison counters lose, fifteen where the team shares
-    /// them (CR 904.13c keeps them individual). `None` for a seat out of the game.
+    /// CR 704.5c / CR 704.6b: the poison-loss rule [`poison_loss_measure`] applies. `None` for a
+    /// seat out of the game or one no poison-loss rule applies to.
     pub(crate) fn poison(state: &GameState, player: PlayerId) -> Option<LossPool> {
         if !is_alive(state, player) {
             return None;
         }
-        let threshold = if super::topology::has_shared_poison(state, player) {
-            15
-        } else {
-            10
-        };
+        let measure = poison_loss_measure(state, state.players.iter().find(|p| p.id == player)?)?;
         Some(LossPool {
             members: super::topology::shared_poison_members(state, player),
-            to_threshold: threshold - i64::from(team_poison_total(state, player)),
+            to_threshold: i64::from(measure.threshold) - i64::from(measure.count),
         })
     }
 

@@ -103,7 +103,7 @@ impl WinKind {
         match reason {
             // CR 704.5a / CR 704.6a: a player or team with 0 or less life loses.
             LossReason::LifeTotal => WinKind::LethalDamage,
-            // CR 704.5c / CR 704.6b: a player with ten, or a team with fifteen, poison counters loses.
+            // CR 704.5c / CR 704.6b: a player or team at its poison-loss threshold loses.
             LossReason::Poison => WinKind::PoisonLoss,
             // CR 704.5b: a player who drew from an empty library loses.
             LossReason::DrewFromEmptyLibrary => WinKind::Decking,
@@ -726,7 +726,7 @@ pub(crate) fn classify_win_kind(
                     .filter(|pid| is_opponent(**pid))
                     .filter_map(|pid| {
                         let pool = pool(state, *pid)?;
-                        ResourceVector::narrowed_repetitions(&[(
+                        ResourceVector::narrowed_repetitions([(
                             pool.to_threshold - 1,
                             sign * pool.moved_by(axis),
                         )])

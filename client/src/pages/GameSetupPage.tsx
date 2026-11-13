@@ -3,6 +3,7 @@ import { useTranslation } from "react-i18next";
 import { useLocation, useNavigate, useSearchParams } from "react-router";
 
 import type { FormatConfig, FormatGroup, GameFormat, MatchType } from "../adapter/types";
+import { U8_MAX } from "../adapter/types";
 import {
   formatMetadata,
   formatSuppliesDeck,
@@ -595,6 +596,21 @@ export function GameSetupPage() {
                         min={1}
                         onCommit={(commander_damage_threshold) =>
                           setFormatConfig({ ...formatConfig, commander_damage_threshold })
+                        }
+                        className="w-16 rounded-lg border border-gray-700 bg-gray-800/60 px-2 py-1 text-right text-sm text-white"
+                      />
+                    </label>
+                  )}
+
+                  {formatConfig.poison_counter_threshold != null && (
+                    <label className="flex items-center justify-between">
+                      <span className="text-xs text-slate-400">{t("gameSetup.config.poisonCounters")}</span>
+                      <IntegerField
+                        value={formatConfig.poison_counter_threshold}
+                        min={1}
+                        max={U8_MAX}
+                        onCommit={(poison_counter_threshold) =>
+                          setFormatConfig({ ...formatConfig, poison_counter_threshold })
                         }
                         className="w-16 rounded-lg border border-gray-700 bg-gray-800/60 px-2 py-1 text-right text-sm text-white"
                       />

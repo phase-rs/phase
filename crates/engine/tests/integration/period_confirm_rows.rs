@@ -9991,3 +9991,28 @@ fn a_threshold_offers_performed_win_is_named_by_its_last_repetition() {
         &[(P1, LossReason::LifeTotal), (P2, LossReason::Poison)],
     );
 }
+
+/// CR 704.5c at the host's poison-loss threshold + CR 704.5a + CR 732.2a: P1's 10 life falls 2 a
+/// repetition and reaches 0 at the fifth; its 6 poison plus 1 a repetition reaches ten at the
+/// fourth but twelve only at the sixth. The threshold offer counts and names whichever the host's
+/// threshold makes first.
+#[test]
+fn a_threshold_offer_counts_and_names_the_hosts_poison_threshold() {
+    let Some(db) = shared_card_db() else { return };
+    for (threshold, n, kind, reason) in [
+        (10, 4, WinKind::PoisonLoss, LossReason::Poison),
+        (12, 5, WinKind::LethalDamage, LossReason::LifeTotal),
+    ] {
+        let format = FormatConfig {
+            poison_counter_threshold: Some(threshold),
+            ..FormatConfig::standard()
+        };
+        let mut runner = kilo_offer(
+            GameScenario::new_with_format(format, 2, 42),
+            &[(22, 0), (10, 6)],
+            &[P1],
+            db,
+        );
+        assert_offered_win(&mut runner, n, kind, &[(P1, reason)]);
+    }
+}
