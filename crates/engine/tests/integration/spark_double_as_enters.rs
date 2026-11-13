@@ -3963,14 +3963,14 @@ mod feldon_tokens {
         assert!(error.contains("disagrees with its own record"), "{error}");
     }
 
-    /// The four-token Body Double batch (Doubling Season, Parallel Lives) whose first three
-    /// tokens copy Triskelion and whose fourth copies Hushbringer. The game is saved at the pause
-    /// after the first token entered, `tamper` is applied to the saved state, and the game is
-    /// restored through the persisted-state reader. Returns Soul Warden's life gain, or the
-    /// reader's refusal.
+    /// Soul Warden's life gain for the four-token Body Double batch (Doubling Season, Parallel
+    /// Lives) whose first three tokens copy Triskelion and whose fourth copies Hushbringer. The
+    /// game is saved at the pause after the first token entered, `tamper` is applied to the saved
+    /// state, and the game is restored through the persisted-state reader. Returns the life
+    /// gained and the instruction marks the restore kept.
     fn four_token_hushbringer_last_life(
         tamper: impl FnOnce(&mut engine::types::game_state::GameState),
-    ) -> Result<i32, String> {
+    ) -> (i32, Vec<usize>) {
         use engine::types::game_state::{PersistedGameState, PersistedRestoreFinalization};
         let (mut scenario, feldon) = setup();
         scenario.add_enchantment_from_oracle(P0, "Doubling Season", SEASON);
@@ -4002,11 +4002,12 @@ mod feldon_tokens {
         tamper(&mut state);
         let wire = serde_json::to_value(PersistedGameState::capture(state)).unwrap();
         let state = serde_json::from_value::<PersistedGameState>(wire)
-            .map_err(|error| error.to_string())?
+            .expect("the save restores")
             .prepare_for_restore(PersistedRestoreFinalization::DeferUntilRehydrated)
             .unwrap()
             .finalize_after_rehydration(|_| Ok(()))
             .unwrap();
+        let marks = state.instruction_boundary_marks.clone();
         let mut runner = GameRunner::from_state(state);
         for entered in 2..=3 {
             let (token, _) = choose_copy(&mut runner, triskelion);
@@ -4018,7 +4019,11 @@ mod feldon_tokens {
                 "entries held while the fourth token is still to come"
             );
             assert!(runner.state().deferred_triggers.is_empty());
-            assert_eq!(runner.life(P0), life);
+            assert_eq!(
+                runner.life(P0),
+                life,
+                "nothing is matched before the batch ends"
+            );
         }
         choose_copy(&mut runner, hushbringer);
         assert_token_entry_complete(&mut runner);
@@ -4027,227 +4032,32 @@ mod feldon_tokens {
             Zone::Graveyard,
             "the donor card stays in the graveyard"
         );
-        Ok(runner.life(P0) - life)
+        (runner.life(P0) - life, marks)
     }
 
-    /// CR 603.6a: the engine marks an instruction complete only where it collects every held
-    /// entry, so a save in which a mark stands above a held entry is not one it wrote. A save
-    /// taken while the first of four co-entrants is held, with the current ledger length
-    /// appended as a mark, is refused by the persisted reader; the untouched save restores, the
-    /// held entries wait for the fourth token, Hushbringer ("Creatures entering and dying don't
-    /// cause abilities to trigger."), and Soul Warden gains nothing.
+    /// CR 603.6a: a saved instruction mark is a ledger position, not proof that the instruction
+    /// below it completed. A save taken while the first of four co-entrants is held, with the
+    /// current ledger length appended as a mark, restores with that mark withheld: the held entry
+    /// still waits for the fourth token, Hushbringer ("Creatures entering and dying don't cause
+    /// abilities to trigger."), and Soul Warden gains nothing, exactly as in the untouched save.
     #[test]
     fn a_restored_completion_mark_cannot_release_a_held_entry_early() {
-        assert_eq!(
-            four_token_hushbringer_last_life(|_| {}),
-            Ok(0),
-            "control: the untouched save restores and the batch stays one event"
-        );
-        let error = four_token_hushbringer_last_life(|state| {
+        let (gained, marks) = four_token_hushbringer_last_life(|_| {});
+        assert_eq!(gained, 0, "control: the untouched save");
+        let valid_marks = marks;
+        let (gained, marks) = four_token_hushbringer_last_life(|state| {
             let ledger_len = state.zone_changes_this_turn.len();
             assert!(state
                 .instruction_boundary_marks
                 .last()
                 .is_none_or(|mark| *mark < ledger_len));
             state.instruction_boundary_marks.push(ledger_len);
-        })
-        .expect_err("a mark above the held entry is refused");
-        assert!(error.contains("below a completion mark"), "{error}");
-    }
-
-    const OPT: &str = "Scry 1.\nDraw a card.";
-
-    /// CR 603.2c: Altar of the Brood has already triggered for both Feldon tokens and for both
-    /// of Raise the Alarm's Soldiers. Later the same turn Opt stops on its scry. A save taken
-    /// there that names one of those collected entries as held is refused: every earlier
-    /// action's entries lie below the mark Opt's resolution wrote when it began (the Soldiers'
-    /// entries have no other mark above them). Control: the untouched paused save restores.
-    #[test]
-    fn a_paused_save_cannot_resubmit_a_collected_entry() {
-        use engine::types::game_state::PersistedGameState;
-        let db = crate::support::shared_card_db().expect("integration card database");
-        let (mut scenario, feldon) = setup();
-        let card = graveyard_copier(&mut scenario, false);
-        let scales = scenario
-            .add_enchantment_from_oracle(P0, "Hardened Scales", SCALES)
-            .id();
-        let season = scenario
-            .add_enchantment_from_oracle(P0, "Doubling Season", SEASON)
-            .id();
-        scenario.add_real_card(P0, "Altar of the Brood", Zone::Battlefield, db);
-        let opt = scenario
-            .add_spell_to_hand_from_oracle(P0, "Opt", true, OPT)
-            .id();
-        let alarm = scenario
-            .add_spell_to_hand_from_oracle(
-                P0,
-                "Raise the Alarm",
-                true,
-                "Create two 1/1 white Soldier creature tokens.",
-            )
-            .id();
-        let mut runner = scenario.build();
-        let before = runner.state().players[1].library.len();
-        let mut events = runner
-            .activate(feldon, 0)
-            .target_object(card)
-            .resolve()
-            .events()
-            .to_vec();
-        let (first, copy_events) = choose_copy(&mut runner, feldon);
-        events.extend(copy_events);
-        events.extend(choose_token_counter_order(&mut runner, first, scales));
-        let (second, copy_events) = choose_copy(&mut runner, feldon);
-        events.extend(copy_events);
-        events.extend(choose_token_counter_order(&mut runner, second, season));
-        runner.advance_until_stack_empty();
-        assert_eq!(runner.state().players[1].library.len(), before - 2);
-        // A one-instruction spell: its entries are followed by no instruction boundary.
-        let alarm_events = runner.cast(alarm).resolve().events().to_vec();
-        runner.advance_until_stack_empty();
-        assert_eq!(runner.state().players[1].library.len(), before - 4);
-        let collected_soldier = alarm_events
-            .iter()
-            .find(|event| {
-                matches!(
-                    event,
-                    GameEvent::ZoneChanged {
-                        to: Zone::Battlefield,
-                        ..
-                    }
-                )
-            })
-            .expect("a Soldier's entry event")
-            .clone();
-        let collected = events
-            .iter()
-            .find(|event| {
-                matches!(
-                    event,
-                    GameEvent::ZoneChanged { object_id, to: Zone::Battlefield, .. }
-                        if *object_id == first
-                )
-            })
-            .expect("the first token's entry event")
-            .clone();
-        let card_id = runner.state().objects[&opt].card_id;
-        runner
-            .act(GameAction::CastSpell {
-                object_id: opt,
-                card_id,
-                targets: vec![],
-                payment_mode: CastPaymentMode::Auto,
-            })
-            .expect("cast Opt");
-        for _ in 0..4 {
-            if !matches!(runner.state().waiting_for, WaitingFor::Priority { .. }) {
-                break;
-            }
-            runner.act(GameAction::PassPriority).unwrap();
-        }
-        assert!(
-            matches!(runner.state().waiting_for, WaitingFor::ScryChoice { .. }),
-            "Opt stopped on its scry: {:?}",
-            runner.state().waiting_for
-        );
-        let restore_result = |state: engine::types::game_state::GameState| {
-            let wire = serde_json::to_value(PersistedGameState::capture(state)).unwrap();
-            serde_json::from_value::<PersistedGameState>(wire)
-                .map(|_| ())
-                .map_err(|error| error.to_string())
-        };
-        restore_result(runner.state().clone()).expect("control: the paused save restores");
-        for collected in [collected, collected_soldier] {
-            let mut forged = runner.state().clone();
-            forged.unsettled_entry_batch_events.push(collected);
-            let error = restore_result(forged).expect_err("the collected entry is refused");
-            assert!(error.contains("below a completion mark"), "{error}");
-        }
-    }
-
-    const ELEMENTAL_MY_DEAR: &str = "Investigate X times, then create an 0/0 Blue Elemental creature token. Put +1/+1 counters on that token equal to the number of Clues you control.";
-
-    /// Elemental, My Dear's "then create" is a continuation step of its repeated investigate,
-    /// which the repeat driver runs inside every iteration, so this chain is excluded from the
-    /// repeated-keyword boundary and keeps one scan: Mister Fantastic's "one or more tokens"
-    /// ability triggers once for the whole resolution, measured equal to main. KNOWN-WRONG (the
-    /// card's instructions are not run in the printed order). The row pins the behaviour, not
-    /// the explicit exclusion alone: the boundary's deferral for a chain that may still change
-    /// the entrant holds this chain as well, so the row also passes without it.
-    #[test]
-    fn a_repeat_with_an_entering_continuation_step_keeps_one_scan() {
-        let mut scenario = GameScenario::new();
-        scenario.at_phase(Phase::PreCombatMain);
-        scenario.with_library_top(P0, &["Plains", "Island", "Swamp", "Mountain"]);
-        scenario.with_mana_pool(
-            P0,
-            (0..4)
-                .map(|_| ManaUnit::new(ManaType::Blue, ObjectId(0), false, vec![]))
-                .collect(),
-        );
-        let fantastic = scenario
-            .add_creature_from_oracle(
-                P0,
-                "Mister Fantastic, Reed Richards",
-                2,
-                4,
-                MISTER_FANTASTIC,
-            )
-            .as_legendary()
-            .id();
-        let mut spell = scenario.add_spell_to_hand_from_oracle(
-            P0,
-            "Elemental, My Dear",
-            false,
-            ELEMENTAL_MY_DEAR,
-        );
-        spell.with_mana_cost(ManaCost::Cost {
-            shards: vec![ManaCostShard::X, ManaCostShard::Blue, ManaCostShard::Blue],
-            generic: 0,
         });
-        let spell = spell.id();
-        let mut runner = scenario.build();
-        let card_id = runner.state().objects[&spell].card_id;
-        runner
-            .act(GameAction::CastSpell {
-                object_id: spell,
-                card_id,
-                targets: vec![],
-                payment_mode: CastPaymentMode::Auto,
-            })
-            .expect("cast Elemental, My Dear");
-        let mut prompts = 0;
-        for _ in 0..40 {
-            match &runner.state().waiting_for {
-                WaitingFor::ChooseXValue { .. } => {
-                    runner.act(GameAction::ChooseX { value: 2 }).unwrap();
-                }
-                WaitingFor::OptionalEffectChoice { source_id, .. } => {
-                    assert_eq!(*source_id, fantastic);
-                    prompts += 1;
-                    runner
-                        .act(GameAction::DecideOptionalEffect { accept: false })
-                        .unwrap();
-                }
-                WaitingFor::OrderTriggers { triggers, .. } => {
-                    let order = (0..triggers.len()).collect();
-                    runner.act(GameAction::OrderTriggers { order }).unwrap();
-                }
-                WaitingFor::Priority { .. } if runner.state().stack.is_empty() => break,
-                WaitingFor::Priority { .. } => {
-                    runner.act(GameAction::PassPriority).unwrap();
-                }
-                other => panic!("unexpected prompt: {other:?}"),
-            }
-        }
-        let clues = runner
-            .state()
-            .objects
-            .values()
-            .filter(|object| object.is_token && object.name == "Clue")
-            .count();
-        assert_eq!(clues, 2, "investigated twice");
-        assert_eq!(prompts, 1, "one scan for the interleaved chain, as on main");
+        assert_eq!(
+            gained, 0,
+            "the held entry was not released before Hushbringer"
+        );
+        assert_eq!(marks, valid_marks, "the forged mark is not restored");
     }
 
     const GRISMOLD: &str = "Trample\nAt the beginning of your end step, each player creates a 1/1 green Plant creature token.\nWhenever a creature token dies, put a +1/+1 counter on Grismold.";

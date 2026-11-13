@@ -13666,17 +13666,32 @@ fn validate_restored_entry_hold(state: &GameState) -> Result<(), String> {
         if !seen.insert(record.turn_zone_change_index) {
             return Err("unsettled_entry_batch_events holds one entry twice".to_string());
         }
-        // CR 603.6a + CR 603.2c: the engine marks an instruction complete only where it also
-        // collects every held entry, and marks every earlier action's entries when a
-        // resolution begins, so a held entry never lies below a mark. One that does was
-        // already collected, or the mark is not the engine's.
-        if record.turn_zone_change_index < state.completed_instruction_ledger_len() {
-            return Err(
-                "unsettled_entry_batch_events holds an entry below a completion mark".to_string(),
-            );
-        }
     }
     Ok(())
+}
+
+/// CR 603.6a + CR 608.2c: a saved instruction mark is a ledger position, not evidence that the
+/// instruction below it completed, and nothing else in a save records that for a held entry. A
+/// mark above a held entry's row would release that entry to the observer scan while its
+/// co-entrants may still be entering, so such marks are not restored: the held entries stay
+/// held until the engine establishes their completion again (the next instruction boundary it
+/// reaches, or the action settling). Marks at or below every held row are kept; they cut
+/// completed instructions that hold nothing.
+fn withhold_unestablished_entry_completion(state: &mut GameState) {
+    let Some(first_held_row) = state
+        .unsettled_entry_batch_events
+        .iter()
+        .filter_map(|event| match event {
+            GameEvent::ZoneChanged { record, .. } => Some(record.turn_zone_change_index),
+            _ => None,
+        })
+        .min()
+    else {
+        return;
+    };
+    state
+        .instruction_boundary_marks
+        .retain(|mark| *mark <= first_held_row);
 }
 
 /// CR 603.2c: the replay guard's occurrence key is a current-turn ledger
@@ -25600,11 +25615,8 @@ declare_game_state! {
     #[serde(default, skip_serializing_if = "im::OrdMap::is_empty")]
     pub battlefield_entry_observations: im::OrdMap<usize, TriggerSourceContext>,
     /// CR 608.2c + CR 603.6a: the length of `zone_changes_this_turn` at each instruction boundary
-    /// (`effects::settle_entries_before_instruction` past its pending-choice guard, where that
-    /// boundary also observes and collects every held entry, and at the start of a top-level
-    /// resolution, `effects::mark_entries_before_resolution`), strictly increasing and never
-    /// zero. A mark therefore never stands above a held entry, which the persisted restore
-    /// checks.
+    /// (`effects::settle_entries_before_instruction` past its pending-choice guard, whether or
+    /// not that boundary deferred the entry observations), strictly increasing and never zero.
     /// A mark is written only while no battlefield entry is in progress
     /// (`triggers::battlefield_entry_in_progress`: a rider chain run inside an entry has
     /// boundaries of its own) and no paused player-scope clause is between seat legs resuming
@@ -28489,6 +28501,7 @@ impl GameStateDecode {
         validate_restored_attack_authority(&state, attack_map_present, &departure_targets_present)?;
         validate_restored_zone_change_replay_keys(&state)?;
         validate_restored_entry_hold(&state)?;
+        withhold_unestablished_entry_completion(&mut state);
         normalize_delayed_trigger_allocators(&mut state)?;
         normalize_resolution_cast_offer_allocator(&mut state)?;
         // The PERSISTED half of the projection gate; `decode` below carries the other.
@@ -44759,21 +44772,18 @@ mod tests {
                 "{marks:?}: {error}"
             );
         }
-        // CR 603.6a: a mark above a held entry is not one the engine wrote (it collects every
-        // held entry where it marks an instruction complete).
-        let error = restore_error(persisted_entry_hold_fixture(vec![1]));
-        assert!(error.contains("below a completion mark"), "{error}");
-        // Positive control: the entry at row 1 is held above the mark at 1.
-        let mut held_above = persisted_entry_hold_fixture(vec![1]);
-        let second = held_above.zone_changes_this_turn[1].clone();
-        held_above.unsettled_entry_batch_events = vec![persisted_zone_change_event(second)];
-        let persisted = serde_json::to_value(PersistedGameState::Raw(Box::new(held_above)))
-            .expect("fixture serializes");
+        // Positive control: marks within the ledger restore. The fixture holds the entry at
+        // row 0, so both marks lie above a held entry and are withheld (CR 603.6a): a saved
+        // position is not proof that the held entry's instruction completed.
+        let persisted = serde_json::to_value(PersistedGameState::Raw(Box::new(
+            persisted_entry_hold_fixture(vec![1, 2]),
+        )))
+        .expect("fixture serializes");
         let restored = serde_json::from_value::<PersistedGameState>(persisted)
-            .expect("a held entry above every mark restores")
+            .expect("marks within the ledger restore")
             .into_game_state()
             .expect("checked restore");
-        assert_eq!(restored.instruction_boundary_marks, vec![1]);
+        assert_eq!(restored.instruction_boundary_marks, Vec::<usize>::new());
         assert_eq!(restored.unsettled_entry_batch_events.len(), 1);
     }
 
