@@ -223393,10 +223393,10 @@ keywords = []
 [[token.source_card_refs]]
 card_name = "Event: Leatherhead's Smackdown"
 scryfall_oracle_id = "4e7833c7-e9ff-4550-b2fd-36afe6087e0f"
-scryfall_id = "fac36345-b2fb-444-a499-f68bbe87e736"
+scryfall_id = "fac36345-b2fb-4a44-a499-f68bbe87e736"
 
 [token.token_image_ref]
-scryfall_id = "fac36345-b2fb-444-a499-f68bbe87e736"
+scryfall_id = "fac36345-b2fb-4a44-a499-f68bbe87e736"
 scryfall_oracle_id = "4e7833c7-e9ff-4550-b2fd-36afe6087e0f"
 preset_id = "f13c9091-91b6-51b4-91d5-214180ff03ee"
 
