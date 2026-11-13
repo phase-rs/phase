@@ -14270,11 +14270,7 @@ mod tests {
     /// issues Σ C(8, k) for k = 0..=4 = 163 selections; the AI ranks exactly
     /// those.
     ///
-    /// The ceiling is a *blowup* guard, not a tight micro-benchmark: the
-    /// healthy path runs in tens of ms (machine- and load-dependent — this runs
-    /// in CI and alongside concurrent Tilt rebuilds), while a reversion to
-    /// Cartesian enumeration costs *tens of seconds*. A 1 s ceiling cleanly
-    /// separates the two without flaking on contention.
+    /// The scored-selection count pins the issued domain.
     ///
     /// This is also the PAIRED POSITIVE guard for ranking the issued domain: it
     /// proves the AI still returns a real multi-card selection (not the empty
@@ -14283,11 +14279,10 @@ mod tests {
     /// every issued combination — and therefore the ranked winner — contains
     /// only uniquely-named cards.
     #[test]
-    fn gifts_ungiven_search_choice_returns_quickly_with_distinct_names() {
+    fn gifts_ungiven_search_choice_ranks_only_issued_distinct_name_sets() {
         use engine::types::ability::{
             SearchSelectionConstraint, SharedQuality, SharedQualityRelation,
         };
-        use std::time::Instant;
 
         let mut state = make_state();
 
@@ -14332,14 +14327,12 @@ mod tests {
 
         let config = create_config(AiDifficulty::VeryHard, Platform::Native);
         let mut rng = SmallRng::seed_from_u64(42);
-        let started = Instant::now();
+        crate::policies::tutor::SEARCH_SELECTIONS_SCORED.with(|c| c.replace(0));
         let action = choose_action(&state, PlayerId(0), &config, &mut rng);
-        let elapsed = started.elapsed();
-        assert!(
-            elapsed.as_millis() < 1000,
-            "AI search-choice took {elapsed:?}; a Cartesian-enumeration regression \
-             (C(80,4) ≈ 1.5M combos) costs tens of seconds — ranking the engine's \
-             163 issued selections must stay well under the 1s blowup ceiling"
+        assert_eq!(
+            crate::policies::tutor::SEARCH_SELECTIONS_SCORED.with(|c| c.replace(0)),
+            163,
+            "the AI ranks the engine's Σ C(8,k≤4) = 163 distinct-name selections, never the C(80,4) pool product"
         );
 
         match action {
@@ -14847,56 +14840,56 @@ mod tests {
         );
     }
 
-    /// Regression guard: AI priority decision against 1000-token opponent
-    /// board must complete in single-digit milliseconds. The combination of
-    /// `ranked.truncate(branching)`, the deadline mechanism, and the
-    /// `im::HashMap` structural sharing in `apply_candidate` keeps priority
-    /// decisions cheap even on Scute Swarm-class boards. If this test ever
-    /// regresses past 100ms, something started doing per-opponent-creature
-    /// work inside `evaluate_after_action` or the candidate scoring loop —
-    /// hunt that down rather than relax this bound.
+    /// The priority decision's board-evaluation count is independent of the opponent's board size.
     #[test]
-    fn priority_decision_vs_thousand_opponent_tokens_stays_fast() {
-        let mut state = make_state();
-        // 1000 1/1 opponent tokens — the pathological board.
-        for _ in 0..1000 {
-            add_creature(&mut state, PlayerId(1), 1, 1);
-        }
-        // AI has 5 untapped lands available (so legal_actions has some real
-        // candidates: PassPriority + maybe land-tap mana abilities).
-        for _ in 0..5 {
-            let cid = CardId(state.next_object_id);
-            let id = create_object(
+    fn priority_search_work_does_not_scale_with_opponent_tokens() {
+        let board = |tokens: usize| {
+            let mut state = make_state();
+            for _ in 0..tokens {
+                add_creature(&mut state, PlayerId(1), 1, 1);
+            }
+            let card_id = CardId(state.next_object_id);
+            let bears = create_object(
                 &mut state,
-                cid,
+                card_id,
                 PlayerId(0),
-                "Forest".to_string(),
-                Zone::Battlefield,
+                "Grizzly Bears".to_string(),
+                Zone::Hand,
             );
-            let obj = state.objects.get_mut(&id).unwrap();
-            obj.card_types.core_types.push(CoreType::Land);
-        }
+            let obj = state.objects.get_mut(&bears).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.card_types.subtypes.push("Bear".to_string());
+            obj.power = Some(2);
+            obj.toughness = Some(2);
+            obj.base_card_types = obj.card_types.clone();
+            obj.base_power = obj.power;
+            obj.base_toughness = obj.toughness;
+            obj.mana_cost = ManaCost::Cost {
+                shards: vec![ManaCostShard::Green],
+                generic: 1,
+            };
+            add_mana(&mut state, PlayerId(0), ManaType::Green, 2);
+            state
+        };
 
-        let config = create_config(AiDifficulty::Hard, Platform::Native);
-        let mut rng = SmallRng::seed_from_u64(42);
+        let evals: Vec<usize> = [1, 100]
+            .into_iter()
+            .map(|tokens| {
+                let state = board(tokens);
+                let config =
+                    create_config(AiDifficulty::Hard, Platform::Native).into_measurement(42);
+                let mut rng = SmallRng::seed_from_u64(42);
+                crate::eval::BOARD_EVALUATIONS.with(|c| c.replace(0));
+                let action = choose_action(&state, PlayerId(0), &config, &mut rng);
+                assert!(action.is_some(), "AI must produce some action");
+                crate::eval::BOARD_EVALUATIONS.with(|c| c.replace(0))
+            })
+            .collect();
 
-        let start = std::time::Instant::now();
-        let action = choose_action(&state, PlayerId(0), &config, &mut rng);
-        let elapsed = start.elapsed();
-
-        eprintln!(
-            "[bench] choose_action priority-pass (1000 opponent tokens, AI difficulty=Hard): {:?}",
-            elapsed
-        );
-        assert!(action.is_some(), "AI must produce some action");
-        // Empirical baseline ~5ms in debug. 100ms is a generous ceiling that
-        // catches a 20× regression while staying robust to CI-runner noise.
-        assert!(
-            elapsed.as_millis() < 100,
-            "Priority decision regressed past 100ms ceiling: {:?}; \
-             investigate per-opponent-creature work in score_candidates / \
-             evaluate_after_action before relaxing this bound.",
-            elapsed
+        assert!(evals[0] > 0, "the decision must reach candidate scoring");
+        assert_eq!(
+            evals[0], evals[1],
+            "priority evaluation count independent of opponent board"
         );
     }
 

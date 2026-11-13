@@ -595,11 +595,19 @@ pub fn evaluate_features(state: &GameState, player: PlayerId) -> Result<EvalFeat
     Ok(features)
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Test witness: board evaluations on this thread.
+    pub(crate) static BOARD_EVALUATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 pub fn evaluate_state_breakdown(
     state: &GameState,
     player: PlayerId,
     weights: &EvalWeights,
 ) -> Result<EvaluationBreakdown, f64> {
+    #[cfg(test)]
+    BOARD_EVALUATIONS.with(|c| c.set(c.get() + 1));
     let features = evaluate_features(state, player)?;
     let mut breakdown = EvaluationBreakdown {
         life: features.life * weights.life,
