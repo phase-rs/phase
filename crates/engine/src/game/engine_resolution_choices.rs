@@ -387,17 +387,34 @@ pub(crate) fn settle_player_scope_sacrifice_after_departure(
 /// - The chooser is still in the game and one or no object is eligible: the
 ///   parked instruction runs again, binding the only candidate or recording that
 ///   the choice named nothing, exactly as when it is first reached.
-/// - The chooser left: the parked instruction runs again for them; they control
-///   nothing now, so it records that the choice named nothing.
+/// - The chooser left and still controls the resolving object as last known:
+///   the parked instruction runs again for them; they control nothing now, so
+///   it records that the choice named nothing.
+/// - The chooser left and the resolving spell reverted to another controller
+///   (CR 109.5: "you" is that player now): the parked instruction runs again
+///   for that controller, prompting them among the objects they control.
 ///
-/// In the last two cases the resolution's remaining instructions run here, and
-/// the events they emit are collected for triggers (a concession is not scanned
-/// by the post-action pipeline). Reports whether it settled, so a departed
-/// controller's spell this continued is not retired as eliminated.
+/// When the parked instruction runs again and does not prompt, the resolution's
+/// remaining instructions run here, and the events they emit are collected for
+/// triggers (a concession is not scanned by the post-action pipeline). If those
+/// instructions pause again, this retains the triggers of the events already
+/// produced and nothing more: finishing the paused instruction belongs to its
+/// own handler, and `DestroyAll` does not resume the objects after the one a
+/// replacement-order prompt interrupted (`effects/destroy.rs`). Reports whether
+/// it settled, so a departed controller's spell this continued is not retired
+/// as eliminated.
 pub(crate) fn settle_resolution_object_choice_after_departure(
     state: &mut GameState,
     events: &mut Vec<GameEvent>,
 ) -> Result<DepartureSettlement, EngineError> {
+    // CR 109.5 + CR 800.4a: when the departure ended a control effect over the
+    // resolving spell (the player who took it with Commandeer left), the spell is
+    // its previous controller's again and "you" is that player. The parked
+    // instruction runs again for them: it prompts them among the objects they
+    // control, binds their only candidate, or records that the choice named
+    // nothing. CR 800.4g does not apply: the instruction asks its controller,
+    // who is still in the game.
+    let reverted_to = effects::rebind_open_resolution_object_choice_to_live_controller(state);
     let Some(current) = effects::open_resolution_object_choice_candidates(state) else {
         return Ok(DepartureSettlement::NotSettled);
     };
@@ -405,7 +422,15 @@ pub(crate) fn settle_resolution_object_choice_after_departure(
         return Ok(DepartureSettlement::NotSettled);
     };
     let chooser = *player;
-    if super::players::is_alive(state, chooser) {
+    if let Some(controller) = reverted_to {
+        // CR 800.4a: priority never names a player who has left the game.
+        let holder = if super::players::is_alive(state, controller) {
+            controller
+        } else {
+            super::players::next_player(state, controller)
+        };
+        set_priority(state, holder);
+    } else if super::players::is_alive(state, chooser) {
         if cards.len() == current.len() && current.iter().all(|id| cards.contains(id)) {
             return Ok(DepartureSettlement::NotSettled);
         }
@@ -443,6 +468,7 @@ pub(crate) fn settle_resolution_object_choice_after_departure(
 /// observers and the delayed triggers of `events[start..]`, the span the
 /// instructions of a resumed resolution-time object choice produced before they
 /// paused again.
+/// Trigger retention only: it does not continue the instruction that paused.
 fn retain_triggers_of_resumed_span(
     state: &mut GameState,
     events: &mut Vec<GameEvent>,

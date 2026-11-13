@@ -10,6 +10,7 @@ use engine::types::ability::{Effect, TargetChoiceTiming, TargetRef};
 use engine::types::actions::GameAction;
 use engine::types::card_type::Supertype;
 use engine::types::counter::CounterType;
+use engine::types::events::GameEvent;
 use engine::types::game_state::{
     CastPaymentMode, PersistedGameState, PersistedRestoreFinalization, WaitingFor,
 };
@@ -2654,6 +2655,11 @@ const HYENA_UMBRA: &str = "Enchant creature\nEnchanted creature gets +1/+1 and h
 /// with Hyena Umbra, so "Destroy all creatures" destroys the damaged creature and
 /// then asks P2 which replacement applies. The delayed trigger for the first death
 /// must survive that second pause, also across a save and restore taken there.
+///
+/// This row covers retention of the trigger for the death that already happened,
+/// not completion of the wipe: the Duelist is the last creature the wipe reaches,
+/// and `DestroyAll` does not resume objects after the one a replacement-order
+/// prompt interrupted (existing behaviour of the destroy loop, not changed here).
 #[test]
 fn delayed_trigger_survives_a_second_pause_in_instructions_resumed_by_a_concession() {
     for restore_at_second_pause in [false, true] {
@@ -2807,6 +2813,9 @@ fn delayed_trigger_survives_a_second_pause_in_instructions_resumed_by_a_concessi
 /// replacement-order prompt for P1's Disciplined Duelist (shield counter against
 /// Hyena Umbra). The Cutthroat's trigger for the death before that second pause
 /// must not be lost.
+///
+/// As with the concession row, this covers retention of the trigger for the death
+/// that already happened, not completion of the wipe after the prompt.
 #[test]
 fn death_trigger_survives_a_second_pause_after_the_choice_is_answered() {
     let mut scenario = GameScenario::new();
@@ -2900,4 +2909,192 @@ fn death_trigger_survives_a_second_pause_after_the_choice_is_answered() {
     );
     assert_eq!(life(&runner, P1), p1_life - 1);
     assert_resolution_settled(&runner, "Final Showdown");
+}
+
+const COMMANDEER: &str = "You may exile two blue cards from your hand rather than pay this spell's mana cost.\nGain control of target noncreature spell. You may choose new targets for it. (If that spell is an artifact, enchantment, or planeswalker, the permanent enters under your control.)";
+
+/// P0 casts Final Showdown's second mode, P1 gains control of it with
+/// Commandeer, and it resolves under P1 until its creature choice is open for
+/// P1. P0 controls `own` creatures, P1 two, P2 one. Returns the runner, the
+/// spell, P0's creatures and P1's creatures.
+fn commandeered_final_showdown_at_the_thiefs_choice(
+    own: usize,
+) -> (GameRunner, ObjectId, Vec<ObjectId>, Vec<ObjectId>) {
+    let mut scenario = GameScenario::new_n_player(3, 7);
+    scenario.at_phase(Phase::PreCombatMain);
+    let own_ids: Vec<ObjectId> = (0..own)
+        .map(|index| {
+            scenario
+                .add_creature(P0, &format!("P0 creature {index}"), 2, 2)
+                .id()
+        })
+        .collect();
+    let thief_ids: Vec<ObjectId> = (0..2)
+        .map(|index| {
+            scenario
+                .add_creature(P1, &format!("P1 creature {index}"), 2, 2)
+                .id()
+        })
+        .collect();
+    scenario.add_creature(P2, "P2 creature", 2, 2);
+    for _ in 0..7 {
+        scenario.add_basic_land(P0, ManaColor::White);
+    }
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Final Showdown", true, FINAL_SHOWDOWN)
+        .with_mana_cost(parse_mtgjson_mana_cost("{W}"))
+        .id();
+    let commandeer = scenario
+        .add_spell_to_hand_from_oracle(P1, "Commandeer", true, COMMANDEER)
+        .with_mana_cost(parse_mtgjson_mana_cost("{0}"))
+        .id();
+    let mut runner = scenario.build();
+    let card_id = runner.state().objects[&spell].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: spell,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .unwrap();
+    runner
+        .act(GameAction::SelectModes { indices: vec![1] })
+        .unwrap();
+    runner.act(GameAction::PassPriority).unwrap();
+    assert_eq!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { player: P1 },
+        "reach guard: P1 responds with Final Showdown on the stack"
+    );
+    runner.cast(commandeer).target_object(spell).commit();
+    for _ in 0..12 {
+        if runner.state().objects[&commandeer].zone != Zone::Stack {
+            break;
+        }
+        match runner.state().waiting_for {
+            WaitingFor::Priority { .. } => runner.act(GameAction::PassPriority),
+            WaitingFor::OptionalEffectChoice { .. } => {
+                runner.act(GameAction::DecideOptionalEffect { accept: false })
+            }
+            ref other => panic!("unexpected Commandeer prompt: {other:?}"),
+        }
+        .expect("Commandeer resolves");
+    }
+    assert_eq!(
+        runner.state().objects[&spell].controller,
+        P1,
+        "reach guard: CR 613.1b, P1 controls Final Showdown on the stack"
+    );
+    pass_priority_to_prompt(&mut runner, "the thief's creature choice");
+    let WaitingFor::ChooseFromZoneChoice { player, cards, .. } = &runner.state().waiting_for else {
+        panic!(
+            "expected the thief's creature choice: {:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert_eq!(*player, P1, "reach guard: the thief is asked");
+    assert_eq!(
+        id_set(cards),
+        id_set(&thief_ids),
+        "reach guard: CR 109.5, the thief chooses among the thief's creatures"
+    );
+    (runner, spell, own_ids, thief_ids)
+}
+
+fn stack_resolutions(events: &[GameEvent], spell: ObjectId) -> usize {
+    events
+        .iter()
+        .filter(
+            |event| matches!(event, GameEvent::StackResolved { object_id } if *object_id == spell),
+        )
+        .count()
+}
+
+/// CR 800.4a + CR 109.5 + CR 608.2c: P0 casts Final Showdown ("Choose a creature
+/// you control. It gains indestructible until end of turn."), P1 takes control
+/// of it with Commandeer, and P1 concedes at the creature choice. P1's control
+/// effect ends, so the spell, still resolving on the stack, is P0's again, and
+/// "you" is P0: P0 is asked, among P0's creatures. The chosen creature gains
+/// indestructible and the spell completes once.
+#[test]
+fn final_showdown_choice_passes_to_the_caster_when_the_thief_concedes() {
+    let (mut runner, spell, own, thief_creatures) =
+        commandeered_final_showdown_at_the_thiefs_choice(2);
+    let conceded = runner
+        .act(GameAction::Concede { player_id: P1 })
+        .expect("P1 concedes");
+    assert!(runner.state().players[1].is_eliminated);
+    assert_eq!(
+        runner.state().objects[&spell].controller,
+        P0,
+        "CR 800.4a: P1's control effect ended"
+    );
+    assert_eq!(
+        stack_resolutions(&conceded.events, spell),
+        0,
+        "the spell is still resolving"
+    );
+    let WaitingFor::ChooseFromZoneChoice { player, cards, .. } = &runner.state().waiting_for else {
+        panic!(
+            "the choice is put to the spell's controller now: {:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert_eq!(*player, P0, "CR 109.5: \"you\" is the controller now");
+    assert_eq!(
+        id_set(cards),
+        id_set(&own),
+        "the candidates are the creatures P0 controls"
+    );
+    assert!(thief_creatures.iter().all(|id| !cards.contains(id)));
+
+    let chosen = own[1];
+    let answered = runner
+        .act(GameAction::SelectCards {
+            cards: vec![chosen],
+        })
+        .expect("P0 chooses");
+    evaluate_layers(runner.state_mut());
+    assert!(
+        runner.state().objects[&chosen].has_keyword(&Keyword::Indestructible),
+        "the chosen creature gains indestructible"
+    );
+    assert!(
+        !runner.state().objects[&own[0]].has_keyword(&Keyword::Indestructible),
+        "only the chosen creature does"
+    );
+    assert_eq!(
+        stack_resolutions(&answered.events, spell),
+        1,
+        "the spell completes once"
+    );
+    assert_eq!(runner.state().objects[&spell].zone, Zone::Graveyard);
+    assert!(runner.state().resolving_stack_entry.is_none());
+    assert!(runner.state().active_ability_continuation_frame().is_none());
+    assert_resolution_settled(&runner, "Final Showdown after the thief conceded");
+}
+
+/// As above with a single creature under P0's control: it is the only legal
+/// pick, so the concession itself binds it and completes the spell.
+#[test]
+fn final_showdown_choice_binds_the_casters_only_creature_when_the_thief_concedes() {
+    let (mut runner, spell, own, _) = commandeered_final_showdown_at_the_thiefs_choice(1);
+    let conceded = runner
+        .act(GameAction::Concede { player_id: P1 })
+        .expect("P1 concedes");
+    assert_eq!(runner.state().objects[&spell].zone, Zone::Graveyard);
+    evaluate_layers(runner.state_mut());
+    assert!(
+        runner.state().objects[&own[0]].has_keyword(&Keyword::Indestructible),
+        "P0's only creature gains indestructible"
+    );
+    assert_eq!(
+        stack_resolutions(&conceded.events, spell),
+        1,
+        "the spell completes once"
+    );
+    assert!(runner.state().resolving_stack_entry.is_none());
+    assert!(runner.state().active_ability_continuation_frame().is_none());
+    assert_resolution_settled(&runner, "Final Showdown after the thief conceded");
 }

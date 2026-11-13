@@ -561,7 +561,8 @@ pub(crate) fn eliminate_players(
         // ("choose a creature you control") stored its candidates when it was
         // raised. The departure removed the leaving player's objects and ended
         // their control effects, so the choice is re-offered against the objects
-        // eligible now, or settled (one or no candidate left, or the chooser
+        // eligible now, put to the controller a reverted spell has now
+        // (CR 109.5), or settled (one or no candidate left, or the chooser
         // left) and the resolution's remaining instructions run. Runs before
         // `drain_or_clear_deferred_triggers_after_elimination`, which places the
         // triggers those instructions queued (CR 603.3), and before the generic
