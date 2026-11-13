@@ -5,11 +5,14 @@
 //! `EffectResolved` bookkeeping event.
 //!
 //! Both resolvers handle player and object targets in a single pass:
-//! explicit `TargetRef::Player` targets and player-typed mass filters
-//! (`Controller`, `Player`, `Typed { type_filters: [], … }`) route through
-//! `phase_out_player`/`phase_in_player`; everything else routes through the
-//! permanent path (CR 702.26 proper). Player phasing has no formal CR rule
-//! and follows the small set of card Oracle text that says "you phase out".
+//! player-typed filters (`Controller`, `Player`, `Typed { type_filters: [], … }`)
+//! route through `phase_out_player`/`phase_in_player`, and an explicit
+//! `TargetRef::Player` is read only when the effect filter itself names players.
+//! An object population's companion player target ("each creature target
+//! player controls") is only its controller anchor and never phases the
+//! player; those filters route through the permanent path (CR 702.26 proper).
+//! Player phasing has no formal CR rule and follows the small set of card
+//! Oracle text that says "you phase out".
 
 use std::collections::HashSet;
 
@@ -24,6 +27,7 @@ use crate::types::ability::{
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
 use crate::types::identifiers::ObjectId;
+use crate::types::player::PlayerId;
 
 /// CR 702.26a: Resolve `Effect::PhaseOut` by phasing out every targeted
 /// permanent (or every permanent matching the effect's mass filter, e.g.
@@ -41,19 +45,29 @@ pub fn resolve(
         _ => return Ok(()),
     };
 
-    // Player-phasing branch. Mirrors `collect_object_targets` for the
-    // permanent path: explicit `TargetRef::Player` targets win, then a
-    // player-typed mass filter (`Controller`, `Typed { type_filters: [], … }`,
-    // `Player`) expands to the matching set of player ids. This dispatches
-    // before the object branch so a player target never silently becomes a
-    // no-op via `collect_object_targets`.
+    // Player-phasing branch. Only a filter that itself names players
+    // contributes player ids: a player-typed mass filter (`Controller`,
+    // `Typed { type_filters: [], … }`, `Player`) expands to the matching set,
+    // and an explicit `TargetRef::Player` is consumed for those filters. An
+    // object population's companion player target is only its controller
+    // anchor, so it never phases the player. This dispatches before the object
+    // branch so a genuine player target never silently becomes a no-op via
+    // `collect_object_targets`.
     let player_targets =
         crate::game::ability_utils::collect_player_targets(state, ability, &target);
     for pid in &player_targets {
         phase_out_player(state, *pid, events);
     }
 
-    let object_targets = collect_object_targets(state, ability, &target);
+    // CR 608.2c + CR 115.1: a mixed "target player or creature" announcement
+    // selects ONE role. When the player role was chosen and no object target
+    // was declared, the object leg is not an affected population and must not
+    // be swept from the same filter.
+    let object_targets = if player_role_excludes_object_sweep(ability, &target, &player_targets) {
+        Vec::new()
+    } else {
+        collect_object_targets(state, ability, &target)
+    };
     let target_set: HashSet<ObjectId> = object_targets.iter().copied().collect();
     for oid in object_targets {
         // CR 702.26h: attachments whose host is also in this mass set phase out
@@ -84,10 +98,11 @@ pub fn resolve_phase_in(
         _ => return Ok(()),
     };
 
-    // Player-phasing branch — same idiom as `resolve` for symmetry. Phased-out
+    // Player-phasing branch — same filter-scoped idiom as `resolve`. Phased-out
     // players don't appear in the targeting choke point, so callers wanting
-    // to phase them back in must use an explicit `TargetRef::Player` target
-    // (or a player-typed mass filter such as `Controller`).
+    // to phase them back in must use a player-typed filter (`Controller`,
+    // `Player`, …), with an explicit `TargetRef::Player` read only for such a
+    // filter.
     let player_targets =
         crate::game::ability_utils::collect_player_targets(state, ability, &target);
     for pid in &player_targets {
@@ -120,8 +135,14 @@ pub fn resolve_phase_in(
     // CR 702.26b: Filter choke point normally excludes phased-out objects, so
     // we can't rely on the standard target expansion for phase-in. Instead,
     // enumerate state.battlefield directly and match the filter manually,
-    // skipping the phased-out exclusion.
-    let targets = collect_phase_in_targets(state, ability, &target);
+    // skipping the phased-out exclusion. CR 608.2c + CR 115.1: a mixed
+    // player/object announcement that selected the player role declares no
+    // object population to phase in.
+    let targets = if player_role_excludes_object_sweep(ability, &target, &player_targets) {
+        Vec::new()
+    } else {
+        collect_phase_in_targets(state, ability, &target)
+    };
     for oid in targets {
         // CR 101.2: an explicit "phase in" effect can't override an active
         // "can't phase in" restriction. The restriction is condition-gated
@@ -153,6 +174,27 @@ fn attachment_host_in_set(state: &GameState, oid: ObjectId, targets: &HashSet<Ob
         .is_some_and(|host| targets.contains(&host))
 }
 
+/// CR 608.2c + CR 115.1: a mixed player/object announcement selects one role.
+/// When the player role was chosen and the ability declares no object target,
+/// the object leg is not an affected population and must not be swept.
+fn player_role_excludes_object_sweep(
+    ability: &ResolvedAbility,
+    target: &TargetFilter,
+    player_targets: &[PlayerId],
+) -> bool {
+    // CR 608.2b: an announced primary player role stays the selected role even
+    // when that player has since become illegal, so the object leg is not a
+    // substitute population (the companion anchor alone is not a selection).
+    let player_role_selected = !player_targets.is_empty()
+        || crate::game::ability_utils::mixed_primary_player_role_selected(ability, target);
+    player_role_selected
+        && crate::game::ability_utils::filter_selects_players(target)
+        && !ability
+            .targets
+            .iter()
+            .any(|target| matches!(target, TargetRef::Object(_)))
+}
+
 /// Resolve the target object set for a `PhaseOut` effect. Explicit
 /// `ability.targets` (from the targeting phase) take precedence; mass filters
 /// (e.g., `Typed Permanent / You`) are expanded against the battlefield.
@@ -171,6 +213,13 @@ pub(super) fn collect_object_targets(
         .collect();
     if !from_targets.is_empty() {
         return from_targets;
+    }
+    // CR 608.2b: an explicit object occurrence that failed resolution legality
+    // is not replaced by a mass population. "Other parts of the effect for which
+    // those targets are not illegal may still affect them"; the object leg here
+    // had a declared target and that target is gone.
+    if !ability.illegal_local_target_slots.is_empty() {
+        return Vec::new();
     }
 
     // CR 400.7: a self-reference cannot phase out a later same-ID incarnation.
@@ -219,6 +268,11 @@ fn collect_phase_in_targets(
     if !from_targets.is_empty() {
         return from_targets;
     }
+    // CR 608.2b: a declared object target that failed resolution legality must
+    // not be replaced by a battlefield-wide phase-in scan of the same filter.
+    if !ability.illegal_local_target_slots.is_empty() {
+        return Vec::new();
+    }
 
     // CR 702.26b: phasing-in is one of the rare effects that specifically
     // mentions phased-out permanents, so the effect's filter must be applied to
@@ -265,6 +319,184 @@ mod tests {
             .core_types
             .push(CoreType::Creature);
         id
+    }
+
+    /// Issue #10266 regression: an object-population filter whose controller is
+    /// a declared player ("each creature target player controls phases out")
+    /// carries that player as `TargetRef::Player` for the filter anchor, but the
+    /// effect affects creatures only. The player must remain phased in.
+    #[test]
+    fn phase_out_object_filter_with_player_anchor_does_not_phase_out_player() {
+        let mut state = GameState::new_two_player(42);
+        let source = add_creature(&mut state, PlayerId(0), "Galadriel's Dismissal");
+        let theirs = add_creature(&mut state, PlayerId(1), "Target Bear");
+        let yours = add_creature(&mut state, PlayerId(0), "Caster Bear");
+
+        let ability = ResolvedAbility::new(
+            Effect::PhaseOut {
+                target: TargetFilter::Typed(
+                    TypedFilter::creature().controller(ControllerRef::TargetPlayer),
+                ),
+            },
+            vec![TargetRef::Player(PlayerId(1))],
+            source,
+            PlayerId(0),
+        );
+
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        // CR 702.26b: only permanents phase out; the player target is the
+        // controller anchor for the creature filter, not an affected player.
+        assert!(
+            !state.players[1].is_phased_out(),
+            "the targeted player must remain phased in"
+        );
+        assert!(
+            state.objects[&theirs].is_phased_out(),
+            "the targeted player's creature must phase out"
+        );
+        assert!(
+            state.objects[&yours].is_phased_in(),
+            "an untargeted player's creature must remain phased in"
+        );
+    }
+
+    /// CR 608.2c + CR 115.1: a mixed "target player or creature" phrase
+    /// selects ONE role. When the player was selected, the object leg must not
+    /// also be swept as a mass population.
+    #[test]
+    fn phase_out_mixed_player_or_creature_selects_only_the_player() {
+        let mut state = GameState::new_two_player(42);
+        let source = add_creature(&mut state, PlayerId(0), "Mixed Source");
+        let theirs = add_creature(&mut state, PlayerId(1), "Target Bear");
+
+        let ability = ResolvedAbility::new(
+            Effect::PhaseOut {
+                target: TargetFilter::Or {
+                    filters: vec![
+                        TargetFilter::Player,
+                        TargetFilter::Typed(TypedFilter::creature()),
+                    ],
+                },
+            },
+            vec![TargetRef::Player(PlayerId(1))],
+            source,
+            PlayerId(0),
+        );
+
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert!(
+            state.players[1].is_phased_out(),
+            "the selected player phase-out must run"
+        );
+        assert!(
+            state.objects[&theirs].is_phased_in(),
+            "the unchosen creature leg must not be swept"
+        );
+    }
+
+    /// CR 115.1 + CR 608.2b: when the companion anchor was dropped but the
+    /// player declared for the mixed primary slot survived, that surviving
+    /// player is still the selected role — not a stray anchor to discard.
+    #[test]
+    fn phase_out_mixed_player_role_keeps_surviving_primary_player() {
+        use crate::types::ability::DeclaredPlayerTargetSlot;
+
+        let mut state = GameState::new_two_player(42);
+        let source = add_creature(&mut state, PlayerId(0), "Mixed Source");
+        let theirs = add_creature(&mut state, PlayerId(1), "Target Bear");
+        let target = TargetFilter::Or {
+            filters: vec![
+                TargetFilter::Player,
+                TargetFilter::Typed(
+                    TypedFilter::creature().controller(ControllerRef::TargetPlayer),
+                ),
+            ],
+        };
+        let mut ability = ResolvedAbility::new(
+            Effect::PhaseOut {
+                target: target.clone(),
+            },
+            vec![TargetRef::Player(PlayerId(1))],
+            source,
+            PlayerId(0),
+        );
+        ability.declared_player_target_slots = vec![
+            DeclaredPlayerTargetSlot {
+                declared_position: 0,
+                stored_position: None,
+            },
+            DeclaredPlayerTargetSlot {
+                declared_position: 1,
+                stored_position: Some(0),
+            },
+        ];
+
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert!(
+            state.players[1].is_phased_out(),
+            "the surviving primary player is the selected role"
+        );
+        assert!(
+            state.objects[&theirs].is_phased_in(),
+            "the object leg must not sweep a selected player role"
+        );
+    }
+
+    /// CR 115.1 + CR 608.2b: only the companion anchor survived, while the
+    /// declared primary player is illegal. The player role is still the
+    /// announced selection, so neither the illegal player nor the object leg
+    /// may be substituted for it.
+    #[test]
+    fn phase_out_mixed_player_role_suppresses_sweep_when_primary_player_is_illegal() {
+        use crate::types::ability::DeclaredPlayerTargetSlot;
+
+        let mut state = GameState::new_two_player(42);
+        let source = add_creature(&mut state, PlayerId(0), "Mixed Source");
+        let theirs = add_creature(&mut state, PlayerId(1), "Target Bear");
+        let target = TargetFilter::Or {
+            filters: vec![
+                TargetFilter::Player,
+                TargetFilter::Typed(
+                    TypedFilter::creature().controller(ControllerRef::TargetPlayer),
+                ),
+            ],
+        };
+        let mut ability = ResolvedAbility::new(
+            Effect::PhaseOut {
+                target: target.clone(),
+            },
+            vec![TargetRef::Player(PlayerId(0))],
+            source,
+            PlayerId(0),
+        );
+        ability.declared_player_target_slots = vec![
+            DeclaredPlayerTargetSlot {
+                declared_position: 0,
+                stored_position: Some(0),
+            },
+            DeclaredPlayerTargetSlot {
+                declared_position: 1,
+                stored_position: None,
+            },
+        ];
+
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert!(
+            state.players[0].is_phased_in(),
+            "the lone companion anchor is not an affected player"
+        );
+        assert!(
+            state.objects[&theirs].is_phased_in(),
+            "an illegal primary player role must not be replaced by an object sweep"
+        );
     }
 
     /// CR 702.26b: A mass phase-in effect specifically mentioning phased-out

@@ -7688,6 +7688,7 @@ fn instruction_outlives_declined_gate(
         illegal_target_slots: _,
         unjudged_target_slots: _,
         illegal_local_target_slots: _,
+        declared_player_target_slots: _, // announce-time role identity, no per-seat read
         controller: _,
         original_controller: _,
         context: _,
@@ -12194,6 +12195,7 @@ fn fan_out_head_is_allowlisted(head: &ResolvedAbility) -> bool {
         illegal_target_slots: _,         // CR 608.2b legality stamp
         unjudged_target_slots: _,        // CR 608.2b legality stamp
         illegal_local_target_slots: _,   // CR 608.2b legality stamp
+        declared_player_target_slots: _, // CR 115.1 declared player-role identity
         controller: _,                   // player id
         original_controller: _,          // player id
         scoped_player: _,                // the seat's binding
@@ -14604,6 +14606,96 @@ fn pump_run_feeds_tracked_set_grant(ability: &ResolvedAbility) -> bool {
     false
 }
 
+/// CR 608.2c: True for a filter that names the phase action's resolved
+/// population itself, not an object population that merely reads the parent
+/// referent through a controller/owner qualifier.
+fn is_phase_population_referent(filter: &TargetFilter) -> bool {
+    matches!(
+        filter,
+        TargetFilter::ParentTarget | TargetFilter::ParentTargetSlot { .. }
+    )
+}
+
+/// CR 115.1 + CR 702.26b: the population a phase instruction hands to its
+/// following rider. Explicit object targets are the SELECTED population — a
+/// selected Aura is included even though it phased out indirectly with its host,
+/// while an incidental attachment is not. A mass phase action declares no
+/// object target, so it falls back to the DIRECTLY phased creatures; indirect
+/// attachments ride with their host rather than becoming separate members.
+fn phase_result_objects(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    effect_events: &[GameEvent],
+) -> Vec<ObjectId> {
+    match &ability.effect {
+        Effect::PhaseOut { .. } | Effect::PhaseIn { .. } => {
+            // CR 115.1 + CR 702.26b: the phase handler publishes the objects it
+            // actually changed phase status for. A selected attachment that
+            // phased out indirectly with its selected host still has its own
+            // event; a stale pinned target that the handler dropped (CR 400.7)
+            // has none, so the raw declared ID must not be repinned downstream.
+            let actual: HashSet<ObjectId> = effect_events
+                .iter()
+                .filter_map(|event| match (&ability.effect, event) {
+                    (Effect::PhaseOut { .. }, GameEvent::PermanentPhasedOut { object_id, .. }) => {
+                        Some(*object_id)
+                    }
+                    (Effect::PhaseIn { .. }, GameEvent::PermanentPhasedIn { object_id }) => {
+                        Some(*object_id)
+                    }
+                    _ => None,
+                })
+                .collect();
+            let declared_explicit: Vec<ObjectId> = ability
+                .targets
+                .iter()
+                .filter_map(|target| match target {
+                    TargetRef::Object(id) => Some(*id),
+                    TargetRef::Player(_) => None,
+                })
+                .collect();
+            if declared_explicit.is_empty() {
+                // A mass phase action declares no object target. Its affected
+                // creatures are the directly phased objects; indirect
+                // attachments ride with them and are not separate members of
+                // "each creature target player controls". A phase-in has no
+                // indirect marker, so every phase-in event belongs.
+                effect_events
+                    .iter()
+                    .filter_map(|event| match event {
+                        GameEvent::PermanentPhasedOut {
+                            object_id,
+                            indirect: false,
+                        } => Some(*object_id),
+                        GameEvent::PermanentPhasedIn { object_id }
+                            if matches!(&ability.effect, Effect::PhaseIn { .. }) =>
+                        {
+                            Some(*object_id)
+                        }
+                        _ => None,
+                    })
+                    .collect()
+            } else {
+                // CR 400.7 + CR 603.7c: membership is the SELECTED occurrence
+                // as it exists now, not the bare storage id. A stale selected
+                // occurrence must not be re-admitted just because a new
+                // incarnation of the same id appears in the incidental event
+                // slice. Preserve selection order among live occurrences.
+                ability
+                    .live_object_targets(state)
+                    .into_iter()
+                    .filter_map(|target| match target {
+                        TargetRef::Object(id) => Some(id),
+                        TargetRef::Player(_) => None,
+                    })
+                    .filter(|object_id| actual.contains(object_id))
+                    .collect()
+            }
+        }
+        _ => Vec::new(),
+    }
+}
+
 fn affected_objects_from_events(
     state: &GameState,
     ability: &ResolvedAbility,
@@ -14621,6 +14713,28 @@ fn affected_objects_from_events(
                 } else {
                     None
                 }
+            })
+            .collect(),
+        // CR 702.26b: the DIRECTLY phased permanents are the mass population
+        // a following "they"/"those creatures" instruction names. An
+        // attachment phased out indirectly with its host is not a separate
+        // member of that population; a selected attachment is carried
+        // separately by `phase_result_objects`' explicit-target branch.
+        Effect::PhaseOut { .. } => events
+            .iter()
+            .filter_map(|event| match event {
+                GameEvent::PermanentPhasedOut {
+                    object_id,
+                    indirect: false,
+                } => Some(*object_id),
+                _ => None,
+            })
+            .collect(),
+        Effect::PhaseIn { .. } => events
+            .iter()
+            .filter_map(|event| match event {
+                GameEvent::PermanentPhasedIn { object_id } => Some(*object_id),
+                _ => None,
             })
             .collect(),
         // CR 508.1a + CR 608.2c + CR 603.7c + CR 611.2c + CR 615.11 (issue
@@ -22152,6 +22266,7 @@ fn resolve_chain_body(
                 .map(|&pid| {
                     let mut seat = per_target.clone();
                     seat.targets = vec![TargetRef::Player(pid)];
+                    seat.declared_player_target_slots.clear();
                     seat.multi_target = None;
                     (pid, seat)
                 })
@@ -24561,6 +24676,11 @@ fn resolve_chain_body(
         vec![]
     };
     let effect_events = &events[events_before..];
+    // CR 608.2c: phase-out/phase-in affect a resolved population, not a
+    // declared object target. Publish the actual set so a following
+    // `ParentTarget` rider ("until end of turn, they can't phase in") binds the
+    // creatures that changed status rather than the player-only anchor.
+    let phase_affected_objects = phase_result_objects(state, ability, effect_events);
     // CR 608.2c + CR 608.2h: a later instruction may read a public-to-hidden
     // move's last-known controller/owner metadata, without treating the hidden
     // object itself as an available parent referent.
@@ -25901,6 +26021,31 @@ fn resolve_chain_body(
         });
         let sub = bound_sub.as_ref().unwrap_or(sub);
 
+        // CR 608.2c: only a population-shaped continuous rider needs the phase
+        // action's resolved set forwarded. A direct `ParentTarget` instruction
+        // (Oubliette's "Tap that creature as it phases in") is bound by the
+        // ordinary parent-target propagation and must keep that path. A
+        // `GenericEffect` that declares its own real target keeps that target's
+        // authority even when its controller qualifier names the parent: the
+        // qualifier parameterizes the rider's own population, it does not make
+        // the parent's phase result the rider's antecedent. Only a pure
+        // `ParentTarget`/`ParentTargetSlot` referent on both the instruction and
+        // its application filter forwards the phase population.
+        let phase_rider_reads_population = matches!(
+            &sub.effect,
+            Effect::GenericEffect {
+                static_abilities,
+                target,
+                ..
+            } if target.as_ref().is_none_or(is_phase_population_referent)
+                && static_abilities.iter().any(|static_def| {
+                    static_def
+                        .affected
+                        .as_ref()
+                        .is_some_and(is_phase_population_referent)
+                })
+        );
+
         // CR 608.2c + CR 609.3: A zone-choice partition already bound this sub's
         // complement, and that binding is EMPTY — the pick exhausted the eligible
         // pool, so "the other" names no object at all
@@ -26027,6 +26172,30 @@ fn resolve_chain_body(
                 ForwardedResultContext::from_object_ids(state, &forwarded_objects),
                 attachment_candidates,
             );
+            progress = resolve_ability_chain_step(state, &sub_with_context, events, depth + 1)?;
+        } else if matches!(
+            &ability.effect,
+            Effect::PhaseOut { .. } | Effect::PhaseIn { .. }
+        ) && phase_rider_reads_population
+        {
+            // CR 608.2c: a phase instruction's resolved population is the
+            // antecedent for a following `ParentTarget` continuous rider.
+            // Forward the actual objects through the same result-binding
+            // authority a forward-result producer uses; `effect.rs`'s
+            // inherited-target path then binds one transient effect per phased
+            // permanent. Install the context even when the set is EMPTY: a
+            // completed zero-object phase action must bind no rider, not fall
+            // back to the player-only parent target.
+            let mut sub_with_context = sub.as_ref().clone();
+            apply_parent_chain_context(
+                &mut sub_with_context,
+                ability,
+                effect_context_object.as_ref(),
+                state,
+            );
+            sub_with_context.context.forwarded_result_context = Some(Box::new(
+                ForwardedResultContext::from_object_ids(state, &phase_affected_objects),
+            ));
             progress = resolve_ability_chain_step(state, &sub_with_context, events, depth + 1)?;
         } else if sub.targets.is_empty()
             && !state.last_revealed_ids.is_empty()
@@ -45302,6 +45471,215 @@ mod tests {
         assert!(
             state.objects.get(&noncreature).unwrap().tapped,
             "non-gained object must not be included in the tracked set"
+        );
+    }
+
+    /// CR 115.1 + CR 702.26b: a phase instruction hands its SELECTED objects
+    /// to a following rider. A selected attachment is kept even when it phased
+    /// out indirectly with its host (Barn); an incidental attachment is not
+    /// (Oubliette). A mass phase action uses only directly phased creatures.
+    #[test]
+    fn phase_result_objects_use_selected_targets_not_incidental_attachments() {
+        let host = ObjectId(1);
+        let aura = ObjectId(2);
+        let direct = GameEvent::PermanentPhasedOut {
+            object_id: host,
+            indirect: false,
+        };
+        let indirect = GameEvent::PermanentPhasedOut {
+            object_id: aura,
+            indirect: true,
+        };
+
+        let selected = ResolvedAbility::new(
+            Effect::PhaseOut {
+                target: TargetFilter::ParentTarget,
+            },
+            vec![TargetRef::Object(host), TargetRef::Object(aura)],
+            ObjectId(9),
+            PlayerId(0),
+        );
+        let state = GameState::new_two_player(42);
+        assert_eq!(
+            phase_result_objects(&state, &selected, &[direct.clone(), indirect.clone()]),
+            vec![host, aura],
+            "the selected host and selected Aura must both forward"
+        );
+
+        let mass = ResolvedAbility::new(
+            Effect::PhaseOut {
+                target: TargetFilter::Any,
+            },
+            vec![TargetRef::Player(PlayerId(0))],
+            ObjectId(9),
+            PlayerId(0),
+        );
+        assert_eq!(
+            phase_result_objects(&state, &mass, &[direct, indirect]),
+            vec![host],
+            "a mass phase action must not add an incidental indirect attachment"
+        );
+    }
+
+    /// CR 115.1 + CR 400.7 + CR 702.26b: the forwarded phase population is the
+    /// objects the handler actually changed, not the raw declared IDs. A stale
+    /// pinned phase-in target publishes no event and must not be repinned; a
+    /// selected attachment that phased out indirectly with its selected host
+    /// does publish one and must stay in the set.
+    #[test]
+    fn phase_result_objects_publish_handler_results_not_stale_declared_ids() {
+        let host = ObjectId(1);
+        let selected_aura = ObjectId(2);
+        let stale = ObjectId(3);
+        let incidental = ObjectId(4);
+
+        let phase_out = ResolvedAbility::new(
+            Effect::PhaseOut {
+                target: TargetFilter::ParentTarget,
+            },
+            vec![TargetRef::Object(host), TargetRef::Object(selected_aura)],
+            ObjectId(9),
+            PlayerId(0),
+        );
+        let phase_out_events = [
+            GameEvent::PermanentPhasedOut {
+                object_id: host,
+                indirect: false,
+            },
+            GameEvent::PermanentPhasedOut {
+                object_id: selected_aura,
+                indirect: true,
+            },
+            GameEvent::PermanentPhasedOut {
+                object_id: incidental,
+                indirect: true,
+            },
+        ];
+        assert_eq!(
+            phase_result_objects(
+                &GameState::new_two_player(42),
+                &phase_out,
+                &phase_out_events
+            ),
+            vec![host, selected_aura],
+            "selected indirect attachment stays; incidental attachment and stale ID do not"
+        );
+
+        let phase_in = ResolvedAbility::new(
+            Effect::PhaseIn {
+                target: TargetFilter::ParentTarget,
+            },
+            vec![TargetRef::Object(host), TargetRef::Object(stale)],
+            ObjectId(9),
+            PlayerId(0),
+        );
+        let phase_in_events = [GameEvent::PermanentPhasedIn { object_id: host }];
+        assert_eq!(
+            phase_result_objects(&GameState::new_two_player(42), &phase_in, &phase_in_events),
+            vec![host],
+            "a stale declared phase-in target must not be repinned or forwarded"
+        );
+
+        // CR 400.7 + CR 603.7c: the stale selected occurrence must not be
+        // re-admitted merely because a NEW incarnation of the same storage id
+        // phases in indirectly with a live host.
+        let mut state = GameState::new_two_player(42);
+        let returned = crate::game::zones::create_object(
+            &mut state,
+            crate::types::identifiers::CardId(77),
+            PlayerId(1),
+            "Returned Aura".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&returned).unwrap().incarnation = 2;
+        let mut stale_phase_in = ResolvedAbility::new(
+            Effect::PhaseIn {
+                target: TargetFilter::ParentTarget,
+            },
+            vec![TargetRef::Object(returned)],
+            ObjectId(9),
+            PlayerId(0),
+        );
+        stale_phase_in.target_incarnations =
+            vec![crate::types::identifiers::ObjectIncarnationRef::of(
+                returned, 1,
+            )];
+        assert!(
+            phase_result_objects(
+                &state,
+                &stale_phase_in,
+                &[GameEvent::PermanentPhasedIn {
+                    object_id: returned
+                }]
+            )
+            .is_empty(),
+            "an incidental phase-in of a new incarnation must not revive the stale selected occurrence"
+        );
+    }
+
+    /// CR 608.2c + CR 608.2b: a `GenericEffect` that independently declares its
+    /// own target must keep that target even when its controller qualifier reads
+    /// the parent referent. The parent phase result is not its antecedent.
+    #[test]
+    fn phase_result_does_not_override_an_independently_targeted_rider() {
+        let mut state = GameState::new_two_player(42);
+        let phased = crate::game::zones::create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Phased A".to_string(),
+            Zone::Battlefield,
+        );
+        let rider_target = crate::game::zones::create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Rider B".to_string(),
+            Zone::Battlefield,
+        );
+        for id in [phased, rider_target] {
+            state.objects.get_mut(&id).unwrap().card_types.core_types = vec![CoreType::Creature];
+        }
+        let source = ObjectId(99);
+        let rider = ResolvedAbility::new(
+            Effect::GenericEffect {
+                static_abilities: vec![StaticDefinition::continuous()
+                    .affected(TargetFilter::ParentTarget)
+                    .modifications(vec![ContinuousModification::AddKeyword {
+                        keyword: crate::types::keywords::Keyword::Flying,
+                    }])],
+                duration: None,
+                target: Some(TargetFilter::Typed(
+                    TypedFilter::creature().controller(ControllerRef::ParentTargetController),
+                )),
+                end_cost: None,
+            },
+            vec![TargetRef::Object(rider_target)],
+            source,
+            PlayerId(0),
+        );
+        let chain = ResolvedAbility::new(
+            Effect::PhaseOut {
+                target: TargetFilter::Typed(TypedFilter::creature()),
+            },
+            vec![TargetRef::Object(phased)],
+            source,
+            PlayerId(0),
+        )
+        .sub_ability(rider);
+
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &chain, &mut events, 0).unwrap();
+
+        let bound = state
+            .transient_continuous_effects
+            .iter()
+            .find(|effect| effect.source_id == source)
+            .expect("the rider must install a transient effect");
+        assert_eq!(
+            bound.affected,
+            TargetFilter::SpecificObject { id: rider_target },
+            "the rider must bind its independently declared target, not the phased object"
         );
     }
 

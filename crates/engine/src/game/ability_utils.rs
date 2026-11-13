@@ -14,10 +14,10 @@ use crate::types::ability::{
     payer_is_declared_target, quantity_slot_filter_selects_players, relative_controller_kind,
     AbilityCondition, AbilityDefinition, AbilityKind, AdditionalCost, AttachSelection,
     AttachmentReferent, ChosenTargetSlots, ControllerRef, DamageReplacementTargetRole,
-    EachDamageRecipient, Effect, EffectError, EffectKind, EffectScope, FilterProp, ModalChoice,
-    ModalSelectionCondition, ModalSelectionConstraint, MultiTargetSpec, ObjectScope,
-    ParentTargetMissingReason, PlayerFilter, PreventionAmount, PtValue, QuantityExpr, QuantityRef,
-    ResolvedAbility, SpellContext, SubAbilityLink, TargetChoiceTiming, TargetFilter,
+    DeclaredPlayerTargetSlot, EachDamageRecipient, Effect, EffectError, EffectKind, EffectScope,
+    FilterProp, ModalChoice, ModalSelectionCondition, ModalSelectionConstraint, MultiTargetSpec,
+    ObjectScope, ParentTargetMissingReason, PlayerFilter, PreventionAmount, PtValue, QuantityExpr,
+    QuantityRef, ResolvedAbility, SpellContext, SubAbilityLink, TargetChoiceTiming, TargetFilter,
     TargetReadOrigin, TargetRef, TypeFilter, TypedFilter,
 };
 #[cfg(test)]
@@ -3085,7 +3085,9 @@ impl DeclaredNumbering {
     fn delegate(self, node: &ResolvedAbility) -> Option<&ResolvedAbility> {
         match self {
             Self::Recorded => None,
-            Self::Layout => paid_instead_delegate(node),
+            // A paid override that inherits the parent's target owns no
+            // declaration; numbering must read the base branch's real target.
+            Self::Layout => paid_instead_delegate(node).filter(|sub| !sub.targets.is_empty()),
         }
     }
 
@@ -3171,6 +3173,30 @@ fn paid_instead_delegate(ability: &ResolvedAbility) -> Option<&ResolvedAbility> 
         .filter(|sub| is_paid_instead_sub(&ability.context, sub))
 }
 
+/// CR 601.2b + CR 608.2c: The node whose `targets` are the BASE-exposed
+/// declaration when the additional cost was paid. The cast path delegates the
+/// whole chain to the paid "instead" sub (`collect_target_slots` /
+/// `collect_target_slot_specs` return after descending), and assignment mirrors
+/// the sub's targets onto the parent, so a sub that owns a target declaration —
+/// kicked Galadriel's Dismissal's player slot — is the authority for what a
+/// retarget may change.
+///
+/// A paid override that inherits the parent's target instead ("that
+/// permanent", kicked Rite of Replication, bargained Torch the Tower) has no
+/// targets of its own: its `ParentTarget` anaphor is not a declaration. Stop at
+/// the pre-delegation node there, or the retarget seam would expose an empty
+/// slot and suppress a legal change.
+pub(crate) fn base_exposed_node(ability: &ResolvedAbility) -> &ResolvedAbility {
+    let mut node = ability;
+    while let Some(sub) = paid_instead_delegate(node) {
+        if sub.targets.is_empty() {
+            break;
+        }
+        node = sub;
+    }
+    node
+}
+
 /// CR 608.2b: The slots of `declared` — numbered exactly as
 /// [`declared_targets_in_chain`] numbers them, the numbering every
 /// `ParentTargetSlot` reader and [`declared_slots_ahead_of`] use — whose target
@@ -3231,6 +3257,11 @@ pub(crate) fn illegal_declared_target_slots(
 /// normal initial legality check.
 pub(crate) fn clear_illegal_local_target_slots(ability: &mut ResolvedAbility) {
     ability.illegal_local_target_slots.clear();
+    // CR 115.1: this route skips the validation that would preserve declared
+    // role identity, so the stored-occurrence map from an earlier resolution is
+    // stale. The uncompacted targets still preserve announced order, which the
+    // companion fallback reads.
+    ability.declared_player_target_slots.clear();
     if matches!(
         ability.parent_target_missing_reason,
         Some(ParentTargetMissingReason::IllegalAnnouncement {
@@ -3691,6 +3722,7 @@ fn validate_single_derived_role(
                 state,
                 ability,
                 &state.current_trigger_events,
+                ability.controller,
             );
             Some(
                 (0..ability.targets.len())
@@ -3874,6 +3906,36 @@ fn declared_illegal_local_positions(
         .collect()
 }
 
+/// CR 115.1: The pre-compaction positions of `announced` that hold a player.
+/// Read before resolution validation projects `targets`, so a dropped player
+/// occurrence still contributes its declared role identity.
+fn declared_player_positions(announced: &ResolvedAbility) -> Vec<usize> {
+    announced
+        .targets
+        .iter()
+        .enumerate()
+        .filter_map(|(position, target)| matches!(target, TargetRef::Player(_)).then_some(position))
+        .collect()
+}
+
+/// CR 115.1 + CR 608.2b: Record every announced player occurrence and the
+/// stored index it keeps after legality compaction. `stored_by_declared` is
+/// aligned with the announced target vector; `None` marks an occurrence
+/// validation dropped.
+fn stamp_declared_player_target_slots(
+    validated: &mut ResolvedAbility,
+    declared_positions: &[usize],
+    stored_by_declared: &[Option<usize>],
+) {
+    validated.declared_player_target_slots = declared_positions
+        .iter()
+        .map(|&declared_position| DeclaredPlayerTargetSlot {
+            declared_position,
+            stored_position: stored_by_declared.get(declared_position).copied().flatten(),
+        })
+        .collect();
+}
+
 type Occurrence = (TargetRef, Option<ObjectIncarnationRef>);
 
 /// CR 608.2b: one node's resolution-validation result.
@@ -3976,6 +4038,7 @@ fn validate_targets_in_chain_inner(
     // (`OccurrenceVerdict`, aligned with `validated.targets`); storage, the
     // declared view and the fizzle stamp are each derived from the verdicts.
     let occurrence_count = validated.targets.len();
+    let announced_player_positions = declared_player_positions(&validated);
     let node_validation = if is_per_opponent_target_fanout(&validated) {
         NodeValidation::Verdicts(validate_per_opponent_target_fanout_targets(
             state, &validated,
@@ -4549,6 +4612,7 @@ fn validate_targets_in_chain_inner(
                             state,
                             &validated,
                             &state.current_trigger_events,
+                            validated.controller,
                         )
                         .contains(companion)
                             && target_is_current_at(&validated, 0, state),
@@ -4667,6 +4731,11 @@ fn validate_targets_in_chain_inner(
     // (stored domain, `declared_to_stored`).
     let verdicts = match node_validation {
         NodeValidation::Verdicts(verdicts) => {
+            let stored_by_declared: Vec<Option<usize>> =
+                super::target_occurrences::declared_to_stored(&verdicts)
+                    .into_iter()
+                    .map(|stored| stored.map(|super::target_occurrences::StoredIndex(index)| index))
+                    .collect();
             validated.retain_target_occurrences(&verdicts);
             // The storage projection crosses domains only through
             // `declared_to_stored`: each stored occurrence is its declared
@@ -4684,6 +4753,11 @@ fn validate_targets_in_chain_inner(
                     );
                 }
             }
+            stamp_declared_player_target_slots(
+                &mut validated,
+                &announced_player_positions,
+                &stored_by_declared,
+            );
             verdicts
         }
         NodeValidation::Rebuilt { verdicts, stored } => {
@@ -4691,11 +4765,27 @@ fn validate_targets_in_chain_inner(
             // node, so it is inserted unrecorded.
             let own: Vec<usize> = stored.iter().filter_map(|(own, _)| *own).collect();
             validated.project_target_occurrences(&own);
+            // The rebuilt storage order is the final order: own occurrences
+            // are projected in place, then each ancestor occurrence is
+            // inserted at its stored index.
+            let mut stored_by_declared = vec![None; occurrence_count];
+            for (stored_index, (own, _)) in stored.iter().enumerate() {
+                if let Some(declared) = own {
+                    if let Some(slot) = stored_by_declared.get_mut(*declared) {
+                        *slot = Some(stored_index);
+                    }
+                }
+            }
             for (index, (own, (target, pin))) in stored.into_iter().enumerate() {
                 if own.is_none() {
                     validated.insert_target(index, target, pin);
                 }
             }
+            stamp_declared_player_target_slots(
+                &mut validated,
+                &announced_player_positions,
+                &stored_by_declared,
+            );
             verdicts
         }
     };
@@ -5059,6 +5149,7 @@ fn companion_target_player_legal_targets(
     state: &GameState,
     ability: &ResolvedAbility,
     trigger_events: &[crate::types::events::GameEvent],
+    controller: PlayerId,
 ) -> Vec<TargetRef> {
     // CR 115.1 + CR 118.12a: a payer declared as a target inside the unless clause
     // ("unless target opponent/target player pays") drives this slot directly — the
@@ -5071,7 +5162,7 @@ fn companion_target_player_legal_targets(
         .map(|m| &m.payer)
         .filter(|&payer| payer_is_declared_target(payer))
     {
-        return targeting::find_legal_targets(state, payer, ability.controller, ability.source_id);
+        return targeting::find_legal_targets(state, payer, controller, ability.source_id);
     }
     ability
         .trigger_source
@@ -5087,12 +5178,7 @@ fn companion_target_player_legal_targets(
             } else {
                 TargetFilter::Player
             };
-            targeting::find_legal_targets(
-                state,
-                &slot_filter,
-                ability.controller,
-                ability.source_id,
-            )
+            targeting::find_legal_targets(state, &slot_filter, controller, ability.source_id)
         })
 }
 
@@ -5112,9 +5198,10 @@ pub(crate) fn companion_target_player_retarget_options(
     state: &GameState,
     ability: &ResolvedAbility,
     trigger_events: &[crate::types::events::GameEvent],
+    controller: PlayerId,
 ) -> Option<Vec<TargetRef>> {
     ability_needs_companion_target_player_slot(ability)
-        .then(|| companion_target_player_legal_targets(state, ability, trigger_events))
+        .then(|| companion_target_player_legal_targets(state, ability, trigger_events, controller))
 }
 
 /// CR 601.2c + CR 115.1: Collect the target slots contributed by `ability` (and
@@ -5608,6 +5695,7 @@ fn collect_target_slots_inner(
                 state,
                 ability,
                 &state.pending_trigger_event_batch,
+                ability.controller,
             );
             if player_targets.is_empty() && !ability.optional_targeting {
                 return Err(no_legal_target_slots());
@@ -7246,17 +7334,138 @@ fn attach_object_binding(
     ))
 }
 
+/// CR 115.1: True when `filter` itself names the player(s) an effect affects,
+/// as opposed to an object population that only reads a player through a
+/// controller/owner constraint. `TargetFilter::is_player_scope` covers the
+/// targeted/mass player shapes; the extra `Typed` arm admits the unscoped
+/// empty-type player filter (Teferi's Reproach's chosen opponent), which the
+/// player axis resolves but `is_player_scope` leaves to object enumeration.
+/// A composite `Or` is player-selecting when any leg is, but an object leg
+/// that only reads a target player as its controller anchor is not a selected
+/// player role; an `And` requires every leg, matching the filter evaluator's
+/// conjunction semantics.
+pub(crate) fn filter_selects_players(filter: &TargetFilter) -> bool {
+    match filter {
+        // A mixed OR population ("target player or creature") still has a
+        // player leg, so an explicitly selected player must not be discarded.
+        // When an object leg only READS a target player as its controller
+        // anchor, the companion slot is announced FIRST; `collect_player_targets`
+        // drops that leading anchor and keeps a player declared for the primary
+        // mixed slot.
+        TargetFilter::Or { filters } => filters.iter().any(filter_selects_players),
+        // An AND population requires EVERY leg to hold, matching
+        // `filter::matches_target_filter`; a mixed player/object conjunction
+        // selects neither a player nor an object population.
+        TargetFilter::And { filters } => filters.iter().all(filter_selects_players),
+        TargetFilter::Player
+        | TargetFilter::Controller
+        | TargetFilter::PlayerMatching { .. }
+        | TargetFilter::AllPlayers => true,
+        // An unscoped/You/Opponent typed filter with no object axis is the
+        // player axis. Object properties put it back on the object side.
+        TargetFilter::Typed(tf) => tf.type_filters.is_empty() && tf.properties.is_empty(),
+        TargetFilter::None
+        | TargetFilter::Any
+        | TargetFilter::SourceController
+        | TargetFilter::ControllerAndControlledPermanents { .. }
+        | TargetFilter::Opponent
+        | TargetFilter::SelfRef
+        | TargetFilter::GrantingObject { .. }
+        | TargetFilter::SourceOrPaired
+        | TargetFilter::StackAbility { .. }
+        | TargetFilter::StackSpell
+        | TargetFilter::SpecificObject { .. }
+        | TargetFilter::SpecificPlayer { .. }
+        | TargetFilter::PlayerWhoChoseLabel { .. }
+        | TargetFilter::Neighbor { .. }
+        | TargetFilter::ScopedPlayer
+        | TargetFilter::AttachedTo
+        | TargetFilter::LastCreated
+        | TargetFilter::LastRevealed
+        | TargetFilter::LastZoneChanged
+        | TargetFilter::CostPaidObject
+        | TargetFilter::AmassedArmy
+        | TargetFilter::ChosenCard
+        | TargetFilter::TrackedSet { .. }
+        | TargetFilter::TrackedSetFiltered { .. }
+        | TargetFilter::ExiledBySource
+        | TargetFilter::ExiledCardByIndex { .. }
+        | TargetFilter::TriggeringSpellController
+        | TargetFilter::TriggeringSpellOwner
+        | TargetFilter::TriggeringPlayer
+        | TargetFilter::TriggeringSource
+        | TargetFilter::CastingSpell
+        | TargetFilter::EventTarget
+        | TargetFilter::TriggeringSourceController
+        | TargetFilter::EventTargetController
+        | TargetFilter::ParentTarget
+        | TargetFilter::ParentTargetSlot { .. }
+        | TargetFilter::DeclaredPlayer { .. }
+        | TargetFilter::ParentTargetController
+        | TargetFilter::ParentTargetOwner
+        | TargetFilter::SourceChosenPlayer
+        | TargetFilter::OriginalController
+        | TargetFilter::OriginalSource
+        | TargetFilter::PostReplacementSourceController
+        | TargetFilter::PostReplacementDamageSource
+        | TargetFilter::PostReplacementDamageTarget
+        | TargetFilter::PostReplacementDamageTargetOwner
+        | TargetFilter::DefendingPlayer
+        | TargetFilter::AttackedPlayerOrPlaneswalker
+        | TargetFilter::HasChosenName
+        | TargetFilter::ChosenDamageSource { .. }
+        | TargetFilter::Named { .. }
+        | TargetFilter::Owner
+        | TargetFilter::AffectedObjectOwner
+        | TargetFilter::Not { .. } => false,
+    }
+}
+
+/// CR 109.4 + CR 115.1: True when a composite filter contains an object leg
+/// that only reads a target player as its controller anchor. Such an ability
+/// announces the companion player slot BEFORE the primary mixed slot, so the
+/// leading player target is the anchor and must be dropped from the affected
+/// player set.
+fn filter_has_object_player_anchor(filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::Or { filters } | TargetFilter::And { filters } => filters.iter().any(|leg| {
+            crate::types::ability::filter_references_target_player(leg)
+                && !filter_selects_players(leg)
+        }),
+        TargetFilter::Not { filter } => filter_has_object_player_anchor(filter),
+        _ => false,
+    }
+}
+
+/// CR 115.1 + CR 608.2b: True when the mixed primary role was announced as a
+/// player, even if resolution validation has since dropped that occurrence.
+/// The companion anchor alone does not select the player role; a declared
+/// player at any later announced position does.
+pub(crate) fn mixed_primary_player_role_selected(
+    ability: &ResolvedAbility,
+    target: &TargetFilter,
+) -> bool {
+    filter_selects_players(target)
+        && ability_needs_companion_target_player_slot(ability)
+        && ability
+            .declared_player_target_slots
+            .iter()
+            .any(|slot| slot.declared_position != 0)
+}
+
 /// Resolve a player-scoped `TargetFilter` to the concrete set of player ids it
 /// affects, for an effect whose targets live on `ability`.
 ///
-/// Explicit `TargetRef::Player` targets win. Otherwise a player-typed mass
-/// filter (`Controller`, `Player`, or a `Typed` filter with no `type_filters`
-/// and an optional `controller` ref) expands to the matching player ids.
-/// Returns an empty vec if the filter doesn't refer to players (the caller's
-/// object branch handles those). Every `ControllerRef` variant is matched
-/// exhaustively so this is the single authority for the
-/// "player-typed filter → `Vec<PlayerId>`" shape (shared by phasing's
-/// player path and the transient-effect player-scope binding).
+/// When the filter itself names players, explicit `TargetRef::Player` targets
+/// win; otherwise a player-typed mass filter (`Controller`, `Player`, or a
+/// `Typed` filter with no `type_filters` and an optional `controller` ref)
+/// expands to the matching player ids. Returns an empty vec if the filter
+/// doesn't refer to players (the caller's object branch handles those), even
+/// when the ability carries a player target as an object filter's controller
+/// anchor ("each creature target player controls"). Every `ControllerRef`
+/// variant is matched exhaustively so this is the single authority for the
+/// "player-typed filter → `Vec<PlayerId>`" shape (shared by phasing's player
+/// path and the transient-effect player-scope binding).
 pub(crate) fn collect_player_targets(
     state: &GameState,
     ability: &ResolvedAbility,
@@ -7287,16 +7496,58 @@ pub(crate) fn collect_player_targets(
             .into_iter()
             .collect();
     }
-    let from_targets: Vec<PlayerId> = ability
-        .targets
-        .iter()
-        .filter_map(|t| match t {
-            TargetRef::Player(pid) => Some(*pid),
-            TargetRef::Object(_) => None,
-        })
-        .collect();
-    if !from_targets.is_empty() {
-        return from_targets;
+    // CR 608.2c: only a filter that itself names players may consume the
+    // ability's player targets. An object-population filter that merely *reads*
+    // a player ("each creature target player controls") still carries a
+    // companion `TargetRef::Player` for its controller anchor; returning that
+    // player here would turn an object effect into a player effect (issue
+    // #10266: kicked Galadriel's Dismissal phased out the targeted player as
+    // well as their creatures). The player-anaphor filters above are exempt
+    // because their arms already resolved the exact slot before this point.
+    if filter_selects_players(target) {
+        // CR 115.1 + CR 608.2b: when resolution validation compacted the
+        // announced targets, stored order alone no longer identifies the
+        // companion anchor. The declared-player map keeps that identity even
+        // when the companion or the primary occurrence was dropped: only a
+        // player declared for a position after the anchor is the selected
+        // player role.
+        if filter_has_object_player_anchor(target)
+            && ability_needs_companion_target_player_slot(ability)
+            && !ability.declared_player_target_slots.is_empty()
+        {
+            return ability
+                .declared_player_target_slots
+                .iter()
+                .filter(|slot| slot.declared_position != 0)
+                .filter_map(|slot| slot.stored_position)
+                .filter_map(|position| ability.targets.get(position))
+                .filter_map(|target| match target {
+                    TargetRef::Player(pid) => Some(*pid),
+                    TargetRef::Object(_) => None,
+                })
+                .collect();
+        }
+        let mut from_targets: Vec<PlayerId> = ability
+            .targets
+            .iter()
+            .filter_map(|t| match t {
+                TargetRef::Player(pid) => Some(*pid),
+                TargetRef::Object(_) => None,
+            })
+            .collect();
+        // Fallback for an ability not stamped by resolution validation (a
+        // hand-built test node or a legacy wire frame): the companion player
+        // slot is announced before the mixed primary slot, so drop the leading
+        // anchor.
+        if filter_has_object_player_anchor(target)
+            && ability_needs_companion_target_player_slot(ability)
+            && !from_targets.is_empty()
+        {
+            from_targets.remove(0);
+        }
+        if !from_targets.is_empty() {
+            return from_targets;
+        }
     }
 
     match target {
@@ -7305,8 +7556,9 @@ pub(crate) fn collect_player_targets(
         TargetFilter::Typed(TypedFilter {
             type_filters,
             controller,
+            properties,
             ..
-        }) if type_filters.is_empty() => state
+        }) if type_filters.is_empty() && properties.is_empty() => state
             .players
             .iter()
             .filter(|p| match controller {
@@ -8662,6 +8914,7 @@ fn legal_targets_for_selected_slot(
             state,
             declaring_node,
             &state.pending_trigger_event_batch,
+            declaring_node.controller,
         );
     }
     // Each branch computes the raw legal set into `legal`; the per-instance
@@ -10380,11 +10633,16 @@ fn assign_targets_recursive(
         .filter(|sub| is_paid_instead_sub(&ability.context, sub))
     {
         assign_targets_recursive(state, sub_ability, targets, next_target)?;
-        // The paid-"instead" delegator mirrors its delegate's occurrences.
-        let mirrored = sub_ability.target_occurrences();
-        let bindings = sub_ability.context.attach_target_bindings.clone();
-        ability.replace_target_occurrences(mirrored);
-        ability.context.attach_target_bindings = bindings;
+        // The paid-"instead" delegator mirrors its delegate's occurrences only
+        // when the delegate OWNS a declaration. An inherited-target override
+        // ("that permanent", bargained Torch the Tower) has none; mirroring its
+        // empty list would erase the base branch's real target.
+        if !sub_ability.targets.is_empty() {
+            let mirrored = sub_ability.target_occurrences();
+            let bindings = sub_ability.context.attach_target_bindings.clone();
+            ability.replace_target_occurrences(mirrored);
+            ability.context.attach_target_bindings = bindings;
+        }
         return Ok(());
     }
 
@@ -10777,11 +11035,15 @@ fn assign_selected_slots_recursive(
         .filter(|sub| is_paid_instead_sub(&ability.context, sub))
     {
         assign_selected_slots_recursive(state, sub_ability, selected_slots, next_slot, announced)?;
-        // The paid-"instead" delegator mirrors its delegate's occurrences.
-        let mirrored = sub_ability.target_occurrences();
-        let bindings = sub_ability.context.attach_target_bindings.clone();
-        ability.replace_target_occurrences(mirrored);
-        ability.context.attach_target_bindings = bindings;
+        // See `assign_targets_recursive`: an inherited-target paid override
+        // owns no declaration, so its empty list must not erase the base
+        // branch's target.
+        if !sub_ability.targets.is_empty() {
+            let mirrored = sub_ability.target_occurrences();
+            let bindings = sub_ability.context.attach_target_bindings.clone();
+            ability.replace_target_occurrences(mirrored);
+            ability.context.attach_target_bindings = bindings;
+        }
         return Ok(());
     }
 
@@ -12087,12 +12349,15 @@ pub fn chain_retarget_slots(ability: &ResolvedAbility) -> Vec<RetargetSlotBindin
         ability: &ResolvedAbility,
         path: Vec<ChainStep>,
     ) -> (&ResolvedAbility, Vec<ChainStep>) {
-        if let Some(sub) = paid_instead_delegate(ability) {
-            let mut new_path = path;
+        let base = base_exposed_node(ability);
+        let mut node = ability;
+        let mut new_path = path;
+        while !std::ptr::eq(node, base) {
+            node = paid_instead_delegate(node)
+                .expect("base_exposed_node stops only at a node with no paid delegate");
             new_path.push(ChainStep::SubAbility);
-            return resolve_base_exposed(sub, new_path);
         }
-        (ability, path)
+        (base, new_path)
     }
     let (base_node, base_path) = resolve_base_exposed(ability, Vec::new());
 
@@ -12689,7 +12954,11 @@ pub(crate) fn restamp_derived_chain_targets(ability: &mut ResolvedAbility) {
         }
         if let Some(sub) = ability.sub_ability.as_deref_mut() {
             remirror(sub);
-            if is_paid_instead_sub(&ability.context, sub) {
+            // Mirror only a delegate that OWNS a declaration. An
+            // inherited-target paid override has no targets, and copying its
+            // empty list would erase the base branch's real target during a
+            // retarget write.
+            if is_paid_instead_sub(&ability.context, sub) && !sub.targets.is_empty() {
                 mirrored = Some((
                     sub.target_occurrences(),
                     sub.context.attach_target_bindings.clone(),
@@ -15088,8 +15357,12 @@ mod tests {
             mana_multi_role(&single.effect).is_none(),
             "reach guard: this is the SINGLE-role path"
         );
-        let companion_legal =
-            companion_target_player_legal_targets(&state, &single, &state.current_trigger_events);
+        let companion_legal = companion_target_player_legal_targets(
+            &state,
+            &single,
+            &state.current_trigger_events,
+            single.controller,
+        );
         assert!(
             companion_legal.contains(&TargetRef::Player(PlayerId(0))),
             "reach guard: P0 must be a legal companion payer, got {companion_legal:?}"
@@ -16507,6 +16780,7 @@ mod tests {
             &state,
             &ability,
             &state.pending_trigger_event_batch,
+            ability.controller,
         );
         assert_eq!(
             targets.len(),
@@ -16551,6 +16825,274 @@ mod tests {
         let defending =
             TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::DefendingPlayer));
         assert!(collect_player_targets(&state, &ability, &defending).is_empty());
+    }
+
+    /// Issue #10266 regression: an object-population filter that names a player
+    /// only as its controller anchor ("each creature target player controls")
+    /// must NOT resolve that player through the player-target path. The
+    /// companion `TargetRef::Player` is the anchor for the object filter, not a
+    /// player the effect affects. A genuinely player-scoped filter retains the
+    /// explicit-target fast path as a positive control.
+    #[test]
+    fn collect_player_targets_ignores_controller_anchor_for_object_filter() {
+        let state = GameState::new_two_player(42);
+        let ability = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+            vec![TargetRef::Player(PlayerId(1))],
+            ObjectId(1),
+            PlayerId(0),
+        );
+
+        let creature_anchor =
+            TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::TargetPlayer));
+        assert!(
+            collect_player_targets(&state, &ability, &creature_anchor).is_empty(),
+            "an object filter's controller anchor must not phase/animate the player"
+        );
+
+        // Positive controls: the same explicit player target is consumed when
+        // the filter itself names players ("target player phases out"), including
+        // the unscoped empty-type player shape used by Teferi's Reproach.
+        assert_eq!(
+            collect_player_targets(&state, &ability, &TargetFilter::Player),
+            vec![PlayerId(1)]
+        );
+        assert_eq!(
+            collect_player_targets(
+                &state,
+                &ability,
+                &TargetFilter::Typed(TypedFilter::default())
+            ),
+            vec![PlayerId(1)]
+        );
+
+        // A mixed population with a player leg preserves the explicit player
+        // target (e.g. "target player or creature phases out").
+        let mixed = TargetFilter::Or {
+            filters: vec![
+                TargetFilter::Player,
+                TargetFilter::Typed(TypedFilter::creature()),
+            ],
+        };
+        assert_eq!(
+            collect_player_targets(&state, &ability, &mixed),
+            vec![PlayerId(1)]
+        );
+
+        // A mixed AND cannot be satisfied by a player (it must also be a
+        // creature), so the explicit player target is not a valid selection.
+        let mixed_and = TargetFilter::And {
+            filters: vec![
+                TargetFilter::Player,
+                TargetFilter::Typed(TypedFilter::creature()),
+            ],
+        };
+        assert!(
+            collect_player_targets(&state, &ability, &mixed_and).is_empty(),
+            "a mixed And does not select a player population"
+        );
+
+        // In a mixed Or, a player named only by the object leg's controller
+        // anchor is not the selected player role. The companion slot is first;
+        // only a player declared for the primary mixed slot survives.
+        let anchored_or = TargetFilter::Or {
+            filters: vec![
+                TargetFilter::Player,
+                TargetFilter::Typed(
+                    TypedFilter::creature().controller(ControllerRef::TargetPlayer),
+                ),
+            ],
+        };
+        let anchor_only = ResolvedAbility::new(
+            Effect::PhaseOut {
+                target: anchored_or.clone(),
+            },
+            vec![TargetRef::Player(PlayerId(1))],
+            ObjectId(1),
+            PlayerId(0),
+        );
+        assert!(
+            collect_player_targets(&state, &anchor_only, &anchored_or).is_empty(),
+            "a lone controller anchor must not be consumed as a selected player"
+        );
+        let anchor_and_selected = ResolvedAbility::new(
+            Effect::PhaseOut {
+                target: anchored_or.clone(),
+            },
+            vec![
+                TargetRef::Player(PlayerId(1)),
+                TargetRef::Player(PlayerId(0)),
+            ],
+            ObjectId(1),
+            PlayerId(0),
+        );
+        assert_eq!(
+            collect_player_targets(&state, &anchor_and_selected, &anchored_or),
+            vec![PlayerId(0)],
+            "the primary mixed-slot player must survive the leading anchor"
+        );
+
+        // A property-only object filter ("cards owned by target player") is not
+        // a player population: the expansion must not phase every player.
+        let owned_by_target_player =
+            TargetFilter::Typed(TypedFilter::default().properties(vec![FilterProp::Owned {
+                controller: ControllerRef::TargetPlayer,
+            }]));
+        assert!(
+            collect_player_targets(&state, &ability, &owned_by_target_player).is_empty(),
+            "an object-scoped Owned{{TargetPlayer}} filter must not expand to all players"
+        );
+    }
+
+    /// CR 115.1 + CR 608.2b: validation may drop the companion player anchor
+    /// while the player declared for the mixed primary slot remains legal. The
+    /// stored target vector no longer carries the anchor's identity, so the
+    /// declared-player map must keep the primary player as the selected role.
+    #[test]
+    fn validated_mixed_role_keeps_primary_player_when_companion_is_dropped() {
+        use crate::types::ability::{StaticDefinition, TypedFilter};
+        use crate::types::format::FormatConfig;
+        use crate::types::statics::StaticMode;
+
+        let mut state = GameState::new(FormatConfig::standard(), 3, 42);
+        // P2 has player hexproof from opponents, so its companion slot is
+        // illegal while P0 remains a legal primary-player declaration.
+        let grantor = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(2),
+            "Player Hexproof Source".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&grantor).unwrap().static_definitions =
+            vec![
+                StaticDefinition::new(StaticMode::Hexproof).affected(TargetFilter::Typed(
+                    TypedFilter::default().controller(ControllerRef::You),
+                )),
+            ]
+            .into();
+        crate::game::layers::flush_layers(&mut state);
+
+        let anchored_or = TargetFilter::Or {
+            filters: vec![
+                TargetFilter::Player,
+                TargetFilter::Typed(
+                    TypedFilter::creature().controller(ControllerRef::TargetPlayer),
+                ),
+            ],
+        };
+        let declared = ResolvedAbility::new(
+            Effect::PhaseOut {
+                target: anchored_or.clone(),
+            },
+            vec![
+                TargetRef::Player(PlayerId(2)),
+                TargetRef::Player(PlayerId(0)),
+            ],
+            ObjectId(1),
+            PlayerId(0),
+        );
+        let validated = validate_targets_in_chain(&state, &declared);
+        assert_eq!(
+            validated.targets,
+            vec![TargetRef::Player(PlayerId(0))],
+            "the illegal companion anchor is compacted away"
+        );
+        assert_eq!(
+            validated.declared_player_target_slots,
+            vec![
+                DeclaredPlayerTargetSlot {
+                    declared_position: 0,
+                    stored_position: None,
+                },
+                DeclaredPlayerTargetSlot {
+                    declared_position: 1,
+                    stored_position: Some(0),
+                },
+            ]
+        );
+        assert_eq!(
+            collect_player_targets(&state, &validated, &anchored_or),
+            vec![PlayerId(0)],
+            "the surviving primary player role must not be mistaken for the dropped anchor"
+        );
+    }
+
+    /// CR 115.1 + CR 608.2b: the mirror case — only the companion anchor
+    /// survives, while the declared primary player is illegal. The player role
+    /// is still the announced selection, so the object leg must not sweep.
+    #[test]
+    fn validated_mixed_role_keeps_primary_role_when_only_companion_survives() {
+        use crate::types::ability::{StaticDefinition, TypedFilter};
+        use crate::types::format::FormatConfig;
+        use crate::types::statics::StaticMode;
+
+        let mut state = GameState::new(FormatConfig::standard(), 3, 42);
+        let grantor = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(2),
+            "Player Hexproof Source".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&grantor).unwrap().static_definitions =
+            vec![
+                StaticDefinition::new(StaticMode::Hexproof).affected(TargetFilter::Typed(
+                    TypedFilter::default().controller(ControllerRef::You),
+                )),
+            ]
+            .into();
+        crate::game::layers::flush_layers(&mut state);
+
+        let anchored_or = TargetFilter::Or {
+            filters: vec![
+                TargetFilter::Player,
+                TargetFilter::Typed(
+                    TypedFilter::creature().controller(ControllerRef::TargetPlayer),
+                ),
+            ],
+        };
+        let declared = ResolvedAbility::new(
+            Effect::PhaseOut {
+                target: anchored_or.clone(),
+            },
+            vec![
+                TargetRef::Player(PlayerId(0)),
+                TargetRef::Player(PlayerId(2)),
+            ],
+            ObjectId(1),
+            PlayerId(0),
+        );
+        let validated = validate_targets_in_chain(&state, &declared);
+        assert_eq!(
+            validated.targets,
+            vec![TargetRef::Player(PlayerId(0))],
+            "only the companion anchor survives storage"
+        );
+        assert_eq!(
+            validated.declared_player_target_slots,
+            vec![
+                DeclaredPlayerTargetSlot {
+                    declared_position: 0,
+                    stored_position: Some(0),
+                },
+                DeclaredPlayerTargetSlot {
+                    declared_position: 1,
+                    stored_position: None,
+                },
+            ]
+        );
+        assert!(
+            collect_player_targets(&state, &validated, &anchored_or).is_empty(),
+            "the companion anchor is not the selected player role"
+        );
+        assert!(
+            mixed_primary_player_role_selected(&validated, &anchored_or),
+            "the declared primary player role must survive even though it is illegal"
+        );
     }
 
     /// Issue #478 regression: a delayed-trigger return effect
@@ -21007,6 +21549,40 @@ mod tests {
             illegal_declared_target_slots(&paid_parent, &paid_parent, &validated),
             vec![0],
             "the record's target on a paid \"instead\" parent"
+        );
+    }
+
+    /// CR 601.2c + CR 608.2c: an UNRECORDED paid "instead" branch that
+    /// inherits the parent's target ("that permanent") owns no declaration.
+    /// The layout numbering must read the base branch's target, not substitute
+    /// the empty delegate.
+    #[test]
+    fn unrecorded_paid_inherited_branch_reads_the_base_declaration() {
+        let held = TargetRef::Object(ObjectId(5));
+        let mut sub = ResolvedAbility::new(
+            Effect::TargetOnly {
+                target: TargetFilter::ParentTarget,
+            },
+            Vec::new(),
+            ObjectId(99),
+            PlayerId(0),
+        );
+        sub.condition = Some(AbilityCondition::AdditionalCostPaidInstead);
+        let mut paid_parent = ResolvedAbility::new(
+            Effect::TargetOnly {
+                target: TargetFilter::Typed(TypedFilter::creature()),
+            },
+            vec![held.clone()],
+            ObjectId(99),
+            PlayerId(0),
+        )
+        .sub_ability(sub);
+        paid_parent.context.additional_cost_paid = true;
+
+        assert_eq!(
+            declared_targets_in_chain(&paid_parent),
+            vec![held],
+            "the base branch owns the declaration when the paid delegate has no targets"
         );
     }
 

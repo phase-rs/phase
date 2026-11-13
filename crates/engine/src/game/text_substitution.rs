@@ -275,6 +275,7 @@ fn rewrite_resolved_ability(
         illegal_target_slots: _,
         unjudged_target_slots: _,
         illegal_local_target_slots: _,
+        declared_player_target_slots: _,
         target_reads: _,
         entry_onset: _,
         controller: _,

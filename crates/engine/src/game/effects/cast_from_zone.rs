@@ -1751,6 +1751,7 @@ fn resolve_cast_slot_group(
     };
     window.sub_ability = None;
     window.targets = pool.into_iter().map(TargetRef::Object).collect();
+    window.declared_player_target_slots.clear();
     super::free_cast_from_zones::resolve_with_face_policy(
         state,
         &window,

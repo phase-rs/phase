@@ -4,10 +4,12 @@ use engine::game::combat::AttackTarget;
 use engine::game::scenario::{GameScenario, P0, P1};
 use engine::game::zones::move_to_zone;
 use engine::parser::oracle::parse_oracle_text;
-use engine::types::ability::Effect;
+use engine::types::ability::{Effect, TargetRef};
+use engine::types::actions::GameAction;
 use engine::types::events::GameEvent;
 use engine::types::game_state::WaitingFor;
-use engine::types::mana::{ManaColor, ManaCost, ManaCostShard};
+use engine::types::identifiers::ObjectId;
+use engine::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::zones::Zone;
 
@@ -275,5 +277,90 @@ fn torch_the_tower_replacement_does_not_follow_a_bounced_creature_back_onto_the_
         runner.state().objects[&target].zone,
         Zone::Graveyard,
         "CR 400.7: the re-entered creature is a new object and was never dealt damage by Torch"
+    );
+}
+
+const BOLT_BEND: &str = "This spell costs {3} less to cast if you control a creature with power 4 \
+     or greater.\nChange the target of target spell or ability with a single target.";
+
+fn red_mana(n: usize) -> Vec<ManaUnit> {
+    vec![ManaUnit::new(ManaType::Red, ObjectId(0), false, vec![]); n]
+}
+
+/// CR 115.7a + CR 115.7d: the bargained branch's target is the inherited
+/// "that permanent" anaphor, so the retarget pool must come from the base
+/// branch's real `target creature or planeswalker` declaration — not from the
+/// context filter, which has no announced targets. Bolt Bend must offer the
+/// other creature and reject players.
+#[test]
+fn bargained_torch_retargets_through_the_base_declared_filter() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let first_target = scenario.add_creature(P1, "First Target", 2, 2).id();
+    let second_target = scenario.add_creature(P1, "Second Target", 2, 2).id();
+    let bargain_artifact = scenario
+        .add_artifact_from_oracle(P0, "Bargain Artifact", "")
+        .id();
+    let torch = scenario
+        .add_spell_to_hand_from_oracle(P0, "Torch the Tower", true, TORCH)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Red],
+            generic: 0,
+        })
+        .id();
+    let bolt_bend = scenario
+        .add_spell_to_hand_from_oracle(P1, "Bolt Bend", true, BOLT_BEND)
+        .id();
+    scenario.with_mana_pool(P0, red_mana(1));
+    scenario.with_mana_pool(P1, red_mana(4));
+
+    let mut runner = scenario.build();
+    runner
+        .cast(torch)
+        .target_object(first_target)
+        .accept_optional()
+        .sacrifice_with(&[bargain_artifact])
+        .commit();
+    runner
+        .act(GameAction::PassPriority)
+        .expect("P0 passes priority so P1 may respond");
+
+    let outcome = runner.cast(bolt_bend).target_object(torch).resolve();
+    let WaitingFor::RetargetChoice {
+        legal_new_targets, ..
+    } = outcome.final_waiting_for()
+    else {
+        panic!(
+            "Bolt Bend must present the retarget choice, got {:?}",
+            outcome.final_waiting_for()
+        );
+    };
+    assert!(
+        legal_new_targets.contains(&TargetRef::Object(second_target)),
+        "the base branch's other creature must be a legal retarget, got {legal_new_targets:?}"
+    );
+    assert!(
+        !legal_new_targets
+            .iter()
+            .any(|target| matches!(target, TargetRef::Player(_))),
+        "an inherited-target branch must not expose a player pool: {legal_new_targets:?}"
+    );
+
+    runner
+        .act(GameAction::RetargetSpell {
+            new_targets: vec![Some(TargetRef::Object(second_target))],
+        })
+        .expect("retarget Torch to the second creature");
+    runner.advance_until_stack_empty();
+
+    assert_eq!(
+        runner.state().objects[&first_target].zone,
+        Zone::Battlefield,
+        "the original target must be untouched"
+    );
+    assert_eq!(
+        runner.state().objects[&second_target].zone,
+        Zone::Exile,
+        "the bargained Torch's die-exile rider must apply to the retargeted creature"
     );
 }

@@ -95,6 +95,7 @@ mod freeform_commander_deck_rules;
 mod frenzy_attacker_unblocked_pump;
 mod frostcliff_siege_anchor_word_modes;
 mod gaeas_liege;
+mod galadriels_dismissal_kicked_phasing;
 mod galion_elvenkings_butler_attack_pt_set;
 mod game_over_clears_pending_resolution_choice;
 mod giggling_skitterspike_issue_890;
