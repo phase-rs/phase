@@ -27381,6 +27381,40 @@ fn parsed_clause_targets_self_ref(clause: &ParsedEffectClause) -> bool {
 }
 
 /// `reference` is consulted only when a player anaphor is actually rewritten.
+/// CR 608.2c + CR 400.3 + CR 108.3: after "return … to its owner's hand", a
+/// later "that player" / "their" in the same chain names that owner. The
+/// generic anaphor lowering reads such a player as the parent target's
+/// controller (or, in a trigger, the event's player); rebind every such player
+/// slot of the clause — the instruction's player, its performer, and the
+/// controller/owner scope of its object filter — to the parent target's owner.
+fn rebind_returned_objects_controller_to_owner(effect: &mut Effect) {
+    fn rebind(filter: &mut TargetFilter) {
+        match filter {
+            TargetFilter::ParentTargetController | TargetFilter::TriggeringPlayer => {
+                *filter = TargetFilter::ParentTargetOwner;
+            }
+            TargetFilter::Typed(typed) => {
+                if typed.controller == Some(ControllerRef::ParentTargetController) {
+                    typed.controller = Some(ControllerRef::ParentTargetOwner);
+                }
+                for prop in &mut typed.properties {
+                    if let FilterProp::Owned { controller } = prop {
+                        if *controller == ControllerRef::ParentTargetController {
+                            *controller = ControllerRef::ParentTargetOwner;
+                        }
+                    }
+                }
+            }
+            TargetFilter::And { filters } | TargetFilter::Or { filters } => {
+                filters.iter_mut().for_each(rebind);
+            }
+            TargetFilter::Not { filter } => rebind(filter),
+            _ => {}
+        }
+    }
+    each_target_filter_mut(effect, &mut rebind);
+}
+
 fn replace_player_anaphor(effect: &mut Effect, mut reference: impl FnMut() -> TargetFilter) {
     each_target_filter_mut(effect, &mut |filter| {
         if matches!(
@@ -50165,6 +50199,25 @@ fn parse_effect_chain_ir_body(
             if let Some(reference) = chain_prior_player_reference(builder.clauses()) {
                 replace_player_anaphor(&mut clause.effect, || reference.clone());
             }
+        }
+        // CR 608.2c + CR 400.3: "Return target nonland permanent to its owner's
+        // hand, then that player exiles a card from their hand" (Ashiok,
+        // Nightmare Muse), "… Then that player discards a card" (Recoil): the
+        // only player the returning clause names is the permanent's OWNER, whose
+        // hand it goes to, so "that player" and "their" are the owner, not the
+        // permanent's controller.
+        if has_player_anaphoric_reference(&text_lower)
+            && builder.clauses().last().is_some_and(|prev| {
+                matches!(
+                    &prev.parsed.effect,
+                    Effect::Bounce {
+                        destination: None,
+                        ..
+                    }
+                )
+            })
+        {
+            rebind_returned_objects_controller_to_owner(&mut clause.effect);
         }
         // CR 608.2c + CR 115.1: "You look at the top two cards of THEIR library"
         // after a clause that announced a player target ("Target opponent looks

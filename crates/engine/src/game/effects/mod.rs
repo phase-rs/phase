@@ -17613,13 +17613,18 @@ pub(crate) fn controller_for_relative_filter(
     // parent target's controller belongs to that snapshotted player, even
     // though the new object itself is chosen at resolution (Metamorphose).
     // This is distinct from an ordinary Resolution-timed "you" filter below.
-    if target_filter_controller_scope(target_filter) == Some(ControllerRef::ParentTargetController)
-    {
-        if let Some(player) = crate::game::targeting::resolve_effect_player_ref(
-            state,
-            ability,
-            &TargetFilter::ParentTargetController,
-        ) {
+    // CR 400.3: the same holds for a choice scoped to the parent target's
+    // OWNER ("return … to its owner's hand, then that player exiles a card
+    // from their hand", Ashiok, Nightmare Muse).
+    let parent_scope = match target_filter_controller_scope(target_filter) {
+        Some(ControllerRef::ParentTargetController) => Some(TargetFilter::ParentTargetController),
+        Some(ControllerRef::ParentTargetOwner) => Some(TargetFilter::ParentTargetOwner),
+        _ => None,
+    };
+    if let Some(reference) = parent_scope {
+        if let Some(player) =
+            crate::game::targeting::resolve_effect_player_ref(state, ability, &reference)
+        {
             return player;
         }
     }

@@ -97,9 +97,11 @@ fn targeted_subject_wrapper_binds_every_nested_move() {
 
 // --- Binding site: a leading subject on the predicate ----------------------
 
-/// "…, then that player exiles a card from their hand." The parser binds
-/// "that player" to the bounced permanent's controller (its owner unless
-/// control changed); the move sits one clause down the chain.
+/// "Return target nonland permanent to its owner's hand, then that player
+/// exiles a card from their hand." The returning clause names the permanent's
+/// owner, so "that player" is the owner (CR 608.2c + CR 400.3), also when
+/// another player controls the permanent; the move sits one clause down the
+/// chain.
 #[test]
 fn leading_subject_binds_its_player_reference() {
     assert_eq!(
@@ -108,7 +110,7 @@ fn leading_subject_binds_its_player_reference() {
             &["Planeswalker"],
             "[\u{2212}3]: Return target nonland permanent to its owner's hand, then that player exiles a card from their hand.",
         ),
-        vec![(1, subject(TargetFilter::ParentTargetController))]
+        vec![(1, subject(TargetFilter::ParentTargetOwner))]
     );
     assert_eq!(
         zone_move_actors(
@@ -339,6 +341,95 @@ fn draw_replacement_that_player_performs_as_the_drawer() {
         ),
         vec![(0, subject(TargetFilter::PostReplacementDamageTarget))]
     );
+}
+
+/// CR 608.2c + CR 400.3: after "return … to its owner's hand", every player
+/// slot of the following "that player" clause is the owner: the discarding
+/// player (Recoil, Compelling Deterrence, Dinrova Horror's trigger) and, for
+/// Ashiok, the hand the exiled card comes from. A clause that follows any other
+/// instruction keeps the controller reading ("Destroy target creature. Then
+/// that player discards a card" — synthetic control, no printed card).
+#[test]
+fn that_player_after_a_return_to_owners_hand_is_the_owner() {
+    use crate::parser::oracle::parse_oracle_text;
+    use crate::types::ability::{ControllerRef, FilterProp, TypedFilter};
+    let second_clause = |name: &str, types: &[&str], oracle: &str| -> Effect {
+        let types: Vec<String> = types.iter().map(|t| (*t).to_string()).collect();
+        let parsed = parse_oracle_text(oracle, name, &[], &types, &[]);
+        let root = parsed
+            .abilities
+            .first()
+            .or_else(|| parsed.triggers.first().and_then(|t| t.execute.as_deref()))
+            .unwrap_or_else(|| panic!("{name} parses an ability"));
+        assert!(matches!(
+            root.effect.as_ref(),
+            Effect::Bounce { .. } | Effect::Destroy { .. }
+        ));
+        root.sub_ability
+            .as_deref()
+            .unwrap_or_else(|| panic!("{name} has a second clause"))
+            .effect
+            .as_ref()
+            .clone()
+    };
+    for (name, types, oracle) in [
+        (
+            "Recoil",
+            &["Instant"][..],
+            "Return target permanent to its owner's hand. Then that player discards a card.",
+        ),
+        (
+            "Compelling Deterrence",
+            &["Instant"][..],
+            "Return target nonland permanent to its owner's hand. Then that player discards a card if you control a Zombie.",
+        ),
+        (
+            "Dinrova Horror",
+            &["Creature"][..],
+            "When this creature enters, return target permanent to its owner's hand, then that player discards a card.",
+        ),
+    ] {
+        assert!(
+            matches!(
+                second_clause(name, types, oracle),
+                Effect::Discard {
+                    target: TargetFilter::ParentTargetOwner,
+                    ..
+                }
+            ),
+            "{name}"
+        );
+    }
+    let Effect::ChangeZone {
+        target: TargetFilter::Typed(TypedFilter {
+            controller,
+            properties,
+            ..
+        }),
+        ..
+    } = second_clause(
+        "Ashiok, Nightmare Muse",
+        &["Planeswalker"],
+        "[\u{2212}3]: Return target nonland permanent to its owner's hand, then that player exiles a card from their hand.",
+    )
+    else {
+        panic!("Ashiok's second clause is the exile pick");
+    };
+    assert_eq!(controller, Some(ControllerRef::ParentTargetOwner));
+    assert!(properties.contains(&FilterProp::Owned {
+        controller: ControllerRef::ParentTargetOwner
+    }));
+    assert!(matches!(
+        second_clause(
+            "Gorbleflux Edict",
+            &["Sorcery"],
+            "Destroy target creature. Then that player discards a card.",
+        ),
+        Effect::Discard {
+            target: TargetFilter::ParentTargetController,
+            ..
+        }
+    ));
 }
 
 // --- Negative rows: no subject, so the controller performs -----------------

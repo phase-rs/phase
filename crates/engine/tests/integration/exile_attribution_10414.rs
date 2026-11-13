@@ -816,9 +816,10 @@ fn declaration_in_stone_sweep_stays_caster_performed() {
 // ---------------------------------------------------------------------------
 
 /// Ashiok, Nightmare Muse -3: "Return target nonland permanent to its owner's
-/// hand, then that player exiles a card from their hand." The pick carries the
-/// same `ParentTargetController` scope as R8's sweep but has a subject
-/// ("that player"), so that player performs the exile.
+/// hand, then that player exiles a card from their hand." "That player" is
+/// the permanent's owner; here the owner also controls it (the
+/// owner-and-controller-apart row follows). Unlike R8's subjectless sweep the
+/// pick has a subject, so that player performs the exile.
 ///
 /// Revert sensitivity: records `Some(P0)` against the base, where the
 /// controller performed every move.
@@ -880,6 +881,122 @@ fn ashiok_minus_three_pick_records_that_player() {
         Some(P1),
         "\"that player exiles a card from their hand\" is that player's exile"
     );
+}
+
+/// CR 608.2c + CR 400.3: Ashiok, Nightmare Muse -3 on a permanent P1 owns and
+/// P2 controls. The permanent returns to P1's hand, "that player" is P1, and
+/// the exiled card comes from P1's hand and is recorded as exiled by P1. P2,
+/// who merely controlled the permanent, keeps the card in their hand.
+///
+/// Revert sensitivity: with "that player" read as the permanent's controller,
+/// the pick is made from P2's hand and credited to P2.
+#[test]
+fn ashiok_minus_three_that_player_is_the_owner_not_the_controller() {
+    let mut scenario = GameScenario::new_n_player(3, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    let bear = scenario
+        .add_creature(P1, "P1-owned Bear", 2, 2)
+        .controlled_by(P2)
+        .id();
+    let owner_card = scenario.add_card_to_hand(P1, "P1 Hand Card");
+    let controller_card = scenario.add_card_to_hand(P2, "P2 Hand Card");
+    let ashiok = scenario
+        .add_planeswalker_from_oracle(
+            P0,
+            "Ashiok, Nightmare Muse",
+            "Ashiok",
+            5,
+            ASHIOK_NIGHTMARE_MUSE,
+        )
+        .id();
+    let mut runner = scenario.build();
+    let index = runner.state().objects[&ashiok]
+        .abilities
+        .iter()
+        .position(|ability| matches!(&*ability.effect, Effect::Bounce { .. }))
+        .expect("Ashiok has the -3 ability (a Bounce chain)");
+
+    runner
+        .activate(ashiok, index)
+        .target_objects(&[bear])
+        .resolve();
+    let prompts = drive_answering_zone_choices(&mut runner);
+
+    // Reach-guard: the permanent went back to its owner, whose hand then held
+    // two cards, so the pick was a real selection performed by P1.
+    assert_eq!(runner.state().objects[&bear].owner, P1);
+    assert_eq!(prompts.len(), 1, "two cards in P1's hand prompt once");
+    assert_eq!(prompts[0].1, Some(P1), "P1 performs the exile");
+    let exiled = exiled_among(&runner, &[bear, owner_card, controller_card]);
+    assert_eq!(exiled.len(), 1, "exactly one card is exiled: {exiled:?}");
+    assert!(
+        [bear, owner_card].contains(&exiled[0]),
+        "the exiled card came from the owner's hand"
+    );
+    assert_eq!(exiled_by(&runner, exiled[0]), Some(P1));
+    assert_eq!(zone(&runner, controller_card), Zone::Hand);
+    assert!(runner.state().players[P2.0 as usize]
+        .hand
+        .contains(&controller_card));
+    assert_eq!(runner.state().players[P1.0 as usize].hand.len(), 1);
+}
+
+/// Recoil `{1}{U}{B}` Instant — verbatim Oracle text.
+const RECOIL: &str =
+    "Return target permanent to its owner's hand. Then that player discards a card.";
+
+/// CR 608.2c + CR 400.3: the same antecedent on a discard (Recoil; also
+/// Compelling Deterrence and Dinrova Horror). The permanent P1 owns and P2
+/// controls returns to P1's hand and P1 discards; P2's hand is untouched.
+///
+/// Revert sensitivity: with "that player" read as the permanent's controller,
+/// P2 discards their only card and P1 keeps two.
+#[test]
+fn recoil_that_player_is_the_owner_not_the_controller() {
+    assert_parses_clean("Recoil", &[], &["Instant"], RECOIL);
+    let mut scenario = GameScenario::new_n_player(3, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    let bear = scenario
+        .add_creature(P1, "P1-owned Bear", 2, 2)
+        .controlled_by(P2)
+        .id();
+    scenario.add_card_to_hand(P1, "P1 Hand Card");
+    let controller_card = scenario.add_card_to_hand(P2, "P2 Hand Card");
+    let recoil = scenario
+        .add_spell_to_hand_from_oracle(P0, "Recoil", true, RECOIL)
+        .with_mana_cost(ManaCost::zero())
+        .id();
+    let mut runner = scenario.build();
+    runner.cast(recoil).target_objects(&[bear]).resolve();
+    let mut discarders = Vec::new();
+    for _ in 0..60 {
+        if let WaitingFor::DiscardChoice {
+            player,
+            cards,
+            count,
+            ..
+        } = runner.state().waiting_for.clone()
+        {
+            discarders.push(player);
+            runner
+                .act(GameAction::SelectCards {
+                    cards: cards.into_iter().take(count).collect(),
+                })
+                .expect("the discard choice is accepted");
+            continue;
+        }
+        if drive_step(&mut runner) {
+            break;
+        }
+    }
+
+    // Reach-guard: the permanent returned to its owner, who then chose a
+    // discard from two cards.
+    assert_eq!(discarders, vec![P1], "the owner discards");
+    assert_eq!(runner.state().players[P1.0 as usize].hand.len(), 1);
+    assert_eq!(runner.state().players[P1.0 as usize].graveyard.len(), 1);
+    assert_eq!(zone(&runner, controller_card), Zone::Hand);
+    assert!(runner.state().players[P2.0 as usize].graveyard.is_empty());
 }
 
 // ---------------------------------------------------------------------------
