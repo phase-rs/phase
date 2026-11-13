@@ -30,8 +30,9 @@
 //!     controller ("all other creatures its controller controls") names whose
 //!     objects are swept, not who acts — the caster still performs it.
 //!   * R9 — Ashiok, Nightmare Muse: the paired pick ("then that player exiles a
-//!     card from their hand") with the same `ParentTargetController` scope is
-//!     the subject form and records that player.
+//!     card from their hand") is the subject form and records that player: the
+//!     returned permanent's OWNER (`ParentTargetOwner`), told apart from its
+//!     controller in a second row.
 //!   * R10 — Mudhole: a public-action subject-form mass exile that parks on an
 //!     optional `ReplacementChoice` records the subject for paused and resumed
 //!     members. An explicitly typed continuation witness, not part of
@@ -52,9 +53,9 @@
 //!     Usurper (`DeclaredPlayer` reached by the chain's anaphor rewrite), Elkin Lair
 //!     (`ScopedPlayer`), Wildfire Devils (`Typed { ChosenPlayer }`). Where the
 //!     move can prompt, the single-candidate shortcut and the interactive
-//!     selection must credit the same player. (`ParentTargetOwner` is a
-//!     resolver unit row in `change_zone.rs`: no printed card stamped with it
-//!     exiles.)
+//!     selection must credit the same player. (`ParentTargetOwner` is
+//!     exercised by Ashiok's R9 rows; `change_zone.rs` also has a synthetic
+//!     resolver unit row for it.)
 //!   * Dandân — Skullwinder: an opponent-performed return keeps the receiving
 //!     hand and owner the entry-ownership input decides (the controller on the
 //!     shortcut, the prompt's chooser on the selection route), not the
@@ -62,10 +63,10 @@
 //!     "their hand" should send the card to the performer's hand under Dandân
 //!     is a separate entry-ownership question this change does not decide.
 //!
-//! R8 and R9 share the `ParentTargetController` scope; only the sentence
-//! differs. Declaration in Stone's sweep is imperative, so its actor stays
-//! `Controller`; Ashiok's "then that player exiles a card from their hand" has
-//! a subject, so its actor is that player.
+//! R8 and R9 both name a player through the object the ability acted on.
+//! Declaration in Stone's sweep is imperative, so its actor stays `Controller`;
+//! Ashiok's "then that player exiles a card from their hand" has a subject, so
+//! its actor is that player, the owner whose hand the permanent returned to.
 //!
 //! Revert sensitivity is stated per test. The gameplay readers of `exiled_by` are
 //! `casting::exile_permission_pool` (guarded by

@@ -13586,9 +13586,11 @@ mod tests {
     /// CR 608.2c + CR 108.3: an `actor` naming the parent target's owner ("its
     /// owner shuffles it into their library": Blink, Deglamer, Inferno
     /// Hellion) credits that owner, not the controller of the moved object or
-    /// of the ability. Every printed card the parser stamps this way moves to a
-    /// library, where nothing observes the performer, so this row exiles to
-    /// make the credit observable.
+    /// of the ability. Those cards move to a library, where nothing observes
+    /// the performer, so this synthetic row exiles to make the credit
+    /// observable; the printed owner-performed exile is Ashiok, Nightmare
+    /// Muse's -3, exercised through the public path in
+    /// `exile_attribution_10414.rs`.
     ///
     /// Revert sensitivity: crediting `ability.controller` records P0.
     #[test]
