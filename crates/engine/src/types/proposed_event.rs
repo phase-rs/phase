@@ -972,6 +972,12 @@ impl EntrantAbilities {
 /// type that enter the battlefield at the same time as Metallic Mimic won't enter with an
 /// additional +1/+1 counter."). Empty for a lone entry and for a proposal outside a logical
 /// zone-change group; a `TokenEntry` carries none.
+/// Known gap: per-player simultaneous puts resolved as separate player-scoped legs are
+/// separate logical groups, so an entrant of an earlier leg is still a replacement source for
+/// a later leg's (Show and Tell, "Each player may put an artifact, creature, enchantment, or
+/// land card from their hand onto the battlefield.": a Containment Priest put by an earlier
+/// player exiles a later player's creature). Closing it needs one group spanning the legs, as
+/// Living Death's per-seat legs already share one.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct CoEntrants(Box<[ObjectIncarnationRef]>);
