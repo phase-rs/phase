@@ -48083,12 +48083,13 @@ mod tests {
 
     #[test]
     fn repeat_until_body_that_ends_the_game_does_not_draw() {
-        // CR 104.1 + CR 104.4b: no printed card currently has a repeat body that
-        // can end the game (the 17 parsed `repeat_until` cards contain no
-        // WinTheGame/LoseTheGame body; the nearest printed repeat cards are
-        // Tainted Pact and Claim Jumper). This synthetic shape pins the shared
-        // guard: the win is recorded, and the stalled mandatory iteration must
-        // not be judged a CR 104.4b draw that overwrites the winner.
+        // CR 104.1 + CR 104.4b + CR 614.6: a printed repeat CAN end the game;
+        // `game_over_clears_pending_resolution_choice` exercises Cultivator
+        // Colossus's repeat with Laboratory Maniac replacing its draw with a
+        // win. This synthetic shape isolates the explicit `WinTheGame` leaf in
+        // the stalled mandatory-loop branch: the win is recorded, and the
+        // stalled iteration must not be judged a CR 104.4b draw that overwrites
+        // the winner.
         let mut state = GameState::new_two_player(42);
         assert!(
             state.objects.is_empty(),
