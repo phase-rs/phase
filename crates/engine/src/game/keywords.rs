@@ -669,7 +669,7 @@ pub fn preventing_protection_quality(
     source: &GameObject,
     source_name: Option<&str>,
 ) -> Option<MatchedProtectionQuality> {
-    all_preventing_protection_qualities(target, source, source_name)
+    all_preventing_protection_qualities(target, ProtectionSourceRef::Live(source), source_name)
         .into_iter()
         .next()
 }
@@ -683,7 +683,7 @@ pub fn preventing_protection_quality(
 /// with the count.
 pub fn all_preventing_protection_qualities(
     target: &GameObject,
-    source: &GameObject,
+    source: ProtectionSourceRef<'_>,
     source_name: Option<&str>,
 ) -> Vec<MatchedProtectionQuality> {
     let mut out = Vec::new();
@@ -747,6 +747,64 @@ pub enum ProtectionBearer<'a> {
     Player(PlayerId),
 }
 
+/// CR 702.16 + CR 608.2h: the source a protection quality is matched against.
+/// `Live` reads the object on the battlefield; `Lki` reads its last-known
+/// characteristics after it left (a ceased token still has a name, colors,
+/// types, and controller); `NameOnly` carries just the event's latched name
+/// when neither exists. Name matching (`ChosenCardName`) evaluates under every
+/// variant; characteristic arms fail closed when their input is missing rather
+/// than matching a different object.
+#[derive(Clone, Copy)]
+pub enum ProtectionSourceRef<'a> {
+    Live(&'a GameObject),
+    Lki(&'a crate::types::game_state::LKISnapshot),
+    NameOnly,
+}
+
+impl ProtectionSourceRef<'_> {
+    pub(crate) fn core_types(&self) -> &[crate::types::card_type::CoreType] {
+        match self {
+            Self::Live(object) => &object.card_types.core_types,
+            Self::Lki(lki) => &lki.card_types,
+            Self::NameOnly => &[],
+        }
+    }
+
+    pub(crate) fn subtypes(&self) -> &[String] {
+        match self {
+            Self::Live(object) => &object.card_types.subtypes,
+            Self::Lki(lki) => &lki.subtypes,
+            Self::NameOnly => &[],
+        }
+    }
+
+    pub(crate) fn colors(&self) -> Vec<crate::types::mana::ManaColor> {
+        match self {
+            // CR 709.4b: split-aware combined colors for a live source.
+            Self::Live(object) => object.effective_colors(),
+            // LKI carries flat colors (no split halves to combine).
+            Self::Lki(lki) => lki.colors.clone(),
+            Self::NameOnly => Vec::new(),
+        }
+    }
+
+    /// CR 608.2h: the source's controller — live, or last-known when departed.
+    pub(crate) fn controller(&self) -> Option<PlayerId> {
+        match self {
+            Self::Live(object) => Some(object.controller_or_owner()),
+            Self::Lki(lki) => Some(lki.controller),
+            Self::NameOnly => None,
+        }
+    }
+
+    pub(crate) fn live(&self) -> Option<&GameObject> {
+        match self {
+            Self::Live(object) => Some(object),
+            Self::Lki(_) | Self::NameOnly => None,
+        }
+    }
+}
+
 impl ProtectionBearer<'_> {
     /// CR 702.16k: the protected side of a "protection from [a player]" quality.
     fn controller(&self) -> PlayerId {
@@ -775,7 +833,7 @@ pub fn source_matches_protection_target(
     matching_protection_quality(
         protection,
         ProtectionBearer::Object(protected),
-        source,
+        ProtectionSourceRef::Live(source),
         None,
     )
     .is_some()
@@ -795,7 +853,7 @@ pub fn source_matches_protection_target_for_player(
     matching_protection_quality(
         protection,
         ProtectionBearer::Player(player_id),
-        source,
+        ProtectionSourceRef::Live(source),
         None,
     )
     .is_some()
@@ -812,20 +870,24 @@ pub fn source_matches_protection_target_for_player(
 pub fn matching_protection_quality(
     protection: &ProtectionTarget,
     bearer: ProtectionBearer<'_>,
-    source: &GameObject,
+    source: ProtectionSourceRef<'_>,
     source_name: Option<&str>,
 ) -> Option<MatchedProtectionQuality> {
     // CR 709.4b: A split source off the stack has the combined colors of both
     // halves; on the stack (the usual protection-source case) it is the chosen
     // half. `effective_colors` no-ops for single-face and on-stack sources.
-    let source_colors = source.effective_colors();
+    let source_colors = source.colors();
     let protected = bearer.object();
     match protection {
         ProtectionTarget::Color(color) => source_colors
             .contains(color)
             .then_some(MatchedProtectionQuality::Color(*color)),
-        ProtectionTarget::CardType(type_name) => matching_card_type_quality(source, type_name),
-        ProtectionTarget::Quality(quality) => matching_colorlessness_quality(source, quality),
+        ProtectionTarget::CardType(type_name) => {
+            matching_card_type_quality(source.core_types(), source.subtypes(), type_name)
+        }
+        ProtectionTarget::Quality(quality) => {
+            matching_colorlessness_quality(&source_colors, quality)
+        }
         ProtectionTarget::Multicolored => {
             (source_colors.len() > 1).then_some(MatchedProtectionQuality::Multicolored)
         }
@@ -844,13 +906,15 @@ pub fn matching_protection_quality(
         ProtectionTarget::ChosenCardType => protected
             .and_then(|object| object.chosen_card_type())
             .and_then(|ct| ct.protection_quality_str())
-            .and_then(|quality| matching_card_type_quality(source, quality)),
+            .and_then(|quality| {
+                matching_card_type_quality(source.core_types(), source.subtypes(), quality)
+            }),
         // CR 702.16a + CR 201.2: "Protection from the chosen card
         // name" — resolved from the protected permanent's own chosen card name.
         ProtectionTarget::ChosenCardName => protected
             .and_then(|object| object.chosen_card_name())
             .filter(|name| {
-                crate::game::filter::source_has_chosen_name(Some(source), source_name, name)
+                crate::game::filter::source_has_chosen_name(source.live(), source_name, name)
             })
             .map(|name| MatchedProtectionQuality::ChosenName(fnv1a_64(name.as_bytes()))),
         // CR 702.16k: Resolve "the chosen player" from the protected
@@ -859,7 +923,7 @@ pub fn matching_protection_quality(
         // 109.4 + CR 108.4a make controller-or-owner the shared authority.
         ProtectionTarget::ChosenPlayer => protected
             .and_then(|object| object.chosen_player())
-            .filter(|player| source.controller_or_owner() == *player)
+            .filter(|player| source.controller().is_some_and(|c| c == *player))
             .map(MatchedProtectionQuality::Player),
         // CR 702.16j: "Protection from everything" — protection from each object
         // regardless of the source's characteristic values.
@@ -867,8 +931,12 @@ pub fn matching_protection_quality(
         // CR 702.16a + CR 202.3: Filter-based protection — the source matches if
         // it satisfies every FilterProp in the typed filter. Only supports
         // object-intrinsic properties (Cmc, HasColor, PowerLE/GE, etc.) that can
-        // be evaluated from the source alone without game state.
-        ProtectionTarget::Filter(filter) => matching_filter_fingerprint(source, filter),
+        // be evaluated from the source alone without game state. LKI carries
+        // no mana value, so a departed source fails this arm closed.
+        ProtectionTarget::Filter(filter) => match &source {
+            ProtectionSourceRef::Live(object) => matching_filter_fingerprint(object, filter),
+            ProtectionSourceRef::Lki(_) | ProtectionSourceRef::NameOnly => None,
+        },
         // CR 702.16k: "Protection from [a player]" — the source matches if it is
         // controlled by the scoped player(s) relative to the protected side,
         // regardless of the source's characteristics. "Each of your opponents"
@@ -876,34 +944,36 @@ pub fn matching_protection_quality(
         // protected side is an opponent in 1v1 and free-for-all multiplayer.
         // `SpecificPlayer` is the resolution-time binding of a declared-target
         // anaphor ("protection from that player", CR 608.2c/608.2h). Player
-        // references with no static context fail closed.
-        ProtectionTarget::FromPlayer(scope) => match scope {
-            crate::types::ability::ControllerRef::Opponent => {
-                (source.controller_or_owner() != bearer.controller()).then_some(
-                    MatchedProtectionQuality::FromPlayer(ProtectionPlayerScope::Opponent),
-                )
+        // references with no static context fail closed, as does a source
+        // with no known controller.
+        ProtectionTarget::FromPlayer(scope) => {
+            let controller = source.controller()?;
+            match scope {
+                crate::types::ability::ControllerRef::Opponent => {
+                    (controller != bearer.controller()).then_some(
+                        MatchedProtectionQuality::FromPlayer(ProtectionPlayerScope::Opponent),
+                    )
+                }
+                crate::types::ability::ControllerRef::You => (controller == bearer.controller())
+                    .then_some(MatchedProtectionQuality::FromPlayer(
+                        ProtectionPlayerScope::You,
+                    )),
+                // CR 608.2c/608.2h: `SpecificPlayer` is the resolution-time binding
+                // of a declared-target anaphor ("protection from that player");
+                // the source matches when that player controls (or, off the
+                // battlefield, owns) it. The resolved scope is relative to the
+                // bearer, like the arms above.
+                crate::types::ability::ControllerRef::SpecificPlayer { id } => {
+                    let scope = if *id == bearer.controller() {
+                        ProtectionPlayerScope::You
+                    } else {
+                        ProtectionPlayerScope::Opponent
+                    };
+                    (controller == *id).then_some(MatchedProtectionQuality::FromPlayer(scope))
+                }
+                _ => None,
             }
-            crate::types::ability::ControllerRef::You => {
-                (source.controller_or_owner() == bearer.controller()).then_some(
-                    MatchedProtectionQuality::FromPlayer(ProtectionPlayerScope::You),
-                )
-            }
-            // CR 608.2c/608.2h: `SpecificPlayer` is the resolution-time binding
-            // of a declared-target anaphor ("protection from that player");
-            // the source matches when that player controls (or, off the
-            // battlefield, owns) it. The resolved scope is relative to the
-            // bearer, like the arms above.
-            crate::types::ability::ControllerRef::SpecificPlayer { id } => {
-                let scope = if *id == bearer.controller() {
-                    ProtectionPlayerScope::You
-                } else {
-                    ProtectionPlayerScope::Opponent
-                };
-                (source.controller_or_owner() == *id)
-                    .then_some(MatchedProtectionQuality::FromPlayer(scope))
-            }
-            _ => None,
-        },
+        }
         // CR 702.16i: a set quality is expanded into concrete Color qualities by
         // resolve_granted_protection before any match; an unexpanded set (a printed
         // keyword, never produced by a card today) resolves to no quality.
@@ -1022,22 +1092,28 @@ pub fn resolve_granted_protection(
 }
 
 pub fn source_matches_card_type(source: &GameObject, type_name: &str) -> bool {
-    matching_card_type_quality(source, type_name).is_some()
+    matching_card_type_quality(
+        &source.card_types.core_types,
+        &source.card_types.subtypes,
+        type_name,
+    )
+    .is_some()
 }
 
 /// CR 702.16g + CR 615.13 (Matt R8-F1): resolve the card-type quality
-/// `type_name` when it matches `source`. Core-type spellings resolve to the
-/// matched [`CoreType`](crate::types::card_type::CoreType) (case/plural
-/// folded); the creature-subtype fallback resolves to an FNV-1a fingerprint
-/// of the lowercased spelling, so spelling variants split rather than merge.
-/// The bool matcher above delegates, so the table below is the one authority.
+/// `type_name` against a source's core types and subtypes, live or last-known.
+/// Core-type spellings resolve to the matched
+/// [`CoreType`](crate::types::card_type::CoreType) (case/plural folded); the
+/// creature-subtype fallback resolves to an FNV-1a fingerprint of the
+/// lowercased spelling, so spelling variants split rather than merge. The bool
+/// matcher above delegates, so the table below is the one authority.
 pub fn matching_card_type_quality(
-    source: &GameObject,
+    core_types: &[crate::types::card_type::CoreType],
+    subtypes: &[String],
     type_name: &str,
 ) -> Option<MatchedProtectionQuality> {
     use crate::types::card_type::CoreType;
 
-    let core = &source.card_types.core_types;
     for (core_type, singular, plural) in [
         (CoreType::Artifact, "artifact", "artifacts"),
         (CoreType::Creature, "creature", "creatures"),
@@ -1048,7 +1124,7 @@ pub fn matching_card_type_quality(
         (CoreType::Land, "land", "lands"),
     ] {
         if type_name.eq_ignore_ascii_case(singular) || type_name.eq_ignore_ascii_case(plural) {
-            return core
+            return core_types
                 .contains(&core_type)
                 .then_some(MatchedProtectionQuality::CardType(core_type));
         }
@@ -1058,9 +1134,7 @@ pub fn matching_card_type_quality(
     // sources like "assassins" or "elves" are stored as CardType by the
     // parser but must match via the creature-subtype list.
     let quality = type_name.to_ascii_lowercase();
-    source
-        .card_types
-        .subtypes
+    subtypes
         .iter()
         .any(|st| source_subtype_matches_protection_quality(&st.to_ascii_lowercase(), &quality))
         .then(|| MatchedProtectionQuality::CardSubtype(fnv1a_64(quality.as_bytes())))
@@ -1073,20 +1147,21 @@ fn source_subtype_matches_protection_quality(source_subtype: &str, quality: &str
 }
 
 pub fn source_matches_quality(source: &GameObject, quality: &str) -> bool {
-    matching_colorlessness_quality(source, quality).is_some()
+    matching_colorlessness_quality(&source.effective_colors(), quality).is_some()
 }
 
 /// CR 702.16g + CR 615.13 (Matt R8-F1): resolve the color-count quality
-/// `quality` when it matches `source`. Only the three spellings below can
-/// resolve — anything else fails the match, so it never reaches a key. The
-/// bool matcher above delegates, so this match is the one authority.
+/// `quality` against a source's colors, live or last-known. Only the three
+/// spellings below can resolve — anything else fails the match, so it never
+/// reaches a key. The bool matcher above delegates, so this match is the one
+/// authority.
 pub fn matching_colorlessness_quality(
-    source: &GameObject,
+    colors: &[crate::types::mana::ManaColor],
     quality: &str,
 ) -> Option<MatchedProtectionQuality> {
-    // CR 709.4b: combined colors off the stack for a split source; no-op for
-    // single-face and on-stack sources.
-    let color_count = source.effective_colors().len();
+    // CR 709.4b: callers pass combined colors off the stack for a split
+    // source; no-op for single-face and on-stack sources.
+    let color_count = colors.len();
     match quality {
         // CR 105.2c: An object with no colors is colorless. Uses the split-aware
         // combined color count so an off-stack split card is classified by both

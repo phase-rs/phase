@@ -654,6 +654,145 @@ fn runed_halo_does_not_prevent_damage_from_departed_clone_rig_for_other_name() {
     assert_eq!(run_departed_clone_rig_sequence("Shock"), (16, 16));
 }
 
+const CACKLING_COUNTERPART_ORACLE: &str =
+    "Create a token that's a copy of target creature you control.\nFlashback {5}{U}{U}";
+
+/// CR 608.2h + CR 702.16a: a Cackling Counterpart token copy of Volatile Rig
+/// dies and CEASES to exist (no graveyard object remains, unlike a Clone
+/// card). The token's lost flip still resolves afterward: Halo naming the
+/// latched name must protect, consulting last-known characteristics where the
+/// live object is gone. Returns (P0 life, P1 life); P1 is the unprotected
+/// control and always takes the token's 4.
+fn run_ceased_token_rig_sequence(halo_named: &str) -> (i32, i32) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let halo = halo_on_battlefield(&mut scenario);
+    let rig = scenario
+        .add_creature_from_oracle(P1, "Volatile Rig", 4, 4, VOLATILE_RIG_ORACLE)
+        .as_artifact_creature()
+        .id();
+    let counterpart = scenario
+        .add_spell_to_hand_from_oracle(
+            P1,
+            "Cackling Counterpart",
+            true,
+            CACKLING_COUNTERPART_ORACLE,
+        )
+        .as_instant()
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Blue, ManaCostShard::Blue],
+            generic: 1,
+        })
+        .id();
+    let murder = scenario
+        .add_spell_to_hand_from_oracle(P0, "Murder", false, MURDER_ORACLE)
+        .as_instant()
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Black, ManaCostShard::Black],
+            generic: 1,
+        })
+        .id();
+    scenario.with_mana_pool(
+        P1,
+        vec![
+            ManaUnit::new(ManaType::Blue, ObjectId(0), false, vec![]),
+            ManaUnit::new(ManaType::Blue, ObjectId(0), false, vec![]),
+            ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]),
+        ],
+    );
+    scenario.with_mana_pool(
+        P0,
+        vec![
+            ManaUnit::new(ManaType::Black, ObjectId(0), false, vec![]),
+            ManaUnit::new(ManaType::Black, ObjectId(0), false, vec![]),
+            ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]),
+        ],
+    );
+    let mut runner = scenario.build();
+    // Seed the coin flip so the token's flip loses (deals 4 damage). Seed 1
+    // produces false on first flip; the Rig's own later flip wins, as in the
+    // Clone sequence above.
+    runner.state_mut().rng = GameRng::seed_from_u64(1);
+    name_halo_choice(&mut runner, halo, halo_named);
+
+    // 1. P1 casts Counterpart copying the Rig.
+    runner.state_mut().active_player = P1;
+    runner.state_mut().priority_player = P1;
+    runner.state_mut().waiting_for = WaitingFor::Priority { player: P1 };
+    runner.cast(counterpart).target_object(rig).resolve();
+    let token = runner
+        .state()
+        .objects
+        .iter()
+        .find(|(_, o)| o.is_token && o.name == "Volatile Rig" && o.controller == P1)
+        .map(|(id, _)| *id)
+        .expect("Counterpart token copy of Volatile Rig");
+    assert!(
+        runner
+            .state()
+            .objects
+            .get(&token)
+            .unwrap()
+            .trigger_definitions
+            .iter_all()
+            .count()
+            >= 1,
+        "the token copy must carry the Rig's dies trigger"
+    );
+
+    // 2. P0 Murders the token; it ceases to exist (no graveyard husk).
+    runner.state_mut().active_player = P0;
+    runner.state_mut().priority_player = P0;
+    runner.state_mut().waiting_for = WaitingFor::Priority { player: P0 };
+    runner.cast(murder).target_object(token).commit();
+    runner
+        .act(GameAction::PassPriority)
+        .expect("P0 pass Murder");
+    runner
+        .act(GameAction::PassPriority)
+        .expect("P1 pass Murder");
+    assert!(
+        !runner.state().objects.contains_key(&token),
+        "CR 111.7: the token must cease to exist after dying"
+    );
+    let lki = runner
+        .state()
+        .lki_cache
+        .get(&token)
+        .expect("exit LKI must record the token");
+    assert_eq!(
+        lki.name, "Volatile Rig",
+        "CR 608.2h: last-known name is the copy's, not a blank token's"
+    );
+    assert_eq!(runner.state().stack.len(), 1, "dies trigger on stack");
+
+    // 3. Resolve the dies trigger.
+    runner.advance_until_stack_empty();
+    assert!(runner.state().stack.is_empty(), "stack is empty");
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+        "priority returned"
+    );
+
+    (
+        runner.state().players[0].life,
+        runner.state().players[1].life,
+    )
+}
+
+#[test]
+fn runed_halo_prevents_token_rig_damage_after_token_ceased() {
+    // Halo naming "Volatile Rig": the ceased token's 4 is prevented (P0 stays
+    // 20) while the unprotected P1 control takes 4 (16).
+    assert_eq!(run_ceased_token_rig_sequence("Volatile Rig"), (20, 16));
+}
+
+#[test]
+fn runed_halo_token_rig_unprotected_for_other_name() {
+    // Control: Halo naming "Shock": both players take the token's 4 (16, 16).
+    assert_eq!(run_ceased_token_rig_sequence("Shock"), (16, 16));
+}
+
 #[test]
 fn runed_halo_prevents_targeting_from_ceased_token() {
     let mut scenario = GameScenario::new();

@@ -262,6 +262,7 @@ mod consuming_vapors_rebound;
 mod context_ref_slot_hygiene;
 mod controls_commander_statics;
 mod converge_colors_spent_trigger_lifetime;
+mod coordinated_clobbering_prevention_aggregation;
 mod coordinated_player_subjects;
 mod copied_ability_transform_generation;
 mod copied_cost_choices_phase1;

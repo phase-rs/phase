@@ -2107,12 +2107,7 @@ pub fn all_preventing_player_protection_qualities(
     source: Option<ObjectId>,
     source_name: Option<&str>,
 ) -> Vec<crate::types::keywords::MatchedProtectionQuality> {
-    all_matching_player_protections(
-        state,
-        player_id,
-        source.and_then(|id| state.objects.get(&id)),
-        source_name,
-    )
+    all_matching_player_protections(state, player_id, source, source_name)
 }
 
 /// Collecting authority behind the single-match fns: every resolved
@@ -2121,10 +2116,11 @@ pub fn all_preventing_player_protection_qualities(
 fn all_matching_player_protections(
     state: &GameState,
     player_id: PlayerId,
-    source: Option<&crate::game::game_object::GameObject>,
+    source: Option<ObjectId>,
     source_name: Option<&str>,
 ) -> Vec<crate::types::keywords::MatchedProtectionQuality> {
     use crate::game::keywords::matching_card_type_quality;
+    use crate::game::keywords::ProtectionSourceRef;
     use crate::types::ability::ControllerRef;
     use crate::types::keywords::{
         Keyword, MatchedProtectionQuality, ProtectionPlayerScope, ProtectionTarget,
@@ -2135,8 +2131,21 @@ fn all_matching_player_protections(
     if player_has_protection_from_everything(state, player_id) {
         out.push(MatchedProtectionQuality::Everything);
     }
-    let Some(source_obj) = source else {
-        return out;
+    // CR 702.16 + CR 608.2h: match against the live source when present, its
+    // last-known characteristics when it has left (a ceased token still has a
+    // name, colors, types, and controller), or the event's latched name alone.
+    // A departed source must never silently lose name protection (Runed Halo
+    // over a dead Clone keeps stopping that name).
+    let live_source = source.and_then(|id| state.objects.get(&id));
+    let lki = if live_source.is_none() {
+        source.and_then(|id| state.lki_cache.get(&id))
+    } else {
+        None
+    };
+    let source_ref = match (live_source, lki) {
+        (Some(object), _) => ProtectionSourceRef::Live(object),
+        (None, Some(lki)) => ProtectionSourceRef::Lki(lki),
+        (None, None) => ProtectionSourceRef::NameOnly,
     };
     // CR 702.16b + CR 702.16e: resolution-created "you gain protection from
     // [quality]" (Seht's Tiger, Faith's Shield) and "protection from that
@@ -2169,7 +2178,7 @@ fn all_matching_player_protections(
             if let Some(resolved) = crate::game::keywords::matching_protection_quality(
                 quality,
                 crate::game::keywords::ProtectionBearer::Player(player_id),
-                source_obj,
+                source_ref,
                 source_name,
             ) {
                 if !out.contains(&resolved) {
@@ -2215,14 +2224,20 @@ fn all_matching_player_protections(
                 ProtectionTarget::ChosenCardType => src_obj
                     .chosen_card_type()
                     .and_then(|ct| ct.protection_quality_str())
-                    .and_then(|quality| matching_card_type_quality(source_obj, quality)),
+                    .and_then(|quality| {
+                        matching_card_type_quality(
+                            source_ref.core_types(),
+                            source_ref.subtypes(),
+                            quality,
+                        )
+                    }),
                 // CR 702.16a + CR 702.16e + CR 608.2h + CR 201.2: protection from the card name
                 // chosen as the granting permanent (e.g. Runed Halo) entered.
                 ProtectionTarget::ChosenCardName => src_obj
                     .chosen_card_name()
                     .filter(|chosen| {
                         crate::game::filter::source_has_chosen_name(
-                            Some(source_obj),
+                            source_ref.live(),
                             source_name,
                             chosen,
                         )
@@ -2238,17 +2253,25 @@ fn all_matching_player_protections(
                 // `Opponent` scope: any source NOT controlled by the protected
                 // player is an opponent's object in 1v1 and free-for-all. Mirrors the
                 // object-level arm in `game/keywords.rs::source_matches_protection_target`.
-                ProtectionTarget::FromPlayer(scope) => match scope {
-                    ControllerRef::Opponent => (source_obj.controller != player_id).then_some(
-                        MatchedProtectionQuality::FromPlayer(ProtectionPlayerScope::Opponent),
-                    ),
-                    ControllerRef::You => (source_obj.controller == player_id).then_some(
-                        MatchedProtectionQuality::FromPlayer(ProtectionPlayerScope::You),
-                    ),
-                    // Target/chosen player refs have no static context here —
-                    // fail closed (the parser never emits them for protection).
-                    _ => None,
-                },
+                ProtectionTarget::FromPlayer(scope) => {
+                    // CR 608.2h: live controller, else last-known; unknown fails closed.
+                    let controller = match source_ref {
+                        ProtectionSourceRef::Live(object) => Some(object.controller),
+                        ProtectionSourceRef::Lki(lki) => Some(lki.controller),
+                        ProtectionSourceRef::NameOnly => None,
+                    };
+                    controller.and_then(|controller| match scope {
+                        ControllerRef::Opponent => (controller != player_id).then_some(
+                            MatchedProtectionQuality::FromPlayer(ProtectionPlayerScope::Opponent),
+                        ),
+                        ControllerRef::You => (controller == player_id).then_some(
+                            MatchedProtectionQuality::FromPlayer(ProtectionPlayerScope::You),
+                        ),
+                        // Target/chosen player refs have no static context here —
+                        // fail closed (the parser never emits them for protection).
+                        _ => None,
+                    })
+                }
                 // Truly inert at the player level — no card grants these qualities to
                 // a player; object-level grants of these qualities flow through the
                 // `AddKeyword(Protection)` continuous path, not `PlayerProtection`.

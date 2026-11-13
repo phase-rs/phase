@@ -25507,8 +25507,9 @@ fn resolve_chain_body(
         // damage resolver whose EVERY park path stashes remaining work plus
         // the parent's `sub_ability` — `DealDamage` (single/multi-target and
         // EachTarget loops via `stash_remaining_damage_chain` /
-        // `stash_remaining_each_source_damage`), `DamageAll`, `DamageEachPlayer`
-        // and `EachDealsDamageEqualToPower` (same helpers), and `Fight` (whose
+        // `stash_each_source_combined_continuation`), `DamageAll`,
+        // `DamageEachPlayer` and `EachDealsDamageEqualToPower` (same helpers),
+        // and `Fight` (whose
         // three park arms each append the sub). Without the skip, a parked
         // node with a sub is preserved TWICE — once by its own stash and once
         // by the generic prepend — so a nested same-batch prompt re-drives its

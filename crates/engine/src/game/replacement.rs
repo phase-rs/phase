@@ -9245,15 +9245,32 @@ pub fn find_applicable_replacements(
         if *amount > 0 {
             let applicable = match target {
                 TargetRef::Object(object_id) => {
-                    match (state.objects.get(object_id), state.objects.get(source_id)) {
-                        (Some(target_obj), Some(source_obj)) => {
+                    use crate::game::keywords::ProtectionSourceRef;
+                    match state.objects.get(object_id) {
+                        Some(target_obj) => {
+                            // CR 702.16 + CR 608.2h: match against the live
+                            // source when present, its last-known
+                            // characteristics when it has left, or the event's
+                            // latched name alone. A departed target still
+                            // binds nothing (no bearer to shelter).
+                            let live = state.objects.get(source_id);
+                            let lki = if live.is_none() {
+                                state.lki_cache.get(source_id)
+                            } else {
+                                None
+                            };
+                            let source_ref = match (live, lki) {
+                                (Some(object), _) => ProtectionSourceRef::Live(object),
+                                (None, Some(lki)) => ProtectionSourceRef::Lki(lki),
+                                (None, None) => ProtectionSourceRef::NameOnly,
+                            };
                             crate::game::keywords::all_preventing_protection_qualities(
                                 target_obj,
-                                source_obj,
+                                source_ref,
                                 source_name.as_deref(),
                             )
                         }
-                        _ => Vec::new(),
+                        None => Vec::new(),
                     }
                 }
                 TargetRef::Player(player_id) => {

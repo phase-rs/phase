@@ -76,6 +76,7 @@ mod same_name_nameless_10213;
 mod sandman_reanimate_self_and_land_s25;
 mod sandswirl_wanderglyph_attacked_you_cant_cast;
 mod sarkhan_dragon_ascendant_behold;
+mod sarkhan_dragon_batch_member_sources;
 mod sarulf_realm_eater_upkeep_exile;
 mod saruman_white_hand_amass;
 mod satya_localized_destruction_commander_copy;
