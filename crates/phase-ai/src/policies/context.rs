@@ -419,6 +419,15 @@ pub(crate) fn selected_mode_abilities<'a>(
         .collect()
 }
 
+/// The object whose modes a pending `SelectModes` decision is choosing among.
+pub(crate) fn pending_mode_source(waiting_for: &WaitingFor) -> Option<ObjectId> {
+    match waiting_for {
+        WaitingFor::ModeChoice { pending_cast, .. } => Some(pending_cast.object_id),
+        WaitingFor::AbilityModeChoice { source_id, .. } => Some(*source_id),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;

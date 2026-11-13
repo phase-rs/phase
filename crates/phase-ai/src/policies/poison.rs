@@ -40,56 +40,68 @@
 //! `verdict()` runs per candidate per search node. Every predicate here is
 //! card-local (`obj.abilities` / `obj.keywords`) or a
 //! `players::poison_loss_measure` call per live opponent; the combat branch is
-//! linear in the candidate's own attack list. Only a candidate whose estimate
-//! reaches lethal runs `preview_player_counter_addition`, one state clone per
-//! placement; sub-lethal candidates stay card-local.
+//! linear in the candidate's own attack list. Only a pool whose estimate
+//! reaches lethal, or a direct poison whose printed count is dynamic, pays for
+//! one state clone, on which the engine resolves the instruction or the
+//! unblocked combat damage (and the attackers' poison triggers it fires);
+//! sub-lethal candidates stay card-local.
 
+use engine::game::ability_utils::build_resolved_from_def_with_targets;
 use engine::game::combat::AttackTarget;
+use engine::game::combat_damage::preview_unblocked_combat_damage;
 use engine::game::effects::player_counter::{
     preview_player_counter_addition, PlayerCounterAdditionPreview,
 };
+use engine::game::effects::preview_resolution;
+use engine::game::effects::proliferate::apply_proliferate;
 use engine::game::players::{self, PoisonLossMeasure, PoisonLossScope};
-use engine::types::ability::AbilityDefinition;
+use engine::types::ability::{
+    AbilityDefinition, Effect, EffectKind, QuantityExpr, ResolvedAbility, TargetFilter, TargetRef,
+};
 use engine::types::actions::GameAction;
-use engine::types::game_state::GameState;
+use engine::types::game_state::{GameState, PendingEffectResolved};
 use engine::types::identifiers::ObjectId;
 use engine::types::player::{PlayerCounterKind, PlayerId};
 
-use crate::ability_chain::AbilityScope;
+use crate::ability_chain::{collect_scoped_nodes, AbilityScope};
 use crate::features::poison::{
     opponent_poison_recipients_parts, poison_yield_parts, proliferates_parts, PoisonRecipients,
     POISON_CLOCK_FLOOR,
 };
 use crate::features::DeckFeatures;
 
-use super::context::{selected_mode_abilities, PolicyContext};
+use super::context::{pending_mode_source, selected_mode_abilities, PolicyContext};
 use super::registry::{
     DecisionKind, PolicyId, PolicyReason, PolicyVerdict, TacticalPolicy, CRITICAL_MAX, STRONG_MAX,
 };
 
 pub struct PoisonClockPolicy;
 
-/// One poison clock a candidate advances (CR 810.10: teammates share one), the counters credited
-/// to it, the `(recipient, count)` placements the engine resolves (per attacker for combat), and
-/// the highest band its claim may reach.
+/// One poison clock a candidate advances (CR 810.10: teammates share one), the seat that opened
+/// it, the counters credited to it, and the highest band its claim may reach.
 #[derive(Debug, Clone, PartialEq)]
 struct PoisonPool {
+    seat: PlayerId,
     measure: PoisonLossMeasure,
     added: u32,
-    placements: Vec<(PlayerId, u32)>,
     ceiling: f64,
 }
 
 /// What the candidate action contributes to the poison clock. Typed rather
 /// than a pair of bools so the branch set stays exhaustive.
 #[derive(Debug, Clone, PartialEq)]
-enum PoisonContribution {
+enum PoisonContribution<'a> {
     /// Adds poison counters to opponents (CR 122.1f); the recipients decide how
-    /// many land on one shared pool (CR 810.10).
-    DirectPoison(PoisonRecipients),
+    /// many land on one shared pool (CR 810.10). `source` and `abilities` are
+    /// what the engine resolves to confirm a lethal claim.
+    DirectPoison {
+        recipients: PoisonRecipients,
+        source: ObjectId,
+        abilities: Vec<&'a AbilityDefinition>,
+    },
     /// Proliferates (CR 701.34a) — only advances the clock on an already
     /// poisoned opponent.
-    Proliferate,
+    Proliferate { source: ObjectId },
     /// CR 508.1: an attack declaration whose poison sources are pointed at a
     /// live opponent: the closest pool the declared attackers advance if the
     /// damage connects.
@@ -102,40 +114,54 @@ impl PoisonClockPolicy {
     /// Re-classify the LIVE candidate structurally. Deck-time classification is
     /// deliberately not trusted here — the object on the battlefield may have
     /// been modified since the deck was analyzed.
-    fn contribution(&self, ctx: &PolicyContext<'_>) -> PoisonContribution {
+    fn contribution<'a>(&self, ctx: &PolicyContext<'a>) -> PoisonContribution<'a> {
         match &ctx.candidate.action {
-            GameAction::CastSpell { object_id, .. } => match ctx.state.objects.get(object_id) {
-                // CR 601.2b + CR 700.2: a modal spell's poison lives in one of
-                // its printed modes, and mode selection is a later step of
-                // announcing the spell. Crediting the cast would score a branch
-                // the AI may never take — `SelectModes` is where it is decided.
-                Some(obj) if obj.modal.is_some() => PoisonContribution::None,
-                Some(obj) => classify_abilities(obj.abilities.iter()),
-                None => PoisonContribution::None,
-            },
-            GameAction::ActivateAbility {
-                source_id,
-                ability_index,
-                ..
-            } => ctx
-                .state
-                .objects
-                .get(source_id)
-                .and_then(|obj| obj.abilities.get(*ability_index))
-                .map_or(PoisonContribution::None, |ability| {
-                    classify_abilities(std::slice::from_ref(ability).iter())
-                }),
-            // CR 601.2b: the mode IS chosen here — classify exactly the branch
-            // the candidate selects, so a poison mode and a non-poison mode of
-            // the same card score differently.
-            GameAction::SelectModes { indices } => {
-                let selected =
-                    selected_mode_abilities(ctx.state, &ctx.decision.waiting_for, indices);
-                classify_abilities(selected.iter().copied())
-            }
             GameAction::DeclareAttackers { attacks, .. } => combat_contribution(ctx, attacks),
-            _ => PoisonContribution::None,
+            _ => candidate_abilities(ctx)
+                .map_or(PoisonContribution::None, |(source, abilities)| {
+                    classify_abilities(source, abilities)
+                }),
         }
+    }
+}
+
+/// The source and the ability set a cast, activation, or mode selection commits to.
+fn candidate_abilities<'a>(
+    ctx: &PolicyContext<'a>,
+) -> Option<(ObjectId, Vec<&'a AbilityDefinition>)> {
+    let state = ctx.state;
+    match &ctx.candidate.action {
+        GameAction::CastSpell { object_id, .. } => {
+            let obj = state.objects.get(object_id)?;
+            // CR 601.2b + CR 700.2: a modal spell's poison lives in one of
+            // its printed modes, and mode selection is a later step of
+            // announcing the spell. Crediting the cast would score a branch
+            // the AI may never take — `SelectModes` is where it is decided.
+            obj.modal
+                .is_none()
+                .then(|| (*object_id, obj.abilities.iter().collect()))
+        }
+        GameAction::ActivateAbility {
+            source_id,
+            ability_index,
+            ..
+        } => {
+            let ability = state
+                .objects
+                .get(source_id)?
+                .abilities
+                .get(*ability_index)?;
+            Some((*source_id, vec![ability]))
+        }
+        // CR 601.2b: the mode IS chosen here — classify exactly the branch
+        // the candidate selects, so a poison mode and a non-poison mode of
+        // the same card score differently.
+        GameAction::SelectModes { indices } => {
+            let waiting_for = &ctx.decision.waiting_for;
+            let source = pending_mode_source(waiting_for)?;
+            Some((source, selected_mode_abilities(state, waiting_for, indices)))
+        }
+        _ => None,
     }
 }
 
@@ -145,19 +171,110 @@ impl PoisonClockPolicy {
 /// The walk is always [`AbilityScope::Unconditional`]: every caller has already
 /// resolved which branch this candidate commits to, so a still-unchosen mode
 /// must not leak in.
-fn classify_abilities<'a, I>(abilities: I) -> PoisonContribution
-where
-    I: IntoIterator<Item = &'a AbilityDefinition> + Clone,
-{
+fn classify_abilities(
+    source: ObjectId,
+    abilities: Vec<&AbilityDefinition>,
+) -> PoisonContribution<'_> {
     if let Some(recipients) =
-        opponent_poison_recipients_parts(abilities.clone(), AbilityScope::Unconditional)
+        opponent_poison_recipients_parts(abilities.iter().copied(), AbilityScope::Unconditional)
     {
-        PoisonContribution::DirectPoison(recipients)
-    } else if proliferates_parts(abilities, AbilityScope::Unconditional) {
-        PoisonContribution::Proliferate
+        PoisonContribution::DirectPoison {
+            recipients,
+            source,
+            abilities,
+        }
+    } else if proliferates_parts(abilities.iter().copied(), AbilityScope::Unconditional) {
+        PoisonContribution::Proliferate { source }
     } else {
         PoisonContribution::None
     }
+}
+
+/// The poison-giving nodes of an already-scoped ability set, with each node's count and recipient.
+fn poison_nodes<'a>(
+    abilities: &'a [&'a AbilityDefinition],
+) -> impl Iterator<Item = (&'a AbilityDefinition, &'a QuantityExpr, &'a TargetFilter)> + 'a {
+    abilities
+        .iter()
+        .flat_map(|ability| collect_scoped_nodes(ability, AbilityScope::Unconditional))
+        .filter_map(|node| match &*node.effect {
+            Effect::GivePlayerCounter {
+                counter_kind: PlayerCounterKind::Poison,
+                count,
+                target,
+            } => Some((node, count, target)),
+            _ => None,
+        })
+}
+
+/// The poison counters each recipient gets as printed; `None` when any count is dynamic.
+fn printed_poison(abilities: &[&AbilityDefinition]) -> Option<u32> {
+    poison_nodes(abilities).try_fold(0u32, |total, (_, count, _)| match count {
+        QuantityExpr::Fixed { value } => {
+            Some(total.saturating_add(u32::try_from(*value).unwrap_or(0)))
+        }
+        _ => None,
+    })
+}
+
+/// CR 608.2c: the board after the candidate's poison instructions resolve with `seat` as the AI's
+/// chosen player target; `None` when a recipient is bound only at resolution or a choice stops it.
+fn direct_delivery(
+    state: &GameState,
+    ai_player: PlayerId,
+    source: ObjectId,
+    abilities: &[&AbilityDefinition],
+    seat: PlayerId,
+) -> Option<GameState> {
+    let resolved = poison_nodes(abilities)
+        .map(|(node, _, target)| {
+            // A scoped node binds each player itself; an announced target is the AI's choice.
+            let targets = if node.player_scope.is_some() {
+                Vec::new()
+            } else if !target.is_context_ref() {
+                vec![TargetRef::Player(seat)]
+            } else {
+                return None;
+            };
+            let mut node = node.clone();
+            node.sub_ability = None;
+            node.else_ability = None;
+            Some(build_resolved_from_def_with_targets(
+                &node, source, ai_player, targets,
+            ))
+        })
+        .collect::<Option<Vec<_>>>()?;
+    preview_resolution(state, &resolved)
+}
+
+/// CR 701.34a + CR 701.34b: the board after the AI proliferates choosing `seat` alone.
+fn proliferate_delivery(
+    state: &GameState,
+    ai_player: PlayerId,
+    source: ObjectId,
+    seat: PlayerId,
+) -> Option<GameState> {
+    let mut preview = state.clone();
+    let mut events = Vec::new();
+    apply_proliferate(
+        &mut preview,
+        ai_player,
+        &[TargetRef::Player(seat)],
+        PendingEffectResolved::new(EffectKind::Proliferate, source),
+        &mut events,
+    )
+    .then_some(preview)
+}
+
+/// CR 702.70a: a trigger whose instructions give poison counters (Poisonous).
+fn gives_poison(ability: &ResolvedAbility) -> bool {
+    matches!(
+        ability.effect,
+        Effect::GivePlayerCounter {
+            counter_kind: PlayerCounterKind::Poison,
+            ..
+        }
+    ) || ability.sub_ability.as_deref().is_some_and(gives_poison)
 }
 
 /// CR 508.1: score an attack declaration by the poison it converts.
@@ -167,10 +284,10 @@ where
 /// this axis. Poison is summed per poison clock — attackers on one seat, or on
 /// teammates who share poison (CR 810.10), share one clock — and the seat
 /// closest to its poison-loss threshold is the one scored.
-fn combat_contribution(
-    ctx: &PolicyContext<'_>,
+fn combat_contribution<'a>(
+    ctx: &PolicyContext<'a>,
     attacks: &[(ObjectId, AttackTarget)],
-) -> PoisonContribution {
+) -> PoisonContribution<'a> {
     let gains = attacks.iter().filter_map(|(attacker_id, target)| {
         let AttackTarget::Player(defender) = target else {
             return None;
@@ -183,10 +300,18 @@ fn combat_contribution(
         );
         (yielded > 0).then_some((*defender, yielded))
     });
+    let at_players: Vec<(ObjectId, PlayerId)> = attacks
+        .iter()
+        .filter_map(|(attacker, target)| match target {
+            AttackTarget::Player(player) => Some((*attacker, *player)),
+            _ => None,
+        })
+        .collect();
     closest_delivered(
-        ctx.state,
         ctx.ai_player,
         clock_pools(ctx.state, ctx.ai_player, gains, STRONG_MAX),
+        |_| preview_unblocked_combat_damage(ctx.state, &at_players, gives_poison),
+        false,
     )
     .map_or(PoisonContribution::None, PoisonContribution::CombatDamage)
 }
@@ -198,8 +323,7 @@ fn clock_pools(
     gains: impl IntoIterator<Item = (PlayerId, u32)>,
     ceiling: f64,
 ) -> Vec<PoisonPool> {
-    // Keyed by the seat that opened the pool.
-    let mut pools: Vec<(PlayerId, PoisonPool)> = Vec::new();
+    let mut pools: Vec<PoisonPool> = Vec::new();
     for (seat, gained) in gains {
         let Some(measure) = live_opponent_poison(state, ai_player, seat) else {
             continue;
@@ -209,39 +333,34 @@ fn clock_pools(
                 || (measure.scope == PoisonLossScope::Team
                     && players::teammates(state, seat).contains(other))
         };
-        match pools.iter_mut().find(|(other, _)| shares_clock(other)) {
-            Some((_, pool)) => {
-                pool.added = pool.added.saturating_add(gained);
-                pool.placements.push((seat, gained));
-            }
-            None => pools.push((
+        match pools.iter_mut().find(|pool| shares_clock(&pool.seat)) {
+            Some(pool) => pool.added = pool.added.saturating_add(gained),
+            None => pools.push(PoisonPool {
                 seat,
-                PoisonPool {
-                    measure,
-                    added: gained,
-                    placements: vec![(seat, gained)],
-                    ceiling,
-                },
-            )),
+                measure,
+                added: gained,
+                ceiling,
+            }),
         }
     }
-    pools.into_iter().map(|(_, pool)| pool).collect()
+    pools
 }
 
-/// One single-counter pool per live opponent seat whose measure passes `keep`: a choose-one
+/// One `added`-counter pool per live opponent seat whose measure passes `keep`: a choose-one
 /// recipient, or proliferate (CR 701.34b: a shared-poison team gets one counter).
 fn seat_pools(
     state: &GameState,
     ai_player: PlayerId,
+    added: u32,
     keep: impl Fn(&PoisonLossMeasure) -> bool,
     ceiling: f64,
 ) -> Vec<PoisonPool> {
     opponent_poison_seats(state, ai_player)
         .filter(|(_, measure)| keep(measure))
         .map(|(seat, measure)| PoisonPool {
+            seat,
             measure,
-            added: 1,
-            placements: vec![(seat, 1)],
+            added,
             ceiling,
         })
         .collect()
@@ -266,21 +385,24 @@ pub(crate) fn previewed_poison(
     }
 }
 
-/// CR 101.2: a lethal estimate is replaced by what the engine would deliver, since a can't
-/// effect (Solemnity) or a replacement decides how many counters land.
-fn confirm_lethal(state: &GameState, actor: PlayerId, mut pool: PoisonPool) -> PoisonPool {
-    // The preview clones the state, so only an estimate that would claim lethal pays for one.
-    if !reaches_lethal(pool.measure, pool.added) {
+/// CR 101.2 + CR 614.1: the engine's resolution decides what lands, since a can't effect
+/// (Solemnity) or a replacement (Vorinclex) can change every counter, so a lethal estimate is
+/// replaced by the pool's poison on the board `deliver` returns for its seat. `must_resolve`
+/// reads it even below lethal, for a count with no printed estimate.
+fn confirm_lethal(
+    ai_player: PlayerId,
+    mut pool: PoisonPool,
+    deliver: impl Fn(PlayerId) -> Option<GameState>,
+    must_resolve: bool,
+) -> PoisonPool {
+    // The delivery clones the state, so only an estimate that would claim lethal pays for one.
+    if !must_resolve && !reaches_lethal(pool.measure, pool.added) {
         return pool;
     }
-    let delivered = pool
-        .placements
-        .iter()
-        .try_fold(0u32, |total, &(recipient, count)| {
-            Some(total.saturating_add(previewed_poison(state, actor, recipient, count)?))
-        });
+    let delivered =
+        deliver(pool.seat).and_then(|after| live_opponent_poison(&after, ai_player, pool.seat));
     match delivered {
-        Some(delivered) => pool.added = delivered,
+        Some(after) => pool.added = after.count.saturating_sub(pool.measure.count),
         None => pool.ceiling = pool.ceiling.min(STRONG_MAX),
     }
     pool
@@ -288,13 +410,14 @@ fn confirm_lethal(state: &GameState, actor: PlayerId, mut pool: PoisonPool) -> P
 
 /// The confirmed pool with the fewest counters left to lethal.
 fn closest_delivered(
-    state: &GameState,
-    actor: PlayerId,
+    ai_player: PlayerId,
     pools: Vec<PoisonPool>,
+    deliver: impl Fn(PlayerId) -> Option<GameState>,
+    must_resolve: bool,
 ) -> Option<PoisonPool> {
     pools
         .into_iter()
-        .map(|pool| confirm_lethal(state, actor, pool))
+        .map(|pool| confirm_lethal(ai_player, pool, &deliver, must_resolve))
         .filter(|pool| pool.added > 0)
         .min_by_key(|pool| headroom(pool.measure).saturating_sub(pool.added))
 }
@@ -372,14 +495,19 @@ impl TacticalPolicy for PoisonClockPolicy {
             PoisonContribution::None => {
                 PolicyVerdict::neutral(PolicyReason::new("poison_clock_na"))
             }
-            // One counter per recipient is the floor: `GivePlayerCounter.count`
-            // need not be static. A resolving spell's lethal case reaches
-            // `CRITICAL_MAX` only once `confirm_lethal` has read the counters
-            // through the engine.
-            PoisonContribution::DirectPoison(recipients) => {
+            // The printed fixed count is the estimate, and a dynamic count is always resolved
+            // (CR 107.1b: it can be zero). A lethal case reaches `CRITICAL_MAX` only once
+            // `confirm_lethal` has read the counters through the engine.
+            PoisonContribution::DirectPoison {
+                recipients,
+                source,
+                abilities,
+            } => {
+                let printed = printed_poison(&abilities);
+                let estimate = printed.unwrap_or(1);
                 let pools = match recipients {
                     PoisonRecipients::One => {
-                        seat_pools(ctx.state, ctx.ai_player, |_| true, CRITICAL_MAX)
+                        seat_pools(ctx.state, ctx.ai_player, estimate, |_| true, CRITICAL_MAX)
                     }
                     // CR 810.10: each opponent gets its counter individually; teammates' counters share one pool.
                     PoisonRecipients::EachOpponent => clock_pools(
@@ -387,18 +515,20 @@ impl TacticalPolicy for PoisonClockPolicy {
                         ctx.ai_player,
                         players::opponents(ctx.state, ctx.ai_player)
                             .into_iter()
-                            .map(|seat| (seat, 1)),
+                            .map(|seat| (seat, estimate)),
                         CRITICAL_MAX,
                     ),
                 };
-                match closest_delivered(ctx.state, ctx.ai_player, pools) {
+                let deliver =
+                    |seat| direct_delivery(ctx.state, ctx.ai_player, source, &abilities, seat);
+                match closest_delivered(ctx.ai_player, pools, deliver, printed.is_none()) {
                     Some(pool) => score_clock(scalar, pool.measure, pool.added, pool.ceiling),
                     None => {
                         PolicyVerdict::neutral(PolicyReason::new("poison_clock_no_poison_loss"))
                     }
                 }
             }
-            PoisonContribution::Proliferate => {
+            PoisonContribution::Proliferate { source } => {
                 // CR 701.34b: one proliferate gives a shared-poison team a single counter.
                 // CR 701.34a: proliferate chooses among permanents and players
                 // that ALREADY have a counter. With no poisoned opponent it
@@ -406,10 +536,12 @@ impl TacticalPolicy for PoisonClockPolicy {
                 let pools = seat_pools(
                     ctx.state,
                     ctx.ai_player,
+                    1,
                     |measure| measure.count > 0,
                     CRITICAL_MAX,
                 );
-                match closest_delivered(ctx.state, ctx.ai_player, pools) {
+                let deliver = |seat| proliferate_delivery(ctx.state, ctx.ai_player, source, seat);
+                match closest_delivered(ctx.ai_player, pools, deliver, false) {
                     Some(pool) => score_clock(scalar, pool.measure, pool.added, pool.ceiling),
                     None => PolicyVerdict::neutral(PolicyReason::new(
                         "poison_clock_no_counters_to_proliferate",

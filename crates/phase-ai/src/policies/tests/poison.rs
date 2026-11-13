@@ -11,15 +11,17 @@ use engine::game::combat::AttackTarget;
 use engine::game::zones::create_object;
 use engine::types::ability::ResolvedAbility;
 use engine::types::ability::{
-    AbilityDefinition, AbilityKind, Effect, ModalChoice, QuantityExpr, TargetFilter,
+    AbilityCost, AbilityDefinition, AbilityKind, Effect, ModalChoice, QuantityExpr, TargetFilter,
 };
 use engine::types::actions::GameAction;
 use engine::types::card_type::{CardType, CoreType};
+use engine::types::counter::CounterType;
 use engine::types::format::FormatConfig;
 use engine::types::game_state::{CastPaymentMode, GameState, PendingCast, WaitingFor};
 use engine::types::identifiers::{CardId, ObjectId};
 use engine::types::keywords::Keyword;
 use engine::types::mana::ManaCost;
+use engine::types::phase::Phase;
 use engine::types::player::{PlayerCounterKind, PlayerId};
 use engine::types::zones::Zone;
 
@@ -1468,9 +1470,9 @@ fn solemnity(scenario: &mut GameScenario) -> ObjectId {
     )
 }
 
-fn vorinclex(scenario: &mut GameScenario) -> ObjectId {
+fn vorinclex(scenario: &mut GameScenario, controller: PlayerId) -> ObjectId {
     scenario.add_real_card(
-        AI,
+        controller,
         "Vorinclex, Monstrous Raider",
         Zone::Battlefield,
         shared_integration_card_db(),
@@ -1578,17 +1580,182 @@ fn prevented_poison_on_a_single_opponent_is_not_lethal() {
     assert_eq!(delta, 0.0);
 }
 
-/// CR 614.1: Vorinclex doubles each head's counter, so the lethal claim books four, not two.
+fn poison_of(state: &GameState, seat: PlayerId) -> u32 {
+    state.players[seat.0 as usize].poison_counters
+}
+
+/// CR 810.10 + CR 614.1: each head gets Prologue's counter with that head as the actor, so the
+/// caster's Vorinclex halves each one to zero; without it both land.
 #[test]
-fn replaced_poison_count_is_the_one_scored() {
-    let (delta, reason) = cast_beside(
-        FormatConfig::two_headed_giant(),
-        4,
-        &[(PlayerId(2), 6), (PlayerId(3), 7)],
-        prologue_to_phyresis,
-        vorinclex,
-    );
-    assert_eq!(reason.kind, "poison_clock_lethal");
-    assert_eq!(fact(&reason, "poison_added"), Some(4));
-    assert!(delta > crate::policies::registry::STRONG_MAX);
+fn each_opponent_poison_reads_the_scoped_actor() {
+    let at_13 = [(PlayerId(2), 6), (PlayerId(3), 7)];
+    for with_vorinclex in [false, true] {
+        let (mut runner, ids) = board(FormatConfig::two_headed_giant(), 4, &at_13, |s| {
+            let prologue = prologue_to_phyresis(s);
+            if with_vorinclex {
+                vorinclex(s, AI);
+            }
+            vec![prologue]
+        });
+        let (delta, reason) = verdict_on(runner.state(), &cast_candidate(ids[0]));
+        runner.cast(ids[0]).free_cast().resolve();
+        let heads = (
+            poison_of(runner.state(), PlayerId(2)),
+            poison_of(runner.state(), PlayerId(3)),
+        );
+        if with_vorinclex {
+            assert_eq!(heads, (6, 7));
+            assert_eq!(reason.kind, "poison_clock_no_poison_loss");
+            assert_eq!(delta, 0.0);
+        } else {
+            assert_eq!(heads, (7, 8));
+            assert_eq!(reason.kind, "poison_clock_lethal");
+            assert_eq!(fact(&reason, "poison_added"), Some(2));
+            assert!(delta > crate::policies::registry::STRONG_MAX);
+        }
+    }
+}
+
+/// Skrelv, Defector Mite: "{W/P}, {T}: Choose a color. Another target creature you control gains
+/// toxic 1 and hexproof from that color until end of turn. It can't be blocked by creatures of
+/// that color this turn." The keyword below stands in for that resolved grant.
+fn grant_skrelv_toxic(runner: &mut GameRunner, creature: ObjectId) {
+    let state = runner.state_mut();
+    let obj = state.objects.get_mut(&creature).unwrap();
+    obj.base_keywords.push(Keyword::Toxic(1));
+    obj.keywords.push(Keyword::Toxic(1));
+    state.layers_dirty.mark_full();
+    engine::game::layers::evaluate_layers(state);
+}
+
+/// A standard 2-player board in precombat main with the opponent at nine poison; the opponent
+/// controls Vorinclex when `opponent_vorinclex`.
+fn combat_board(card: &str, opponent_vorinclex: bool) -> (GameRunner, ObjectId) {
+    let (mut runner, ids) = board(FormatConfig::standard(), 2, &[(OPPONENT, 9)], |s| {
+        s.at_phase(Phase::PreCombatMain);
+        let attacker = s.add_real_card(AI, card, Zone::Battlefield, shared_integration_card_db());
+        if opponent_vorinclex {
+            vorinclex(s, OPPONENT);
+        }
+        vec![attacker]
+    });
+    runner.state_mut().layers_dirty.mark_full();
+    engine::game::layers::evaluate_layers(runner.state_mut());
+    (runner, ids[0])
+}
+
+/// The verdict on `attacker` attacking the opponent at the declare-attackers decision, and the
+/// opponent's poison once production combat deals that attack's damage unblocked.
+fn attack_then_combat(runner: &mut GameRunner, attacker: ObjectId) -> ((f64, PolicyReason), u32) {
+    runner.advance_to_combat();
+    let attack = vec![(attacker, AttackTarget::Player(OPPONENT))];
+    let verdict = verdict_on(runner.state(), &attack_candidate(attack.clone()));
+    runner.declare_attackers(&attack).unwrap();
+    runner.combat_damage();
+    if matches!(
+        runner.state().waiting_for,
+        WaitingFor::DeclareBlockers { .. }
+    ) {
+        runner.declare_blockers(&[]).unwrap();
+        runner.combat_damage();
+    }
+    (verdict, poison_of(runner.state(), OPPONENT))
+}
+
+/// CR 120.3b + CR 120.3g: infect and toxic give their counters as separate placements, so the
+/// opponent's Vorinclex halves each to zero; without it both land.
+#[test]
+fn infect_and_toxic_counters_are_separate_placements() {
+    for opponent_vorinclex in [false, true] {
+        let (mut runner, elf) = combat_board("Glistener Elf", opponent_vorinclex);
+        grant_skrelv_toxic(&mut runner, elf);
+        let ((delta, reason), poison) = attack_then_combat(&mut runner, elf);
+        if opponent_vorinclex {
+            assert_eq!(poison, 9);
+            assert_eq!(reason.kind, "poison_clock_na");
+            assert_eq!(delta, 0.0);
+        } else {
+            assert_eq!(poison, 11);
+            assert_eq!(reason.kind, "poison_clock_lethal");
+            assert_eq!(fact(&reason, "poison_added"), Some(2));
+            assert!(delta > 0.0 && delta <= crate::policies::registry::STRONG_MAX);
+        }
+    }
+}
+
+/// CR 702.70a: Virulent Sliver's combat damage triggers poisonous 1, whose controller gives the
+/// counter, so the opponent's Vorinclex halves it to zero; without it the counter lands.
+#[test]
+fn poisonous_counters_come_from_the_trigger_controller() {
+    for opponent_vorinclex in [false, true] {
+        let (mut runner, sliver) = combat_board("Virulent Sliver", opponent_vorinclex);
+        let ((delta, reason), poison) = attack_then_combat(&mut runner, sliver);
+        if opponent_vorinclex {
+            assert_eq!(poison, 9);
+            assert_eq!(reason.kind, "poison_clock_na");
+            assert_eq!(delta, 0.0);
+        } else {
+            assert_eq!(poison, 10);
+            assert_eq!(reason.kind, "poison_clock_lethal");
+            assert_eq!(fact(&reason, "poison_added"), Some(1));
+            assert!(delta > 0.0 && delta <= crate::policies::registry::STRONG_MAX);
+        }
+    }
+}
+
+/// CR 107.1b: Vraska's −9 gives the difference up to nine, so its count is resolved, never
+/// assumed: zero at nine, four at five, and lethal one at eight under a threshold of nine.
+#[test]
+fn dynamic_poison_count_is_resolved_before_it_is_scored() {
+    for (format, at, kind, added) in [
+        (
+            FormatConfig::standard(),
+            9,
+            "poison_clock_no_poison_loss",
+            None,
+        ),
+        (
+            FormatConfig::standard(),
+            5,
+            "poison_clock_pressure",
+            Some(4),
+        ),
+        (threshold(9), 8, "poison_clock_lethal", Some(1)),
+    ] {
+        let (mut runner, ids) = board(format, 2, &[(OPPONENT, at)], |s| {
+            s.at_phase(Phase::PreCombatMain);
+            vec![s.add_real_card(
+                AI,
+                "Vraska, Betrayal's Sting",
+                Zone::Battlefield,
+                shared_integration_card_db(),
+            )]
+        });
+        let vraska = ids[0];
+        let obj = runner.state_mut().objects.get_mut(&vraska).unwrap();
+        obj.loyalty = Some(9);
+        obj.counters.insert(CounterType::Loyalty, 9);
+        let minus_nine = runner.state().objects[&vraska]
+            .abilities
+            .iter()
+            .position(|a| matches!(a.cost, Some(AbilityCost::Loyalty { amount: -9 })))
+            .unwrap();
+        let (delta, reason) = verdict_on(
+            runner.state(),
+            &activate_ability_candidate(vraska, minus_nine),
+        );
+        let _ = runner
+            .activate(vraska, minus_nine)
+            .target_player(OPPONENT)
+            .try_resolve();
+        assert_eq!(poison_of(runner.state(), OPPONENT), 9);
+        assert!(!runner.state().battlefield.contains(&vraska));
+        assert_eq!(reason.kind, kind);
+        assert_eq!(fact(&reason, "poison_added"), added);
+        match kind {
+            "poison_clock_no_poison_loss" => assert_eq!(delta, 0.0),
+            "poison_clock_lethal" => assert!(delta > crate::policies::registry::STRONG_MAX),
+            _ => assert!(delta > 0.0 && delta <= crate::policies::registry::STRONG_MAX),
+        }
+    }
 }
