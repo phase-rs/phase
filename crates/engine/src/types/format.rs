@@ -845,6 +845,16 @@ pub enum SurvivorDeckFormat {
     Commander,
 }
 
+impl SurvivorDeckFormat {
+    /// Whether survivors play a Commander variant (CR 903).
+    pub fn uses_commander(self) -> bool {
+        match self {
+            SurvivorDeckFormat::Constructed => false,
+            SurvivorDeckFormat::Commander => true,
+        }
+    }
+}
+
 /// Staged boss-deck configuration (Turtle Team-Up class): the Boss team fights
 /// in stages of deployed Bosses sharing one life total per stage, instead of
 /// the classic Horde's life-total-less mill race.
@@ -1813,6 +1823,15 @@ pub fn validate_poison_counter_threshold(config: &FormatConfig) -> Result<(), St
 /// blanket equality because no Custom payload has ever been accepted at this
 /// boundary and there are therefore no legacy Custom payloads to keep
 /// compatible with. This function is the built-in half of the same idea.
+/// The `uses_commander` a built-in config must carry: a Horde reads its
+/// survivors' deck format, every other built-in reads its `GameFormat`.
+fn derived_built_in_uses_commander(config: &FormatConfig) -> Result<bool, String> {
+    match (config.format, &config.horde_ruleset) {
+        (GameFormat::Horde, Some(ruleset)) => Ok(ruleset.survivor_deck_format.uses_commander()),
+        (format, _) => format.uses_commander().map_err(|e| e.0),
+    }
+}
+
 fn built_in_axes_no_looser_than_rules(config: &FormatConfig) -> Result<(), String> {
     let rules = FormatConfig::for_format(config.format).map_err(|e| e.0)?;
 
@@ -2090,7 +2109,7 @@ fn built_in_axes_no_looser_than_rules(config: &FormatConfig) -> Result<(), Strin
 
     // uses_commander: Derived from format — independent of the threshold
     // (CR 903.12h: Brawl stays a Commander variant without CR 704.6c).
-    let derived_uses_commander = config.format.uses_commander().map_err(|e| e.0)?;
+    let derived_uses_commander = derived_built_in_uses_commander(config)?;
     if config.uses_commander != derived_uses_commander {
         return Err(format!(
             "FormatConfig.uses_commander is {}, but {} derives {} — uses_commander must always \
@@ -4875,28 +4894,22 @@ impl FormatConfig {
         // Theros-block decks want 60-card constructed). `command_zone` stays true
         // regardless — the Horde's own game-start emblem lives in the command zone,
         // independent of whether survivors run commanders.
-        let (
-            deck_size,
-            singleton,
-            uses_commander,
-            commander_damage_threshold,
-            default_deck_copy_limit,
-        ) = match ruleset.survivor_deck_format {
-            SurvivorDeckFormat::Constructed => (
-                DeckSizeRule::Minimum(60),
-                false,
-                false,
-                None,
-                DeckCopyLimit::Unlimited,
-            ),
-            SurvivorDeckFormat::Commander => (
-                DeckSizeRule::Exactly(100),
-                true,
-                true,
-                Some(21),
-                DeckCopyLimit::UpTo(1),
-            ),
-        };
+        let uses_commander = ruleset.survivor_deck_format.uses_commander();
+        let (deck_size, singleton, commander_damage_threshold, default_deck_copy_limit) =
+            match ruleset.survivor_deck_format {
+                SurvivorDeckFormat::Constructed => (
+                    DeckSizeRule::Minimum(60),
+                    false,
+                    None,
+                    DeckCopyLimit::Unlimited,
+                ),
+                SurvivorDeckFormat::Commander => (
+                    DeckSizeRule::Exactly(100),
+                    true,
+                    Some(21),
+                    DeckCopyLimit::UpTo(1),
+                ),
+            };
         FormatConfig {
             format: GameFormat::Horde,
             // Fallback only. The authoritative survivors' combined base life is
@@ -5452,6 +5465,37 @@ mod tests {
         let mut commander = FormatConfig::commander();
         commander.uses_commander = false;
         assert!(round_trip(&commander).is_err());
+    }
+
+    /// The Derived `uses_commander` row accepts every config the engine builds:
+    /// each registry default and each challenge deck's Horde config, whose
+    /// survivors decide it.
+    #[test]
+    fn derived_uses_commander_matches_every_engine_built_config() {
+        let configs: Vec<FormatConfig> = ChallengeDeck::ALL
+            .iter()
+            .map(|deck| FormatConfig::horde(deck.default_ruleset()))
+            .chain(
+                GameFormat::registry()
+                    .into_iter()
+                    .map(|meta| meta.default_config),
+            )
+            .collect();
+        assert!(
+            configs
+                .iter()
+                .any(|c| c.format == GameFormat::Horde && c.uses_commander),
+            "reach-guard: some challenge deck seats Commander survivors"
+        );
+        for config in configs {
+            assert_eq!(
+                derived_built_in_uses_commander(&config),
+                Ok(config.uses_commander),
+                "{:?} {:?}",
+                config.format,
+                config.horde_ruleset.as_ref().map(|r| r.challenge_deck),
+            );
+        }
     }
 
     #[test]
@@ -6118,7 +6162,7 @@ mod tests {
     /// adding a variant to one side without the other fails here rather than
     /// silently starting a game one card short or one card long.
     /// A custom format shaped like Oathbreaker or Tiny Leaders — an enabled
-    /// command zone with an eligibility rule but NO commander-damage threshold
+    /// command zone with a non-Commander eligibility rule
     /// — still designates a decklist commander. Its `uses_commander` is
     /// `false`, so reading that field would answer `false` here and strand the
     /// commander in the library, which is the same class of bug this predicate
@@ -6161,8 +6205,8 @@ mod tests {
             commander_damage_threshold: None,
             eligibility_rule: CommanderEligibilityRule::OathbreakerSignatureSpell,
         });
-        // PREMISE: this is genuinely the threshold-less shape, so the assertion
-        // below is about the predicate rather than a trivially true case.
+        // PREMISE: this shape's uses_commander is false, so the assertion below is
+        // about the predicate rather than a trivially true case.
         assert!(!oathbreaker_shaped.uses_commander);
         assert!(oathbreaker_shaped.command_zone);
         assert!(

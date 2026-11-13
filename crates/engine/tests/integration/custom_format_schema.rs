@@ -2005,8 +2005,7 @@ fn format_config_deserialization_rejects_commander_damage_threshold_shape_mismat
     none_but_still_commander.uses_commander = false;
     let json = serde_json::to_value(&none_but_still_commander).unwrap();
     let error = serde_json::from_value::<FormatConfig>(json).expect_err(
-        "a self-consistent forgery (None threshold AND uses_commander: false) must still be \
-         rejected on Commander",
+        "a None threshold with uses_commander: false must still be rejected on Commander",
     );
     assert!(
         error.to_string().contains("commander_damage_threshold"),
