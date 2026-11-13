@@ -3338,6 +3338,122 @@ mod feldon_tokens {
         }
     }
 
+    /// Edgar Markov's Coffin's upkeep trigger under Metallic Mimic (Vampire), Doubling Season and
+    /// Hardened Scales, with Where Ancients Tread. Returns the number of replacement-order prompts
+    /// the chain stopped on, whether the chain ended anywhere but empty at priority (a Where
+    /// Ancients Tread trigger), and the finished game.
+    /// With `anthem` a Glorious Anthem is also in play, so the Vampires enter as 5/5s.
+    fn coffin_vampires_trigger_count(
+        anthem: bool,
+        persist: bool,
+    ) -> (usize, bool, GameRunner, ObjectId) {
+        let db = crate::support::shared_card_db().expect("integration card database");
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::End);
+        scenario.with_library_top(P0, &["Plains", "Island", "Swamp", "Mountain"]);
+        scenario.with_library_top(P1, &["Plains", "Island", "Swamp", "Mountain"]);
+        // The Coffin is the back face of Edgar, Charmed Groom: turn it over below.
+        let coffin = scenario.add_real_card(P0, "Edgar, Charmed Groom", Zone::Battlefield, db);
+        scenario.with_counter(coffin, CounterType::Generic("bloodline".to_string()), 2);
+        let mimic = scenario.add_real_card(P0, "Metallic Mimic", Zone::Battlefield, db);
+        let season = scenario.add_real_card(P0, "Doubling Season", Zone::Battlefield, db);
+        scenario.add_real_card(P0, "Hardened Scales", Zone::Battlefield, db);
+        scenario.add_real_card(P0, "Where Ancients Tread", Zone::Battlefield, db);
+        if anthem {
+            scenario.add_real_card(P0, "Glorious Anthem", Zone::Battlefield, db);
+        }
+        let mut runner = scenario.build();
+        engine::game::transform::transform_permanent(runner.state_mut(), coffin, &mut Vec::new())
+            .expect("Edgar turns over to Edgar Markov's Coffin");
+        assert_eq!(
+            runner.state().objects[&coffin].name,
+            "Edgar Markov's Coffin"
+        );
+        runner
+            .state_mut()
+            .objects
+            .get_mut(&mimic)
+            .unwrap()
+            .chosen_attributes
+            .push(ChosenAttribute::CreatureType("Vampire".to_string()));
+        engine::game::layers::mark_layers_full(runner.state_mut());
+        engine::game::layers::flush_layers(runner.state_mut());
+        // Pass to the next turn of P0's: the upkeep trigger is put on the stack.
+        for _ in 0..64 {
+            if runner.state().phase == Phase::Upkeep
+                && runner.state().active_player == P0
+                && runner.state().turn_number > 1
+            {
+                break;
+            }
+            runner.act(GameAction::PassPriority).unwrap();
+        }
+        assert_eq!(runner.state().phase, Phase::Upkeep);
+        assert_eq!(runner.state().active_player, P0);
+        assert_eq!(runner.state().stack.len(), 1, "Coffin's upkeep trigger");
+        let mut prompts = 0;
+        for _ in 0..8 {
+            runner.advance_until_stack_empty();
+            let WaitingFor::ReplacementChoice { candidates, .. } = &runner.state().waiting_for
+            else {
+                break;
+            };
+            prompts += 1;
+            // CR 616.1f: Doubling Season before Hardened Scales makes the Mimic's one counter three.
+            let index = candidates
+                .iter()
+                .position(|candidate| candidate.source_id == season)
+                .expect("Doubling Season is among the replacements to order");
+            runner.act(GameAction::ChooseReplacement { index }).unwrap();
+            if persist {
+                runner = restore(runner);
+            }
+        }
+        let triggered = !matches!(runner.state().waiting_for, WaitingFor::Priority { .. })
+            || !runner.state().stack.is_empty();
+        (prompts, triggered, runner, coffin)
+    }
+
+    /// CR 603.6a + CR 603.10 + CR 608.2c: the Coffin's token instruction completes before its
+    /// "put a bloodline counter" instruction, and the counters transform the Coffin into Edgar,
+    /// Charmed Groom, who gives the Vampires +1/+1 afterwards. The Vampires entered as 4/4s, so
+    /// Where Ancients Tread ("power 5 or greater") sees neither entry. Control: under Glorious
+    /// Anthem they enter as 5/5s and it sees both.
+    #[test]
+    fn a_phase_triggers_later_instruction_does_not_change_what_its_entries_match() {
+        for persist in [false, true] {
+            let (prompts, triggered, _, _) = coffin_vampires_trigger_count(true, persist);
+            assert_eq!(
+                prompts, 2,
+                "one order prompt per Vampire (restore: {persist})"
+            );
+            assert!(
+                triggered,
+                "positive control: 5/5 entrants trigger Where Ancients Tread (restore: {persist})"
+            );
+            let (prompts, triggered, runner, coffin) =
+                coffin_vampires_trigger_count(false, persist);
+            assert_eq!(
+                prompts, 2,
+                "one order prompt per Vampire (restore: {persist})"
+            );
+            assert!(
+                !triggered,
+                "the Vampires entered as 4/4s (restore: {persist})"
+            );
+            // Reach guards: the Coffin did transform, so the final board does read 5/5.
+            assert_eq!(runner.state().objects[&coffin].name, "Edgar, Charmed Groom");
+            let powers: Vec<_> = runner
+                .state()
+                .objects
+                .values()
+                .filter(|object| object.is_token && object.name == "Vampire")
+                .map(|object| object.power)
+                .collect();
+            assert_eq!(powers, vec![Some(5), Some(5)], "restore: {persist}");
+        }
+    }
+
     /// The captured game at the pause between two co-entrants of the four-token
     /// Body Double batch (Doubling Season, Parallel Lives), with `tamper` applied to the
     /// state before it is persisted. Returns the restore's verdict.

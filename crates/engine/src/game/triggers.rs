@@ -19810,7 +19810,7 @@ pub(super) fn build_triggered_ability_from_context(
         // Crescent Moon / Howling Mine-class triggers no longer fall back to
         // the source's controller.
         if matches!(trig_def.mode, TriggerMode::Phase) {
-            resolved.set_scoped_player_recursive(state.active_player);
+            resolved.set_phase_turn_player_recursive(state.active_player);
         }
         resolved.set_trigger_source_recursive(source_context.clone());
         // CR 400.7 + CR 509.1c: Source-referential force-block instructions
@@ -19880,7 +19880,7 @@ pub(super) fn build_triggered_ability(
     }
     resolved.unless_pay.clone_from(&trig_def.unless_pay);
     if matches!(trig_def.mode, TriggerMode::Phase) {
-        resolved.set_scoped_player_recursive(state.active_player);
+        resolved.set_phase_turn_player_recursive(state.active_player);
     }
     resolved
 }
