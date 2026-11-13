@@ -480,7 +480,7 @@ was, and the attempts of an active initial-join fallback, which start only
 after the previous socket closed and have their own deadline. The interval
 reads each frame's tag from the canonical type-first envelope (the frames a
 candidate buffers before its setup settles are bounded at the adapter: 64
-frames and 16 MiB of expanded text, not counting the settling bootstrap, and a
+frames and 16 MiB of expanded text, not counting the attachment's bootstrap, which is recognized by its tag wherever it sits behind a prefix of small frames, and a
 candidate that exceeds it is cut off and handled like a close); a frame whose
 tag can settle it is parsed once there, must parse as that envelope, and is
 the envelope dispatched after adoption, so the bootstrap is parsed once.

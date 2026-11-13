@@ -1,6 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  SETUP_BUFFER_MAX_TEXT_BYTES,
   SETUP_CONFIRMATION_TIMEOUT_MS,
+  SetupBufferBudget,
   SetupConfirmation,
   classifySetupFrame,
 } from "../setupConfirmation";
@@ -213,5 +215,28 @@ describe("SetupConfirmation.observe", () => {
     confirmation.observe("game", frame("Pong", { timestamp: 1 }));
     expect(confirmation.current).toBeNull();
     confirmation.dispose();
+  });
+});
+
+describe("SetupBufferBudget", () => {
+  const large = (type: string) => `{"type":"${type}","data":{"padding":"${"x".repeat(SETUP_BUFFER_MAX_TEXT_BYTES / 2)}"}}`;
+
+  it.each([
+    ["game", "GameStarted"], ["draft", "GameStarted"], ["draft", "DraftStateUpdate"], ["draft", "DraftJoined"],
+  ] as const)("does not charge the %s surface's first %s, wherever it sits behind a prefix", (surface, type) => {
+    const budget = new SetupBufferBudget(surface);
+    expect(budget.admit('{"type":"SessionAttached","data":{}}')).toBe(true);
+    expect(budget.admit('{"type":"PlayerSlotsUpdate","data":{"slots":[]}}')).toBe(true);
+    expect(budget.admit(large(type))).toBe(true);
+    // Later backlog is still admitted against an untouched byte budget.
+    expect(budget.admit('{"type":"Pong","data":{}}')).toBe(true);
+  });
+
+  it("charges a repeated bootstrap tag and any other large frame as backlog", () => {
+    const repeated = new SetupBufferBudget("game");
+    expect(repeated.admit(large("GameStarted"))).toBe(true);
+    expect(repeated.admit(large("GameStarted"))).toBe(false);
+    expect(new SetupBufferBudget("game").admit(large("StateUpdate"))).toBe(false);
+    expect(new SetupBufferBudget("game").admit(large("DraftStateUpdate"))).toBe(false);
   });
 });

@@ -2614,7 +2614,7 @@ export class WebSocketAdapter implements EngineAdapter {
       };
       // Keep admission buffered through public handoff callbacks and the
       // entire drain: their synchronous replies follow already-admitted frames.
-      const bufferBudget = new SetupBufferBudget();
+      const bufferBudget = new SetupBufferBudget("game");
       socket.ws.onmessage = (event) => {
         (setupMessages ??= []).push(event);
         if (noteSetupAnswer !== null) {

@@ -7528,6 +7528,55 @@ describe("WebSocketAdapter — acquired socket ownership", () => {
       },
     );
 
+    it.each(["inside the transport's setup send", "after the send, with the receipt still held"] as const)(
+      "completes an initial join on the server-ordered batch SessionAttached, PlayerSlotsUpdate, large GameStarted delivered %s",
+      async (timing) => {
+        MockWebSocket.last = null;
+        const adapter = new WebSocketAdapter(
+          "wss://localhost:9374/ws", "join", { main_deck: [], sideboard: [] }, "GAME01",
+          undefined, undefined, undefined,
+          { stateCodecSessionProvider: () => Promise.resolve(null) },
+        );
+        const init = observe(adapter.initialize());
+        await vi.waitFor(() => expect(MockWebSocket.last).not.toBeNull());
+        const candidate = latestSocket();
+        const started = JSON.stringify(codecGameStarted(6, 6, { state: largeReconnectState(6) }));
+        expect(started.length).toBeGreaterThan(8_388_608);
+        // The order a full Join is answered in (phase-server main.rs:9784-9803).
+        const deliverBatch = () => {
+          candidate.dispatchSynthetic("message", JSON.stringify({
+            type: "SessionAttached",
+            data: {
+              game_code: "GAME01", player_id: 0, player_token: "codec-token",
+              full_key: REPLY_OWNERSHIP_FULL_KEY,
+            },
+          }));
+          candidate.dispatchSynthetic("message", JSON.stringify({ type: "PlayerSlotsUpdate", data: { slots: [] } }));
+          candidate.dispatchSynthetic("message", started);
+        };
+        // Snapshot-only transport whose receipt never settles.
+        candidate.sendReceipt = vi.fn(() => {
+          if (timing === "inside the transport's setup send") deliverBatch();
+          return new Promise<void>(() => undefined);
+        });
+        try {
+          candidate.dispatchSynthetic("message", CODEC_SESSION_HELLO);
+          await vi.waitFor(() => expect(candidate.sendReceipt).toHaveBeenCalledOnce());
+          // One synchronous batch: the continuation cannot drain between frames.
+          if (timing !== "inside the transport's setup send") deliverBatch();
+          await vi.waitFor(() => expect(init.value()).toEqual({ resolvedWith: undefined }));
+          expect((await adapter.getSnapshot()).state.turn_number).toBe(6);
+          // The next update lands on the adopted socket.
+          candidate.dispatchSynthetic("message", JSON.stringify(codecStateUpdate(7, 7)));
+          await vi.waitFor(async () => expect((await adapter.getSnapshot()).state.turn_number).toBe(7));
+          expect(candidate.close).not.toHaveBeenCalled();
+        } finally {
+          adapter.dispose();
+        }
+        expect(candidate.close).toHaveBeenCalledOnce();
+      },
+    );
+
     it("completes an initial spectate on a large bootstrap delivered inside the transport's setup send", async () => {
       MockWebSocket.last = null;
       const adapter = new WebSocketAdapter(

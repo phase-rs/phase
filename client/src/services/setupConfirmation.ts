@@ -66,20 +66,43 @@ export const SETUP_BUFFER_MAX_FRAMES = 64;
 export const SETUP_BUFFER_MAX_TEXT_BYTES = 16 * 1024 * 1024;
 
 /**
+ * The frames that carry an attachment's state bootstrap, by surface. The server
+ * may send one behind a prefix of small frames (a full Join is answered with
+ * `SessionAttached`, `PlayerSlotsUpdate`, then `GameStarted`:
+ * `crates/phase-server/src/main.rs:9784-9803`), so it is recognized by its tag
+ * wherever it sits in the buffer, not by being the first answer.
+ */
+const BOOTSTRAP_FRAMES: Record<"game" | "draft", ReadonlySet<string>> = {
+  game: new Set(["GameStarted"]),
+  draft: new Set(["GameStarted", "DraftStateUpdate", "DraftJoined"]),
+};
+
+/**
  * Admission budget for the frames a private candidate buffers while its setup
  * is unsettled. The codec transport releases its own receive charge once the
  * adapter's handler has the frame, so the adapter, which retains the expanded
- * text until the drain, owns this bound. It counts only frames that do not
- * settle the setup: the one bootstrap may be as large as the transport allows.
+ * text until the drain, owns this bound. It counts only backlog: the
+ * attachment's bootstrap may be as large as the transport allows, so the first
+ * frame of each bootstrap tag is not charged (a repeat of the same tag is).
  */
 export class SetupBufferBudget {
   private frames = 0;
   private bytes = 0;
+  private readonly bootstrapsSeen = new Set<string>();
 
-  /** Charges one unsettling frame; false once the buffer's budget is exhausted. */
+  constructor(private readonly surface: "game" | "draft") {}
+
+  /** Charges one backlog frame; false once the buffer's budget is exhausted. */
   admit(data: unknown): boolean {
+    if (typeof data === "string") {
+      const type = frameType(data);
+      if (BOOTSTRAP_FRAMES[this.surface].has(type) && !this.bootstrapsSeen.has(type)) {
+        this.bootstrapsSeen.add(type);
+        return true;
+      }
+      this.bytes += data.length * 2;
+    }
     this.frames++;
-    if (typeof data === "string") this.bytes += data.length * 2;
     return this.frames <= SETUP_BUFFER_MAX_FRAMES && this.bytes <= SETUP_BUFFER_MAX_TEXT_BYTES;
   }
 }

@@ -1274,7 +1274,7 @@ export class ServerDraftAdapter implements EngineAdapter {
       // Envelopes the confirmation interval already parsed, by frame: the
       // drain dispatches them without materializing the frame a second time.
       const parsedSetupFrames = new WeakMap<object, SetupFrameMessage>();
-      const bufferBudget = new SetupBufferBudget();
+      const bufferBudget = new SetupBufferBudget("draft");
       // Set while an unconfirmed attachment waits for its setup receipt: a
       // frame the candidate receives then is the server's answer to that setup.
       let noteSetupAnswer: (() => void) | null = null;
