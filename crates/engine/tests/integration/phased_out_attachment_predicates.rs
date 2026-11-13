@@ -135,13 +135,15 @@ fn equipped_by_fallback_ignores_phased_out_equipment() {
 fn enchanted_bears_has_keyword(
     lord: &str,
     lord_oracle: &str,
+    power: i32,
+    toughness: i32,
     keyword: Keyword,
     phased: bool,
 ) -> bool {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     scenario
-        .add_creature(P0, lord, 3, 3)
+        .add_creature(P0, lord, power, toughness)
         .from_oracle_text(lord_oracle);
     let bears = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
     let aura = add_firebreathing(&mut scenario, P0);
@@ -164,6 +166,8 @@ fn has_any_attachment_of_ignores_phased_out_aura() {
         enchanted_bears_has_keyword(
             "Halvar, God of Battle",
             HALVAR,
+            4,
+            4,
             Keyword::DoubleStrike,
             phased,
         )
@@ -178,6 +182,8 @@ fn modified_ignores_phased_out_aura() {
         enchanted_bears_has_keyword(
             "Envoy of the Ancestors",
             ENVOY_OF_THE_ANCESTORS,
+            2,
+            3,
             Keyword::Lifelink,
             phased,
         )
