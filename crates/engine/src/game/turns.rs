@@ -1762,6 +1762,16 @@ pub fn start_next_turn(state: &mut GameState, events: &mut Vec<GameEvent>) {
         state.resolving_stack_entry,
         state.resolution_stack,
     );
+    // CR 502.2 + CR 731.2: the next untap step checks the turn ending here. Record its active
+    // player's spells before a skipped turn (CR 500.11 + CR 614.10) restarts the boundary below
+    // with another `active_player`.
+    day_night::record_previous_turn(state);
+    begin_next_turn(state, events);
+}
+
+/// The turn boundary after [`start_next_turn`]'s check and day/night record. A skipped turn
+/// (CR 614.10) restarts here, so the record keeps naming the turn that actually ended.
+fn begin_next_turn(state: &mut GameState, events: &mut Vec<GameEvent>) {
     // CR 805.4b: defensively drop any stale draw-step queue entries. The
     // queue is normally drained to empty before a turn ends, but a turn
     // ended early (e.g. `Effect::EndTheTurn` — Time Stop, Obeka) could in
@@ -1826,7 +1836,7 @@ pub fn start_next_turn(state: &mut GameState, events: &mut Vec<GameEvent>) {
     if idx < state.turns_to_skip.len() && state.turns_to_skip[idx] > 0 {
         state.turns_to_skip[idx] -= 1;
         // Recursively start the next turn (skipping this one entirely).
-        return start_next_turn(state, events);
+        return begin_next_turn(state, events);
     }
 
     // CR 614.1b + CR 614.10: Route turn-start through the replacement pipeline so
@@ -1837,7 +1847,7 @@ pub fn start_next_turn(state: &mut GameState, events: &mut Vec<GameEvent>) {
     match replacement::replace_event(state, proposed, events) {
         ReplacementResult::Prevented => {
             // CR 614.10: Turn skipped entirely — restart for the next player.
-            return start_next_turn(state, events);
+            return begin_next_turn(state, events);
         }
         ReplacementResult::Execute(_) => {
             // Normal path — turn proceeds.
@@ -2308,10 +2318,21 @@ pub fn execute_untap_with_choices(
 
     // CR 502.1 + CR 702.26c + CR 702.145c + CR 702.145f: a permanent that just phased in
     // with a face that disagrees with day or night transforms immediately, not as a
-    // state-based action, so CR 502.3's untap decision below reads the face it turned to.
-    // CR 502.4 + CR 503.1a: its transform triggers wait for the upkeep, through this
-    // action's ordinary post-action trigger scan.
+    // state-based action, against the designation phasing found.
+    let reconcile_start = events.len();
     super::day_night::keep_faces_in_agreement(state, events);
+    // CR 603.10 + CR 701.27e: those transforms' triggers are checked against the objects
+    // immediately after them, before CR 502.2 below can turn a permanent back over (Brutal
+    // Cathar's "transforms into Brutal Cathar" exists only on the face it turned to).
+    // CR 502.4 + CR 503.1a: they wait for the upkeep in the deferred queue; CR 603.2c: the
+    // claimed occurrences aren't collected again by this action's post-action scan.
+    super::triggers::collect_unclaimed_triggers_into_deferred(state, events, reconcile_start, None);
+    super::triggers::claim_events_for_ordinary_collection(state, events, reconcile_start);
+    // CR 502.2 + CR 731.2: second, the day/night check against the previous turn, in every
+    // untap step, an added one included (`begins_turn == false`). CR 502.4 + CR 503.1a: its
+    // transforms' and "day becomes night" triggers (CR 731.1a) wait for the upkeep, through
+    // this action's ordinary post-action trigger scan.
+    super::day_night::check_day_night_transition(state, events);
     // CR 613.1 + CR 613.4c + CR 122.1a: a transform writes the new face's printed values and
     // marks layers dirty, so settle them before CR 502.3 reads power, color or type: a
     // Brutal Cathar with a +1/+1 counter is 3/3 when Meekstone decides.
@@ -3294,10 +3315,6 @@ pub fn execute_cleanup(state: &mut GameState, events: &mut Vec<GameEvent>) -> Op
             super::lifecycle::DelayedTerminalDisposition::CleanupExpired,
         );
     }
-
-    // CR 502.2 / CR 731.2: Check the prior active player's day/night transition
-    // before advancing the active player.
-    day_night::check_day_night_transition(state, events);
 
     let active = state.active_player;
 
@@ -6816,6 +6833,40 @@ card into your hand at the beginning of your next end step.";
         assert!(state.extra_turns.is_empty());
         // extra_phases is unchanged (still empty).
         assert!(state.extra_phases.is_empty());
+    }
+
+    /// CR 502.2 + CR 500.11: the day/night record names the turn that ended, even when the
+    /// next player's turn is skipped and the boundary restarts with them as `active_player`.
+    #[test]
+    fn start_next_turn_records_the_completed_active_players_spells_before_a_skipped_turn() {
+        let mut state = setup();
+        state.active_player = PlayerId(0);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+        state.turns_to_skip[1] = 1;
+        state.spells_cast_this_turn_by_player.insert(
+            PlayerId(0),
+            std::iter::once(SpellCastRecord::default()).collect(),
+        );
+        state.spells_cast_this_turn_by_player.insert(
+            PlayerId(1),
+            (0..2).map(|_| SpellCastRecord::default()).collect(),
+        );
+
+        start_next_turn(&mut state, &mut Vec::new());
+
+        assert_eq!(
+            state.active_player,
+            PlayerId(0),
+            "reach guard: P1's turn was skipped"
+        );
+        assert_eq!(
+            state.turns_to_skip[1], 0,
+            "reach guard: the skip was consumed"
+        );
+        assert!(state.spells_cast_this_turn_by_player.is_empty());
+        assert_eq!(state.spells_cast_by_previous_active_player, Some(1));
     }
 
     #[test]

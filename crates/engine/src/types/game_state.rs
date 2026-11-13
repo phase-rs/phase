@@ -24338,6 +24338,12 @@ declare_game_state! {
     /// Used by werewolf "if no/two or more spells were cast last turn" conditions.
     #[serde(default)]
     pub spells_cast_last_turn: Option<u8>,
+    /// CR 502.2 + CR 731.2: how many spells the previous turn's active player cast during that
+    /// turn. Written as each turn ends (`day_night::record_previous_turn`, from
+    /// `turns::start_next_turn`) and read by the untap step's day/night check
+    /// (`day_night::check_day_night_transition`). `None` until a turn has ended.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spells_cast_by_previous_active_player: Option<u32>,
 
     /// Objects whose casting/activation was cancelled this priority window.
     /// Prevents the AI from looping cast→cancel→recast on the same spell or ability.
@@ -34019,6 +34025,7 @@ impl GameState {
             day_night: None,
             spells_cast_this_turn: 0,
             spells_cast_last_turn: None,
+            spells_cast_by_previous_active_player: None,
             pending_trigger: None,
             pending_trigger_firing: None,
             pending_trigger_event_batch: Vec::new(),
@@ -37965,6 +37972,7 @@ fn _gamestate_partition_is_total(s: &GameState) {
         day_night: _,
         spells_cast_this_turn: _,
         spells_cast_last_turn: _,
+        spells_cast_by_previous_active_player: _,
         cancelled_casts: _,
         pending_activations: _,
         pending_trigger: _,
@@ -38395,6 +38403,8 @@ impl PartialEq for GameState {
             && self.day_night == other.day_night
             && self.spells_cast_this_turn == other.spells_cast_this_turn
             && self.spells_cast_last_turn == other.spells_cast_last_turn
+            && self.spells_cast_by_previous_active_player
+                == other.spells_cast_by_previous_active_player
             && self.pending_trigger == other.pending_trigger
             && self.pending_trigger_firing == other.pending_trigger_firing
             && self.pending_trigger_entry == other.pending_trigger_entry

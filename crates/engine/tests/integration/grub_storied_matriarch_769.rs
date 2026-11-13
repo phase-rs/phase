@@ -215,6 +215,8 @@ const ENGINEERED_PLAGUE_ORACLE: &str =
 const ARCANE_ARTISAN_ORACLE: &str = "{2}{U}, {T}: Target player draws a card, then exiles a card from their hand. If a creature card is exiled this way, that player creates a token that's a copy of that card.\nWhen this creature leaves the battlefield, exile all tokens created with it at the beginning of the next end step.";
 const TOVOLAR_ORACLE: &str = "Whenever a Wolf or Werewolf you control deals combat damage to a player, draw a card.\nAt the beginning of your upkeep, if you control three or more Wolves and/or Werewolves, it becomes night. Then transform any number of Human Werewolves you control.\nDaybound";
 const MIDNIGHT_SCOURGE_ORACLE: &str = "Whenever a Wolf or Werewolf you control deals combat damage to a player, draw a card.\n{X}{R}{G}: Target Wolf or Werewolf you control gets +X/+0 and gains trample until end of turn.\nNightbound";
+const UNTAP_UPKEEP_DRAW: &str = "Untap, Upkeep, Draw";
+const UNTAP_UPKEEP_DRAW_ORACLE: &str = "Choose one \u{2014}\n\u{2022} After this phase, there is an additional untap step.\n\u{2022} After this phase, there is an additional upkeep step.\n\u{2022} After this phase, there is an additional draw step.\nEntwine {3} (Choose all of them if you pay the entwine cost.)";
 const INTO_THE_NIGHT_ORACLE: &str =
     "It becomes night. Discard any number of cards, then draw that many cards plus one.";
 const CELESTUS_ORACLE: &str = "If it's neither day nor night, it becomes day as The Celestus enters.\n{T}: Add one mana of any color.\n{3}, {T}: If it's night, it becomes day. Otherwise, it becomes night. Activate only as a sorcery.\nWhenever day becomes night or night becomes day, you gain 1 life. You may draw a card. If you do, discard a card.";
@@ -1547,12 +1549,17 @@ fn turn_by_designation(runner: &mut GameRunner, id: ObjectId, into: &str) {
     assert_eq!(runner.state().objects[&id].name, into);
 }
 
-/// Adds `n` mana of one type to P0's pool.
-fn fund(runner: &mut GameRunner, mana: ManaType, n: usize) {
-    let pool = &mut runner.state_mut().players[0].mana_pool;
+/// Adds `n` mana of one type to `player`'s pool.
+fn fund_player(runner: &mut GameRunner, player: PlayerId, mana: ManaType, n: usize) {
+    let pool = &mut runner.state_mut().players[player.0 as usize].mana_pool;
     for _ in 0..n {
         pool.add(ManaUnit::new(mana, ObjectId(0), false, vec![]));
     }
+}
+
+/// Adds `n` mana of one type to P0's pool.
+fn fund(runner: &mut GameRunner, mana: ManaType, n: usize) {
+    fund_player(runner, P0, mana, n);
 }
 
 /// The displayed face's name, live P/T and live haste.
@@ -4556,6 +4563,30 @@ fn pass_into_next_upkeep(
     panic!("never reached P1's upkeep; at {:?}", runner.state().phase);
 }
 
+/// Resolves the stack through public actions, declining The Celestus's optional draw if its
+/// day/night trigger resolves (filed follow-up: it does not fire today).
+fn resolve_stack(runner: &mut GameRunner) -> Vec<GameEvent> {
+    let mut events = Vec::new();
+    for _ in 0..12 {
+        let action = match runner.state().waiting_for {
+            WaitingFor::OptionalEffectChoice { .. } => {
+                GameAction::DecideOptionalEffect { accept: false }
+            }
+            WaitingFor::Priority { .. } if !runner.state().stack.is_empty() => {
+                GameAction::PassPriority
+            }
+            _ => return events,
+        };
+        events.extend(
+            runner
+                .act(action)
+                .expect("resolving the stack must succeed")
+                .events,
+        );
+    }
+    panic!("the stack did not settle within twelve actions");
+}
+
 /// CR 613.7 + CR 730.2a: a later copy effect wins over the merge, but its
 /// characteristics do not survive its own duration in the merge snapshot.
 #[test]
@@ -4786,6 +4817,276 @@ fn a_phased_out_nightbound_permanent_does_not_transform_until_it_phases_in() {
     let mut expected = vec![cathar_a, cathar_b];
     expected.sort();
     assert_eq!(sources, expected);
+}
+
+/// CR 502.1 + CR 502.2 + CR 731.2a: phasing comes first, then the day/night check. Reality
+/// Ripple ("Target artifact, creature, or land phases out. …") phases out Moonrage Brute at
+/// night; The Celestus ("{3}, {T}: If it's night, it becomes day. …") makes it day; P0, the
+/// active player, casts no spells. In P1's untap step the Brute phases in by day and transforms
+/// into Brutal Cathar (CR 702.145f), whose "Whenever this creature enters or transforms into
+/// Brutal Cathar, exile target creature an opponent controls until this creature leaves the
+/// battlefield." triggers (CR 603.10 + CR 701.27e); then it becomes night and the Cathar
+/// transforms back (CR 702.145b). CR 502.4 + CR 503.1a: the exile waits for the upkeep.
+#[test]
+fn a_permanent_that_phases_in_by_day_transforms_before_it_becomes_night() {
+    let (mut runner, (celestus, brute, bears, ripple)) =
+        board(Phase::PreCombatMain, |scenario, db| {
+            for (name, oracle) in [
+                (CELESTUS, CELESTUS_ORACLE),
+                (BRUTAL_CATHAR, BRUTAL_CATHAR_ORACLE),
+                (MOONRAGE_BRUTE, MOONRAGE_BRUTE_ORACLE),
+                (REALITY_RIPPLE, REALITY_RIPPLE_ORACLE),
+            ] {
+                assert_oracle(db, name, oracle);
+            }
+            (
+                scenario.add_real_card(P0, CELESTUS, Zone::Battlefield, db),
+                scenario.add_real_card(P1, BRUTAL_CATHAR, Zone::Battlefield, db),
+                scenario.add_real_card(P0, BEARS, Zone::Battlefield, db),
+                scenario.add_real_card(P1, REALITY_RIPPLE, Zone::Hand, db),
+            )
+        });
+    runner.state_mut().day_night = Some(DayNight::Night);
+    turn_by_designation(&mut runner, brute, MOONRAGE_BRUTE);
+
+    // P0 activates The Celestus. P1 responds by phasing out its own Brute (no ward: P1
+    // controls it), so P0 casts no spell this turn.
+    fund(&mut runner, ManaType::Colorless, 3);
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: celestus,
+            ability_index: CELESTUS_DAY_NIGHT_ABILITY,
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("The Celestus's day/night ability must be legal");
+    runner
+        .act(GameAction::PassPriority)
+        .expect("P0 passes with the ability on the stack");
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { player: P1 }
+    ));
+    fund_player(&mut runner, P1, ManaType::Blue, 2);
+    runner.cast(ripple).target_object(brute).commit();
+    resolve_stack(&mut runner);
+
+    let obj = &runner.state().objects[&brute];
+    assert!(obj.is_phased_out() && obj.transformed);
+    assert_eq!(obj.name, MOONRAGE_BRUTE);
+    assert_eq!(runner.state().day_night, Some(DayNight::Day));
+    assert_eq!(runner.state().objects[&ripple].zone, Zone::Graveyard);
+    assert!(
+        runner
+            .state()
+            .spells_cast_this_turn_by_player
+            .get(&P0)
+            .is_none_or(|spells| spells.is_empty()),
+        "the active player cast no spells this turn"
+    );
+
+    let events = pass_into_next_upkeep(&mut runner, |_, _| {});
+    assert_eq!(runner.state().active_player, P1);
+    assert_eq!(runner.state().phase, Phase::Upkeep);
+    let first =
+        |pred: &dyn Fn(&GameEvent) -> bool| events.iter().position(pred).expect("event happened");
+    let untap_at = first(&|e| {
+        matches!(
+            e,
+            GameEvent::PhaseChanged {
+                phase: Phase::Untap,
+                ..
+            }
+        )
+    });
+    let phased_in_at =
+        first(&|e| matches!(e, GameEvent::PermanentPhasedIn { object_id } if *object_id == brute));
+    let transforms: Vec<usize> = events
+        .iter()
+        .enumerate()
+        .filter(|(_, e)| matches!(e, GameEvent::Transformed { object_id } if *object_id == brute))
+        .map(|(index, _)| index)
+        .collect();
+    let changes: Vec<usize> = events
+        .iter()
+        .enumerate()
+        .filter(|(_, e)| matches!(e, GameEvent::DayNightChanged { .. }))
+        .map(|(index, _)| index)
+        .collect();
+    let upkeep_at = first(&|e| {
+        matches!(
+            e,
+            GameEvent::PhaseChanged {
+                phase: Phase::Upkeep,
+                ..
+            }
+        )
+    });
+    assert_eq!(
+        transforms.len(),
+        2,
+        "into Brutal Cathar by day, back at night"
+    );
+    assert_eq!(
+        changes.len(),
+        1,
+        "the designation changes once, in the untap step"
+    );
+    assert!(matches!(
+        &events[changes[0]],
+        GameEvent::DayNightChanged { new_state } if new_state == "Night"
+    ));
+    assert!(
+        untap_at < phased_in_at
+            && phased_in_at < transforms[0]
+            && transforms[0] < changes[0]
+            && changes[0] < transforms[1]
+            && transforms[1] < upkeep_at,
+        "CR 502.1, then CR 502.2: {events:?}"
+    );
+    assert_eq!(runner.state().day_night, Some(DayNight::Night));
+    let obj = &runner.state().objects[&brute];
+    assert!(obj.is_phased_in() && obj.transformed);
+    assert_eq!(obj.name, MOONRAGE_BRUTE);
+
+    // CR 603.10 + CR 701.27e: Brutal Cathar's trigger was checked right after it transformed.
+    let exile_triggers = runner
+        .state()
+        .stack
+        .iter()
+        .filter(|entry| {
+            matches!(
+                entry.kind,
+                StackEntryKind::TriggeredAbility { source_id, .. } if source_id == brute
+            )
+        })
+        .count();
+    assert_eq!(exile_triggers, 1);
+    resolve_stack(&mut runner);
+    assert_eq!(runner.state().objects[&bears].zone, Zone::Exile);
+    assert!(runner.state().stack.is_empty());
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { player: P1 }
+    ));
+    assert_eq!(runner.state().objects[&brute].name, MOONRAGE_BRUTE);
+}
+
+/// CR 502.2 + CR 731.2: the check belongs to the untap step. With day and P0 casting no spells,
+/// it becomes night in P1's untap step, not in P0's cleanup. In an untap step added by Untap,
+/// Upkeep, Draw ("After this phase, there is an additional untap step."), the check runs again
+/// against the previous turn: after P1's The Celestus made it day, it becomes night again,
+/// although P1 has cast a spell this turn.
+#[test]
+fn an_added_untap_step_checks_the_previous_turn_again() {
+    let (mut runner, (celestus, untap_step)) = board(Phase::PreCombatMain, |scenario, db| {
+        assert_oracle(db, CELESTUS, CELESTUS_ORACLE);
+        let celestus = scenario.add_real_card(P1, CELESTUS, Zone::Battlefield, db);
+        let untap_step = scenario
+            .add_spell_to_hand_from_oracle(P1, UNTAP_UPKEEP_DRAW, false, UNTAP_UPKEEP_DRAW_ORACLE)
+            .from_oracle_text_with_keywords(&["Entwine"], UNTAP_UPKEEP_DRAW_ORACLE)
+            .with_mana_cost(ManaCost::Cost {
+                shards: vec![ManaCostShard::Blue],
+                generic: 1,
+            })
+            .id();
+        (celestus, untap_step)
+    });
+    runner.state_mut().day_night = Some(DayNight::Day);
+
+    let events = pass_into_next_upkeep(&mut runner, |_, _| {});
+    let untap_at = events
+        .iter()
+        .position(|e| {
+            matches!(
+                e,
+                GameEvent::PhaseChanged {
+                    phase: Phase::Untap,
+                    ..
+                }
+            )
+        })
+        .expect("P1's untap step began");
+    let changes: Vec<usize> = events
+        .iter()
+        .enumerate()
+        .filter(|(_, e)| matches!(e, GameEvent::DayNightChanged { .. }))
+        .map(|(index, _)| index)
+        .collect();
+    assert_eq!(changes.len(), 1);
+    assert!(
+        untap_at < changes[0],
+        "CR 502.2: not in P0's cleanup: {events:?}"
+    );
+    assert_eq!(runner.state().day_night, Some(DayNight::Night));
+
+    for _ in 0..8 {
+        if runner.state().phase == Phase::PreCombatMain {
+            break;
+        }
+        resolve_stack(&mut runner);
+        runner
+            .act(GameAction::PassPriority)
+            .expect("pass to P1's main phase");
+    }
+    assert_eq!(runner.state().phase, Phase::PreCombatMain);
+    assert_eq!(runner.state().active_player, P1);
+    fund_player(&mut runner, P1, ManaType::Colorless, 3);
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: celestus,
+            ability_index: CELESTUS_DAY_NIGHT_ABILITY,
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("P1 activates The Celestus");
+    resolve_stack(&mut runner);
+    assert_eq!(runner.state().day_night, Some(DayNight::Day), "reach guard");
+    fund_player(&mut runner, P1, ManaType::Blue, 2);
+    runner.cast(untap_step).modes(&[0]).commit();
+    resolve_stack(&mut runner);
+    assert!(runner.state().stack.is_empty());
+
+    let mut events = Vec::new();
+    for _ in 0..8 {
+        if runner.state().phase == Phase::BeginCombat {
+            break;
+        }
+        events.extend(runner.act(GameAction::PassPriority).expect("pass").events);
+    }
+    assert_eq!(runner.state().phase, Phase::BeginCombat);
+    assert_eq!(runner.state().active_player, P1);
+    let at =
+        |pred: &dyn Fn(&GameEvent) -> bool| events.iter().position(pred).expect("event happened");
+    let added_untap_at = at(&|e| {
+        matches!(
+            e,
+            GameEvent::PhaseChanged {
+                phase: Phase::Untap,
+                ..
+            }
+        )
+    });
+    let night_at =
+        at(&|e| matches!(e, GameEvent::DayNightChanged { new_state } if new_state == "Night"));
+    let untapped_at =
+        at(&|e| matches!(e, GameEvent::PermanentUntapped { object_id } if *object_id == celestus));
+    let combat_at = at(&|e| {
+        matches!(
+            e,
+            GameEvent::PhaseChanged {
+                phase: Phase::BeginCombat,
+                ..
+            }
+        )
+    });
+    assert!(
+        added_untap_at < night_at && night_at < combat_at,
+        "{events:?}"
+    );
+    assert!(
+        added_untap_at < untapped_at && untapped_at < combat_at,
+        "reach guard: the added step's CR 502.3 untap ran"
+    );
+    assert_eq!(runner.state().day_night, Some(DayNight::Night));
 }
 
 /// CR 702.145b: Moonmist transforms a non-daybound Human DFC but cannot transform Brutal Cathar.

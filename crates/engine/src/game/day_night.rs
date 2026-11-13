@@ -62,8 +62,9 @@ fn transform_disagreeing_permanents(
 /// that collection, not inside the resolution; no printed "create a token that's a copy of … card"
 /// producer observes the token between the two. Its Transformed events are matched before the
 /// next SBA check (CR 603.10; `engine_priority`).
-/// The untap step also calls it right after phasing (`turns::execute_untap_with_choices`),
-/// so a permanent that phases in agrees before CR 502.3's untap decision.
+/// The untap step also calls it right after phasing (`turns::execute_untap_with_choices`), so a
+/// permanent that phases in agrees with the designation CR 502.1 found, before CR 502.2's check
+/// (`check_day_night_transition`) and CR 502.3's untap decision.
 pub(crate) fn keep_faces_in_agreement(state: &mut GameState, events: &mut Vec<GameEvent>) {
     let Some(designation) = state.day_night else {
         return;
@@ -75,33 +76,36 @@ pub(crate) fn keep_faces_in_agreement(state: &mut GameState, events: &mut Vec<Ga
     transform_disagreeing_permanents(state, designation, events);
 }
 
-/// Check and apply day/night transition at end of turn.
-///
-/// CR 502.2 (see also CR 731, "Day and Night"):
-/// - If it's currently Day and the active player cast no spells this turn, it becomes Night.
-/// - If it's currently Night and the active player cast 2+ spells this turn, it becomes Day.
-/// - On transition, all Daybound/Nightbound permanents transform accordingly.
-pub fn check_day_night_transition(state: &mut GameState, events: &mut Vec<GameEvent>) {
-    let current = match state.day_night {
-        Some(dn) => dn,
-        None => return, // Day/night not yet initialized
-    };
-
-    // CR 502.2: the transition keys on the spells the (previous turn's) ACTIVE
-    // player cast that turn — not the table-wide total. `spells_cast_this_turn`
-    // counts every player's casts, so an opponent's instant-speed spell on the
-    // active player's turn would wrongly drive or suppress the transition (e.g.
-    // keep it Day when the active player cast nothing). Read the active player's
-    // own per-turn cast count. This runs at cleanup, where `active_player` is
-    // still the player whose turn is ending and the per-player tally is intact.
-    let active_spells = state
+/// CR 502.2 + CR 731.2: records, as a turn ends, how many spells its active player cast during
+/// it, for the next untap step's day/night check (`check_day_night_transition`). CR 502.2 keys on
+/// the previous turn's ACTIVE player, not the table-wide `spells_cast_this_turn`: an opponent's
+/// instant cast on that turn neither drives nor suppresses the change. `turns::start_next_turn`
+/// calls it before a skipped turn (CR 500.11) can move `active_player`, while the per-player
+/// tally is intact.
+pub(crate) fn record_previous_turn(state: &mut GameState) {
+    let spells = state
         .spells_cast_this_turn_by_player
         .get(&state.active_player)
         .map_or(0, |records| records.len());
+    state.spells_cast_by_previous_active_player = Some(u32::try_from(spells).unwrap_or(u32::MAX));
+}
+
+/// CR 502.2 + CR 731.2: the untap step's second turn-based action. If it's day and the previous
+/// turn's active player cast no spells during that turn, it becomes night (CR 731.2a); if it's
+/// night and they cast two or more, it becomes day (CR 731.2b).
+pub fn check_day_night_transition(state: &mut GameState, events: &mut Vec<GameEvent>) {
+    // CR 731.2c: if it's neither day nor night, this check doesn't happen.
+    let Some(current) = state.day_night else {
+        return;
+    };
+    // The game's first untap step has no previous turn to check.
+    let Some(previous_spells) = state.spells_cast_by_previous_active_player else {
+        return;
+    };
 
     let new_state = match current {
-        DayNight::Day if active_spells == 0 => DayNight::Night,
-        DayNight::Night if active_spells >= 2 => DayNight::Day,
+        DayNight::Day if previous_spells == 0 => DayNight::Night,
+        DayNight::Night if previous_spells >= 2 => DayNight::Day,
         _ => return, // No transition
     };
 
@@ -114,6 +118,11 @@ pub fn check_day_night_transition(state: &mut GameState, events: &mut Vec<GameEv
         },
     });
 
+    // CR 613.1: a copy effect's daybound/nightbound is a layer-applied keyword, and the untap
+    // step's phase-in reconciliation runs just before this check.
+    if state.layers_dirty.is_dirty() {
+        super::layers::flush_layers(state);
+    }
     // CR 702.145b + CR 702.145e: as it becomes day or night, each disagreeing permanent
     // transforms. A card entering at night enters transformed (zones::move_to_zone,
     // CR 702.145b); any other disagreement, a token's included, is corrected by
@@ -226,8 +235,7 @@ mod tests {
         id
     }
 
-    /// Record `n` spells cast this turn by the active player in the per-player
-    /// tally that CR 502.2 keys the day/night transition on.
+    /// Records that the active player cast `n` spells this turn, then records the turn as ended (CR 502.2).
     fn set_active_spells(state: &mut GameState, n: usize) {
         let player = state.active_player;
         state.spells_cast_this_turn_by_player.insert(
@@ -236,6 +244,7 @@ mod tests {
                 .map(|_| crate::types::game_state::SpellCastRecord::default())
                 .collect(),
         );
+        record_previous_turn(state);
     }
 
     #[test]
@@ -322,6 +331,8 @@ mod tests {
         );
         // The global tally reflects the table total but must be irrelevant.
         state.spells_cast_this_turn = 2;
+        record_previous_turn(&mut state);
+        assert_eq!(state.spells_cast_by_previous_active_player, Some(0));
 
         let mut events = Vec::new();
         check_day_night_transition(&mut state, &mut events);
@@ -337,11 +348,27 @@ mod tests {
     fn test_no_transition_when_none() {
         let mut state = GameState::new_two_player(42);
         assert_eq!(state.day_night, None);
+        set_active_spells(&mut state, 0);
+        assert_eq!(state.spells_cast_by_previous_active_player, Some(0));
 
         let mut events = Vec::new();
         check_day_night_transition(&mut state, &mut events);
 
         assert_eq!(state.day_night, None);
+        assert!(events.is_empty());
+    }
+
+    /// The game's first untap step has no previous turn, so day stays day (CR 502.2).
+    #[test]
+    fn no_transition_before_any_turn_has_ended() {
+        let mut state = GameState::new_two_player(42);
+        state.day_night = Some(DayNight::Day);
+        assert_eq!(state.spells_cast_by_previous_active_player, None);
+
+        let mut events = Vec::new();
+        check_day_night_transition(&mut state, &mut events);
+
+        assert_eq!(state.day_night, Some(DayNight::Day));
         assert!(events.is_empty());
     }
 
