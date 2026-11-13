@@ -47202,7 +47202,11 @@ fn teferi_minus_twelve_resolution_choice_is_explicitly_unsupported() {
         minus_twelve.effect
     );
     let mut node = Some(minus_twelve);
+    let mut unimplemented = 0;
     while let Some(ability) = node {
+        if matches!(&*ability.effect, Effect::Unimplemented { .. }) {
+            unimplemented += 1;
+        }
         assert!(
             !matches!(
                 &*ability.effect,
@@ -47213,6 +47217,11 @@ fn teferi_minus_twelve_resolution_choice_is_explicitly_unsupported() {
         );
         node = ability.sub_ability.as_deref();
     }
+    assert!(
+        unimplemented >= 2,
+        "both the choice and the following shuffle must stay explicit gaps: {:?}",
+        minus_twelve
+    );
 }
 
 /// CR 701.24c + CR 400.6: "each card not put onto the battlefield this way" is

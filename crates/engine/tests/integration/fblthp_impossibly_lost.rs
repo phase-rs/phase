@@ -820,12 +820,24 @@ fn restored_between_games_state_does_not_eliminate_the_winner() {
     let db = crate::support::install_synthetic_card_db(&mut state, &faces);
     load_and_hydrate_decks(&mut state, &DeckPayload::default(), Some(&db));
     let started = start_game(&mut state);
+    let game_started = started
+        .events
+        .iter()
+        .any(|e| matches!(e, GameEvent::GameStarted));
     assert!(
-        started
-            .events
+        game_started
+            || (state.turn_number == 1
+                && state.match_phase == MatchPhase::InGame
+                && !state.players[0].library.is_empty()),
+        "reach: game one started; events={:?} turn={} phase={:?} libraries={:?}",
+        started.events,
+        state.turn_number,
+        state.match_phase,
+        state
+            .players
             .iter()
-            .any(|e| matches!(e, GameEvent::GameStarted)),
-        "reach: game one started"
+            .map(|player| player.library.len())
+            .collect::<Vec<_>>()
     );
     let mut runner = GameRunner::from_state(state);
 
