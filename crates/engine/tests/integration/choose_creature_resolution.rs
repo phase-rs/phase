@@ -2800,3 +2800,104 @@ fn delayed_trigger_survives_a_second_pause_in_instructions_resumed_by_a_concessi
         assert_resolution_settled(&runner, "Final Showdown after the concession");
     }
 }
+
+/// CR 603.2 + CR 603.3: the ordinary-answer sibling of the concession rows. P0
+/// answers Final Showdown's choice (modes 2 and 3) with Zulaport Cutthroat;
+/// "Destroy all creatures" destroys P0's other creature and then pauses on the
+/// replacement-order prompt for P1's Disciplined Duelist (shield counter against
+/// Hyena Umbra). The Cutthroat's trigger for the death before that second pause
+/// must not be lost.
+#[test]
+fn death_trigger_survives_a_second_pause_after_the_choice_is_answered() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let cutthroat = scenario
+        .add_creature_from_oracle(P0, "Zulaport Cutthroat", 1, 1, ZULAPORT_CUTTHROAT)
+        .id();
+    let other = scenario.add_creature(P0, "Other own creature", 2, 2).id();
+    let duelist = scenario
+        .add_creature_from_oracle(P1, "Disciplined Duelist", 2, 1, DISCIPLINED_DUELIST)
+        .id();
+    scenario.with_counter(duelist, CounterType::Shield, 1);
+    let umbra = scenario
+        .add_enchantment_from_oracle(P1, "Hyena Umbra", HYENA_UMBRA)
+        .with_subtypes(vec!["Aura"])
+        .id();
+    for _ in 0..7 {
+        scenario.add_basic_land(P0, ManaColor::White);
+    }
+    let showdown = scenario
+        .add_spell_to_hand_from_oracle(P0, "Final Showdown", true, FINAL_SHOWDOWN)
+        .with_mana_cost(parse_mtgjson_mana_cost("{W}"))
+        .id();
+    let mut runner = scenario.build();
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&umbra)
+        .unwrap()
+        .attached_to = Some(AttachTarget::Object(duelist));
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&duelist)
+        .unwrap()
+        .attachments
+        .push(umbra);
+    runner.state_mut().layers_dirty.mark_full();
+    let life =
+        |runner: &GameRunner, player: PlayerId| runner.state().players[player.0 as usize].life;
+    let (p0_life, p1_life) = (life(&runner, P0), life(&runner, P1));
+
+    let card_id = runner.state().objects[&showdown].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: showdown,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .unwrap();
+    runner
+        .act(GameAction::SelectModes {
+            indices: vec![1, 2],
+        })
+        .unwrap();
+    pass_priority_to_prompt(&mut runner, "Final Showdown's creature choice");
+    runner
+        .act(GameAction::SelectCards {
+            cards: vec![cutthroat],
+        })
+        .unwrap();
+    assert_eq!(
+        runner.state().objects[&other].zone,
+        Zone::Graveyard,
+        "reach guard: P0's other creature died before the second pause"
+    );
+    let WaitingFor::ReplacementChoice { player, .. } = &runner.state().waiting_for else {
+        panic!(
+            "reach guard: the replacement-order prompt is the second pause: {:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert_eq!(*player, P1);
+    runner
+        .act(GameAction::ChooseReplacement { index: 0 })
+        .unwrap();
+    for _ in 0..12 {
+        if life(&runner, P0) != p0_life && runner.state().stack.is_empty() {
+            break;
+        }
+        if runner.act(GameAction::PassPriority).is_err() {
+            break;
+        }
+    }
+    assert_eq!(runner.state().objects[&cutthroat].zone, Zone::Battlefield);
+    assert_eq!(
+        life(&runner, P0),
+        p0_life + 1,
+        "Zulaport Cutthroat triggered once"
+    );
+    assert_eq!(life(&runner, P1), p1_life - 1);
+    assert_resolution_settled(&runner, "Final Showdown");
+}

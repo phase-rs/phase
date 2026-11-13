@@ -435,11 +435,36 @@ pub(crate) fn settle_resolution_object_choice_after_departure(
     // The departure's own delayed scan ran before this settlement, and when the
     // resumed instructions pause again (a replacement-order prompt during
     // "Destroy all creatures") the later answer runs on a new event buffer.
+    retain_delayed_triggers_of_resumed_span(state, events, base);
+    Ok(DepartureSettlement::Settled)
+}
+
+/// CR 603.2 + CR 603.7: retain, for a later priority boundary, the ordinary
+/// observers and the delayed triggers of `events[start..]`, the span the
+/// instructions of a resumed resolution-time object choice produced before they
+/// paused again.
+fn retain_triggers_of_resumed_span(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+    start: usize,
+) {
+    defer_observer_triggers_for_paused_choice(state, events, start);
+    retain_delayed_triggers_of_resumed_span(state, events, start);
+}
+
+/// CR 603.7: the delayed half of [`retain_triggers_of_resumed_span`], through
+/// the occurrence-aware delayed collector, so an occurrence another collector
+/// claims is not collected twice (CR 603.2c).
+fn retain_delayed_triggers_of_resumed_span(
+    state: &mut GameState,
+    events: &[GameEvent],
+    start: usize,
+) {
     let mut consumed = Vec::new();
     let delayed_input = super::engine_priority::unclaimed_delayed_trigger_input(
         state,
         events,
-        base,
+        start,
         &mut consumed,
         None,
     );
@@ -448,7 +473,6 @@ pub(crate) fn settle_resolution_object_choice_after_departure(
         events,
         &delayed_input,
     );
-    Ok(DepartureSettlement::Settled)
 }
 
 /// CR 800.4a + CR 603.3d + CR 601.2c: a departure answers or settles an open
@@ -6029,13 +6053,18 @@ pub(super) fn handle_resolution_choice(
             // CR 608.2d: a resolution-time object choice is validated against the
             // objects eligible now, not only the candidates stored when the
             // prompt was raised (a player can't choose an illegal option).
-            if let Some(current) = effects::open_resolution_object_choice_candidates(state) {
-                if chosen.iter().any(|id| !current.contains(id)) {
-                    return Err(EngineError::InvalidAction(
-                        "Selected object is no longer eligible for this choice".to_string(),
-                    ));
-                }
-            }
+            let answers_resolution_object_choice =
+                match effects::open_resolution_object_choice_candidates(state) {
+                    Some(current) => {
+                        if chosen.iter().any(|id| !current.contains(id)) {
+                            return Err(EngineError::InvalidAction(
+                                "Selected object is no longer eligible for this choice".to_string(),
+                            ));
+                        }
+                        true
+                    }
+                    None => false,
+                };
             if !effects::choose_from_zone::selection_satisfies_constraint(
                 state,
                 &chosen,
@@ -6345,8 +6374,20 @@ pub(super) fn handle_resolution_choice(
                 state.current_trigger_match_count = ctx.match_count;
                 state.die_result_this_resolution = ctx.die_result;
             }
+            let events_before_resume = events.len();
             super::engine::resume_pending_continuation_if_priority(state, events)
                 .expect("a settled zone choice must resume its continuation");
+            // CR 603.2 + CR 603.3 + CR 603.7: the instructions an answered
+            // resolution-time object choice resumed can pause again (a
+            // replacement-order prompt during "Destroy all creatures"). The
+            // paused action is not scanned by the post-action pipeline and the
+            // later answer has a new event buffer, so the resumed span's
+            // observers and delayed triggers are retained now.
+            if answers_resolution_object_choice
+                && !matches!(state.waiting_for, WaitingFor::Priority { .. })
+            {
+                retain_triggers_of_resumed_span(state, events, events_before_resume);
+            }
             state.current_trigger_event = prev_trigger_event;
             state.current_trigger_match_count = prev_trigger_match_count;
             state.die_result_this_resolution = prev_die_result;

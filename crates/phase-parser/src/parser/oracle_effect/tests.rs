@@ -80700,6 +80700,28 @@ fn bare_choose_feeding_a_printed_target_through_the_chosen_object_keeps_stack_ti
         "{text}: the permanent choice is withheld: {def:#?}"
     );
 
+    // Predicate-bearing player filters name no object either: a qualified
+    // player-only declaration and a qualified player subject. Synthetic.
+    for text in [
+        "Choose a permanent you control. Choose target player with the most life. Prevent all combat damage target creature would deal this turn if it shares a color with that permanent.",
+        "Choose a permanent you control. The player with the most life draws a card. Prevent all combat damage target creature would deal this turn if it shares a color with that permanent.",
+    ] {
+        let def = parse_effect_chain(text, AbilityKind::Spell);
+        let interposed = def.sub_ability.as_deref().expect("the interposed clause");
+        assert!(
+            interposed
+                .effect
+                .target_filter()
+                .is_some_and(|filter| matches!(filter, TargetFilter::PlayerMatching { .. })),
+            "{text}: reach guard for the predicate-bearing player filter: {def:#?}"
+        );
+        assert_eq!(
+            def.target_choice_timing,
+            TargetChoiceTiming::Stack,
+            "{text}: the permanent choice is withheld: {def:#?}"
+        );
+    }
+
     // A compound continuation's choice is an antecedent too ("... and choose a
     // creature you control."), and keeps the `Stack` it lowered to before the
     // producer existed when the next sentence's printed target is rebound to it.

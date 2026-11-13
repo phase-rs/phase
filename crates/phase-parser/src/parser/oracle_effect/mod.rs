@@ -29797,14 +29797,14 @@ fn node_object_antecedent(
     match effect {
         // CR 109.1: a player is not an object, so a player-only declaration
         // ("Choose target opponent.") names no object and the walk passes over it.
-        Effect::TargetOnly { target } if target.denotes_player_target() => None,
+        Effect::TargetOnly { target } if filter_names_only_players(target) => None,
         Effect::TargetOnly { .. } if bare_resolution_choice => Some(site),
         Effect::TargetOnly { .. } => Some(ObjectAntecedent::Other),
         // CR 109.1: likewise a player target of any other effect ("Target player
         // draws a card.").
-        _ if effect
-            .target_filter()
-            .is_some_and(|filter| !filter.is_context_ref() && !filter.denotes_player_target()) =>
+        _ if effect.target_filter().is_some_and(|filter| {
+            !filter.is_context_ref() && !filter_names_only_players(filter)
+        }) =>
         {
             Some(ObjectAntecedent::Other)
         }
