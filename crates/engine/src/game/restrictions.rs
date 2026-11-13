@@ -7,7 +7,9 @@ use crate::types::ability::{
 };
 use crate::types::card_type::{CoreType, Supertype};
 use crate::types::counter::CounterType;
-use crate::types::game_state::{BattlefieldEntryRecord, CastOccurrence, CastingVariant};
+use crate::types::game_state::{
+    BattlefieldEntryRecord, CastOccurrence, CastTimingRoute, CastingVariant,
+};
 use crate::types::keywords::Keyword;
 use crate::types::mana::{ManaColor, ManaCost};
 use crate::types::phase::Phase;
@@ -208,21 +210,50 @@ pub fn spell_confined_to_sorcery_timing(
     // blockers step. Its unblocked-creature cost can exist only in that step, so
     // the keyword's presence decides, not the cost's payability now.
     let instant_speed_route_open =
-        super::casting::spell_has_effective_flash(state, player, object_id, false)
-            || (flash_timing_cost(state, player, obj).is_some()
-                && target_dependent_flash_permission_feasible(state, player, object_id, false))
-            || super::casting_costs::payable_spell_alternative_cost_for_timing(
-                state,
-                player,
-                object_id,
-                CastTimingPermission::AsThoughHadFlash,
-            )
-            .is_some()
+        !open_flash_timing_routes(state, player, object_id, CastingVariant::Normal).is_empty()
             || super::casting_costs::can_pay_offering_additional_cost(state, player, object_id)
             || (obj.zone == Zone::Hand
                 && obj.owner == player
                 && super::keywords::effective_sneak_cost(state, object_id).is_some());
     !instant_speed_route_open
+}
+
+/// CR 601.3 + CR 601.3c + CR 601.3d + CR 702.8a: the "as though it had flash" routes by which
+/// this cast could begin now, in the order a cast proposal records them.
+pub(crate) fn open_flash_timing_routes(
+    state: &crate::types::game_state::GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    casting_variant: CastingVariant,
+) -> Vec<CastTimingRoute> {
+    let Some(obj) = state.objects.get(&object_id) else {
+        return Vec::new();
+    };
+    [
+        (
+            CastTimingRoute::Permission,
+            super::casting::spell_has_effective_flash(state, player, object_id, false),
+        ),
+        (
+            CastTimingRoute::SpellOption,
+            flash_timing_cost(state, player, obj).is_some()
+                && target_dependent_flash_permission_feasible(state, player, object_id, false),
+        ),
+        (
+            CastTimingRoute::AlternativeCost,
+            super::casting_costs::payable_spell_alternative_cost_for_timing(
+                state,
+                player,
+                object_id,
+                casting_variant,
+                CastTimingPermission::AsThoughHadFlash,
+            )
+            .is_some(),
+        ),
+    ]
+    .into_iter()
+    .filter_map(|(route, open)| open.then_some(route))
+    .collect()
 }
 
 /// CR 307.5 + CR 602.5d: Is `player`'s activation of ability `ability_index`

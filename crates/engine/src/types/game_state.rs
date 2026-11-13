@@ -13092,6 +13092,52 @@ fn migrate_legacy_batched_zone_change_trigger_fired(
     Ok(())
 }
 
+/// Strips the pre-route `"AsThoughHadFlash"` timing value from every serialized
+/// `PendingCast` and lists those casts' objects in `legacy_unrouted_pending_casts`,
+/// where restore recovers their route from the board.
+fn migrate_legacy_pending_cast_timing(value: &mut serde_json::Value) {
+    fn visit(value: &mut serde_json::Value, ids: &mut Vec<serde_json::Value>) {
+        match value {
+            serde_json::Value::Object(object) => {
+                // `card_id` and `ability` are required `PendingCast` fields; a
+                // `PendingSpellResolution` carries the same value legitimately.
+                if object.contains_key("card_id")
+                    && object.contains_key("ability")
+                    && object
+                        .get("cast_timing_permission")
+                        .and_then(serde_json::Value::as_str)
+                        == Some("AsThoughHadFlash")
+                {
+                    object.remove("cast_timing_permission");
+                    if let Some(id) = object.get("object_id").filter(|id| !ids.contains(id)) {
+                        ids.push(id.clone());
+                    }
+                }
+                for child in object.values_mut() {
+                    visit(child, ids);
+                }
+            }
+            serde_json::Value::Array(values) => {
+                for child in values {
+                    visit(child, ids);
+                }
+            }
+            serde_json::Value::Null
+            | serde_json::Value::Bool(_)
+            | serde_json::Value::Number(_)
+            | serde_json::Value::String(_) => {}
+        }
+    }
+    let mut ids = Vec::new();
+    visit(value, &mut ids);
+    if let (false, Some(state)) = (ids.is_empty(), value.as_object_mut()) {
+        state.insert(
+            "legacy_unrouted_pending_casts".into(),
+            serde_json::Value::Array(ids),
+        );
+    }
+}
+
 /// CR 400.7 + CR 603.10a: zone-change triggers use the exact source at the
 /// event, rather than a same-id object from a later zone change. Promotes
 /// legacy payload-only trigger lists carried by persisted zone-change snapshots
@@ -16693,6 +16739,8 @@ pub enum PersistedRestoreError {
     /// never inferred, so the save is not resumable.
     #[error("persisted copy announcement for {copy_id:?} has targets before its announcing-opponent election and is not resumable")]
     UnelectedCopyAnnouncer { copy_id: ObjectId },
+    #[error("persisted pending cast has no open timing route and cannot be reversed: {0}")]
+    LegacyPendingCastNotReversible(String),
 }
 
 impl PreparedPersistedGameState {
@@ -16904,6 +16952,7 @@ impl PersistedGameState {
         state
             .validate_payment_transaction()
             .map_err(PersistedRestoreError::InvalidPaymentTransaction)?;
+        crate::game::engine_casting::restore_legacy_cast_timing_routes(&mut state)?;
         crate::game::effects::choose_from_zone::migrate_legacy_per_player_frame_on_restore(
             &mut state,
         )
@@ -26645,6 +26694,11 @@ declare_game_state! {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_cast: Option<Box<PendingCast>>,
 
+    /// Decode-only carrier: pending casts an old save recorded only as cast "as though it had
+    /// flash"; always empty after `PersistedGameState::prepare_for_restore`.
+    #[serde(default, skip_serializing)]
+    pub(crate) legacy_unrouted_pending_casts: Vec<ObjectId>,
+
     /// CR 601.2c + CR 601.2i: a spell announcement's trigger carrier, held here
     /// for the duration of ONE reducer action and returned to whichever
     /// [`PendingCastOwner`] holds the announcement when the action ends.
@@ -28321,6 +28375,7 @@ impl GameStateDecode {
             }
         }
         migrate_legacy_batched_zone_change_trigger_fired(&mut value)?;
+        migrate_legacy_pending_cast_timing(&mut value);
         // Defaults must not turn unknown old attack authority into a recorded
         // ended relation. Preserve these input-presence facts through decoding.
         let attack_map_present = value
@@ -34290,6 +34345,7 @@ impl GameState {
             trigger_construction_finisher_ran_this_action: false,
             pending_discard_for_cost: None,
             pending_cast: None,
+            legacy_unrouted_pending_casts: Vec::new(),
             in_flight_spell_trigger_carrier: None,
             announcement_event_scope: AnnouncementEventScope::Unowned,
             ring_level: HashMap::new(),
@@ -38249,6 +38305,7 @@ fn _gamestate_partition_is_total(s: &GameState) {
         trigger_construction_finisher_ran_this_action: _,
         pending_discard_for_cost: _,
         pending_cast: _,
+        legacy_unrouted_pending_casts: _,
         in_flight_spell_trigger_carrier: _,
         announcement_event_scope: _,
         ring_level: _,

@@ -9,8 +9,8 @@ use crate::types::ability::{
 use crate::types::actions::GameAction;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
-    CollectEvidenceResume, GameState, PendingCast, PendingManaAbility, PlayerDeckPool,
-    SpellCastReversal, SpellCastUndo, WaitingFor,
+    CollectEvidenceResume, GameState, PendingCast, PendingManaAbility, PersistedRestoreError,
+    PlayerDeckPool, SpellCastReversal, SpellCastUndo, WaitingFor,
 };
 use crate::types::identifiers::ObjectId;
 use crate::types::mana::ManaCost;
@@ -19,7 +19,7 @@ use crate::types::zones::{ExileCostSourceZone, Zone};
 
 use super::engine::EngineError;
 use super::game_object::UndecodedObjectRules;
-use super::{casting, casting_costs, mana_abilities};
+use super::{casting, casting_costs, mana_abilities, restrictions};
 use casting_costs::{CostSelection, SpellCostPayment};
 
 // A cast can start after its enclosing action consumed a parent choice. Share
@@ -1567,6 +1567,55 @@ pub(super) fn cancel_pending_cast(
         );
     }
     Ok(WaitingFor::Priority { player })
+}
+
+/// CR 601.3 + CR 601.6: gives a pending cast that an old save recorded only as cast "as though it
+/// had flash" the first timing route open on the restored board, or reverses the cast.
+pub(crate) fn restore_legacy_cast_timing_routes(
+    state: &mut GameState,
+) -> Result<(), PersistedRestoreError> {
+    let ids = std::mem::take(&mut state.legacy_unrouted_pending_casts);
+    let owners = state.live_pending_cast_owners();
+    let Some(pending) = owners
+        .first()
+        .and_then(|owner| state.pending_cast_at(*owner))
+        .filter(|pending| ids.contains(&pending.object_id))
+        .cloned()
+    else {
+        return Ok(());
+    };
+    // CR 601.2a: the caster, who need not control the card being cast.
+    let player = pending.ability.controller;
+    match restrictions::open_flash_timing_routes(
+        state,
+        player,
+        pending.object_id,
+        pending.casting_variant,
+    )
+    .first()
+    {
+        Some(&route) => {
+            for owner in owners {
+                if let Some(live) = state.pending_cast_at_mut(owner) {
+                    live.cast_timing_permission = Some(route);
+                }
+            }
+        }
+        None => {
+            // CR 601.6 + CR 733.1: no route allows this cast any more, so the incomplete
+            // cast is reversed.
+            state.waiting_for = cancel_pending_cast(state, player, &pending, &mut Vec::new())
+                .map_err(|error| {
+                    PersistedRestoreError::LegacyPendingCastNotReversible(error.to_string())
+                })?;
+            if !state.live_pending_cast_owners().is_empty() {
+                return Err(PersistedRestoreError::LegacyPendingCastNotReversible(
+                    "a pending cast owner survived the reversal".to_string(),
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 pub(super) fn handle_target_selection_select_targets(

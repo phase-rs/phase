@@ -4823,6 +4823,282 @@ mod combat_prompt_restore_tests {
 }
 
 #[cfg(test)]
+mod legacy_pending_cast_timing_restore_tests {
+    use super::*;
+    use engine::game::scenario::{CardBuilder, GameRunner, GameScenario, P0, P1};
+    use engine::types::actions::GameAction;
+    use engine::types::game_state::{CastPaymentMode, CastTimingRoute, CastingVariant};
+    use engine::types::mana::{ManaCostShard, ManaType, ManaUnit};
+    use engine::types::phase::Phase;
+    use engine::types::zones::Zone;
+
+    const TIMELY_WARD: &str = "You may cast this spell as though it had flash if it targets a \
+commander.\nEnchant creature\nEnchanted creature has indestructible.";
+
+    const LEYLINE_OF_ANTICIPATION: &str = "If this card is in your opening hand, you may begin \
+the game with it on the battlefield.\nYou may cast spells as though they had flash.";
+
+    const PRIMAL_PRAYERS: &str = "When this enchantment enters, you get {E}{E} (two energy \
+counters).\nYou may cast creature spells with mana value 3 or less by paying {E} rather than \
+paying their mana costs. If you cast a spell this way, you may cast it as though it had flash.";
+
+    const WISPMARE: &str = "Flying\nWhen this creature enters, destroy target enchantment.\n\
+Evoke {W} (You may cast this spell for its evoke cost. If you do, it's sacrificed when it enters.)";
+
+    const AZULA_CUNNING_USURPER: &str = "Firebending 2 (Whenever this creature attacks, add \
+{R}{R}. This mana lasts until end of combat.)\nWhen Azula enters, target opponent exiles a \
+nontoken creature they control, then they exile a nonland card from their graveyard.\nDuring \
+your turn, you may cast cards exiled with Azula and you may cast them as though they had flash. \
+Mana of any type can be spent to cast those spells.";
+
+    fn timely_ward(builder: &mut CardBuilder<'_>) -> ObjectId {
+        builder
+            .as_enchantment()
+            .with_subtypes(vec!["Aura"])
+            .with_mana_cost(ManaCost::Cost {
+                shards: vec![ManaCostShard::White],
+                generic: 2,
+            })
+            .from_oracle_text_with_keywords(&["Enchant"], TIMELY_WARD)
+            .id()
+    }
+
+    fn mana(color: ManaType, count: usize) -> Vec<ManaUnit> {
+        vec![ManaUnit::new(color, ObjectId(9_900), false, vec![]); count]
+    }
+
+    fn cast(runner: &mut GameRunner, spell: ObjectId, payment_mode: CastPaymentMode) {
+        let card_id = runner.state().objects[&spell].card_id;
+        runner
+            .act(GameAction::CastSpell {
+                object_id: spell,
+                card_id,
+                targets: Vec::new(),
+                payment_mode,
+            })
+            .expect("the cast is announced");
+    }
+
+    fn pending_route(state: &GameState) -> Option<CastTimingRoute> {
+        state
+            .waiting_for
+            .pending_cast_ref()
+            .or(state.pending_cast.as_deref())
+            .expect("a cast is pending")
+            .cast_timing_permission
+    }
+
+    /// The persisted save with the pending cast's `route` written as the pre-route timing value.
+    fn legacy_save(state: &GameState, route: &str) -> String {
+        let json = serde_json::to_string(&PersistedGameState::capture(state.clone()))
+            .expect("persisted state serializes");
+        let current = format!("\"cast_timing_permission\":\"{route}\"");
+        assert_eq!(json.matches(&current).count(), 1, "{current}");
+        json.replace(&current, "\"cast_timing_permission\":\"AsThoughHadFlash\"")
+    }
+
+    fn restore(json: &str) -> GameState {
+        load_minimal_test_card_database();
+        decode_and_rehydrate_restored_game_state(json, |_| Ok(()))
+            .expect("the legacy save restores")
+            .state
+    }
+
+    /// Timely Ward announced in P0's upkeep, paused at target selection, with a commander and a
+    /// noncommander Grizzly Bears to target, and Leyline of Anticipation when `with_leyline`.
+    fn ward_at_target_selection(with_leyline: bool) -> GameRunner {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::Upkeep);
+        if with_leyline {
+            scenario.add_enchantment_from_oracle(
+                P0,
+                "Leyline of Anticipation",
+                LEYLINE_OF_ANTICIPATION,
+            );
+        }
+        let ward = timely_ward(&mut scenario.add_spell_to_hand(P0, "Timely Ward", false));
+        scenario.add_creature(P1, "Grizzly Bears", 2, 2).commander();
+        scenario.add_creature(P0, "Grizzly Bears", 2, 2);
+        scenario.with_mana_pool(P0, mana(ManaType::White, 4));
+        let mut runner = scenario.build();
+        cast(&mut runner, ward, CastPaymentMode::Auto);
+        assert!(
+            matches!(
+                runner.state().waiting_for,
+                WaitingFor::TargetSelection { .. }
+            ),
+            "{:?}",
+            runner.state().waiting_for
+        );
+        runner
+    }
+
+    fn assert_restored_at_target_selection(state: &GameState, route: CastTimingRoute) {
+        assert!(
+            matches!(state.waiting_for, WaitingFor::TargetSelection { .. }),
+            "{:?}",
+            state.waiting_for
+        );
+        assert_eq!(pending_route(state), Some(route));
+    }
+
+    // CR 601.3d: only Timely Ward's own option is open, so that route is recovered.
+    #[test]
+    fn legacy_pending_cast_recovers_the_spells_own_flash_option() {
+        let runner = ward_at_target_selection(false);
+        assert_eq!(
+            pending_route(runner.state()),
+            Some(CastTimingRoute::SpellOption)
+        );
+        let restored = restore(&legacy_save(runner.state(), "SpellOption"));
+        assert_restored_at_target_selection(&restored, CastTimingRoute::SpellOption);
+    }
+
+    // CR 601.3: with Leyline's permission and the spell's own option both open, the permission a
+    // cast proposal records first is recovered.
+    #[test]
+    fn legacy_pending_cast_recovers_the_first_open_route() {
+        let runner = ward_at_target_selection(true);
+        assert_eq!(
+            pending_route(runner.state()),
+            Some(CastTimingRoute::Permission)
+        );
+        let restored = restore(&legacy_save(runner.state(), "Permission"));
+        assert_restored_at_target_selection(&restored, CastTimingRoute::Permission);
+    }
+
+    // CR 601.2a: Azula's permission belongs to its caster, not to the exiled card's controller.
+    #[test]
+    fn legacy_pending_cast_recovers_the_casters_route() {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PostCombatMain);
+        let azula = scenario
+            .add_creature_to_hand_from_oracle(
+                P0,
+                "Azula, Cunning Usurper",
+                4,
+                4,
+                AZULA_CUNNING_USURPER,
+            )
+            .with_mana_cost(ManaCost::Cost {
+                shards: vec![
+                    ManaCostShard::Blue,
+                    ManaCostShard::Black,
+                    ManaCostShard::Black,
+                ],
+                generic: 2,
+            })
+            .id();
+        scenario.add_creature(P0, "Grizzly Bears", 2, 2);
+        scenario.add_creature(P1, "Grizzly Bears", 2, 2);
+        let ward = timely_ward(&mut scenario.add_spell_to_graveyard(P1, "Timely Ward", false));
+        for player in [P0, P1] {
+            scenario.with_library_top(player, &["Library A", "Library B"]);
+        }
+        let mut pool = mana(ManaType::Black, 4);
+        pool.extend(mana(ManaType::Blue, 1));
+        scenario.with_mana_pool(P0, pool);
+        let mut runner = scenario.build();
+
+        cast(&mut runner, azula, CastPaymentMode::Auto);
+        runner.advance_until_stack_empty();
+        assert_eq!(runner.state().objects[&ward].zone, Zone::Exile);
+        for _ in 0..2 {
+            runner.advance_to_phase(Phase::End);
+            runner.advance_to_phase(Phase::Upkeep);
+        }
+        assert_eq!(
+            (runner.state().active_player, runner.state().phase),
+            (P0, Phase::Upkeep)
+        );
+        for unit in mana(ManaType::White, 3) {
+            runner.state_mut().players[P0.0 as usize]
+                .mana_pool
+                .add(unit);
+        }
+        cast(&mut runner, ward, CastPaymentMode::Auto);
+        assert_eq!(
+            pending_route(runner.state()),
+            Some(CastTimingRoute::Permission)
+        );
+        assert_eq!(runner.state().objects[&ward].controller, P1);
+        assert_eq!(
+            runner
+                .state()
+                .waiting_for
+                .pending_cast_ref()
+                .expect("the Ward's cast is pending")
+                .ability
+                .controller,
+            P0
+        );
+
+        let restored = restore(&legacy_save(runner.state(), "Permission"));
+        assert_restored_at_target_selection(&restored, CastTimingRoute::Permission);
+    }
+
+    // CR 601.6 + CR 733.1: once Leyline is gone, only Primal Prayers' timing remains, which an
+    // evoked cast cannot use, so the incomplete cast is reversed.
+    #[test]
+    fn legacy_pending_cast_without_an_open_route_is_reversed() {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::Upkeep);
+        let leyline = scenario
+            .add_enchantment_from_oracle(P0, "Leyline of Anticipation", LEYLINE_OF_ANTICIPATION)
+            .id();
+        scenario.add_enchantment_from_oracle(P0, "Primal Prayers", PRIMAL_PRAYERS);
+        let wispmare = scenario
+            .add_creature_to_hand_from_oracle(P0, "Wispmare", 1, 3, WISPMARE)
+            .with_mana_cost(ManaCost::Cost {
+                shards: vec![ManaCostShard::White],
+                generic: 2,
+            })
+            .id();
+        scenario.with_mana_pool(P0, mana(ManaType::White, 1));
+        let mut runner = scenario.build();
+        runner.state_mut().players[P0.0 as usize].energy = 2;
+
+        cast(&mut runner, wispmare, CastPaymentMode::Manual);
+        assert!(
+            matches!(runner.state().waiting_for, WaitingFor::ManaPayment { .. }),
+            "{:?}",
+            runner.state().waiting_for
+        );
+        assert_eq!(
+            runner
+                .state()
+                .pending_cast
+                .as_deref()
+                .expect("the evoked cast is pending")
+                .casting_variant,
+            CastingVariant::Evoke
+        );
+        assert_eq!(
+            pending_route(runner.state()),
+            Some(CastTimingRoute::Permission)
+        );
+        engine::game::zones::move_to_zone(
+            runner.state_mut(),
+            leyline,
+            Zone::Graveyard,
+            &mut Vec::new(),
+        );
+
+        let restored = restore(&legacy_save(runner.state(), "Permission"));
+        assert!(
+            matches!(restored.waiting_for, WaitingFor::Priority { player } if player == P0),
+            "{:?}",
+            restored.waiting_for
+        );
+        assert_eq!(restored.objects[&wispmare].zone, Zone::Hand);
+        assert!(restored.stack.is_empty());
+        assert!(restored.pending_cast.is_none());
+        assert_eq!(restored.players[P0.0 as usize].mana_pool.total(), 1);
+        assert_eq!(restored.players[P0.0 as usize].energy, 2);
+    }
+}
+
+#[cfg(test)]
 mod legacy_debug_permission_restore_tests {
     use super::*;
 

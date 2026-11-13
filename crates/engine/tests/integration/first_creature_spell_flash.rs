@@ -8,8 +8,10 @@ use engine::database::card_db::CardDatabase;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::scenario_db::GameScenarioDbExt;
 use engine::types::ability::TargetRef;
-use engine::types::actions::GameAction;
-use engine::types::game_state::{CastPaymentMode, ManaChoice, PayCostKind, WaitingFor};
+use engine::types::actions::{AlternativeCastDecision, GameAction};
+use engine::types::game_state::{
+    AlternativeCastKeyword, CastPaymentMode, ManaChoice, PayCostKind, WaitingFor,
+};
 use engine::types::identifiers::ObjectId;
 use engine::types::keywords::Keyword;
 use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
@@ -702,6 +704,122 @@ fn primal_prayers_alone_requires_its_energy_cost_once() {
     assert!(on_stack(&runner, bears));
     assert_eq!(energy(&runner), 1);
     assert_eq!(pool(&runner, P0), before);
+}
+
+const WISPMARE: &str = "Flying\nWhen this creature enters, destroy target enchantment.\nEvoke \
+{W} (You may cast this spell for its evoke cost. If you do, it's sacrificed when it enters.)";
+
+const MARDU_SHADOWSPEAR: &str = "Whenever this creature attacks, each opponent loses 1 life.\n\
+Dash {1}{B} (You may cast this spell for its dash cost. If you do, it gains haste, and it's \
+returned from the battlefield to its owner's hand at the beginning of the next end step.)";
+
+fn wispmare(scenario: &mut GameScenario) -> ObjectId {
+    scenario
+        .add_creature_to_hand_from_oracle(P0, "Wispmare", 1, 3, WISPMARE)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::White],
+            generic: 2,
+        })
+        .id()
+}
+
+fn mardu_shadowspear(scenario: &mut GameScenario) -> ObjectId {
+    scenario
+        .add_creature_to_hand_from_oracle(P0, "Mardu Shadowspear", 1, 1, MARDU_SHADOWSPEAR)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Black],
+            generic: 0,
+        })
+        .id()
+}
+
+/// P0's upkeep with Primal Prayers, two energy, `spell` in hand, four {B} added to the floating
+/// mana, and Leyline of Anticipation when `with_leyline`.
+fn prayers_upkeep(
+    with_leyline: bool,
+    spell: impl FnOnce(&mut GameScenario) -> ObjectId,
+) -> (GameRunner, ObjectId) {
+    let (mut runner, spell) = upkeep(|scenario, db| {
+        if with_leyline {
+            scenario.add_enchantment_from_oracle(
+                P0,
+                "Leyline of Anticipation",
+                LEYLINE_OF_ANTICIPATION,
+            );
+        }
+        scenario.add_real_card(P0, "Primal Prayers", Zone::Battlefield, db);
+        spell(scenario)
+    });
+    let player = &mut runner.state_mut().players[P0.0 as usize];
+    player.energy = 2;
+    for _ in 0..4 {
+        player.mana_pool.add(ManaUnit::new(
+            ManaType::Black,
+            ObjectId(9_903),
+            false,
+            vec![],
+        ));
+    }
+    (runner, spell)
+}
+
+/// Casts `spell` in the upkeep and asserts it went on the stack through Primal Prayers' {E}.
+fn assert_cast_only_through_prayers(mut runner: GameRunner, spell: ObjectId) {
+    let before = pool(&runner, P0);
+    assert!(cast(&mut runner, spell), "Primal Prayers lets P0 cast it");
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+        "{:?}",
+        runner.state().waiting_for
+    );
+    assert!(on_stack(&runner, spell));
+    assert_eq!(energy(&runner), 1);
+    assert_eq!(pool(&runner, P0), before);
+}
+
+// CR 118.9a + CR 601.6: Primal Prayers grants flash timing only with its own alternative cost, so
+// in the upkeep Wispmare's evoke cost is not offered.
+#[test]
+fn primal_prayers_alone_does_not_offer_evoke_in_the_upkeep() {
+    let (runner, spell) = prayers_upkeep(false, wispmare);
+    assert_cast_only_through_prayers(runner, spell);
+}
+
+#[test]
+fn primal_prayers_alone_does_not_offer_dash_in_the_upkeep() {
+    let (runner, spell) = prayers_upkeep(false, mardu_shadowspear);
+    assert_cast_only_through_prayers(runner, spell);
+}
+
+// CR 702.74a: Leyline's permission does not depend on a cost, so Wispmare may be evoked for {W}.
+#[test]
+fn leyline_lets_wispmare_be_evoked_beside_primal_prayers() {
+    let (mut runner, spell) = prayers_upkeep(true, wispmare);
+    let before = pool(&runner, P0);
+    assert!(cast(&mut runner, spell), "Leyline lets P0 cast it");
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::AlternativeCastChoice {
+                keyword: AlternativeCastKeyword::Evoke,
+                ..
+            }
+        ),
+        "{:?}",
+        runner.state().waiting_for
+    );
+    runner
+        .act(GameAction::ChooseAlternativeCast {
+            choice: AlternativeCastDecision::Alternative,
+        })
+        .expect("P0 pays the evoke cost");
+    assert!(on_stack(&runner, spell));
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+    assert_eq!(energy(&runner), 2);
+    assert_eq!(pool(&runner, P0), before - 1);
 }
 
 // CR 702.8a: "have flash" grants the keyword itself, unlike an "as though" permission.

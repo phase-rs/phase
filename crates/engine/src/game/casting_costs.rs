@@ -1259,8 +1259,14 @@ pub(crate) fn payable_spell_alternative_cost_for_timing(
     state: &GameState,
     player: PlayerId,
     object_id: ObjectId,
+    casting_variant: CastingVariant,
     timing_permission: CastTimingPermission,
 ) -> Option<PayableSpellAlternativeCost> {
+    // CR 601.3c: the timing comes only with its alternative cost, which only a
+    // Normal-method cast elects.
+    if casting_variant != CastingVariant::Normal {
+        return None;
+    }
     let obj = state.objects.get(&object_id)?;
     if obj.zone != Zone::Hand || obj.controller != player {
         return None;
@@ -9641,6 +9647,7 @@ fn check_additional_cost_or_pay_with_kept_cost(
                     state,
                     player,
                     object_id,
+                    casting_variant,
                     CastTimingPermission::AsThoughHadFlash,
                 )
             })
