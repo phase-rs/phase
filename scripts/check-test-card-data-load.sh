@@ -99,7 +99,7 @@ while IFS= read -r file; do
         # `case` globs (not grep args) so a content line starting with '-' is safe.
         case "$content" in *allow-full-card-db*) continue ;; esac
         if [ "$ln" -gt 1 ]; then
-            prev=$(sed -n "$((ln - 1))p" "$file")
+            prev=$(added_lines_text_at "$file" "$((ln - 1))")
             case "$prev" in *allow-full-card-db*) continue ;; esac
         fi
         report="${report}
