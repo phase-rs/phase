@@ -5906,6 +5906,7 @@ history_members! {
         CreatureTypesDealtCombatDamageThisTurn => creature_types_dealt_combat_damage_this_turn: false,
         CreaturesAttackedThisTurn => creatures_attacked_this_turn: false,
         CreaturesBlockedThisTurn => creatures_blocked_this_turn: false,
+        CreaturesFoughtThisTurn => creatures_fought_this_turn: false,
         CrewActivatedThisTurn => crew_activated_this_turn: false,
         CrewResolvedThisTurn => crew_resolved_this_turn: false,
         CrewHistoryThisTurn => crew_history_this_turn: false,

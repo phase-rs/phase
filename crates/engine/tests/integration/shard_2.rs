@@ -149,6 +149,7 @@ mod bounce_destination_redirect;
 mod bound_by_moonsilver_sacrifice_source_relative_6017;
 mod bow_to_my_command_as_choice;
 mod bow_to_my_command_end_step;
+mod boxing_ring_fought_this_turn;
 mod braids_arisen_nightmare_decline;
 mod brain_pry_named_discard;
 mod brainspoil;
