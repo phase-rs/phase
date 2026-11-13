@@ -520,6 +520,7 @@ pub(crate) fn history_for_unit<'a>(
         .map(|entry| {
             let root = history_root(entry, parsed, tracks);
             HistoryAudit {
+                document_root: Some((entry.item, entry.root)),
                 record: &entry.record,
                 instruction: root.and_then(|root| {
                     entry

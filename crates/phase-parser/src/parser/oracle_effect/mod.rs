@@ -27442,40 +27442,68 @@ fn anaphor_rewrite_would_drop_this_way_binding(text_lower: &str, effect: &Effect
 /// The affected populations owned by this instruction. Nested payloads and
 /// continuation instructions have their own operands and are deliberately excluded.
 /// Both the lowering guard and the final provenance audit must use this boundary.
-pub(crate) fn own_instruction_populations(effect: &Effect) -> Vec<&TargetFilter> {
-    // `mass_population_target` adds `ChangeZoneAll`, which the parser-side
-    // list does not carry. CR 701.27a + CR 115.10a: a scope-`All` Transform
-    // ("transform all Humans") keeps a population neither shared list names,
-    // and its `target_filter()` is `None`. It is read here only, so the
-    // chain-prior population the shared lists feed is unchanged.
-    let population = mass_population_filter(effect)
-        .or_else(|| mass_population_target(effect))
-        .or(match effect {
-            Effect::Transform {
-                scope: EffectScope::All,
-                target,
-            } => Some(target),
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PopulationOperand {
+    Effect,
+    Static(usize),
+}
+
+pub(crate) fn own_instruction_population(
+    effect: &Effect,
+    operand: PopulationOperand,
+) -> Option<&TargetFilter> {
+    match operand {
+        PopulationOperand::Effect => mass_population_filter(effect)
+            .or_else(|| mass_population_target(effect))
+            .or_else(|| match effect {
+                Effect::Transform {
+                    scope: EffectScope::All,
+                    target,
+                } => Some(target),
+                _ => effect.target_filter(),
+            }),
+        PopulationOperand::Static(index) => match effect {
+            Effect::GenericEffect {
+                static_abilities,
+                target: None,
+                ..
+            } => static_abilities.get(index)?.affected.as_ref(),
             _ => None,
-        });
-    // CR 611.2c: an untargeted continuous grant over a broadcast population
-    // ("creatures that were blocked by that creature this combat gain
-    // trample", Ride Down) keeps that population in its statics' `affected`,
-    // which neither shared list nor `target_filter()` names. Read here only.
-    let grant_populations = match effect {
-        Effect::GenericEffect {
-            static_abilities,
-            target: None,
-            ..
-        } => static_abilities.as_slice(),
-        _ => &[],
+        },
     }
-    .iter()
-    .filter_map(|static_def| static_def.affected.as_ref())
-    .filter(|filter| is_broadcast_population_filter(filter));
-    population
+}
+
+pub(crate) fn own_instruction_population_operands(effect: &Effect) -> Vec<PopulationOperand> {
+    let mut operands = Vec::new();
+    if own_instruction_population(effect, PopulationOperand::Effect).is_some() {
+        operands.push(PopulationOperand::Effect);
+    }
+    if let Effect::GenericEffect {
+        static_abilities,
+        target: None,
+        ..
+    } = effect
+    {
+        operands.extend(
+            static_abilities
+                .iter()
+                .enumerate()
+                .filter_map(|(index, definition)| {
+                    definition
+                        .affected
+                        .as_ref()
+                        .filter(|filter| is_broadcast_population_filter(filter))
+                        .map(|_| PopulationOperand::Static(index))
+                }),
+        );
+    }
+    operands
+}
+
+pub(crate) fn own_instruction_populations(effect: &Effect) -> Vec<&TargetFilter> {
+    own_instruction_population_operands(effect)
         .into_iter()
-        .chain(grant_populations)
-        .chain(effect.target_filter())
+        .filter_map(|operand| own_instruction_population(effect, operand))
         .collect()
 }
 
@@ -27499,12 +27527,31 @@ fn instruction_drops_block_partner(
     lower: &str,
     ctx: &ParseContext,
 ) -> bool {
+    let own_history: Vec<_> = clause
+        .history
+        .iter()
+        .filter(|record| record.instruction.0.is_empty() && record.lineage.is_empty())
+        .collect();
+    if !own_history.is_empty() {
+        return own_history.iter().any(|record| {
+            record.expected.is_none_or(|expected| {
+                record.occurrence.operands.is_empty()
+                    || record.occurrence.operands.iter().any(|operand| {
+                        own_instruction_population(&clause.effect, *operand).is_none_or(|filter| {
+                            !crate::parser::oracle_target::restricting_block_pairings(filter)
+                                .contains(&expected)
+                        })
+                    })
+            })
+        });
+    }
     let populations = own_instruction_populations(&clause.effect);
     let own_text = clause.head_text.as_deref().unwrap_or(lower);
-    !populations.is_empty()
-        && population_drops_block_history_clause(own_text, &[populations], |word| {
+    populations.into_iter().any(|population| {
+        population_drops_block_history_clause(own_text, &[vec![population]], |word| {
             history_clause_subject(word, ctx)
         })
+    })
 }
 
 #[cfg(test)]
@@ -27743,6 +27790,46 @@ mod instruction_drops_block_partner_tests {
             assert_eq!(relation_on(&tail.effect), on_tail, "{text}");
             assert_eq!(relation_on(&def.effect), !on_tail, "{text}");
         }
+    }
+
+    #[test]
+    fn broadcast_guard_checks_each_statics_own_affected() {
+        let text = "Creatures ~ blocked this turn gain trample until end of turn.";
+        let mut definition = parse_effect_chain(text, AbilityKind::Spell);
+        let Effect::GenericEffect {
+            static_abilities, ..
+        } = definition.effect.as_mut()
+        else {
+            panic!("broadcast grant: {definition:?}");
+        };
+        assert_eq!(static_abilities.len(), 1);
+        let original = static_abilities[0].clone();
+        let mut sibling = original.clone();
+        sibling.affected = Some(TargetFilter::Typed(TypedFilter::creature()));
+        static_abilities.push(sibling);
+        let mut clause = parsed_clause(*definition.effect);
+        crate::parser::oracle_ir::history_provenance::capture_own_history(
+            &mut clause,
+            text,
+            &source_ctx(),
+        );
+        assert!(!instruction_drops_block_partner(
+            &clause,
+            text,
+            &source_ctx()
+        ));
+        let Effect::GenericEffect {
+            static_abilities, ..
+        } = &mut clause.effect
+        else {
+            unreachable!()
+        };
+        static_abilities[0].affected = Some(TargetFilter::Typed(TypedFilter::creature()));
+        static_abilities[1] = original;
+        assert!(
+            instruction_drops_block_partner(&clause, text, &source_ctx()),
+            "static 1 cannot vouch for static 0's widened affected"
+        );
     }
 
     /// CR 608.2c + CR 611.2c: a broadcast grant keeps its population in its statics'

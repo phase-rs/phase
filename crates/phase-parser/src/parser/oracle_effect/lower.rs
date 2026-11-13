@@ -7656,7 +7656,13 @@ pub(crate) fn strip_trailing_duration(text: &str) -> (&str, Option<Duration>) {
                     .parse(seg)
                     .is_ok()
             }) && quantity_clause_owns_this_turn_suffix(&lower[..this_turn_end]);
-        if !before.is_empty() && !quantity_owns_suffix {
+        // CR 608.2c + CR 608.2i: a "this turn" that closes a block-history clause
+        // ("tap all creatures ~ blocked this turn, or draw a card") is that
+        // clause's window, not the effect's duration, as at the end of the text.
+        let history_owns_suffix = lower
+            .get(..this_turn_end)
+            .is_some_and(combat_history_relative_clause_owns_suffix);
+        if !before.is_empty() && !quantity_owns_suffix && !history_owns_suffix {
             return (duration_text[..before.len()].trim_end(), Some(duration));
         }
     }

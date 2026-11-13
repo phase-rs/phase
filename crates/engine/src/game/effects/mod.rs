@@ -15741,6 +15741,11 @@ pub(crate) enum TrackedSetPublicationInput<'a> {
     ResolvedEvents {
         ability: &'a ResolvedAbility,
         events: &'a [GameEvent],
+        /// CR 608.2c: the population the instruction selected before acting
+        /// ([`tap_untap::selection_before_resolution`]). A member whose state
+        /// the instruction left unchanged emits no event but is still among
+        /// its referents; empty when the referents are exactly the events.
+        selection: &'a [ObjectId],
     },
 }
 
@@ -15959,9 +15964,25 @@ pub(crate) fn publish_tracked_set_for_resolution(
         ) => publish_prospective_tracked_set(state, objects, participants, cause),
         (
             TrackedSetPublicationMode::Normal,
-            TrackedSetPublicationInput::ResolvedEvents { ability, events },
+            TrackedSetPublicationInput::ResolvedEvents {
+                ability,
+                events,
+                selection,
+            },
         ) if resolution_next_needs_tracked_set(state, producer) => {
-            let affected = affected_objects_with_causes(state, ability, &ability.effect, events);
+            let mut affected =
+                affected_objects_with_causes(state, ability, &ability.effect, events);
+            // CR 608.2c + CR 701.26a: "tap all creatures that blocked this
+            // creature this turn. They don't untap ..." (Joven's Ferrets) names
+            // an already-tapped blocker too. Such a member emits no event, so it
+            // joins from the selection; it was not "tapped this way", so its
+            // cause is read like any other member's.
+            for &id in selection {
+                if !affected.iter().any(|(member, _)| *member == id) {
+                    let cause = this_way_cause_for_resolved(state, &ability.effect, events, id);
+                    affected.push((id, cause));
+                }
+            }
             publish_tracked_set_with_causes(state, affected);
         }
         (
@@ -18959,6 +18980,7 @@ fn publish_player_scope_clause_results(
             TrackedSetPublicationInput::ResolvedEvents {
                 ability: scoped_template,
                 events: scoped_events,
+                selection: &[],
             },
         );
     }
@@ -23773,6 +23795,13 @@ fn resolve_chain_body(
 
     // CR 608.2c: Snapshot event count so we can detect objects moved by this effect.
     let events_before = events.len();
+    // CR 608.2c: the population the instruction selects, read before it acts,
+    // for a following reference to it.
+    let selection_before = if resolution_next_needs_tracked_set(state, ability) {
+        tap_untap::selection_before_resolution(state, ability)
+    } else {
+        Vec::new()
+    };
     // CR 608.2e: a generated seat leg of a paused player-scope token clause
     // begins that seat's instruction. Its entry becomes the seat in progress
     // before the node acts, so a pause inside it re-parks the sidecar (cloned
@@ -24554,6 +24583,7 @@ fn resolve_chain_body(
             TrackedSetPublicationInput::ResolvedEvents {
                 ability,
                 events: &events[events_before..],
+                selection: &selection_before,
             },
         );
     }

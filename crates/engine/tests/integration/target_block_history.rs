@@ -17,12 +17,14 @@
 //!   (CR 608.2c).
 
 use engine::game::combat::AttackTarget;
+use engine::game::keywords::has_keyword;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::types::ability::{
     AbilityDefinition, CombatRelationSubject, Effect, EffectKind, FilterProp, TargetFilter,
     TargetRef,
 };
 use engine::types::actions::GameAction;
+use engine::types::counter::CounterType;
 use engine::types::events::GameEvent;
 use engine::types::game_state::{GameState, WaitingFor};
 use engine::types::identifiers::{ObjectId, ObjectIncarnationRef};
@@ -1203,6 +1205,175 @@ fn ferrets_tap_only_the_creatures_that_blocked_them() {
     );
     past_end_of_combat(&mut runner);
     assert!(!tapped(&runner, a), "A did not block the Ferrets");
+}
+
+/// CR 608.2c + CR 502.3: "They" names every matching blocker, including
+/// one that was tapped before the end-of-combat tap instruction resolved.
+#[test]
+fn ferrets_restrict_already_tapped_and_untapped_blockers_next_untap() {
+    let mut s = GameScenario::new();
+    s.at_phase(Phase::PreCombatMain);
+    let ferrets = s
+        .add_creature_from_oracle(P0, "Joven's Ferrets", 0, 1, FERRETS)
+        .id();
+    let already = s.add_creature(P1, "Already tapped blocker", 0, 6).id();
+    let untapped = s.add_creature(P1, "Untapped blocker", 0, 6).id();
+    let other = s.add_creature(P1, "Nonmatching creature", 0, 6).id();
+    // Named apart from their text, which would otherwise read "Tap" as the card's name.
+    let tap = free_spell(&mut s, P0, "Frost Breath One", "Tap target creature.");
+    let tap_other = free_spell(&mut s, P0, "Frost Breath Two", "Tap target creature.");
+    s.with_library_top(P0, &["Forest", "Forest", "Forest"]);
+    s.with_library_top(P1, &["Forest", "Forest", "Forest"]);
+    let mut runner = s.build();
+    attack_block(
+        &mut runner,
+        &[ferrets],
+        &[(already, ferrets), (untapped, ferrets)],
+    );
+    runner.cast(tap).target_objects(&[already]).resolve();
+    runner.cast(tap_other).target_objects(&[other]).resolve();
+    assert!(tapped(&runner, already));
+    assert!(
+        !tapped(&runner, untapped),
+        "reach: the other matching blocker is untapped"
+    );
+    assert!(tapped(&runner, other));
+    past_end_of_combat(&mut runner);
+    assert!(tapped(&runner, already));
+    assert!(
+        tapped(&runner, untapped),
+        "reach: Ferrets tapped the matching blocker"
+    );
+    pass_until(&mut runner, "blockers' controller's next upkeep", |state| {
+        state.active_player == P1 && state.phase == Phase::Upkeep
+    });
+    assert!(
+        tapped(&runner, already),
+        "an already-tapped member also skips untapping"
+    );
+    assert!(
+        tapped(&runner, untapped),
+        "the newly-tapped member skips untapping"
+    );
+    assert!(
+        !tapped(&runner, other),
+        "the unrelated creature untaps normally"
+    );
+}
+
+/// CR 608.2c: Kill Switch's "They" refers to the artifacts selected when its
+/// ability resolved, not an artifact that entered afterward.
+#[test]
+fn kill_switch_does_not_restrict_an_artifact_that_enters_after_the_tap() {
+    const KILL_SWITCH: &str = "{2}, {T}: Tap all other artifacts. They don't untap during their controllers' untap steps for as long as this artifact remains tapped.";
+    let mut s = GameScenario::new();
+    s.at_phase(Phase::PreCombatMain);
+    let switch = s
+        .add_artifact_from_oracle(P0, "Kill Switch", KILL_SWITCH)
+        .id();
+    let already = s
+        .add_artifact_from_oracle(P1, "Already tapped artifact", "")
+        .id();
+    let untapped = s.add_artifact_from_oracle(P1, "Untapped artifact", "").id();
+    // Shimmer Myr has flash, so P1 can cast it during P0's turn after the tap.
+    let late = s
+        .add_creature_to_hand_from_oracle(
+            P1,
+            "Shimmer Myr",
+            2,
+            2,
+            "You may cast artifact spells as though they had flash.",
+        )
+        .as_artifact_creature()
+        .flash()
+        .with_mana_cost(ManaCost::zero())
+        .id();
+    let tap_before = free_spell(&mut s, P0, "Tap artifact", "Tap target artifact.");
+    // Named apart from its text, which would otherwise read "Tap" as the card's name.
+    let tap = free_spell(&mut s, P0, "Frost Breath", "Tap target creature.");
+    s.with_mana_pool(
+        P0,
+        vec![ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]); 2],
+    );
+    s.with_library_top(P0, &["Forest", "Forest", "Forest"]);
+    s.with_library_top(P1, &["Forest", "Forest", "Forest"]);
+    let mut runner = s.build();
+    runner.cast(tap_before).target_objects(&[already]).resolve();
+    assert!(
+        tapped(&runner, already),
+        "reach: an artifact was already tapped"
+    );
+    runner.activate(switch, 0).resolve();
+    assert!(
+        tapped(&runner, switch),
+        "reach: the activation cost was paid"
+    );
+    assert!(tapped(&runner, already));
+    assert!(tapped(&runner, untapped), "reach: the mass tap resolved");
+    pass_priority_to(&mut runner, P1);
+    runner.cast(late).resolve();
+    assert_eq!(
+        zone(&runner, late),
+        Zone::Battlefield,
+        "reach: the later artifact entered"
+    );
+    runner.cast(tap).target_objects(&[late]).resolve();
+    assert!(tapped(&runner, late), "reach: the later artifact is tapped");
+    pass_until(
+        &mut runner,
+        "artifacts' controller's next upkeep",
+        |state| state.active_player == P1 && state.phase == Phase::Upkeep,
+    );
+    assert!(tapped(&runner, switch), "reach: Kill Switch remains tapped");
+    assert!(
+        tapped(&runner, already),
+        "the already-tapped selected artifact stays tapped"
+    );
+    assert!(
+        tapped(&runner, untapped),
+        "the newly-tapped selected artifact stays tapped"
+    );
+    assert!(!tapped(&runner, late), "the later artifact untaps normally");
+}
+
+/// CR 608.2c + CR 122.1d: "They" names the creatures the mass untap selected
+/// before it acted. Untapping a stunned creature removes its only counter
+/// instead, so it no longer matches "with counters on them" afterward, yet it
+/// was selected and still gains the keyword.
+#[test]
+fn mass_untap_they_keeps_a_member_that_lost_its_only_stun_counter() {
+    let mut s = GameScenario::new();
+    s.at_phase(Phase::PreCombatMain);
+    let stunned = s.add_creature(P0, "Stunned creature", 2, 2).id();
+    let countered = s.add_creature(P0, "Countered creature", 2, 2).id();
+    let plain = s.add_creature(P0, "Plain creature", 2, 2).id();
+    s.with_counter(stunned, CounterType::Stun, 1);
+    s.with_counter(countered, CounterType::Plus1Plus1, 1);
+    let spell = free_spell(
+        &mut s,
+        P0,
+        "Rousing Call",
+        "Untap all creatures you control with counters on them. They gain flying until end of turn.",
+    );
+    let mut runner = s.build();
+    for id in [stunned, countered, plain] {
+        runner.state_mut().objects.get_mut(&id).unwrap().tapped = true;
+    }
+    let outcome = runner.cast(spell).resolve();
+    assert_eq!(
+        outcome.counters(stunned, CounterType::Stun),
+        0,
+        "reach: the untap removed the stun counter instead"
+    );
+    let flying = |id: ObjectId| has_keyword(&runner.state().objects[&id], &Keyword::Flying);
+    assert!(tapped(&runner, stunned), "the stun counter kept it tapped");
+    assert!(!tapped(&runner, countered), "reach: the untap resolved");
+    assert!(flying(countered), "reach: the untapped member gains flying");
+    assert!(
+        flying(stunned),
+        "the selected member that lost its last counter is among \"they\""
+    );
+    assert!(!flying(plain), "an unselected creature gains nothing");
 }
 
 // ── V19, V20: two spells, redirect ─────────────────────────────────────

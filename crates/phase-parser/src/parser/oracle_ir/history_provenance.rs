@@ -100,6 +100,8 @@ pub(crate) struct HistoryOccurrence {
     /// Logical printed identity, shared by every instruction produced by fan-out.
     pub(crate) printed: PrintedHistoryIdentity,
     pub(crate) source: Option<super::doc::OracleUnitSource>,
+    /// Operand positions within the instruction, captured before lowering can widen them.
+    pub(crate) operands: Vec<crate::parser::oracle_effect::PopulationOperand>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -199,6 +201,23 @@ pub(crate) fn capture_own_history(clause: &mut ParsedEffectClause, text: &str, c
                     end,
                 },
                 source: None,
+                operands: crate::parser::oracle_effect::own_instruction_population_operands(
+                    &clause.effect,
+                )
+                .into_iter()
+                .filter(|operand| {
+                    expected.is_some_and(|key| {
+                        crate::parser::oracle_effect::own_instruction_population(
+                            &clause.effect,
+                            *operand,
+                        )
+                        .is_some_and(|filter| {
+                            crate::parser::oracle_target::restricting_block_pairings(filter)
+                                .contains(&key)
+                        })
+                    })
+                })
+                .collect(),
             },
             expected,
             instruction: InstructionPath::default(),
@@ -372,6 +391,7 @@ pub(crate) struct DocumentHistory {
 /// Provenance and the explicitly located typed instruction. Absence is an audit
 /// failure; it never authorizes a search elsewhere in the unit.
 pub(crate) struct HistoryAudit<'a> {
+    pub(crate) document_root: Option<(super::doc::OracleItemId, HistoryRoot)>,
     pub(crate) record: &'a HistoryProvenance,
     pub(crate) instruction: Option<&'a AbilityDefinition>,
 }
@@ -384,6 +404,7 @@ pub(crate) fn audit_history<'a>(
     history
         .iter()
         .map(|record| HistoryAudit {
+            document_root: None,
             record,
             instruction: record
                 .locator
@@ -583,45 +604,49 @@ mod tests {
 
     /// The binary "A or B" choice carries each arm's record at its branch, and the
     /// wrapper owns no printed text. Constructed from Highway Robbery's binary
-    /// imperative and Joven's Ferrets' population. The history arm comes second: put
-    /// first ("Tap all creatures ~ blocked this turn, or draw a card."), a mid-text
-    /// "this turn" is read as the clause's duration before the choice parser runs, and
-    /// the guard fails the instruction closed.
+    /// imperative and Joven's Ferrets' population, in both branch orders.
     #[test]
     fn binary_choice_parser_preserves_branch_history_ownership() {
-        let text = "Draw a card or tap all creatures ~ blocked this turn.";
-        let mut lowered = lower(text, source_context());
-        let Effect::ChooseOneOf { branches, kind, .. } = lowered.value.effect.as_ref() else {
-            panic!("expected binary choice, got {lowered:?}");
-        };
-        assert_eq!(branches.len(), 2, "{lowered:?}");
-        assert_eq!(*kind, crate::types::ability::ChooseOneOfKind::Ordinary);
-        assert!(matches!(*branches[1].effect, Effect::SetTapState { .. }));
-        assert_eq!(lowered.history.len(), 1, "{lowered:?}");
-        let path = InstructionPath(vec![InstructionStep::ChoiceBranch(1)]);
-        assert_eq!(lowered.history[0].locator.as_ref(), Some(&path));
-        assert!(!flagged(text, &lowered), "{lowered:?}");
+        for (text, history_arm) in [
+            ("Draw a card or tap all creatures ~ blocked this turn.", 1),
+            ("Tap all creatures ~ blocked this turn, or draw a card.", 0),
+        ] {
+            let mut lowered = lower(text, source_context());
+            let Effect::ChooseOneOf { branches, kind, .. } = lowered.value.effect.as_ref() else {
+                panic!("expected binary choice, got {lowered:?}");
+            };
+            assert_eq!(branches.len(), 2, "{lowered:?}");
+            assert_eq!(*kind, crate::types::ability::ChooseOneOfKind::Ordinary);
+            assert!(matches!(
+                *branches[history_arm].effect,
+                Effect::SetTapState { .. }
+            ));
+            assert_eq!(lowered.history.len(), 1, "{lowered:?}");
+            let path = InstructionPath(vec![InstructionStep::ChoiceBranch(history_arm)]);
+            assert_eq!(lowered.history[0].locator.as_ref(), Some(&path));
+            assert!(!flagged(text, &lowered), "{lowered:?}");
 
-        let original = crate::parser::oracle_effect::own_instruction_populations(
-            &resolve_mut(&path, &mut lowered.value).effect,
-        )[0]
-        .clone();
-        replace_population(resolve_mut(&path, &mut lowered.value), bare());
-        // Draw has no object population; give the sibling a Tap population while
-        // retaining exactly the provenance produced by the binary parser.
-        let sibling = resolve_mut(
-            &InstructionPath(vec![InstructionStep::ChoiceBranch(0)]),
-            &mut lowered.value,
-        );
-        *sibling.effect = Effect::SetTapState {
-            target: original,
-            scope: crate::types::ability::EffectScope::All,
-            state: crate::types::ability::TapStateChange::Tap,
-        };
-        assert!(
-            flagged(text, &lowered),
-            "the sibling cannot vouch for branch 1"
-        );
+            let original = crate::parser::oracle_effect::own_instruction_populations(
+                &resolve_mut(&path, &mut lowered.value).effect,
+            )[0]
+            .clone();
+            replace_population(resolve_mut(&path, &mut lowered.value), bare());
+            // Draw has no object population; give the sibling a Tap population while
+            // retaining exactly the provenance produced by the binary parser.
+            let sibling = resolve_mut(
+                &InstructionPath(vec![InstructionStep::ChoiceBranch(1 - history_arm)]),
+                &mut lowered.value,
+            );
+            *sibling.effect = Effect::SetTapState {
+                target: original,
+                scope: crate::types::ability::EffectScope::All,
+                state: crate::types::ability::TapStateChange::Tap,
+            };
+            assert!(
+                flagged(text, &lowered),
+                "the sibling cannot vouch for branch 1"
+            );
+        }
     }
 
     /// A choice branch owns its own history clause: the audit resolves the record's
@@ -1286,6 +1311,76 @@ mod tests {
             lower("Tap all creatures ~ blocked this turn.", source_context()).value,
         ));
         assert!(document_flagged(&mut doc));
+    }
+
+    #[test]
+    fn shared_saga_body_keeps_both_document_producers() {
+        let text = "I, II — Tap all creatures ~ blocked this turn.";
+        for damaged_copy in 0..2 {
+            let mut doc = crate::parser::oracle::parse_oracle_ir(
+                text,
+                "History witness",
+                &[],
+                &["Enchantment".to_string()],
+                &["Saga".to_string()],
+            );
+            let copies = doc.items.iter().filter(|item| matches!(
+                &item.node,
+                super::super::doc::OracleNodeIr::Trigger(super::super::trigger::TriggerNodeIr::Assembled { history, .. }) if history.len() == 1
+            )).count();
+            assert_eq!(copies, 2, "reach: both chapter copies carry history");
+            assert!(!document_flagged(&mut doc));
+            let definition = doc
+                .items
+                .iter_mut()
+                .filter_map(|item| match &mut item.node {
+                    super::super::doc::OracleNodeIr::Trigger(
+                        super::super::trigger::TriggerNodeIr::Assembled { definition, .. },
+                    ) => Some(definition),
+                    _ => None,
+                })
+                .nth(damaged_copy)
+                .unwrap();
+            replace_population(definition.execute.as_mut().unwrap(), bare());
+            assert!(
+                document_flagged(&mut doc),
+                "copy {damaged_copy} lost its relation"
+            );
+        }
+    }
+
+    #[test]
+    fn broadcast_static_cannot_borrow_a_siblings_restriction() {
+        let text = "Creatures ~ blocked this turn gain trample until end of turn.";
+        let mut lowered = lower(text, source_context());
+        assert!(!flagged(text, &lowered), "reach: {lowered:?}");
+        let Effect::GenericEffect {
+            static_abilities, ..
+        } = lowered.value.effect.as_mut()
+        else {
+            panic!("broadcast grant: {lowered:?}");
+        };
+        assert_eq!(static_abilities.len(), 1);
+        let original = static_abilities[0].clone();
+        let mut sibling = original.clone();
+        sibling.affected = Some(bare());
+        static_abilities.push(sibling);
+        assert!(
+            !flagged(text, &lowered),
+            "the grant owns its restriction; its sibling has a separate population"
+        );
+        let Effect::GenericEffect {
+            static_abilities, ..
+        } = lowered.value.effect.as_mut()
+        else {
+            unreachable!()
+        };
+        static_abilities[0].affected = Some(bare());
+        static_abilities[1] = original;
+        assert!(
+            flagged(text, &lowered),
+            "the sibling's affected cannot vouch for static 0"
+        );
     }
 
     #[test]

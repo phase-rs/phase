@@ -6480,17 +6480,24 @@ pub(crate) fn detect_combat_history_relation(
     }
     for (index, evidence) in provenance.iter().enumerate() {
         if provenance[..index].iter().any(|previous| {
-            previous.record.producer == evidence.record.producer
+            previous.document_root == evidence.document_root
+                && previous.record.producer == evidence.record.producer
                 && previous.record.occurrence == evidence.record.occurrence
         }) {
             swallowed = true;
         }
         let represented = evidence.record.expected.is_some_and(|expected| {
             evidence.instruction.is_some_and(|instruction| {
-                super::oracle_effect::own_instruction_populations(&instruction.effect)
-                    .into_iter()
-                    .flat_map(restricting_block_pairings)
-                    .any(|actual| actual == expected)
+                !evidence.record.occurrence.operands.is_empty()
+                    && evidence.record.occurrence.operands.iter().all(|operand| {
+                        super::oracle_effect::own_instruction_population(
+                            &instruction.effect,
+                            *operand,
+                        )
+                        .is_some_and(|filter| {
+                            restricting_block_pairings(filter).contains(&expected)
+                        })
+                    })
             })
         });
         if !represented {
@@ -6801,13 +6808,20 @@ mod tests {
                 )
             })
             .collect::<Vec<_>>();
+        // The clause was lowered bare, so each record's operand is its own
+        // definition's population, the one the hand-built filter restricts.
         let records = clause
             .history
             .into_iter()
             .enumerate()
             .take(definitions.len())
             .map(|(index, pending)| HistoryProvenance {
-                occurrence: pending.occurrence,
+                occurrence: crate::parser::oracle_ir::history_provenance::HistoryOccurrence {
+                    operands: crate::parser::oracle_effect::own_instruction_population_operands(
+                        &definitions[index].effect,
+                    ),
+                    ..pending.occurrence
+                },
                 expected: pending.expected,
                 producer: InstructionIdentity {
                     clause: crate::parser::oracle_ir::effect_chain::ClauseId(index as u32),
