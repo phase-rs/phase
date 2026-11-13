@@ -21114,7 +21114,7 @@ pub fn preview_resolution(state: &GameState, abilities: &[ResolvedAbility]) -> O
     let mut events = Vec::new();
     for ability in abilities {
         let progress = resolve_ability_chain_step(&mut preview, ability, &mut events, 0).ok()?;
-        // CR 616.1: a prompt the resolution opened leaves the outcome to a player's choice.
+        // A prompt the resolution opened leaves the outcome to a player's choice.
         if progress.is_pending() || preview.waiting_for != state.waiting_for {
             return None;
         }

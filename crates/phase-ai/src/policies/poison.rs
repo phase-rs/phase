@@ -388,7 +388,8 @@ pub(crate) fn previewed_poison(
 /// CR 101.2 + CR 614.1: the engine's resolution decides what lands, since a can't effect
 /// (Solemnity) or a replacement (Vorinclex) can change every counter, so a lethal estimate is
 /// replaced by the pool's poison on the board `deliver` returns for its seat. `must_resolve`
-/// reads it even below lethal, for a count with no printed estimate.
+/// reads it even below lethal, for a count with no printed estimate. A delivery the engine
+/// could not read never earns a lethal claim, so its estimate is held below the threshold.
 fn confirm_lethal(
     ai_player: PlayerId,
     mut pool: PoisonPool,
@@ -403,7 +404,7 @@ fn confirm_lethal(
         deliver(pool.seat).and_then(|after| live_opponent_poison(&after, ai_player, pool.seat));
     match delivered {
         Some(after) => pool.added = after.count.saturating_sub(pool.measure.count),
-        None => pool.ceiling = pool.ceiling.min(STRONG_MAX),
+        None => pool.added = pool.added.min(headroom(pool.measure).saturating_sub(1)),
     }
     pool
 }

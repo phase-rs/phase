@@ -1703,6 +1703,45 @@ fn poisonous_counters_come_from_the_trigger_controller() {
     }
 }
 
+/// CR 616.1: Archfiend's Vessel's lifelink gain meets the AI's Alhammarret's Archive and Leyline
+/// of Hope, so the combat preview stops for the order choice and never reads whether Glistener
+/// Elf's counter survives the opponent's Vorinclex; an unread delivery is not lethal.
+#[test]
+fn unread_combat_delivery_is_not_lethal() {
+    for gain_replacements in [false, true] {
+        let (mut runner, ids) = board(FormatConfig::standard(), 2, &[(OPPONENT, 9)], |s| {
+            s.at_phase(Phase::PreCombatMain);
+            let db = shared_integration_card_db();
+            let elf = glistener_elf(s);
+            let vessel = s.add_real_card(AI, "Archfiend's Vessel", Zone::Battlefield, db);
+            vorinclex(s, OPPONENT);
+            if gain_replacements {
+                s.add_real_card(AI, "Alhammarret's Archive", Zone::Battlefield, db);
+                s.add_real_card(AI, "Leyline of Hope", Zone::Battlefield, db);
+            }
+            vec![elf, vessel]
+        });
+        runner.state_mut().layers_dirty.mark_full();
+        engine::game::layers::evaluate_layers(runner.state_mut());
+        runner.advance_to_combat();
+        let attack: Vec<_> = ids
+            .iter()
+            .map(|&id| (id, AttackTarget::Player(OPPONENT)))
+            .collect();
+        let at_players: Vec<_> = ids.iter().map(|&id| (id, OPPONENT)).collect();
+        let preview = engine::game::combat_damage::preview_unblocked_combat_damage(
+            runner.state(),
+            &at_players,
+            |_| true,
+        )
+        .map(|after| poison_of(&after, OPPONENT));
+        let (delta, reason) = verdict_on(runner.state(), &attack_candidate(attack));
+        assert_eq!(preview, (!gain_replacements).then_some(9));
+        assert_eq!(reason.kind, "poison_clock_na");
+        assert_eq!(delta, 0.0);
+    }
+}
+
 /// CR 107.1b: Vraska's −9 gives the difference up to nine, so its count is resolved, never
 /// assumed: zero at nine, four at five, and lethal one at eight under a threshold of nine.
 #[test]
