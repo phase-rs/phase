@@ -42,8 +42,9 @@ fn phase_out(runner: &mut GameRunner, ripple: ObjectId, target: ObjectId) {
     runner.resolve_top();
 }
 
-/// Returns the Horse's (phased out, has a control effect, controller).
-fn akroan(phase: bool) -> (bool, bool, PlayerId) {
+/// Returns the Horse's (phased out, has a control effect, controller, `GainControl` resolutions,
+/// `ControllerChanged` count, back at priority with an empty stack).
+fn akroan(phase: bool) -> (bool, bool, PlayerId, usize, usize, bool) {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     let horse = scenario
@@ -65,38 +66,49 @@ fn akroan(phase: bool) -> (bool, bool, PlayerId) {
     if phase {
         phase_out(&mut runner, ripple, horse);
     }
+    let mut events = Vec::new();
     for _ in 0..20 {
-        match runner.state().waiting_for.clone() {
-            WaitingFor::NamedChoice { options, .. } => {
-                runner
-                    .act(GameAction::ChooseOption {
-                        choice: options[0].clone(),
-                    })
-                    .unwrap();
-            }
+        let result = match runner.state().waiting_for.clone() {
+            WaitingFor::NamedChoice { options, .. } => runner.act(GameAction::ChooseOption {
+                choice: options[0].clone(),
+            }),
             _ if runner.state().stack.is_empty() => break,
-            _ => {
-                runner.act(GameAction::PassPriority).unwrap();
-            }
-        }
+            _ => runner.act(GameAction::PassPriority),
+        };
+        events.extend(result.unwrap().events);
     }
-    assert!(runner.state().stack.is_empty());
     let obj = &runner.state().objects[&horse];
     (
         obj.is_phased_out(),
         has_control_effect(&runner, horse),
         obj.controller,
+        events
+            .iter()
+            .filter(|event| {
+                matches!(
+                    event,
+                    GameEvent::EffectResolved { kind: EffectKind::GainControl, source_id, .. }
+                        if *source_id == horse
+                )
+            })
+            .count(),
+        events
+            .iter()
+            .filter(|event| matches!(event, GameEvent::ControllerChanged { .. }))
+            .count(),
+        matches!(runner.state().waiting_for, WaitingFor::Priority { .. })
+            && runner.state().stack.is_empty(),
     )
 }
 
 #[test]
 fn phased_out_akroan_horse_gains_no_control() {
-    assert_eq!(akroan(true), (true, false, P0));
+    assert_eq!(akroan(true), (true, false, P0, 1, 0, true));
 }
 
 #[test]
 fn akroan_horse_reach_gives_control_to_opponent() {
-    assert_eq!(akroan(false), (false, true, P1));
+    assert_eq!(akroan(false), (false, true, P1, 1, 1, true));
 }
 
 /// Returns (Totem phased out, Totem has a control effect, Bears have a control effect, the

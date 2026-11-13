@@ -1,8 +1,11 @@
 //! CR 608.2c + CR 613.1b: Coveted Falcon draws one card for each permanent whose control actually changed.
+//! Two-player boards with no restriction on targeting the opponent: the sole opponent receives the
+//! permanents. The recipient is never announced as a target (#9766).
 
-use engine::game::scenario::{GameScenario, P0, P1};
+use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::types::ability::{
-    Effect, QuantityExpr, QuantityRef, ResolvedAbility, TargetRef, ThisWayCause,
+    ContinuousModification, Effect, EffectKind, QuantityExpr, QuantityRef, ResolvedAbility,
+    TargetFilter, TargetRef, ThisWayCause,
 };
 use engine::types::actions::GameAction;
 use engine::types::events::GameEvent;
@@ -28,11 +31,39 @@ fn draw_count(ability: &ResolvedAbility) -> Option<&QuantityExpr> {
     }
 }
 
-/// Turns a face-down Falcon face up and hands over two of P0's Bears, A and B, optionally phasing
-/// B out first. Returns (cards drawn, A's controller, B's controller, the objects whose
-/// `ControllerChanged` the trigger emitted, named "A", "B" or "other").
-fn falcon(players: u8, phase_b: bool) -> (usize, PlayerId, PlayerId, Vec<&'static str>) {
-    let mut scenario = GameScenario::new_n_player(players, 7);
+/// The controllers of `id`'s control-changing transient effects.
+fn control_effect_controllers(runner: &GameRunner, id: ObjectId) -> Vec<PlayerId> {
+    runner
+        .state()
+        .transient_continuous_effects
+        .iter()
+        .filter(|effect| {
+            effect.affected == TargetFilter::SpecificObject { id }
+                && effect
+                    .modifications
+                    .iter()
+                    .any(|m| matches!(m, ContinuousModification::ChangeController))
+        })
+        .map(|effect| effect.controller)
+        .collect()
+}
+
+type FalconOutcome = (
+    usize,
+    PlayerId,
+    PlayerId,
+    Vec<PlayerId>,
+    Vec<PlayerId>,
+    Vec<(&'static str, PlayerId)>,
+    usize,
+);
+
+/// Two players: turns a face-down Falcon face up and hands over two of P0's Bears, A and B,
+/// optionally phasing B out first. Returns (cards drawn, A's controller, B's controller, A's and
+/// B's control-effect controllers, each `ControllerChanged` as ("A" | "B" | "other", new
+/// controller), the Falcon's `GiveControl` resolutions).
+fn falcon(phase_b: bool) -> FalconOutcome {
+    let mut scenario = GameScenario::new_n_player(2, 7);
     scenario.at_phase(Phase::PreCombatMain);
     scenario.with_library_top(P0, &["Library 1", "Library 2", "Library 3", "Library 4"]);
     let falcon = scenario
@@ -121,35 +152,53 @@ fn falcon(players: u8, phase_b: bool) -> (usize, PlayerId, PlayerId, Vec<&'stati
         runner.state().players[0].hand.len() - hand_before,
         runner.state().objects[&a].controller,
         runner.state().objects[&b].controller,
+        control_effect_controllers(&runner, a),
+        control_effect_controllers(&runner, b),
         events
             .iter()
             .filter_map(|event| match event {
-                GameEvent::ControllerChanged { object_id, .. } => Some(match *object_id {
-                    id if id == a => "A",
-                    id if id == b => "B",
-                    _ => "other",
-                }),
+                GameEvent::ControllerChanged {
+                    object_id,
+                    new_controller,
+                    ..
+                } => Some((
+                    match *object_id {
+                        id if id == a => "A",
+                        id if id == b => "B",
+                        _ => "other",
+                    },
+                    *new_controller,
+                )),
                 _ => None,
             })
             .collect(),
+        events
+            .iter()
+            .filter(|event| {
+                matches!(
+                    event,
+                    GameEvent::EffectResolved { kind: EffectKind::GiveControl, source_id, .. }
+                        if *source_id == falcon
+                )
+            })
+            .count(),
     )
 }
 
 #[test]
 fn falcon_draws_for_each_permanent_handed_over() {
-    assert_eq!(falcon(2, false), (2, P1, P1, vec!["A", "B"]));
+    assert_eq!(
+        falcon(false),
+        (2, P1, P1, vec![P1], vec![P1], vec![("A", P1), ("B", P1)], 1)
+    );
 }
 
+/// CR 608.2b + CR 702.26b: phased-out B leaves the target list at revalidation, so only A is
+/// handed over and drawn for.
 #[test]
-fn falcon_draws_only_for_the_permanent_that_stayed_phased_in() {
-    assert_eq!(falcon(2, true), (1, P1, P0, vec!["A"]));
-}
-
-/// The draw count equals the permanents handed over (CR 608.2c), whatever the engine hands over
-/// to the unoffered "target opponent" at three players; it discriminates while #9766 leaves that
-/// handover empty.
-#[test]
-fn falcon_draws_one_card_per_permanent_whose_control_changed() {
-    let (drawn, _, _, changed) = falcon(3, false);
-    assert_eq!(drawn, changed.len());
+fn falcon_draws_only_for_the_target_still_phased_in() {
+    assert_eq!(
+        falcon(true),
+        (1, P1, P0, vec![P1], vec![], vec![("A", P1)], 1)
+    );
 }
