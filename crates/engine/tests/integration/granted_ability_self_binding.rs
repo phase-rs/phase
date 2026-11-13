@@ -28,6 +28,8 @@ use engine::types::phase::Phase;
 use engine::types::zones::Zone;
 use engine::types::TargetRef;
 
+use super::rules::assert_damage_dealt;
+
 fn equipment_types() -> (Vec<String>, Vec<String>) {
     (vec!["Artifact".to_string()], vec!["Equipment".to_string()])
 }
@@ -1720,9 +1722,9 @@ mod concretizer_seams {
     use engine::types::zones::Zone;
 
     use super::{
-        ARCHERY_TRAINING, DIRE_BLUNDERBUSS, FISHING_POLE, GROTHAMA, GUTTER_GRIME, HANKYU,
-        HELIODS_PUNISHMENT, KROVIKAN_PLAGUE, NETTLEVINE_BLIGHT, SPARE_DAGGER, THE_AETHERSPARK,
-        TRUSTY_BOOMERANG,
+        assert_damage_dealt, ARCHERY_TRAINING, DIRE_BLUNDERBUSS, FISHING_POLE, GROTHAMA,
+        GUTTER_GRIME, HANKYU, HELIODS_PUNISHMENT, KROVIKAN_PLAGUE, NETTLEVINE_BLIGHT, SPARE_DAGGER,
+        THE_AETHERSPARK, TRUSTY_BOOMERANG,
     };
 
     fn counter(kind: &str) -> CounterType {
@@ -1857,6 +1859,14 @@ mod concretizer_seams {
     /// Drives priority, "you may" prompts and trigger ordering until the engine asks
     /// for anything else, answering a trigger target with `target`.
     fn drive(runner: &mut GameRunner, target: Option<TargetRef>) {
+        let _ = drive_and_collect_events(runner, target);
+    }
+
+    fn drive_and_collect_events(
+        runner: &mut GameRunner,
+        target: Option<TargetRef>,
+    ) -> Vec<GameEvent> {
+        let mut events = Vec::new();
         for _ in 0..40 {
             let action = match &runner.state().waiting_for {
                 WaitingFor::Priority { .. } if !runner.state().stack.is_empty() => {
@@ -1873,9 +1883,9 @@ mod concretizer_seams {
                         target: target.clone(),
                     }
                 }
-                _ => return,
+                _ => return events,
             };
-            runner.act(action).unwrap();
+            events.extend(runner.act(action).unwrap().events);
         }
         panic!("drive did not settle: {:?}", runner.state().waiting_for);
     }
@@ -3252,11 +3262,13 @@ mod concretizer_seams {
         let mut runner = scenario.build();
         relayer(runner.state_mut());
         attack_with(&mut runner, attacker);
-        drive(&mut runner, None);
+        let events = drive_and_collect_events(&mut runner, None);
         let st = runner.state();
         assert_ne!(grothama, attacker);
+        assert_damage_dealt(&events, attacker, TargetRef::Object(grothama), 3, false);
+        assert_damage_dealt(&events, grothama, TargetRef::Object(attacker), 10, false);
+        assert_eq!(st.objects[&grothama].zone, Zone::Battlefield);
         assert_eq!(st.objects[&grothama].damage_marked, 3);
-        assert_eq!(st.objects[&attacker].damage_marked, 10);
         assert_eq!(st.objects[&attacker].zone, Zone::Graveyard);
     }
 

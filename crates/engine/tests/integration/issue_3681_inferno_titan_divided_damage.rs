@@ -15,6 +15,9 @@ use engine::types::actions::GameAction;
 use engine::types::game_state::{CastPaymentMode, WaitingFor};
 use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
+use engine::types::zones::Zone;
+
+use super::rules::{advance_until_stack_empty_and_collect_events, assert_damage_dealt};
 
 /// Canonical Oracle text (verified against client/public/card-data.json).
 const INFERNO_ORACLE: &str =
@@ -145,7 +148,7 @@ fn inferno_titan_etb_divides_damage_across_three_targets() {
     }
 
     // Distribute 1 / 1 / 1 across the three targets.
-    runner
+    let mut events = runner
         .act(GameAction::DistributeAmong {
             distribution: vec![
                 (TargetRef::Object(bear), 1),
@@ -153,22 +156,28 @@ fn inferno_titan_etb_divides_damage_across_three_targets() {
                 (TargetRef::Player(P1), 1),
             ],
         })
-        .expect("1/1/1 distribution should be accepted");
+        .expect("1/1/1 distribution should be accepted")
+        .events;
 
     // Let the triggered ability resolve.
-    runner.advance_until_stack_empty();
+    events.extend(advance_until_stack_empty_and_collect_events(&mut runner));
 
     // CR 120.3: each target takes exactly its assigned portion.
+    assert_damage_dealt(&events, titan, TargetRef::Object(bear), 1, false);
+    assert_damage_dealt(&events, titan, TargetRef::Object(elf), 1, false);
+    assert_damage_dealt(&events, titan, TargetRef::Player(P1), 1, false);
     assert_eq!(
         runner.state().objects[&bear].damage_marked,
         1,
         "Bear must take 1 damage"
     );
     assert_eq!(
-        runner.state().objects[&elf].damage_marked,
-        1,
-        "Elf must take 1 damage"
+        runner.state().objects[&bear].zone,
+        Zone::Battlefield,
+        "the 2/2 Bear survives its assigned 1 damage"
     );
+    assert_eq!(runner.state().objects[&elf].zone, Zone::Graveyard);
+    assert_eq!(runner.state().objects[&titan].zone, Zone::Battlefield);
     let p1_life = runner
         .state()
         .players

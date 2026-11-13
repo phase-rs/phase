@@ -6,6 +6,8 @@
 //! range. `no_top_level_test_binaries` enforces that each file here is registered in exactly one
 //! shard root.
 
+#[allow(dead_code)]
+mod rules;
 pub mod support;
 
 mod issue_5274_call_the_spirit_dragons;

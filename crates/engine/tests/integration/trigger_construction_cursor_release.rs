@@ -24,6 +24,9 @@ use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
+use engine::types::zones::Zone;
+
+use super::rules::{advance_until_stack_empty_and_collect_events, assert_damage_dealt};
 
 const P2: PlayerId = PlayerId(2);
 
@@ -359,17 +362,22 @@ fn divided_trigger_releases_cursors_only_after_division() {
     );
     assert!(runner.state().pending_trigger_entry.is_some());
 
-    runner
+    let mut events = runner
         .act(GameAction::DistributeAmong {
             distribution: targets.into_iter().map(|target| (target, 1)).collect(),
         })
-        .expect("a 1/1/1 division is legal");
+        .expect("a 1/1/1 division is legal")
+        .events;
 
     assert_construction_released(runner.state());
 
-    runner.advance_until_stack_empty();
+    events.extend(advance_until_stack_empty_and_collect_events(&mut runner));
+    assert_damage_dealt(&events, titan, TargetRef::Object(bear), 1, false);
+    assert_damage_dealt(&events, titan, TargetRef::Object(elf), 1, false);
+    assert_damage_dealt(&events, titan, TargetRef::Player(P1), 1, false);
     assert_eq!(runner.state().objects[&bear].damage_marked, 1);
-    assert_eq!(runner.state().objects[&elf].damage_marked, 1);
+    assert_eq!(runner.state().objects[&bear].zone, Zone::Battlefield);
+    assert_eq!(runner.state().objects[&elf].zone, Zone::Graveyard);
     assert_eq!(runner.life(P1), 19);
 }
 

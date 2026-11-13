@@ -17,11 +17,15 @@ use engine::game::combat::{AttackTarget, BlockHistoryPair};
 use engine::game::game_object::ObjectIncarnationRefExt;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::types::actions::GameAction;
+use engine::types::events::GameEvent;
 use engine::types::game_state::WaitingFor;
 use engine::types::identifiers::{ObjectId, ObjectIncarnationRef};
 use engine::types::mana::ManaCost;
 use engine::types::phase::Phase;
 use engine::types::zones::Zone;
+
+use super::rules::{assert_damage_dealt, assert_no_damage_to};
+use engine::types::ability::TargetRef;
 
 const CATHEDRAL_MEMBRANE: &str = "({W/P} can be paid with either {W} or 2 life.)
 Defender
@@ -46,26 +50,52 @@ fn drive_declare_blockers(
     attacks: Vec<(ObjectId, AttackTarget)>,
     blocks: Vec<(ObjectId, ObjectId)>,
 ) {
-    runner.pass_both_players();
-    runner
-        .act(GameAction::DeclareAttackers {
-            attacks,
-            bands: vec![],
-        })
-        .expect("DeclareAttackers should succeed");
+    let _ = drive_declare_blockers_collecting_events(runner, attacks, blocks);
+}
+
+fn drive_declare_blockers_collecting_events(
+    runner: &mut GameRunner,
+    attacks: Vec<(ObjectId, AttackTarget)>,
+    blocks: Vec<(ObjectId, ObjectId)>,
+) -> Vec<GameEvent> {
+    let mut events = Vec::new();
+    for _ in 0..2 {
+        events.extend(
+            runner
+                .act(GameAction::PassPriority)
+                .expect("PassPriority should succeed")
+                .events,
+        );
+    }
+    events.extend(
+        runner
+            .act(GameAction::DeclareAttackers {
+                attacks,
+                bands: vec![],
+            })
+            .expect("DeclareAttackers should succeed")
+            .events,
+    );
     for _ in 0..20 {
         if !matches!(runner.state().waiting_for, WaitingFor::Priority { .. }) {
             break;
         }
-        runner
-            .act(GameAction::PassPriority)
-            .expect("PassPriority should succeed");
+        events.extend(
+            runner
+                .act(GameAction::PassPriority)
+                .expect("PassPriority should succeed")
+                .events,
+        );
     }
-    runner
-        .act(GameAction::DeclareBlockers {
-            assignments: blocks,
-        })
-        .expect("DeclareBlockers should succeed");
+    events.extend(
+        runner
+            .act(GameAction::DeclareBlockers {
+                assignments: blocks,
+            })
+            .expect("DeclareBlockers should succeed")
+            .events,
+    );
+    events
 }
 
 /// The action that advances the game one step without making any combat
@@ -90,6 +120,11 @@ fn advance_action(runner: &GameRunner) -> GameAction {
 /// Drive to the completion boundary every row asserts at: the postcombat main
 /// phase with an empty stack, no live combat, and a player holding priority.
 fn settle_to_postcombat_main(runner: &mut GameRunner) {
+    let _ = settle_to_postcombat_main_collecting_events(runner);
+}
+
+fn settle_to_postcombat_main_collecting_events(runner: &mut GameRunner) -> Vec<GameEvent> {
+    let mut events = Vec::new();
     for _ in 0..400 {
         let state = runner.state();
         if state.phase == Phase::PostCombatMain
@@ -97,15 +132,16 @@ fn settle_to_postcombat_main(runner: &mut GameRunner) {
             && state.combat.is_none()
             && matches!(state.waiting_for, WaitingFor::Priority { .. })
         {
-            return;
+            return events;
         }
         let action = advance_action(runner);
-        runner.act(action).unwrap_or_else(|e| {
+        let result = runner.act(action).unwrap_or_else(|e| {
             panic!(
                 "advancing to the postcombat main phase failed: {e:?} (phase = {:?})",
                 runner.state().phase
             )
         });
+        events.extend(result.events);
     }
     panic!(
         "never reached the postcombat main phase; phase = {:?}, waiting_for = {:?}",
@@ -150,7 +186,7 @@ fn cathedral_membrane_damages_only_the_creature_it_blocked() {
         .id();
     let mut runner = scenario.build();
 
-    drive_declare_blockers(
+    let mut events = drive_declare_blockers_collecting_events(
         &mut runner,
         vec![
             (blocked, AttackTarget::Player(P1)),
@@ -158,13 +194,17 @@ fn cathedral_membrane_damages_only_the_creature_it_blocked() {
         ],
         vec![(membrane, blocked)],
     );
-    settle_to_postcombat_main(&mut runner);
+    events.extend(settle_to_postcombat_main_collecting_events(&mut runner));
 
     // Reach guard: the Membrane died in combat and its trigger resolved on the
     // creature it blocked.
     assert_eq!(zone(&runner, membrane), Zone::Graveyard);
     assert_eq!(zone(&runner, blocked), Zone::Graveyard);
-    assert_eq!(damage(&runner, blocked), 6);
+    assert_damage_dealt(&events, blocked, TargetRef::Object(membrane), 3, true);
+    assert_damage_dealt(&events, membrane, TargetRef::Object(blocked), 6, false);
+    assert_no_damage_to(&events, TargetRef::Object(unblocked));
+    assert_no_damage_to(&events, TargetRef::Object(attacker_side_bystander));
+    assert_no_damage_to(&events, TargetRef::Object(defender_side_bystander));
 
     assert_untouched(
         &runner,
@@ -191,7 +231,7 @@ fn cathedral_membrane_ignores_a_pair_blocked_by_another_creature() {
         .id();
     let mut runner = scenario.build();
 
-    drive_declare_blockers(
+    let mut events = drive_declare_blockers_collecting_events(
         &mut runner,
         vec![
             (blocked, AttackTarget::Player(P1)),
@@ -199,11 +239,15 @@ fn cathedral_membrane_ignores_a_pair_blocked_by_another_creature() {
         ],
         vec![(membrane, blocked), (other_blocker, other_attacker)],
     );
-    settle_to_postcombat_main(&mut runner);
+    events.extend(settle_to_postcombat_main_collecting_events(&mut runner));
 
     // Reach guard: the Membrane's trigger dealt its 6 damage.
     assert_eq!(zone(&runner, membrane), Zone::Graveyard);
-    assert_eq!(damage(&runner, blocked), 6);
+    assert_eq!(zone(&runner, blocked), Zone::Graveyard);
+    assert_damage_dealt(&events, blocked, TargetRef::Object(membrane), 3, true);
+    assert_damage_dealt(&events, membrane, TargetRef::Object(blocked), 6, false);
+    assert_no_damage_to(&events, TargetRef::Object(other_attacker));
+    assert_no_damage_to(&events, TargetRef::Object(other_blocker));
 
     assert_untouched(
         &runner,
@@ -244,6 +288,7 @@ fn cathedral_membrane_this_combat_excludes_an_earlier_combat_phase() {
     // combats plus the turn's regular one; attack only in the first two.
     let mut declare_attackers_rounds = 0;
     let mut checked_combat_two = false;
+    let mut events = Vec::new();
     for _ in 0..800 {
         let state = runner.state();
         if declare_attackers_rounds >= 3
@@ -280,12 +325,15 @@ fn cathedral_membrane_this_combat_excludes_an_earlier_combat_phase() {
                     2 => vec![(second_combat_attacker, AttackTarget::Player(P1))],
                     _ => vec![],
                 };
-                runner
-                    .act(GameAction::DeclareAttackers {
-                        attacks,
-                        bands: vec![],
-                    })
-                    .expect("declare attackers");
+                events.extend(
+                    runner
+                        .act(GameAction::DeclareAttackers {
+                            attacks,
+                            bands: vec![],
+                        })
+                        .expect("declare attackers")
+                        .events,
+                );
             }
             WaitingFor::DeclareBlockers { .. } => {
                 let assignments = match declare_attackers_rounds {
@@ -293,12 +341,20 @@ fn cathedral_membrane_this_combat_excludes_an_earlier_combat_phase() {
                     2 => vec![(membrane, second_combat_attacker)],
                     _ => vec![],
                 };
-                runner
-                    .act(GameAction::DeclareBlockers { assignments })
-                    .expect("declare blockers");
+                events.extend(
+                    runner
+                        .act(GameAction::DeclareBlockers { assignments })
+                        .expect("declare blockers")
+                        .events,
+                );
             }
             WaitingFor::Priority { .. } => {
-                runner.act(GameAction::PassPriority).expect("pass priority");
+                events.extend(
+                    runner
+                        .act(GameAction::PassPriority)
+                        .expect("pass priority")
+                        .events,
+                );
             }
             other => panic!("unexpected prompt in phase {:?}: {other:?}", state.phase),
         }
@@ -318,7 +374,21 @@ fn cathedral_membrane_this_combat_excludes_an_earlier_combat_phase() {
     // Reach guard: the Membrane died in combat 2 and hit what it blocked there.
     assert_eq!(zone(&runner, membrane), Zone::Graveyard);
     assert_eq!(zone(&runner, second_combat_attacker), Zone::Graveyard);
-    assert_eq!(damage(&runner, second_combat_attacker), 6);
+    assert_damage_dealt(
+        &events,
+        second_combat_attacker,
+        TargetRef::Object(membrane),
+        3,
+        true,
+    );
+    assert_damage_dealt(
+        &events,
+        membrane,
+        TargetRef::Object(second_combat_attacker),
+        6,
+        false,
+    );
+    assert_no_damage_to(&events, TargetRef::Object(first_combat_attacker));
 
     assert_untouched(
         &runner,
@@ -346,7 +416,7 @@ fn cathedral_membrane_is_anchored_on_its_own_source() {
         .id();
     let mut runner = scenario.build();
 
-    drive_declare_blockers(
+    let mut events = drive_declare_blockers_collecting_events(
         &mut runner,
         vec![
             (lethal_attacker, AttackTarget::Player(P1)),
@@ -357,12 +427,26 @@ fn cathedral_membrane_is_anchored_on_its_own_source() {
             (surviving_membrane, harmless_attacker),
         ],
     );
-    settle_to_postcombat_main(&mut runner);
+    events.extend(settle_to_postcombat_main_collecting_events(&mut runner));
 
     // Reach guard: the dying Membrane's trigger resolved on its own blockee.
     assert_eq!(zone(&runner, dying_membrane), Zone::Graveyard);
     assert_eq!(zone(&runner, lethal_attacker), Zone::Graveyard);
-    assert_eq!(damage(&runner, lethal_attacker), 6);
+    assert_damage_dealt(
+        &events,
+        lethal_attacker,
+        TargetRef::Object(dying_membrane),
+        3,
+        true,
+    );
+    assert_damage_dealt(
+        &events,
+        dying_membrane,
+        TargetRef::Object(lethal_attacker),
+        6,
+        false,
+    );
+    assert_no_damage_to(&events, TargetRef::Object(harmless_attacker));
 
     assert_untouched(
         &runner,
@@ -390,7 +474,7 @@ fn defiant_vanguard_destroys_itself_and_only_what_it_blocked() {
         .id();
     let mut runner = scenario.build();
 
-    drive_declare_blockers(
+    let mut events = drive_declare_blockers_collecting_events(
         &mut runner,
         vec![
             (blocked, AttackTarget::Player(P1)),
@@ -398,17 +482,21 @@ fn defiant_vanguard_destroys_itself_and_only_what_it_blocked() {
         ],
         vec![(vanguard, blocked)],
     );
-    settle_to_postcombat_main(&mut runner);
+    events.extend(settle_to_postcombat_main_collecting_events(&mut runner));
 
     // Reach guard: 2 combat damage is below the attacker's toughness of 4, so
     // only the end-of-combat trigger can have put it in the graveyard.
-    assert_eq!(damage(&runner, blocked), 2);
+    assert_damage_dealt(&events, blocked, TargetRef::Object(vanguard), 1, true);
+    assert_damage_dealt(&events, vanguard, TargetRef::Object(blocked), 2, true);
     assert_eq!(zone(&runner, blocked), Zone::Graveyard);
     assert_eq!(
         zone(&runner, vanguard),
         Zone::Graveyard,
         "\"destroy it\" names Defiant Vanguard itself"
     );
+    assert_no_damage_to(&events, TargetRef::Object(unblocked));
+    assert_no_damage_to(&events, TargetRef::Object(attacker_side_bystander));
+    assert_no_damage_to(&events, TargetRef::Object(defender_side_bystander));
 
     for (label, id) in [
         ("the unblocked attacker", unblocked),
@@ -438,7 +526,7 @@ fn defiant_vanguard_trigger_still_finds_its_blockee_after_it_died() {
         .id();
     let mut runner = scenario.build();
 
-    drive_declare_blockers(
+    let mut events = drive_declare_blockers_collecting_events(
         &mut runner,
         vec![
             (blocked, AttackTarget::Player(P1)),
@@ -454,19 +542,22 @@ fn defiant_vanguard_trigger_still_finds_its_blockee_after_it_died() {
             break;
         }
         let action = advance_action(&runner);
-        runner.act(action).expect("advance to end of combat");
+        events.extend(runner.act(action).expect("advance to end of combat").events);
     }
     assert_eq!(runner.state().phase, Phase::EndCombat);
     assert_eq!(zone(&runner, vanguard), Zone::Graveyard);
 
-    settle_to_postcombat_main(&mut runner);
+    events.extend(settle_to_postcombat_main_collecting_events(&mut runner));
 
-    assert_eq!(damage(&runner, blocked), 2);
+    assert_damage_dealt(&events, blocked, TargetRef::Object(vanguard), 3, true);
+    assert_damage_dealt(&events, vanguard, TargetRef::Object(blocked), 2, true);
     assert_eq!(
         zone(&runner, blocked),
         Zone::Graveyard,
         "the delayed trigger must still destroy the creature Vanguard blocked"
     );
+    assert_no_damage_to(&events, TargetRef::Object(unblocked));
+    assert_no_damage_to(&events, TargetRef::Object(defender_side_bystander));
     for (label, id) in [
         ("the unblocked attacker", unblocked),
         ("the defending player's bystander", defender_side_bystander),
@@ -555,14 +646,15 @@ fn defiant_vanguard_destroyed_before_its_trigger_resolves_still_destroys_its_blo
         "the delayed trigger was created"
     );
 
-    settle_to_postcombat_main(&mut runner);
+    let events = settle_to_postcombat_main_collecting_events(&mut runner);
 
     assert!(
         runner.state().delayed_triggers.is_empty(),
         "the delayed trigger fired"
     );
-    // Reach guard: the blocker left before combat damage, so the attacker took none.
-    assert_eq!(damage(&runner, blocked), 0);
+    // Reach guard: the blocker left before combat damage, so no combat damage
+    // was dealt to the attacker before the delayed trigger destroyed it.
+    assert_no_damage_to(&events, TargetRef::Object(blocked));
     assert_eq!(
         zone(&runner, blocked),
         Zone::Graveyard,

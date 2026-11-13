@@ -8312,7 +8312,7 @@ mod tests {
         .expect("the activated ability")
     }
 
-    /// CR 120.1 + CR 115.4 + CR 208.3 — DISCRIMINATING runtime gate for Iron
+    /// CR 120.1 + CR 115.4 + CR 208.1 — DISCRIMINATING runtime gate for Iron
     /// Fist, Living Weapon's granted "{T}: ~ deals damage equal to his power to
     /// any other target". Attaching that ability to a 4-power Iron Fist and
     /// activating it at an opponent creature must deal exactly 4 damage.
@@ -8345,12 +8345,20 @@ mod tests {
             .target_object(victim)
             .resolve();
 
-        // CR 208.3: damage equals the source's power (4).
-        assert_eq!(
-            outcome.state().objects[&victim].damage_marked,
-            4,
-            "Iron Fist must deal damage equal to his power (4) to the chosen other target"
-        );
+        // CR 120.1 + CR 704.5g: the event preserves damage assignment before
+        // state-based actions move the lethal-damaged Bear to its graveyard.
+        assert!(outcome.events().iter().any(|event| matches!(
+            event,
+            GameEvent::DamageDealt {
+                source_id,
+                target: TargetRef::Object(target),
+                amount: 4,
+                is_combat: false,
+                ..
+            } if *source_id == iron_fist && *target == victim
+        )));
+        assert_eq!(outcome.state().objects[&victim].zone, Zone::Graveyard);
+        assert_eq!(outcome.state().objects[&iron_fist].zone, Zone::Battlefield);
     }
 
     /// CR 115.4 — DISCRIMINATING runtime gate that "any OTHER target" (i.e.
@@ -8516,7 +8524,8 @@ mod tests {
             );
         }
 
-        // CR 122.1: damage equals the number of +1/+1 counters on the source (3).
+        // CR 120.1 + CR 122.1 + CR 704.5g: the event records 3 damage from
+        // Red Hulk, then lethal damage moves the Bear to its graveyard.
         {
             let (mut runner, red_hulk, victim) = build_red_hulk(ability);
             let ability_index = runner.state().objects[&red_hulk].abilities.len() - 1;
@@ -8524,11 +8533,18 @@ mod tests {
                 .activate(red_hulk, ability_index)
                 .target_object(victim)
                 .resolve();
-            assert_eq!(
-                outcome.state().objects[&victim].damage_marked,
-                3,
-                "Red Hulk's reflex must deal damage equal to its +1/+1 counter count (3)"
-            );
+            assert!(outcome.events().iter().any(|event| matches!(
+                event,
+                GameEvent::DamageDealt {
+                    source_id,
+                    target: TargetRef::Object(target),
+                    amount: 3,
+                    is_combat: false,
+                    ..
+                } if *source_id == red_hulk && *target == victim
+            )));
+            assert_eq!(outcome.state().objects[&victim].zone, Zone::Graveyard);
+            assert_eq!(outcome.state().objects[&red_hulk].zone, Zone::Battlefield);
         }
         // Silence the unused CounterType import on builds where the matches! arm
         // already consumed it via the qualified path.

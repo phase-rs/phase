@@ -21,6 +21,7 @@ use engine::types::ability::{
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
 use engine::types::counter::CounterType;
+use engine::types::events::GameEvent;
 use engine::types::format::{ChallengeDeck, FormatConfig};
 use engine::types::game_state::{GameState, ReplacementChoiceKind, WaitingFor};
 use engine::types::identifiers::{CardId, ObjectId};
@@ -390,8 +391,17 @@ fn begin_wave_with_budget(runner: &mut GameRunner, budget: u32) {
 fn drive_wave_with_answers(
     runner: &mut GameRunner,
     answers: &mut Vec<Vec<ObjectId>>,
-    mut on_prompt: impl FnMut(&mut GameRunner),
+    on_prompt: impl FnMut(&mut GameRunner),
 ) {
+    let _events = drive_wave_with_answers_collecting(runner, answers, on_prompt);
+}
+
+fn drive_wave_with_answers_collecting(
+    runner: &mut GameRunner,
+    answers: &mut Vec<Vec<ObjectId>>,
+    mut on_prompt: impl FnMut(&mut GameRunner),
+) -> Vec<GameEvent> {
+    let mut events = Vec::new();
     for _ in 0..80 {
         let done = {
             let st = runner.state();
@@ -403,11 +413,10 @@ fn drive_wave_with_answers(
             break;
         }
         match &runner.state().waiting_for {
-            WaitingFor::Priority { .. } => {
-                if runner.act(GameAction::PassPriority).is_err() {
-                    break;
-                }
-            }
+            WaitingFor::Priority { .. } => match runner.act(GameAction::PassPriority) {
+                Ok(result) => events.extend(result.events),
+                Err(_) => break,
+            },
             WaitingFor::HeroEventChoice { .. } => {
                 assert!(
                     !answers.is_empty(),
@@ -416,9 +425,10 @@ fn drive_wave_with_answers(
                 );
                 on_prompt(runner);
                 let answer = answers.remove(0);
-                runner
+                let result = runner
                     .act(GameAction::SelectCards { cards: answer })
                     .expect("the planned answer must be legal");
+                events.extend(result.events);
             }
             other => panic!("unexpected prompt during the wave: {other:?}"),
         }
@@ -427,6 +437,7 @@ fn drive_wave_with_answers(
         answers.is_empty(),
         "every planned prompt must fire during the wave"
     );
+    events
 }
 
 /// The completion boundary every wave test ends at: Priority, an empty stack,
@@ -668,19 +679,39 @@ fn baxter_banks_then_fires_on_the_next_wave_card() {
     let mut state = hero_event_game();
     let bear = add_hero_creature(&mut state, HERO1, "Hero Bear", 2);
     let baxter = add_library_event(&mut state, "Event: Baxter's Experiments");
-    add_library_event(&mut state, "Event: Bebop's Rampage");
+    let rampage = add_library_event(&mut state, "Event: Bebop's Rampage");
     let mut runner = GameRunner::from_state(state);
     begin_wave_with_budget(&mut runner, 2);
     // No prompts: Baxter banks silently and Rampage is synchronous.
     let mut answers = vec![];
-    drive_wave_with_answers(&mut runner, &mut answers, |runner| {
+    let events = drive_wave_with_answers_collecting(&mut runner, &mut answers, |runner| {
         panic!("no prompt expected, got {:?}", runner.state().waiting_for)
     });
     assert_wave_settled(&runner);
     let st = runner.state();
     assert_eq!(
-        st.objects.get(&bear).expect("bear").damage_marked,
-        4,
+        st.objects.get(&bear).expect("bear").zone,
+        Zone::Graveyard,
+        "the second 2-damage event is lethal to the Hero Bear"
+    );
+    let rampage_damage: Vec<_> = events
+        .iter()
+        .filter(|event| {
+            matches!(
+                event,
+                GameEvent::DamageDealt {
+                    source_id,
+                    target: TargetRef::Object(id),
+                    amount: 2,
+                    is_combat: false,
+                    ..
+                } if *source_id == rampage && *id == bear
+            )
+        })
+        .collect();
+    assert_eq!(
+        rampage_damage.len(),
+        2,
         "Rampage resolved twice (2 + 2) under the fired Baxter"
     );
     assert!(

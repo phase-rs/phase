@@ -27,6 +27,8 @@ use engine::types::player::PlayerId;
 use engine::types::replacements::ReplacementEvent;
 use engine::types::zones::Zone;
 
+use super::rules::assert_damage_dealt;
+
 const FLAME_SPILL: &str = "Flame Spill deals 4 damage to target creature. \
 Excess damage is dealt to that creature's controller instead.";
 
@@ -598,13 +600,16 @@ fn cast_ram_through_at(
 /// redirect silently vanishes and `foe_life_delta` reads 0.
 #[test]
 fn t13_ram_through_trample_redirects_excess_through_real_cast() {
-    let (outcome, _source, victim) = cast_ram_through_at(true, 5, 2);
+    let (outcome, source, victim) = cast_ram_through_at(true, 5, 2);
     outcome.assert_life_delta(P1, -3);
-    assert_eq!(
-        outcome.state().objects[&victim].damage_marked,
+    assert_damage_dealt(
+        outcome.events(),
+        source,
+        TargetRef::Object(victim),
         2,
-        "the victim must take only the lethal 2, not the full 5 — the rest redirects"
+        false,
     );
+    assert_eq!(outcome.state().objects[&victim].zone, Zone::Graveyard);
 }
 
 /// T14 — cast-pipeline proof (no trample), the paired negative: the same
@@ -613,11 +618,14 @@ fn t13_ram_through_trample_redirects_excess_through_real_cast() {
 /// controller) absorbs all 5.
 #[test]
 fn t14_ram_through_no_trample_deals_full_damage_no_redirect() {
-    let (outcome, _source, victim) = cast_ram_through_at(false, 5, 2);
+    let (outcome, source, victim) = cast_ram_through_at(false, 5, 2);
     outcome.assert_life_delta(P1, 0);
-    assert_eq!(
-        outcome.state().objects[&victim].damage_marked,
+    assert_damage_dealt(
+        outcome.events(),
+        source,
+        TargetRef::Object(victim),
         5,
-        "without trample the victim must take the full 5 with no redirect"
+        false,
     );
+    assert_eq!(outcome.state().objects[&victim].zone, Zone::Graveyard);
 }

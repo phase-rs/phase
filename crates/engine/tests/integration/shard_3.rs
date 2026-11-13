@@ -6,6 +6,8 @@
 //! from this range. `no_top_level_test_binaries` enforces that each file here is registered in
 //! exactly one shard root.
 
+#[allow(dead_code)]
+mod rules;
 pub mod support;
 
 mod dark_confidant_upkeep;

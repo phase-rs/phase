@@ -29,6 +29,8 @@ use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 use engine::types::zones::Zone;
 
+use super::rules::{advance_until_stack_empty_and_collect_events, assert_damage_dealt};
+
 const VOLCANIC_OFFERING: &str = "Destroy target nonbasic land you don't control \
      and target nonbasic land of an opponent's choice you don't control. Volcanic \
      Offering deals 7 damage to target creature you don't control and 7 damage to \
@@ -151,35 +153,23 @@ fn waiting_for_player_flips_controller_opponent_across_slots_and_controller_keep
         "CR 115.1: the spell is controlled by its controller, not the opponent who announced a slot"
     );
 
-    // Resolve and confirm both lands destroyed, both creatures took 7 damage.
-    runner.advance_until_stack_empty();
+    // Resolve and confirm both lands destroyed and both creatures took 7 damage.
+    let events = advance_until_stack_empty_and_collect_events(&mut runner);
+    assert_damage_dealt(&events, spell, TargetRef::Object(creature_a), 7, false);
+    assert_damage_dealt(&events, spell, TargetRef::Object(creature_b), 7, false);
 
     // CR 701.7b: a destroyed permanent is moved to its owner's graveyard, where it
     // keeps its card types — so "destroyed" means it left the battlefield.
-    let land_a_gone = runner
-        .state()
-        .objects
-        .get(&land_a)
-        .is_none_or(|o| o.zone != Zone::Battlefield);
-    let land_b_gone = runner
-        .state()
-        .objects
-        .get(&land_b)
-        .is_none_or(|o| o.zone != Zone::Battlefield);
-    assert!(land_a_gone, "opponent land A must be destroyed");
-    assert!(land_b_gone, "opponent land B must be destroyed");
-
-    // Creatures with 5 toughness taking 7 damage die as a state-based action.
-    assert!(
-        !runner.state().objects.contains_key(&creature_a)
-            || runner.state().objects[&creature_a].damage_marked >= 7,
-        "opponent creature A must take 7 damage (and die)"
-    );
-    assert!(
-        !runner.state().objects.contains_key(&creature_b)
-            || runner.state().objects[&creature_b].damage_marked >= 7,
-        "opponent creature B must take 7 damage (and die)"
-    );
+    assert_eq!(runner.state().objects[&land_a].zone, Zone::Graveyard);
+    assert_eq!(runner.state().objects[&land_b].zone, Zone::Graveyard);
+    assert_eq!(runner.state().objects[&creature_a].zone, Zone::Graveyard);
+    assert_eq!(runner.state().objects[&creature_b].zone, Zone::Graveyard);
+    assert_eq!(runner.state().objects[&spell].zone, Zone::Graveyard);
+    assert!(runner.state().stack.is_empty());
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
 }
 
 /// CR 601.2c: Each printed instance of "target" may choose the same legal object.

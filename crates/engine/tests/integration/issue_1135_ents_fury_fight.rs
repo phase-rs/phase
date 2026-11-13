@@ -9,6 +9,10 @@ use engine::game::scenario::{GameScenario, P0, P1};
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaType, ManaUnit};
 use engine::types::phase::Phase;
+use engine::types::zones::Zone;
+
+use super::rules::assert_damage_dealt;
+use engine::types::ability::TargetRef;
 
 const ENTS_FURY_ORACLE: &str = "Put a +1/+1 counter on target creature you control if its power is 4 or greater. Then that creature gets +1/+1 until end of turn and fights target creature you don't control.";
 
@@ -38,22 +42,21 @@ fn ents_fury_fights_boosted_creature_against_opponent_creature() {
 
     let mut runner = scenario.build();
 
-    runner
+    let outcome = runner
         .cast(spell)
         .target_objects(&[bear, wolf])
         .commit()
         .resolve();
 
-    assert!(
-        runner.state().objects[&wolf].damage_marked >= 6,
-        "boosted bear must deal fight damage to wolf, got {}",
-        runner.state().objects[&wolf].damage_marked
-    );
+    assert_damage_dealt(outcome.events(), bear, TargetRef::Object(wolf), 7, false);
+    assert_eq!(outcome.zone_of(wolf), Zone::Graveyard);
+    assert_damage_dealt(outcome.events(), wolf, TargetRef::Object(bear), 2, false);
     assert_eq!(
-        runner.state().objects[&bear].damage_marked,
+        outcome.state().objects[&bear].damage_marked,
         2,
         "wolf must deal its power in fight damage back to bear"
     );
+    assert_eq!(outcome.zone_of(bear), Zone::Battlefield);
 }
 
 #[test]

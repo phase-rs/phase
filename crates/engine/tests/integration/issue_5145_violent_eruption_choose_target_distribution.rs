@@ -9,6 +9,9 @@ use engine::types::actions::GameAction;
 use engine::types::game_state::{CastPaymentMode, WaitingFor};
 use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
+use engine::types::zones::Zone;
+
+use super::rules::{advance_until_stack_empty_and_collect_events, assert_damage_dealt};
 
 const VIOLENT_ERUPTION_ORACLE: &str =
     "Violent Eruption deals 4 damage divided as you choose among any number of targets.";
@@ -97,19 +100,19 @@ fn violent_eruption_choose_target_path_divides_damage_among_two_targets() {
         "both chosen targets must participate in the distribution",
     );
 
-    runner
+    let mut events = runner
         .act(GameAction::DistributeAmong {
             distribution: vec![(TargetRef::Player(P1), 1), (TargetRef::Object(bear), 3)],
         })
-        .expect("1/3 distribution should be accepted");
+        .expect("1/3 distribution should be accepted")
+        .events;
 
-    runner.advance_until_stack_empty();
+    events.extend(advance_until_stack_empty_and_collect_events(&mut runner));
+    assert_damage_dealt(&events, spell, TargetRef::Object(bear), 3, false);
+    assert_damage_dealt(&events, spell, TargetRef::Player(P1), 1, false);
+    assert_eq!(runner.state().objects[&bear].zone, Zone::Graveyard);
+    assert_eq!(runner.state().objects[&spell].zone, Zone::Graveyard);
 
-    assert_eq!(
-        runner.state().objects[&bear].damage_marked,
-        3,
-        "creature must take only its assigned share",
-    );
     let p1_life = runner
         .state()
         .players

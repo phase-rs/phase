@@ -36121,6 +36121,8 @@ mod tests {
     #[test]
     fn volcanic_vision_deals_returned_cards_mana_value_after_return_to_hand() {
         use crate::game::scenario::{GameScenario, P0, P1};
+        use crate::game::scenario_db::GameScenarioDbExt;
+        use crate::types::ability::TargetRef;
 
         const ORACLE: &str = "Return target instant or sorcery card from your graveyard to your hand. \
              Volcanic Vision deals damage equal to that card's mana value to each creature your opponents control. \
@@ -36137,24 +36139,32 @@ mod tests {
         let volcanic = scenario
             .add_spell_to_hand_from_oracle(P0, "Volcanic Vision", false, ORACLE)
             .id();
-        // Return target: an instant in the caster's graveyard with mana value 3.
-        let bolt = scenario
-            .add_spell_to_graveyard(P0, "Fire Blast", true)
-            .with_mana_cost(ManaCost::generic(3))
-            .id();
+        // CR 608.2c: Murder is the real mana-value-3 card Volcanic Vision
+        // returns before its damage instruction reads the card's mana value.
+        let card_db = crate::test_support::shared_card_db();
+        let murder = scenario.add_real_card(P0, "Murder", Zone::Graveyard, card_db);
         let goblin = scenario.add_creature(P1, "Goblin", 2, 2).id();
         let ogre = scenario.add_creature(P1, "Ogre", 3, 3).id();
 
         let mut runner = scenario.build();
-        let outcome = runner.cast(volcanic).target_objects(&[bolt]).resolve();
+        let outcome = runner.cast(volcanic).target_objects(&[murder]).resolve();
 
-        outcome.assert_zone(&[bolt], Zone::Hand);
-        assert_eq!(
-            outcome.damage_marked(goblin),
-            3,
-            "each opponent creature must take the returned card's mana value (3)"
-        );
-        assert_eq!(outcome.damage_marked(ogre), 3);
+        outcome.assert_zone(&[murder], Zone::Hand);
+        // CR 120.1 + CR 704.5g: each exact damage event precedes the creature's
+        // lethal-damage move, so final marked damage is not the evidence here.
+        for target in [goblin, ogre] {
+            assert!(outcome.events().iter().any(|event| matches!(
+                event,
+                GameEvent::DamageDealt {
+                    source_id,
+                    target: TargetRef::Object(damaged),
+                    amount: 3,
+                    is_combat: false,
+                    ..
+                } if *source_id == volcanic && *damaged == target
+            )));
+            assert_eq!(outcome.state().objects[&target].zone, Zone::Graveyard);
+        }
         outcome.assert_zone(&[volcanic], Zone::Exile);
     }
 

@@ -1465,13 +1465,49 @@ fn a_slot_reads_the_root_of_its_own_entry() {
     };
     state.priority_player = PlayerId(0);
     let mut runner = GameRunner::from_state(state);
-    runner.resolve_top();
-    let damage_on = |id| runner.state().objects[&id].damage_marked;
+    let initial_stack_len = runner.state().stack.len();
+    let mut events = Vec::new();
+    for _ in 0..10 {
+        if runner.state().stack.len() < initial_stack_len {
+            break;
+        }
+        let result = runner
+            .act(GameAction::PassPriority)
+            .expect("pass priority to resolve the upper synthetic entry");
+        events.extend(result.events);
+    }
+    assert!(runner.state().stack.len() < initial_stack_len);
+    assert_eq!(runner.state().objects[&first].zone, Zone::Battlefield);
+    assert_eq!(runner.state().objects[&first].damage_marked, 0);
     assert_eq!(
-        (damage_on(first), damage_on(second)),
-        (0, 2),
-        "engine agreement: both nodes of the upper entry hit its own target"
+        runner.state().objects[&second].zone,
+        Zone::Graveyard,
+        "the upper entry's two 1-damage nodes are lethal to the second creature"
     );
+    let second_damage: Vec<_> = events
+        .iter()
+        .filter(|event| {
+            matches!(
+                event,
+                GameEvent::DamageDealt {
+                    source_id,
+                    target: TargetRef::Object(id),
+                    amount: 1,
+                    is_combat: false,
+                    ..
+                } if *source_id == source && *id == second
+            )
+        })
+        .collect();
+    assert_eq!(
+        second_damage.len(),
+        2,
+        "both nodes of the upper entry hit its own target"
+    );
+    assert!(events.iter().all(|event| !matches!(
+        event,
+        GameEvent::DamageDealt { target: TargetRef::Object(id), .. } if *id == first
+    )));
 }
 
 #[test]

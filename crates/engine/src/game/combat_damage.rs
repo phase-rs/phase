@@ -3119,8 +3119,36 @@ mod tests {
         let mut events = Vec::new();
         resolve_combat_damage(&mut state, &mut events);
 
-        assert_eq!(state.objects[&attacker].damage_marked, 2);
-        assert_eq!(state.objects[&blocker].damage_marked, 2);
+        assert!(events.iter().any(|event| matches!(
+            event,
+            GameEvent::DamageDealt {
+                source_id,
+                target: TargetRef::Object(target),
+                amount: 2,
+                is_combat: true,
+                ..
+            } if *source_id == attacker && *target == blocker
+        )));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            GameEvent::DamageDealt {
+                source_id,
+                target: TargetRef::Object(target),
+                amount: 2,
+                is_combat: true,
+                ..
+            } if *source_id == blocker && *target == attacker
+        )));
+        assert_eq!(
+            state.objects[&attacker].zone,
+            crate::types::zones::Zone::Graveyard,
+            "CR 704.5g: the attacker is destroyed by lethal combat damage"
+        );
+        assert_eq!(
+            state.objects[&blocker].zone,
+            crate::types::zones::Zone::Graveyard,
+            "CR 704.5g: the blocker is destroyed by lethal combat damage"
+        );
     }
 
     #[test]
@@ -3255,6 +3283,12 @@ mod tests {
             .unwrap()
             .keywords
             .push(Keyword::Deathtouch);
+        assert!(state.objects[&attacker]
+            .keywords
+            .contains(&Keyword::Trample));
+        assert!(state.objects[&attacker]
+            .keywords
+            .contains(&Keyword::Deathtouch));
         let blocker1 = create_creature(&mut state, PlayerId(1), "Bear1", 2, 2);
         let blocker2 = create_creature(&mut state, PlayerId(1), "Bear2", 2, 2);
         setup_combat(
@@ -3299,9 +3333,49 @@ mod tests {
         let result = resolve_combat_damage(&mut state, &mut events);
         assert!(result.is_none(), "All damage should be resolved");
 
-        // With deathtouch, 1 to each blocker is lethal; 3 excess tramples to player
-        assert_eq!(state.objects[&blocker1].damage_marked, 1);
-        assert_eq!(state.objects[&blocker2].damage_marked, 1);
+        // Damage events retain the assignment before the resulting SBAs move the blockers.
+        for blocker in [blocker1, blocker2] {
+            assert!(events.iter().any(|event| matches!(
+                event,
+                GameEvent::DamageDealt {
+                    source_id,
+                    target: TargetRef::Object(target),
+                    amount: 1,
+                    is_combat: true,
+                    ..
+                } if *source_id == attacker && *target == blocker
+            )));
+            assert_eq!(
+                state.objects[&blocker].zone,
+                crate::types::zones::Zone::Graveyard,
+                "CR 702.2b + CR 704.5h: one damage from a deathtouch source destroys the blocker"
+            );
+            assert!(events.iter().any(|event| matches!(
+                event,
+                GameEvent::DamageDealt {
+                    source_id,
+                    target: TargetRef::Object(target),
+                    amount: 2,
+                    is_combat: true,
+                    ..
+                } if *source_id == blocker && *target == attacker
+            )));
+        }
+        assert!(events.iter().any(|event| matches!(
+            event,
+            GameEvent::DamageDealt {
+                source_id,
+                target: TargetRef::Player(player),
+                amount: 3,
+                is_combat: true,
+                ..
+            } if *source_id == attacker && *player == PlayerId(1)
+        )));
+        assert_eq!(
+            state.objects[&attacker].zone,
+            crate::types::zones::Zone::Battlefield
+        );
+        assert_eq!(state.objects[&attacker].damage_marked, 4);
         assert_eq!(state.players[1].life, 17);
     }
 
@@ -3682,9 +3756,46 @@ mod tests {
         let result = resolve_combat_damage(&mut state, &mut events);
         assert!(result.is_none(), "All damage should be resolved");
 
-        // All 5 to blocker1, none to blocker2
-        assert_eq!(state.objects[&blocker1].damage_marked, 5);
+        // The event records the assignment before state-based actions move Bear1.
+        assert!(events.iter().any(|event| matches!(
+            event,
+            GameEvent::DamageDealt {
+                source_id,
+                target: TargetRef::Object(target),
+                amount: 5,
+                is_combat: true,
+                ..
+            } if *source_id == attacker && *target == blocker1
+        )));
+        for blocker in [blocker1, blocker2] {
+            assert!(events.iter().any(|event| matches!(
+                event,
+                GameEvent::DamageDealt {
+                    source_id,
+                    target: TargetRef::Object(target),
+                    amount: 2,
+                    is_combat: true,
+                    ..
+                } if *source_id == blocker && *target == attacker
+            )));
+        }
+        assert_eq!(
+            state.objects[&blocker1].zone,
+            crate::types::zones::Zone::Graveyard,
+            "CR 704.5g: the 2/2 blocker leaves after five combat damage"
+        );
+        assert_eq!(
+            state.objects[&blocker2].zone,
+            crate::types::zones::Zone::Battlefield,
+            "the unassigned blocker remains on the battlefield"
+        );
         assert_eq!(state.objects[&blocker2].damage_marked, 0);
+        assert_eq!(
+            state.objects[&attacker].zone,
+            crate::types::zones::Zone::Battlefield,
+            "Fatty survives with one less than lethal damage"
+        );
+        assert_eq!(state.objects[&attacker].damage_marked, 4);
         // No damage to player
         assert_eq!(state.players[1].life, 20);
     }
@@ -3755,13 +3866,45 @@ mod tests {
             .unwrap()
             .keywords
             .push(Keyword::Deathtouch);
+        assert!(state.objects[&attacker]
+            .keywords
+            .contains(&Keyword::Deathtouch));
         let blocker = create_creature(&mut state, PlayerId(1), "Bear", 2, 2);
         setup_combat(&mut state, vec![attacker], vec![(attacker, vec![blocker])]);
 
         let mut events = Vec::new();
         resolve_combat_damage(&mut state, &mut events);
 
-        assert!(state.objects[&blocker].dealt_deathtouch_damage);
+        assert!(events.iter().any(|event| matches!(
+            event,
+            GameEvent::DamageDealt {
+                source_id,
+                target: TargetRef::Object(target),
+                amount: 1,
+                is_combat: true,
+                ..
+            } if *source_id == attacker && *target == blocker
+        )));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            GameEvent::DamageDealt {
+                source_id,
+                target: TargetRef::Object(target),
+                amount: 2,
+                is_combat: true,
+                ..
+            } if *source_id == blocker && *target == attacker
+        )));
+        assert_eq!(
+            state.objects[&blocker].zone,
+            crate::types::zones::Zone::Graveyard,
+            "CR 702.2b + CR 704.5h: the deathtouch-damaged Bear is destroyed"
+        );
+        assert_eq!(
+            state.objects[&attacker].zone,
+            crate::types::zones::Zone::Graveyard,
+            "CR 704.5g: the 1/1 attacker is destroyed by the Bear's two damage"
+        );
     }
 
     #[test]
