@@ -161,8 +161,8 @@ pub fn preview_action(
     actor: PlayerId,
     action: &GameAction,
 ) -> Result<PreviewDiff, EngineError> {
-    // CR 732.2a–c: a loop-shortcut answer is read from the offer's measured evidence, never
-    // performed or taken, so its preview carries no public delta.
+    // A loop-shortcut answer is read from the offer's measured evidence, never performed or
+    // taken, so its preview carries no public delta.
     if let Some(step) = shortcut_step(state, action, ShortcutEvidence::Measured) {
         check_actor_authorization(state, actor, action)?;
         return step.map(|_| PreviewDiff::default());

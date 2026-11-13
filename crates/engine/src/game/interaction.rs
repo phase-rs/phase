@@ -11865,7 +11865,7 @@ fn preview_outcome(
 }
 
 /// What committing `action` would do, read off a throwaway authoritative clone. A loop-shortcut
-/// answer is read from the offer's measured evidence instead (CR 732.2a–c), so a preview never
+/// answer is read from the offer's measured evidence instead, so a preview never
 /// performs a repetition or takes the shortcut; it reports a take as advancing past the window,
 /// since only performing the take tells a game it ends from one it returns to priority.
 fn preview_action_outcome(

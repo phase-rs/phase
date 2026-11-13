@@ -353,10 +353,10 @@ pub(crate) fn structurally_valid_named_choice_answer(
     }
 }
 
-/// CR 608.2d + CR 614.12a + CR 701.23a + CR 732.2b: Whether the pending prompt's
+/// CR 608.2d + CR 614.12a + CR 701.23a + CR 732.2a + CR 732.2b: Whether the pending prompt's
 /// submission guard admits `action`, decided without mutating the game, for a library
 /// search selection ([`structurally_valid_search_selection`]), a named choice from the
-/// prompt's enumerated domain ([`structurally_valid_named_choice_answer`]), or an answer
+/// prompt's enumerated domain ([`structurally_valid_named_choice_answer`]), or a declaration or answer
 /// to a loop-shortcut offer ([`structurally_valid_shortcut_response`]).
 /// `true` means the guard admits the answer; `false` means it rejects it or the
 /// shape is not modeled here.

@@ -4185,7 +4185,7 @@ export type ResourceAxis =
   | "EtbTriggers"
   | "LtbTriggers"
   | "SacTriggers"
-  // CR 704.5c: poison counters on a player (10 ⇒ that player loses).
+  // CR 704.5c / CR 704.6b: poison counters on a player (its configured threshold ⇒ that player loses).
   | { Poison: PlayerId }
   // CR 107.14: energy counters on a player.
   | { Energy: PlayerId };

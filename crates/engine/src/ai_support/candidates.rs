@@ -4014,7 +4014,8 @@ pub fn candidate_actions_broad_with_probe(
             v
         }
         // CR 732.2b: "Each other player ... may either accept the proposed sequence, or shorten
-        // it"; the reducer filter keeps the answers `apply()` admits.
+        // it"; the legality filter keeps the answers the proposal admits, and `apply()` still
+        // refuses a `Shorten` whose place names no different choice.
         WaitingFor::RespondToShortcut { player, .. } => vec![
             candidate(
                 GameAction::RespondToShortcut {

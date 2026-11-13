@@ -917,7 +917,7 @@ fn shortcut_accept_validation_does_not_take_the_shortcut() {
     );
     assert_eq!(
         during.state_copies, 0,
-        "CR 732.2b: legality reads measured evidence, so it takes nothing on a scratch state"
+        "legality reads measured evidence, so it takes nothing on a scratch state"
     );
 
     // CR 732.2b: P2 holds nothing at place 1, so the committed Shorten is refused there and P2
@@ -944,7 +944,7 @@ fn shortcut_accept_validation_does_not_take_the_shortcut() {
     );
 }
 
-/// CR 732.2a: the AI's legality pipeline issues the proposer's recorded declaration from the
+/// The AI's legality pipeline issues the proposer's recorded declaration from the
 /// offer's measured evidence, without the clone-and-apply probe, and that declaration commits.
 #[test]
 fn the_ai_issues_a_recorded_declaration_without_simulating_it() {
@@ -989,7 +989,7 @@ fn the_ai_issues_a_recorded_declaration_without_simulating_it() {
     );
 }
 
-/// CR 732.2b/c: a responder's answer is previewed from the proposal alone, by the interaction
+/// A responder's answer is previewed from the proposal alone, by the interaction
 /// previewer and the action previewer, so previewing the Accept that materializes the take takes
 /// nothing; committing it takes the shortcut. The first responder's Accept previews as the next
 /// responder's window.

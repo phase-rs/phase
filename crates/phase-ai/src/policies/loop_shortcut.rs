@@ -358,7 +358,7 @@ fn buys_only_mana_and_combats(
 ///   construction rather than by comment. Measured against the net-only rate this replaced, the
 ///   check only tightens: each repetition's net and dip are both at least what the period itself
 ///   nets off the proposer, so every declare that rate refused is still refused.
-/// - **poison**, CR 704.5c — reaching **10 or more** is the threshold.
+/// - **poison**, CR 704.5c / CR 704.6b — reaching the configured poison-loss threshold.
 ///
 /// **LIBRARY IS DELIBERATELY EXCLUDED, and that is the non-obvious part of this function.**
 /// CR 121.4: "A player who attempts to draw a card from a library with no cards in it loses the

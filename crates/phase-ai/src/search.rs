@@ -24798,7 +24798,7 @@ one on the bottom of your library.";
         }
 
         /// P0's declaration on its own offer passes the planner's legality gate from the offer's
-        /// measured evidence (CR 732.2a), without a state copy.
+        /// measured evidence, without a state copy.
         #[test]
         fn the_planner_gate_admits_the_proposers_declaration_without_a_state_copy() {
             use crate::planner::{

@@ -3563,8 +3563,8 @@ mod recorded_niv_table {
         ));
     }
 
-    /// CR 732.2a + CR 608.2b: the preview reads only what the offer measured, so a re-aimed
-    /// declaration it never recorded is confirmable there without a repetition performed. Its
+    /// The preview reads only what the offer measured, so a re-aimed declaration it never
+    /// recorded is confirmable there without a repetition performed. CR 732.2a + CR 608.2b: its
     /// submission through the ingress performs it, falls short of 14, and is refused before any
     /// state write, so the window stays open and the proposer answers again with 13.
     #[test]

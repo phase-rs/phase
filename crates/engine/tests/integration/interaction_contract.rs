@@ -9709,7 +9709,7 @@ fn every_published_shortcut_element_round_trips_byte_equal() {
     }
 }
 
-/// CR 732.2a: an authored split the offer never performed is previewed from the offer's measured
+/// An authored split the offer never performed is previewed from the offer's measured
 /// evidence alone, so the preview performs no repetition; submitting the same declaration performs
 /// it.
 #[test]
