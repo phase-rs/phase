@@ -39,7 +39,7 @@ use engine::types::replacements::ReplacementEvent;
 use engine::types::zones::Zone;
 use engine::types::TargetRef;
 
-use super::rules::{assert_damage_dealt, assert_no_damage_to};
+use super::support::{assert_damage_dealt, assert_no_damage_to};
 
 const BRONZE_HORSE: &str = "Trample\nAs long as you control another creature, prevent all damage that would be dealt to this creature by spells that target it.";
 

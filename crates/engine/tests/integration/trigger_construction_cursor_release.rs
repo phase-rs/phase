@@ -26,7 +26,7 @@ use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 use engine::types::zones::Zone;
 
-use super::rules::{advance_until_stack_empty_and_collect_events, assert_damage_dealt};
+use super::support::{advance_until_stack_empty_and_collect_events, assert_damage_dealt};
 
 const P2: PlayerId = PlayerId(2);
 

@@ -28,7 +28,7 @@ use engine::types::phase::Phase;
 use engine::types::zones::Zone;
 use engine::types::TargetRef;
 
-use super::rules::assert_damage_dealt;
+use super::support::assert_damage_dealt;
 
 fn equipment_types() -> (Vec<String>, Vec<String>) {
     (vec!["Artifact".to_string()], vec!["Equipment".to_string()])

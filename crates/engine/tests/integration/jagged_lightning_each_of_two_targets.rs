@@ -26,7 +26,7 @@ use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::zones::Zone;
 
-use super::rules::{assert_damage_dealt, assert_no_damage_to};
+use super::support::{assert_damage_dealt, assert_no_damage_to};
 
 // Verbatim Oracle text (client/public/card-data.json, verified 2026-07-26).
 const JAGGED_LIGHTNING: &str = "Jagged Lightning deals 3 damage to each of two target creatures.";

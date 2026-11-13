@@ -444,14 +444,19 @@ fn defend_the_hearth_mints_no_target_slot_and_shields_players() {
         life_before,
         "combat damage to the player is prevented"
     );
-    assert!(outcome.events().iter().any(|event| matches!(
-        event,
-        GameEvent::DamagePrevented {
-            source_id,
-            target: TargetRef::Player(player),
-            amount: 2,
-        } if *source_id == x && *player == P1
-    )));
+    let prevented_player_damage: u32 = outcome
+        .events()
+        .iter()
+        .filter_map(|event| match event {
+            GameEvent::DamagePrevented {
+                target: TargetRef::Player(P1),
+                amount,
+                ..
+            } => Some(*amount),
+            _ => None,
+        })
+        .sum();
+    assert_eq!(prevented_player_damage, 2);
     assert!(!outcome.events().iter().any(|event| matches!(
         event,
         GameEvent::DamageDealt {

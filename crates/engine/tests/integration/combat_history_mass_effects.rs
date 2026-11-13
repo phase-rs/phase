@@ -24,7 +24,7 @@ use engine::types::mana::ManaCost;
 use engine::types::phase::Phase;
 use engine::types::zones::Zone;
 
-use super::rules::{assert_damage_dealt, assert_no_damage_to};
+use super::support::{assert_damage_dealt, assert_no_damage_to};
 use engine::types::ability::TargetRef;
 
 const CATHEDRAL_MEMBRANE: &str = "({W/P} can be paid with either {W} or 2 life.)

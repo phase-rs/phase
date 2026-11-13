@@ -11,7 +11,7 @@ use engine::types::mana::{ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::zones::Zone;
 
-use super::rules::assert_damage_dealt;
+use super::support::assert_damage_dealt;
 use engine::types::ability::TargetRef;
 
 const ENTS_FURY_ORACLE: &str = "Put a +1/+1 counter on target creature you control if its power is 4 or greater. Then that creature gets +1/+1 until end of turn and fights target creature you don't control.";

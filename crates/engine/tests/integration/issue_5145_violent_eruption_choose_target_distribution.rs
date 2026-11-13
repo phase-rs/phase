@@ -11,7 +11,7 @@ use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::zones::Zone;
 
-use super::rules::{advance_until_stack_empty_and_collect_events, assert_damage_dealt};
+use super::support::{advance_until_stack_empty_and_collect_events, assert_damage_dealt};
 
 const VIOLENT_ERUPTION_ORACLE: &str =
     "Violent Eruption deals 4 damage divided as you choose among any number of targets.";

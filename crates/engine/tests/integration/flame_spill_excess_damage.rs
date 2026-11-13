@@ -27,7 +27,7 @@ use engine::types::player::PlayerId;
 use engine::types::replacements::ReplacementEvent;
 use engine::types::zones::Zone;
 
-use super::rules::assert_damage_dealt;
+use super::support::assert_damage_dealt;
 
 const FLAME_SPILL: &str = "Flame Spill deals 4 damage to target creature. \
 Excess damage is dealt to that creature's controller instead.";

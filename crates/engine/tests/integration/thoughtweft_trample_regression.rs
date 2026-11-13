@@ -27,7 +27,8 @@ use engine::types::keywords::Keyword;
 use engine::types::phase::Phase;
 use engine::types::zones::Zone;
 
-use super::rules::{assert_damage_dealt, run_combat_and_collect_events};
+use super::rules::run_combat_and_collect_events;
+use super::support::assert_damage_dealt;
 use engine::types::ability::TargetRef;
 
 /// Install the same continuous effect Thoughtweft Lieutenant's trigger creates

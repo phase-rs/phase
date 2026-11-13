@@ -355,71 +355,9 @@ fn run_combat_with_blocker_divisions_and_events(
     events
 }
 
-/// Assert one exact damage event from `source_id` to `target`.
-pub fn assert_damage_dealt(
-    events: &[GameEvent],
-    source_id: ObjectId,
-    target: TargetRef,
-    amount: u32,
-    is_combat: bool,
-) {
-    let matching = events
-        .iter()
-        .filter(|event| {
-            matches!(
-                event,
-                GameEvent::DamageDealt {
-                    source_id: actual_source,
-                    target: actual_target,
-                    amount: actual_amount,
-                    is_combat: actual_is_combat,
-                    ..
-                } if *actual_source == source_id
-                    && *actual_target == target
-                    && *actual_amount == amount
-                    && *actual_is_combat == is_combat
-            )
-        })
-        .count();
-    assert_eq!(matching, 1, "expected exactly one matching damage event");
-}
-
-/// Assert that no damage event in `events` has `target` as its recipient.
-pub fn assert_no_damage_to(events: &[GameEvent], target: TargetRef) {
-    assert!(
-        events.iter().all(|event| !matches!(
-            event,
-            GameEvent::DamageDealt {
-                target: actual_target,
-                ..
-            } if *actual_target == target
-        )),
-        "expected no damage event to {target:?}"
-    );
-}
-
-/// Resolve the current stack through public actions and return every event those
-/// actions emit. Stops at an interactive prompt the generic helper must not
-/// answer on behalf of the test.
-pub fn advance_until_stack_empty_and_collect_events(runner: &mut GameRunner) -> Vec<GameEvent> {
-    let mut events = Vec::new();
-    for _ in 0..40 {
-        let action = match runner.state().waiting_for.clone() {
-            WaitingFor::OrderTriggers { triggers, .. } => GameAction::OrderTriggers {
-                order: (0..triggers.len()).collect(),
-            },
-            WaitingFor::Priority { .. } if !runner.state().stack.is_empty() => {
-                GameAction::PassPriority
-            }
-            _ => break,
-        };
-        let result = runner
-            .act(action)
-            .expect("stack-driving action should succeed");
-        events.extend(result.events);
-    }
-    events
-}
+pub use crate::support::{
+    advance_until_stack_empty_and_collect_events, assert_damage_dealt, assert_no_damage_to,
+};
 
 /// Evenly divide `total` damage among `targets` (first target absorbs the
 /// remainder) so the assignment sums to `total` (CR 510.1e). Used as the

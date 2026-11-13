@@ -9,7 +9,7 @@ use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaType, ManaUnit};
 use engine::types::phase::Phase;
 
-use super::rules::{assert_damage_dealt, assert_no_damage_to};
+use super::support::{assert_damage_dealt, assert_no_damage_to};
 
 const ULVENWALD_TRACKER_ORACLE: &str =
     "{1}{G}, {T}: Target creature you control fights another target creature.";

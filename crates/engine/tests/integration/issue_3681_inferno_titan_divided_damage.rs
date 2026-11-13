@@ -17,7 +17,7 @@ use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::zones::Zone;
 
-use super::rules::{advance_until_stack_empty_and_collect_events, assert_damage_dealt};
+use super::support::{advance_until_stack_empty_and_collect_events, assert_damage_dealt};
 
 /// Canonical Oracle text (verified against client/public/card-data.json).
 const INFERNO_ORACLE: &str =

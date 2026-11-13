@@ -31,7 +31,7 @@ use engine::types::identifiers::ObjectId;
 use engine::types::phase::Phase;
 use engine::types::zones::Zone;
 
-use super::rules::{
+use super::support::{
     advance_until_stack_empty_and_collect_events, assert_damage_dealt, assert_no_damage_to,
 };
 use engine::types::player::PlayerId;
