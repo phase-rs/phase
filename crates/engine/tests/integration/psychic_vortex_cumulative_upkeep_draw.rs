@@ -3805,6 +3805,154 @@ nonland and reveal cards from the top of your library until you reveal a card \
 of the chosen kind. Put that card into your hand and put all other cards \
 revealed this way on the bottom of your library in any order.";
 
+/// CR 104.3a + CR 800.4a: the payer concedes at a later choice of their own
+/// substitute. P0 pays Psychic Vortex's one-draw upkeep, accepts their own
+/// Abundance for the draw, and concedes at its land-or-nonland choice. The
+/// payment leaves with its controller, and the draw still in flight is torn
+/// down with the choice before the continuation beneath it: the departure is
+/// published, nothing is drawn, the departed board passes a checked save and
+/// restore, and a living player acts next.
+#[test]
+fn a_payer_departing_at_their_own_substitutes_later_choice_leaves_the_game() {
+    let (mut runner, vortex, ()) = three_player_vortex_board(0, |scenario| {
+        scenario.add_enchantment_from_oracle(P0, "Abundance", ABUNDANCE_ORACLE);
+    });
+    advance_through_upkeep(&mut runner);
+    assert_draw_cost_prompt(&runner, 1, 1);
+    runner
+        .act(GameAction::PayUnlessCost { pay: true })
+        .expect("choosing the draw cost is legal");
+    assert_replacement_choice(&runner, "the draw offers P0 Abundance");
+    runner
+        .act(GameAction::ChooseReplacement {
+            index: APPLY_REPLACEMENT,
+        })
+        .expect("P0 accepts Abundance");
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::NamedChoice { player: P0, .. }
+        ),
+        "reach guard: Abundance asks P0 for land or nonland: {:?}",
+        runner.state().waiting_for
+    );
+    assert!(
+        runner.state().pending_cost_move_resume.is_some(),
+        "reach guard: the payment is parked"
+    );
+
+    let departure = concede_with_events(&mut runner, P0);
+    assert!(
+        departure.iter().any(|event| matches!(
+            event,
+            GameEvent::PlayerEliminated { player_id } if *player_id == P0
+        )),
+        "CR 104.3a: the departure is published"
+    );
+    assert!(
+        !departure
+            .iter()
+            .any(|event| matches!(event, GameEvent::CardDrawn { .. })),
+        "nothing is drawn for the departed player"
+    );
+    assert_eq!(upkeep_resolutions(&departure, vortex), 0);
+    let state = runner.state();
+    assert!(state.players[P0.0 as usize].is_eliminated);
+    assert!(state.pending_cost_move_resume.is_none(), "nothing is owed");
+    let WaitingFor::Priority { player } = state.waiting_for else {
+        panic!("a living player has priority: {:?}", state.waiting_for);
+    };
+    assert_ne!(player, P0);
+    let saved = serde_json::to_string(&PersistedGameState::Raw(Box::new(state.clone())))
+        .expect("the departed board serializes");
+    let mut restored = serde_json::from_str::<PersistedGameState>(&saved)
+        .expect("the save decodes")
+        .into_game_state()
+        .expect("nothing of the abandoned payment is left behind");
+    engine::game::engine::apply(&mut restored, player, GameAction::PassPriority)
+        .expect("the game goes on for the living players");
+}
+
+/// Arranges `player`'s library so that choosing "Land" for Abundance reveals
+/// two nonland cards before a land, which asks for the misses' bottom order.
+fn stage_two_misses_before_a_land(runner: &mut GameRunner, player: PlayerId) {
+    let state = runner.state_mut();
+    let library: Vec<ObjectId> = state.players[player.0 as usize]
+        .library
+        .iter()
+        .copied()
+        .collect();
+    for (index, id) in library.iter().enumerate() {
+        let object = state.objects.get_mut(id).expect("library card");
+        object.card_types.core_types.clear();
+        if index == 2 {
+            object
+                .card_types
+                .core_types
+                .push(engine::types::card_type::CoreType::Land);
+        }
+    }
+    engine::game::layers::evaluate_layers(state);
+}
+
+/// CR 104.3a + CR 800.4a: the payer concedes one prompt later than in
+/// `a_payer_departing_at_their_own_substitutes_later_choice_leaves_the_game`,
+/// while ordering Abundance's revealed misses. The departure is published,
+/// nothing is owed, the departed board restores, and a living player acts.
+#[test]
+fn a_payer_departing_at_their_own_substitutes_bottom_order_leaves_the_game() {
+    let (mut runner, vortex, ()) = three_player_vortex_board(0, |scenario| {
+        scenario.add_enchantment_from_oracle(P0, "Abundance", ABUNDANCE_ORACLE);
+    });
+    stage_two_misses_before_a_land(&mut runner, P0);
+    advance_through_upkeep(&mut runner);
+    runner
+        .act(GameAction::PayUnlessCost { pay: true })
+        .expect("choosing the draw cost is legal");
+    runner
+        .act(GameAction::ChooseReplacement {
+            index: APPLY_REPLACEMENT,
+        })
+        .expect("P0 accepts Abundance");
+    runner
+        .act(GameAction::ChooseOption {
+            choice: "Land".to_string(),
+        })
+        .expect("P0 chooses Land");
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::RevealUntilBottomOrder { player: P0, .. }
+        ),
+        "reach guard: Abundance asks P0 to order the misses: {:?}",
+        runner.state().waiting_for
+    );
+
+    let departure = concede_with_events(&mut runner, P0);
+    assert!(
+        departure.iter().any(|event| matches!(
+            event,
+            GameEvent::PlayerEliminated { player_id } if *player_id == P0
+        )),
+        "CR 104.3a: the departure is published"
+    );
+    assert_eq!(upkeep_resolutions(&departure, vortex), 0);
+    let state = runner.state();
+    assert!(state.pending_cost_move_resume.is_none(), "nothing is owed");
+    let WaitingFor::Priority { player } = state.waiting_for else {
+        panic!("a living player has priority: {:?}", state.waiting_for);
+    };
+    assert_ne!(player, P0);
+    let saved = serde_json::to_string(&PersistedGameState::Raw(Box::new(state.clone())))
+        .expect("the departed board serializes");
+    let mut restored = serde_json::from_str::<PersistedGameState>(&saved)
+        .expect("the save decodes")
+        .into_game_state()
+        .expect("nothing of the abandoned payment is left behind");
+    engine::game::engine::apply(&mut restored, player, GameAction::PassPriority)
+        .expect("the game goes on for the living players");
+}
+
 /// CR 800.4a + CR 117.2e: the departed chooser's open question is not their
 /// own draw here. P1's Notion Thief turns the first of P0's two upkeep draws
 /// into P1's draw, P1 accepts Abundance for it, and P1 concedes at Abundance's

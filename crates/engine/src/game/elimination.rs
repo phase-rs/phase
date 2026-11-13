@@ -1997,6 +1997,15 @@ fn abandon_source_bound_resolution_prompt(
         return;
     }
 
+    // CR 800.4a: the family is abandoned in dependency order. A draw still in
+    // flight above the abandoned choice (an interactive substitute asked it:
+    // the leaver's own Abundance, on a draw of a payment that left with them)
+    // is torn down before the continuation beneath it, which the carrier's
+    // abandonment expects on top.
+    if state.active_multi_draw_frame().is_some() {
+        super::replacement::abandon_post_replacement_continuation(state);
+    }
+
     if selecting_resolution_sacrifice {
         let _ = state
             .take_active_optional_effect_frame()
