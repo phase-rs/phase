@@ -27025,16 +27025,64 @@ fn explicit_any_target_clause(effect: &Effect, lower: &str) -> bool {
         && nom_primitives::scan_contains(lower, "any target")
 }
 
-/// CR 608.2c + CR 120.1: A demonstrative used by a damage amount does not
-/// turn a named/self damage subject into the earlier target. For example,
-/// Volcanic Vision's "~ deals damage equal to that card's mana value" keeps
-/// the spell as the source and reads the returned card only for its mana value.
-fn has_explicit_self_damage_subject(effect: &Effect, lower: &str) -> bool {
+/// CR 608.2c + CR 120.1: Keep a named/self damage subject when its recipient is
+/// independent from the earlier target. An anaphor in the amount does not name
+/// the recipient: Volcanic Vision reads the returned card's mana value, while
+/// "to that creature" still binds to the earlier chosen target. A new explicit
+/// target stays independent when an earlier target already exists (Pyretic
+/// Rebirth); without one, it is promoted to the enclosing ability's announced
+/// target (Cragganwick Cremator).
+fn self_damage_subject_has_independent_recipient(
+    effect: &Effect,
+    lower: &str,
+    has_prior_typed_target: bool,
+) -> bool {
     if !matches!(effect, Effect::DealDamage { .. } | Effect::DamageAll { .. }) {
         return false;
     }
 
-    preceded(
+    match self_named_damage_recipient_segment(lower) {
+        None => false,
+        Some(None) => true,
+        Some(Some(recipient)) => {
+            if has_anaphoric_reference(recipient) {
+                return false;
+            }
+
+            let declares_target = preceded(
+                opt(tag::<_, _, OracleError<'_>>("random ")),
+                nom_target::parse_declared_target_prefix,
+            )
+            .parse(recipient)
+            .is_ok();
+            !declares_target || has_prior_typed_target
+        }
+    }
+}
+
+/// Preserve the damage source at the source-binding seam while allowing the
+/// normal recipient rewriters to resolve "that creature" independently. A
+/// named self source ("~ deals damage", "this spell deals damage") is the
+/// resolving object under CR 120.1 even when an amount anaphor names an earlier
+/// object.
+fn preserve_self_damage_source(effect: &mut Effect, lower: &str) {
+    if self_named_damage_recipient_segment(lower).is_none() {
+        return;
+    }
+    match effect {
+        Effect::DealDamage { damage_source, .. } | Effect::DamageAll { damage_source, .. } => {
+            *damage_source = None;
+        }
+        _ => {}
+    }
+}
+
+/// Recognize a self-named damage subject and return its parsed recipient, when
+/// the recipient boundary is one of the supported damage forms. The outer
+/// `Option` distinguishes a different subject from a recognized self subject
+/// whose recipient boundary is not established.
+fn self_named_damage_recipient_segment(lower: &str) -> Option<Option<&str>> {
+    let Ok((after_damage, _)) = preceded(
         opt(tag::<_, _, OracleError<'_>>("then ")),
         preceded(
             alt((
@@ -27047,8 +27095,48 @@ fn has_explicit_self_damage_subject(effect: &Effect, lower: &str) -> bool {
             tag(" deals damage"),
         ),
     )
-    .parse(lower)
-    .is_ok()
+    .parse(lower) else {
+        return None;
+    };
+    Some(explicit_self_damage_recipient(after_damage))
+}
+
+/// Return the recipient segment for recipient-first and amount-first Oracle
+/// damage forms. The count-first form reuses `parse_count_expr`, the same
+/// quantity authority used by damage parsing. This keeps amount anaphors out
+/// of recipient detection.
+fn explicit_self_damage_recipient(text_after_damage: &str) -> Option<&str> {
+    let (tail, _) = space0::<_, OracleError<'_>>.parse(text_after_damage).ok()?;
+
+    // Recipient-first: "deals damage to that creature equal to its power".
+    if let Ok((after_to, _)) = tag::<_, _, OracleError<'_>>("to ").parse(tail) {
+        let recipient = take_until::<_, _, OracleError<'_>>(" equal to ")
+            .parse(after_to)
+            .map(|(_, recipient)| recipient)
+            .unwrap_or(after_to);
+        return Some(recipient);
+    }
+
+    // Expression-first: "deals damage equal to its power to that creature".
+    if let Ok((amount, _)) = tag::<_, _, OracleError<'_>>("equal to ").parse(tail) {
+        let (recipient_tail, _) = take_until::<_, _, OracleError<'_>>(" to ")
+            .parse(amount)
+            .ok()?;
+        let (_, recipient) = preceded(tag::<_, _, OracleError<'_>>(" to "), rest)
+            .parse(recipient_tail)
+            .ok()?;
+        return Some(recipient);
+    }
+
+    // Count-first: "deals 3 damage to that creature".
+    let (_, after_count) = parse_count_expr(tail)?;
+    let (after_damage_noun, _) = tag::<_, _, OracleError<'_>>("damage")
+        .parse(after_count)
+        .ok()?;
+    let (_, recipient) = preceded(tag::<_, _, OracleError<'_>>(" to "), rest)
+        .parse(after_damage_noun)
+        .ok()?;
+    Some(recipient)
 }
 
 fn rewrite_triggering_spell_controller_to_parent_target_controller(effect: &mut Effect) {
@@ -49812,6 +49900,7 @@ fn parse_effect_chain_ir_body(
         // chunks. The deeper links are never visited by these rewriters anyway,
         // which is exactly why a head-only rewrite corrupts the chain.
         let is_distributed_chunk = text_is_compound_subject_distribution(&text);
+        let has_prior_typed_target = chain_has_prior_typed_referent(builder.clauses(), false);
         // Kicker clauses referencing "that creature"/"it" inherit the parent's target.
         // CR 608.2c: its `!builder.is_empty()` gate is intentionally broad
         // (many antecedent shapes reach this without a `target_filter()`, e.g. a typed
@@ -49830,7 +49919,11 @@ fn parse_effect_chain_ir_body(
             && !condition
                 .as_ref()
                 .is_some_and(condition_measures_tracked_set)
-            && !has_explicit_self_damage_subject(&clause.effect, &text_lower)
+            && !self_damage_subject_has_independent_recipient(
+                &clause.effect,
+                &text_lower,
+                has_prior_typed_target,
+            )
             // CR 608.2k: only a GENUINE source-counter gate (no prior chosen
             // target — see `binds_source_counter_pronoun`) keeps the SelfRef
             // binding; a mis-scoped bare "it" over a prior typed target
@@ -49920,7 +50013,11 @@ fn parse_effect_chain_ir_body(
             && has_anaphoric_reference(&recipient_anaphor_lower)
             && !typed_trigger_subject
             && !explicit_any_target_clause(&clause.effect, &text_lower)
-            && !has_explicit_self_damage_subject(&clause.effect, &text_lower)
+            && !self_damage_subject_has_independent_recipient(
+                &clause.effect,
+                &text_lower,
+                has_prior_typed_target,
+            )
             && !replace_fight_subject_with_parent_if_anaphoric_subject(
                 &text_lower,
                 &mut clause.effect,
@@ -49949,11 +50046,15 @@ fn parse_effect_chain_ir_body(
         // (Nissa, Who Shakes the World).
         if condition.is_none()
             && !is_distributed_chunk
-            && chain_has_prior_typed_referent(builder.clauses(), false)
+            && has_prior_typed_target
             && has_anaphoric_reference(&recipient_anaphor_lower)
             && !typed_trigger_subject
             && !explicit_any_target_clause(&clause.effect, &text_lower)
-            && !has_explicit_self_damage_subject(&clause.effect, &text_lower)
+            && !self_damage_subject_has_independent_recipient(
+                &clause.effect,
+                &text_lower,
+                has_prior_typed_target,
+            )
             && !replace_fight_subject_with_parent_if_anaphoric_subject(
                 &text_lower,
                 &mut clause.effect,
@@ -51234,6 +51335,8 @@ fn parse_effect_chain_ir_body(
                 );
                 continue 'chunks;
             }
+
+            preserve_self_damage_source(&mut clause.effect, &text_lower);
 
             let clause_declared_group = chunk_ctx.clause_declared_group.take();
             if let Some(group) = clause_declared_group {

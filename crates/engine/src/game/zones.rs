@@ -1464,6 +1464,11 @@ pub fn apply_resolved_zone_change(
     // (issue #8795), through the shared authority.
     prune_object_bound_effects_on_exit(state, command.object.object_id, command.from, command.to);
     if command.from == Zone::Battlefield && command.to != Zone::Battlefield {
+        // CR 400.7 + CR 611.2a: replay bypasses the live battlefield host-left
+        // replacement prune. Run the same authority before the object is
+        // restored from base, or legacy base-resident turn-bound riders can
+        // return with the new battlefield occurrence.
+        super::layers::prune_controller_controls_source_on_leave(state, command.object.object_id);
         // CR 400.7 + CR 613.1: the live move restores the printed baseline after
         // pruning battlefield-bound effects. This also ends resolution-installed
         // riders from the departing object before a later re-entry.

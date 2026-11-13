@@ -3244,34 +3244,43 @@ pub(super) fn strip_property_conditional(
     let lower = text.to_lowercase();
     let tp = TextPair::new(text, &lower);
 
-    // CR 608.2c + CR 608.2k + CR 208.1: "its power" binds the ability SOURCE for
-    // a player/phase-subject trigger (Amalia, Lily Bowen), or the clause-local
-    // object (CostPaidObject) for a target/entering-referent clause (Tribute,
-    // Ent's Fury). A player/phase subject ("you", "a player", any) has no
-    // clause-local object for "its" to bind, so the anaphor resolves to the
-    // ability source (CR 113.7a LKI); a target/typed-object subject supplies the
-    // referent the untargeted "its" reads (CR 608.2k).
-    let scope = match ctx.subject {
-        Some(TargetFilter::Controller) | Some(TargetFilter::Player) | Some(TargetFilter::Any) => {
-            ObjectScope::Source
-        }
-        _ => ObjectScope::CostPaidObject,
-    };
-
-    for (property, qty_ref) in &[
-        ("power", QuantityRef::Power { scope }),
-        ("toughness", QuantityRef::Toughness { scope }),
-    ] {
+    for (property, stat) in [("power", PtStat::Power), ("toughness", PtStat::Toughness)] {
         let pattern = format!(" if its {property} is ");
         if let Some((before, after)) = tp.rsplit_around(&pattern) {
             let after = after.lower.trim_end_matches('.');
 
             if let Some((comparator, value)) = parse_comparison_suffix(after) {
+                // CR 115.1 + CR 608.2c + CR 208.1: When the gated instruction
+                // declares one object target, "its" refers to that target
+                // (Ent's Fury). Otherwise preserve the existing source vs.
+                // cost/trigger referent rule below (Amalia, Lily Bowen,
+                // Tribute to the World Tree). Parse the instruction without its
+                // condition on a throwaway context; a multi-target or
+                // non-object instruction is not enough evidence to bind the
+                // anaphor to the first target slot.
+                let has_single_object_target = effect_target_filter(before.original, ctx)
+                    .is_some_and(|filter| {
+                        !filter.is_context_ref()
+                            && super::lower::target_filter_is_single_object_target(&filter)
+                    });
+                let scope = if has_single_object_target {
+                    ObjectScope::Target
+                } else {
+                    match ctx.subject {
+                        Some(TargetFilter::Controller)
+                        | Some(TargetFilter::Player)
+                        | Some(TargetFilter::Any) => ObjectScope::Source,
+                        _ => ObjectScope::CostPaidObject,
+                    }
+                };
+                let qty = match stat {
+                    PtStat::Power => QuantityRef::Power { scope },
+                    PtStat::Toughness => QuantityRef::Toughness { scope },
+                    PtStat::TotalPowerToughness => return (None, text.to_string()),
+                };
                 return (
                     Some(AbilityCondition::QuantityCheck {
-                        lhs: QuantityExpr::Ref {
-                            qty: qty_ref.clone(),
-                        },
+                        lhs: QuantityExpr::Ref { qty },
                         comparator,
                         rhs: QuantityExpr::Fixed { value },
                     }),

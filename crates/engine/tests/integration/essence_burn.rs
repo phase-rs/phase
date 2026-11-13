@@ -6,6 +6,7 @@ use engine::types::actions::GameAction;
 use engine::types::counter::CounterType;
 use engine::types::game_state::{CastPaymentMode, WaitingFor};
 use engine::types::identifiers::ObjectId;
+use engine::types::keywords::Keyword;
 use engine::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
@@ -464,17 +465,43 @@ fn essence_burn_target_does_not_rebind_after_cloudshift() {
 }
 
 #[test]
-fn essence_burn_battlefield_exit_replay_clears_damage_and_rider() {
+fn torch_legacy_base_resident_rider_is_pruned_on_live_and_replayed_bounce() {
     use engine::types::resolved_commands::ResolvedRulesCommand;
 
     let mut s = lifetime_board();
     let host = real(&mut s, P0, "Catacomb Slug", Zone::Battlefield);
-    let essence = real(&mut s, P0, "Essence Burn", Zone::Hand);
+    let torch = real(&mut s, P0, "Torch the Tower", Zone::Hand);
     let unsummon = real(&mut s, P0, "Unsummon", Zone::Hand);
+    let murder = real(&mut s, P0, "Murder", Zone::Hand);
     let mut r = s.build();
-    r.cast(essence).target_object(host).resolve();
-    assert_eq!(r.state().objects[&host].damage_marked, 5);
+    r.cast(torch)
+        .target_object(host)
+        .decline_optional()
+        .resolve();
+    assert_eq!(r.state().objects[&host].damage_marked, 2);
     assert_eq!(live_resolution_count(&r, host), 1);
+    assert_eq!(base_legacy_die_exile_count_in_state(r.state(), host), 0);
+
+    // Simulate a saved state written by the previous installer, which stored
+    // this turn-bound rider in both the base and live replacement rows.
+    let legacy_rider = r.state().objects[&host]
+        .replacement_definitions
+        .iter_unchecked()
+        .find(|definition| is_turn_bound_die_exile(definition))
+        .expect("the exact Torch rider is live before the simulated legacy write")
+        .clone();
+    let mut legacy_rider = legacy_rider;
+    legacy_rider.origin = engine::types::ability::ReplacementOrigin::Characteristic;
+    std::sync::Arc::make_mut(
+        &mut r
+            .state_mut()
+            .objects
+            .get_mut(&host)
+            .expect("host exists")
+            .base_replacement_definitions,
+    )
+    .push(legacy_rider);
+    assert_eq!(base_legacy_die_exile_count_in_state(r.state(), host), 1);
 
     // Commit Unsummon first so replay starts after its Hand-to-Stack zone
     // change; the recorded host-exit index is relative to that exact prestate.
@@ -486,6 +513,10 @@ fn essence_burn_battlefield_exit_replay_clears_damage_and_rider() {
     assert_eq!(live.zone, Zone::Hand);
     assert_eq!(live.damage_marked, 0);
     assert_eq!(live_resolution_count_in_state(exited.state(), host), 0);
+    assert_eq!(
+        base_legacy_die_exile_count_in_state(exited.state(), host),
+        0
+    );
 
     let command = exited
         .state()
@@ -511,7 +542,93 @@ fn essence_burn_battlefield_exit_replay_clears_damage_and_rider() {
     assert_eq!(replay.objects[&host].zone, Zone::Hand);
     assert_eq!(replay.objects[&host].damage_marked, 0);
     assert_eq!(live_resolution_count_in_state(&replay, host), 0);
+    assert_eq!(base_legacy_die_exile_count_in_state(&replay, host), 0);
+
+    // The live bounce's returned card is a new object. Recasting it and
+    // destroying it before cleanup must use the ordinary graveyard destination.
+    let mut recast = GameRunner::from_state(exited.state().clone());
+    recast.cast(host).resolve();
+    assert_eq!(recast.state().objects[&host].zone, Zone::Battlefield);
+    assert_eq!(live_resolution_count(&recast, host), 0);
+    assert_eq!(
+        base_legacy_die_exile_count_in_state(recast.state(), host),
+        0
+    );
+    let death = recast.cast(murder).target_object(host).resolve();
+    assert_eq!(death.state().objects[&host].zone, Zone::Graveyard);
+    assert!(death.events().iter().any(|event| matches!(
+        event,
+        engine::types::events::GameEvent::ZoneChanged {
+            object_id,
+            to: Zone::Graveyard,
+            ..
+        } if *object_id == host
+    )));
 }
+
+#[test]
+fn generated_volcanic_vision_returns_murder_deals_from_the_spell_and_exiles_it() {
+    let db = crate::support::shared_card_db().expect("integration card fixture must load");
+    let vision_face = db
+        .get_face_by_name("Volcanic Vision")
+        .expect("Volcanic Vision must be in the generated fixture");
+    assert!(
+        vision_face
+            .abilities
+            .iter()
+            .all(|definition| !gaps(definition)),
+        "the generated Volcanic Vision definition must parse its full Oracle text"
+    );
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let vision = scenario.add_real_card(P0, "Volcanic Vision", Zone::Hand, db);
+    let murder = scenario.add_real_card(P0, "Murder", Zone::Graveyard, db);
+    let first = scenario
+        .add_creature(P1, "First Opposing Creature", 2, 5)
+        .id();
+    let second = scenario
+        .add_creature(P1, "Second Opposing Creature", 2, 5)
+        .id();
+    scenario.with_mana_pool(
+        P0,
+        [
+            ManaType::Red,
+            ManaType::Red,
+            ManaType::Colorless,
+            ManaType::Colorless,
+            ManaType::Colorless,
+            ManaType::Colorless,
+            ManaType::Colorless,
+        ]
+        .into_iter()
+        .map(|mana| ManaUnit::new(mana, ObjectId(0), false, vec![]))
+        .collect(),
+    );
+    let mut runner = scenario.build();
+
+    let outcome = runner.cast(vision).target_object(murder).resolve();
+
+    assert_eq!(outcome.state().objects[&murder].zone, Zone::Hand);
+    assert_eq!(outcome.state().objects[&vision].zone, Zone::Exile);
+    for creature in [first, second] {
+        assert_eq!(outcome.damage_marked(creature), 3);
+        assert!(
+            outcome.events().iter().any(|event| matches!(
+                event,
+                engine::types::events::GameEvent::DamageDealt {
+                    source_id,
+                    target: TargetRef::Object(target),
+                    amount: 3,
+                    is_combat: false,
+                    ..
+                } if *source_id == vision && *target == creature
+            )),
+            "Volcanic Vision itself must deal its mana-value 3 damage to {creature:?}"
+        );
+    }
+}
+
 #[test]
 fn essence_burn_bounce_reentry_drops_old_grant() {
     let mut s = board();
@@ -581,6 +698,46 @@ fn essence_burn_generated_fixture_exiles_lethal_creature() {
     out.assert_zone(&[victim], Zone::Exile);
     out.assert_zone(&[spell], Zone::Graveyard);
     out.assert_stack_size(0);
+}
+
+/// CR 608.2c + CR 120.1: Crash Landing's second instruction names the creature
+/// selected by its first instruction, even though the spell itself deals the
+/// damage. The test casts the exact printed Oracle text through the public path.
+#[test]
+fn crash_landing_damage_resolves_to_the_creature_that_lost_flying() {
+    const ORACLE: &str = "Target creature with flying loses flying until end of turn. \
+        Crash Landing deals damage to that creature equal to the number of Forests you control.";
+
+    let mut scenario = board();
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Crash Landing", true, ORACLE)
+        .with_mana_cost(cost(2, ManaCostShard::Green))
+        .id();
+    let target = scenario
+        .add_creature(P1, "Chosen flyer", 2, 6)
+        .with_keyword(Keyword::Flying)
+        .id();
+    let bystander = scenario
+        .add_creature(P1, "Other flyer", 2, 6)
+        .with_keyword(Keyword::Flying)
+        .id();
+    scenario.add_basic_land(P0, ManaColor::Green);
+
+    let mut runner = scenario.build();
+    let outcome = runner.cast(spell).target_object(target).resolve();
+
+    assert_eq!(outcome.damage_marked(target), 1);
+    assert_eq!(outcome.damage_marked(bystander), 0);
+    assert!(
+        !outcome.state().objects[&target].has_keyword(&Keyword::Flying),
+        "the first instruction resolves on the chosen creature"
+    );
+    outcome.assert_zone(&[spell], Zone::Graveyard);
+    outcome.assert_stack_size(0);
+    assert!(matches!(
+        outcome.final_waiting_for(),
+        WaitingFor::Priority { .. }
+    ));
 }
 
 #[test]
@@ -699,30 +856,40 @@ fn live_resolution_count_in_state(
     state: &engine::types::game_state::GameState,
     host: ObjectId,
 ) -> usize {
-    use engine::types::ability::{Effect, RestrictionExpiry};
-    use engine::types::replacements::ReplacementEvent;
     state.objects[&host]
         .replacement_definitions
         .iter_unchecked()
-        .filter(|def| {
-            def.is_resolution_installed()
-                && def.event == ReplacementEvent::Moved
-                && def.valid_card == Some(TargetFilter::SelfRef)
-                && def.expiry == Some(RestrictionExpiry::EndOfTurn)
-                && def.consume_on_apply
-                && def.execute.as_deref().is_some_and(|execute| {
-                    matches!(
-                        execute.effect.as_ref(),
-                        Effect::ChangeZone {
-                            origin: Some(Zone::Battlefield),
-                            destination: Zone::Exile,
-                            target: TargetFilter::SelfRef,
-                            ..
-                        }
-                    )
-                })
-        })
+        .filter(|def| def.is_resolution_installed() && is_turn_bound_die_exile(def))
         .count()
+}
+fn base_legacy_die_exile_count_in_state(
+    state: &engine::types::game_state::GameState,
+    host: ObjectId,
+) -> usize {
+    state.objects[&host]
+        .base_replacement_definitions
+        .iter()
+        .filter(|def| !def.is_resolution_installed() && is_turn_bound_die_exile(def))
+        .count()
+}
+fn is_turn_bound_die_exile(def: &engine::types::ability::ReplacementDefinition) -> bool {
+    use engine::types::ability::{Effect, RestrictionExpiry};
+    use engine::types::replacements::ReplacementEvent;
+    def.event == ReplacementEvent::Moved
+        && def.valid_card == Some(TargetFilter::SelfRef)
+        && def.expiry == Some(RestrictionExpiry::EndOfTurn)
+        && def.consume_on_apply
+        && def.execute.as_deref().is_some_and(|execute| {
+            matches!(
+                execute.effect.as_ref(),
+                Effect::ChangeZone {
+                    origin: Some(Zone::Battlefield),
+                    destination: Zone::Exile,
+                    target: TargetFilter::SelfRef,
+                    ..
+                }
+            )
+        })
 }
 fn assert_intrinsic_base_in_state(state: &engine::types::game_state::GameState, host: ObjectId) {
     assert!(state.objects[&host]
