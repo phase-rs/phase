@@ -2276,13 +2276,10 @@ pub(crate) fn target_dependent_flash_permission_satisfied(
     let Some(obj) = state.objects.get(&object_id) else {
         return true;
     };
-    // CR 702.8a: A real Flash keyword (printed or granted via continuous effect)
-    // authorizes instant-speed casting independent of any conditional flash
-    // option. If the spell has Flash, the cast is legal regardless of any
-    // `AsThoughHadFlash` option's condition.
-    let has_real_flash =
-        super::casting::effective_spell_keyword_kinds_for(state, player, object_id, fused)
-            .contains(&crate::types::keywords::KeywordKind::Flash);
+    // CR 702.8a / CR 601.3b: an unconditional flash route (keyword or as-though
+    // permission) authorizes instant-speed casting independent of any
+    // conditional flash option, whatever that option's condition.
+    let has_real_flash = super::casting::spell_has_effective_flash(state, player, object_id, fused);
     if has_real_flash {
         return true;
     }
@@ -2343,12 +2340,10 @@ pub(crate) fn target_dependent_flash_permission_feasible(
 ) -> bool {
     use crate::types::ability::{SpellCastingOptionKind, TargetRef};
 
-    // CR 702.8a: A real Flash keyword (printed or granted via continuous
-    // effect) authorizes instant-speed casting independent of any conditional
-    // flash option — short-circuit before any feasibility analysis.
-    let has_real_flash =
-        super::casting::effective_spell_keyword_kinds_for(state, player, object_id, fused)
-            .contains(&crate::types::keywords::KeywordKind::Flash);
+    // CR 702.8a / CR 601.3b: an unconditional flash route (keyword or as-though
+    // permission) authorizes instant-speed casting independent of any
+    // conditional flash option — short-circuit before any feasibility analysis.
+    let has_real_flash = super::casting::spell_has_effective_flash(state, player, object_id, fused);
     if has_real_flash {
         return true;
     }

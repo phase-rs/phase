@@ -3034,7 +3034,7 @@ fn parse_cost_and_flash_clauses(input: &str) -> OracleResult<'_, (&str, &str)> {
 /// CR 601.2f + CR 601.3b + CR 611.3a: Radagast of Rhosgobel — "The first
 /// creature spell you cast each turn costs {2} less to cast and can be cast as
 /// though it had flash." One shared nth-qualified subject yields a `ModifyCost`
-/// static and a gated `CastWithKeyword { Flash }` static.
+/// static and a gated `CastWithFlash` static.
 fn parse_nth_spell_cost_and_flash(text: &str) -> Option<Vec<StaticDefinition>> {
     let lower = text.to_lowercase();
     let tp = TextPair::new(text, &lower);
@@ -3044,9 +3044,9 @@ fn parse_nth_spell_cost_and_flash(text: &str) -> Option<Vec<StaticDefinition>> {
     if !matches!(cost.mode, StaticMode::ModifyCost { .. }) {
         return None;
     }
-    let flash = super::keyword_grant::nth_qualified_spell_keyword_grant(
+    let flash = super::keyword_grant::nth_qualified_spell_grant(
         subject,
-        Keyword::Flash,
+        StaticMode::CastWithFlash,
         None,
         text,
     )?;

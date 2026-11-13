@@ -15004,19 +15004,11 @@ fn static_players_cant_gain_life() {
 
 #[test]
 fn static_cast_as_though_flash() {
-    // CR 601.3b + CR 702.8a: "You may cast [type] spells as though they had
-    // flash" must emit a `CastWithKeyword { Flash }` static — the only mode the
-    // flash-timing path (granted_spell_keywords) reads — with the spell-type
-    // filter preserved. Issue #1957: Vivien, Champion of the Wilds restricts the
-    // grant to CREATURE spells, and the dead `CastWithFlash` mode dropped both
-    // the timing grant and the type restriction.
+    // CR 601.3b + CR 609.4: "You may cast [type] spells as though they had
+    // flash" is a `CastWithFlash` timing permission that keeps the spell-type
+    // filter (Vivien, Champion of the Wilds: creature spells only).
     let def = parse_static_line("You may cast creature spells as though they had flash.").unwrap();
-    assert_eq!(
-        def.mode,
-        StaticMode::CastWithKeyword {
-            keyword: Keyword::Flash
-        }
-    );
+    assert_eq!(def.mode, StaticMode::CastWithFlash);
     let Some(TargetFilter::Typed(tf)) = &def.affected else {
         panic!(
             "affected must be a Typed creature filter, got {:?}",
@@ -15333,12 +15325,7 @@ fn static_cast_as_though_flash_all_spells() {
     // CR 601.3b: the bare "spells" form (Leyline of Anticipation, Vedalken
     // Orrery) grants flash to every spell the controller casts.
     let def = parse_static_line("You may cast spells as though they had flash.").unwrap();
-    assert_eq!(
-        def.mode,
-        StaticMode::CastWithKeyword {
-            keyword: Keyword::Flash
-        }
-    );
+    assert_eq!(def.mode, StaticMode::CastWithFlash);
     assert_eq!(
         def.affected,
         Some(TargetFilter::Typed(
@@ -15353,12 +15340,7 @@ fn static_cast_as_though_flash_compound_spell_types_scope_each_leg_to_you() {
         "You may cast legendary spells and artifact spells as though they had flash.",
     )
     .unwrap();
-    assert_eq!(
-        def.mode,
-        StaticMode::CastWithKeyword {
-            keyword: Keyword::Flash
-        }
-    );
+    assert_eq!(def.mode, StaticMode::CastWithFlash);
     let Some(TargetFilter::Or { filters }) = &def.affected else {
         panic!("expected Or affected filter, got {:?}", def.affected);
     };
@@ -15510,18 +15492,153 @@ fn static_cast_as_though_flash_players_may_forms_are_unscoped() {
         "Any player may cast Sliver spells as though they had flash.",
     ] {
         let def = parse_static_line(text).unwrap();
-        assert_eq!(
-            def.mode,
-            StaticMode::CastWithKeyword {
-                keyword: Keyword::Flash
-            }
-        );
+        assert_eq!(def.mode, StaticMode::CastWithFlash);
         match &def.affected {
             Some(TargetFilter::Typed(tf)) => {
                 assert_eq!(tf.controller, None, "{text}: must apply to every player");
             }
             other => panic!("{text}: expected Typed affected filter, got {other:?}"),
         }
+    }
+}
+
+/// CR 609.4: every printed "you may cast [type] spells as though they had flash" line is a
+/// `CastWithFlash` timing permission, never a Flash keyword grant.
+#[test]
+fn printed_as_though_flash_statics_lower_to_cast_with_flash() {
+    for (name, card_type, line) in [
+        ("Akoum", "Plane", "Players may cast enchantment spells as though they had flash."),
+        ("Breath of the Sleepless", "Enchantment", "You may cast Spirit spells as though they had flash."),
+        ("Captain Mar-Vell, Space-Born", "Creature", "Cosmic Awareness \u{2014} As long as an opponent has cast a spell this turn, you may cast spells as though they had flash."),
+        ("Gandalf the White", "Creature", "You may cast legendary spells and artifact spells as though they had flash."),
+        ("Gandalf, Friend of the Shire", "Creature", "You may cast sorcery spells as though they had flash."),
+        ("Heliod, the Warped Eclipse", "Creature", "You may cast spells as though they had flash."),
+        ("High Fae Trickster", "Creature", "You may cast spells as though they had flash."),
+        ("Hypersonic Dragon", "Creature", "You may cast sorcery spells as though they had flash. (You may cast them any time you could cast an instant.)"),
+        ("Keeper of the Secret Lair", "Creature", "You may cast Secret Lair spells as though they had flash."),
+        ("Kianne, Corrupted Memory", "Creature", "As long as Kianne's power is even, you may cast noncreature spells as though they had flash."),
+        ("Kianne, Corrupted Memory", "Creature", "As long as Kianne's power is odd, you may cast creature spells as though they had flash."),
+        ("Leyline of Anticipation", "Enchantment", "You may cast spells as though they had flash."),
+        ("Liberator, Urza's Battlethopter", "Creature", "You may cast colorless spells and artifact spells as though they had flash."),
+        ("Mai and Zuko", "Creature", "You may cast Ally spells and artifact spells as though they had flash."),
+        ("Najal, the Storm Runner", "Creature", "You may cast sorcery spells as though they had flash."),
+        ("Oura, the Imitator", "Creature", "You may cast Faerie spells as though they had flash."),
+        ("Prophet of Kruphix", "Creature", "You may cast creature spells as though they had flash."),
+        ("Quick Sliver", "Creature", "Any player may cast Sliver spells as though they had flash."),
+        ("Quicksilver, Speedster", "Creature", "As long as Quicksilver is tapped, you may cast spells as though they had flash."),
+        ("Raff Capashen, Ship's Mage", "Creature", "You may cast historic spells as though they had flash. (Artifacts, legendaries, and Sagas are historic.)"),
+        ("Rattlechains", "Creature", "You may cast Spirit spells as though they had flash."),
+        ("Renari, Merchant of Marvels", "Creature", "You may cast Dragon spells and artifact spells as though they had flash."),
+        ("Sally Sparrow", "Creature", "You may cast creature spells as though they had flash."),
+        ("Shimmer Myr", "Creature", "You may cast artifact spells as though they had flash."),
+        ("Sigarda's Aid", "Enchantment", "You may cast Aura and Equipment spells as though they had flash."),
+        ("Singer of Swift Rivers", "Creature", "You may cast Merfolk spells as though they had flash."),
+        ("Skittering Cicada", "Creature", "You may cast colorless spells as though they had flash."),
+        ("Tawnos", "Vanguard", "You may cast artifact, creature, and enchantment spells as though they had flash."),
+        ("Tidal Barracuda", "Creature", "Any player may cast spells as though they had flash."),
+        ("Valley Floodcaller", "Creature", "You may cast noncreature spells as though they had flash."),
+        ("Vedalken Orrery", "Artifact", "You may cast spells as though they had flash."),
+        ("Vernal Equinox", "Enchantment", "Any player may cast creature and enchantment spells as though they had flash."),
+        ("Vivien, Champion of the Wilds", "Planeswalker", "You may cast creature spells as though they had flash."),
+        ("Whirlwing Stormbrood", "Creature", "You may cast sorcery spells and Dragon spells as though they had flash."),
+        ("Wizards of Thay", "Creature", "You may cast sorcery spells as though they had flash."),
+        ("Yeva, Nature's Herald", "Creature", "You may cast green creature spells as though they had flash."),
+        ("The Blue Spirit", "Creature", "You may cast the first creature spell you cast each turn as though it had flash."),
+        ("Radagast of Rhosgobel", "Creature", "The first creature spell you cast each turn costs {2} less to cast and can be cast as though it had flash."),
+    ] {
+        let parsed = crate::parser::oracle::parse_oracle_text(
+            line,
+            name,
+            &[],
+            &[card_type.to_string()],
+            &[],
+        );
+        assert!(
+            parsed
+                .statics
+                .iter()
+                .any(|def| def.mode == StaticMode::CastWithFlash && def.affected.is_some()),
+            "{name}: {:?}",
+            parsed.statics
+        );
+        assert!(
+            !parsed
+                .statics
+                .iter()
+                .any(|def| matches!(def.mode, StaticMode::CastWithKeyword { .. })),
+            "{name}: {:?}",
+            parsed.statics
+        );
+    }
+}
+
+/// CR 702.8a: "have flash" grants the keyword itself.
+#[test]
+fn printed_have_flash_statics_stay_flash_keyword_grants() {
+    for (name, line) in [
+        (
+            "Chea, Friend to Maybe Too Many",
+            "Familiar spells you cast have flash.",
+        ),
+        (
+            "Teferi, Mage of Zhalfir",
+            "Creature cards you own that aren't on the battlefield have flash.",
+        ),
+    ] {
+        let parsed = crate::parser::oracle::parse_oracle_text(
+            line,
+            name,
+            &[],
+            &["Creature".to_string()],
+            &[],
+        );
+        assert!(
+            parsed.statics.iter().any(|def| def.mode
+                == StaticMode::CastWithKeyword {
+                    keyword: Keyword::Flash
+                }),
+            "{name}: {:?}",
+            parsed.statics
+        );
+    }
+}
+
+/// CR 611.2a + CR 609.4: resolved "you may cast … spells this turn / until your next turn as
+/// though they had flash" grants a player-scoped `CastWithFlash` permission.
+#[test]
+fn printed_as_though_flash_effects_grant_cast_with_flash() {
+    for (name, card_type, line) in [
+        ("Alchemist's Refuge", "Land", "{G}{U}, {T}: You may cast spells this turn as though they had flash."),
+        ("Borne Upon a Wind", "Instant", "You may cast spells this turn as though they had flash."),
+        ("Complete the Circuit", "Instant", "You may cast sorcery spells this turn as though they had flash."),
+        ("Emergence Zone", "Land", "{1}, {T}, Sacrifice this land: You may cast spells this turn as though they had flash."),
+        ("Teferi, Time Raveler", "Planeswalker", "[+1]: Until your next turn, you may cast sorcery spells as though they had flash."),
+        ("Winding Canyons", "Land", "{2}, {T}: You may cast creature spells this turn as though they had flash."),
+    ] {
+        let parsed = crate::parser::oracle::parse_oracle_text(
+            line,
+            name,
+            &[],
+            &[card_type.to_string()],
+            &[],
+        );
+        let Some(crate::types::ability::Effect::GenericEffect {
+            static_abilities, ..
+        }) = parsed.abilities.first().map(|ability| &*ability.effect)
+        else {
+            panic!("{name}: expected a GenericEffect, got {:?}", parsed.abilities);
+        };
+        let modes: Vec<_> = static_abilities
+            .iter()
+            .flat_map(|def| &def.modifications)
+            .filter_map(|modification| match modification {
+                ContinuousModification::GrantStaticAbility { definition } => {
+                    Some(&definition.mode)
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(modes, vec![&StaticMode::CastWithFlash], "{name}");
     }
 }
 
@@ -42552,12 +42669,7 @@ fn repaired_grammar_neighbours_parse_to_their_meaning_or_an_explicit_gap() {
 }
 
 fn assert_you_creature_flash_grant(def: &StaticDefinition, expect_during_your_turn: bool) {
-    assert_eq!(
-        def.mode,
-        StaticMode::CastWithKeyword {
-            keyword: Keyword::Flash,
-        }
-    );
+    assert_eq!(def.mode, StaticMode::CastWithFlash);
     let Some(TargetFilter::Typed(tf)) = &def.affected else {
         panic!("expected Typed affected, got {:?}", def.affected);
     };
@@ -42602,18 +42714,18 @@ fn static_first_creature_spell_during_your_turns_costs_less_and_has_flash() {
 }
 
 #[test]
-fn nth_qualified_spell_keyword_grant_declines_unsupported_timing() {
-    assert!(nth_qualified_spell_keyword_grant(
+fn nth_qualified_spell_grant_declines_unsupported_timing() {
+    assert!(nth_qualified_spell_grant(
         "the first creature spell you cast each turn",
-        Keyword::Flash,
+        StaticMode::CastWithFlash,
         None,
         "",
     )
     .is_some());
     // No printed first-spell flash card uses this timing (nearest: The Blue Spirit, "each turn"); it pins that the builder declines the opponent-turn axis.
-    assert!(nth_qualified_spell_keyword_grant(
+    assert!(nth_qualified_spell_grant(
         "the first creature spell you cast during each opponent's turn",
-        Keyword::Flash,
+        StaticMode::CastWithFlash,
         None,
         "",
     )
@@ -42637,9 +42749,10 @@ fn opponent_cast_first_spell_cost_and_flash_grants_no_flash() {
         "{defs:?}"
     );
     assert!(
-        !defs
-            .iter()
-            .any(|d| matches!(d.mode, StaticMode::CastWithKeyword { .. })),
+        !defs.iter().any(|d| matches!(
+            d.mode,
+            StaticMode::CastWithKeyword { .. } | StaticMode::CastWithFlash
+        )),
         "{defs:?}"
     );
 }
@@ -42661,12 +42774,7 @@ fn leading_condition_keeps_first_spell_flash_gate() {
         "As long as you control a green or blue permanent, you may cast the first creature spell you cast each turn as though it had flash.",
     )
     .unwrap();
-    assert_eq!(
-        def.mode,
-        StaticMode::CastWithKeyword {
-            keyword: Keyword::Flash,
-        }
-    );
+    assert_eq!(def.mode, StaticMode::CastWithFlash);
     let Some(StaticCondition::And { conditions }) = &def.condition else {
         panic!("expected And of both gates, got {:?}", def.condition);
     };

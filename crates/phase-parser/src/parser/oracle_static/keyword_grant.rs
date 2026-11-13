@@ -353,9 +353,14 @@ pub(crate) fn parse_spells_have_keyword(tp: &TextPair<'_>, text: &str) -> Option
     // cast-origin restriction, and `SpellsCastThisTurn == 0` gate are all preserved
     // instead of collapsing to "every spell you cast". `None` falls through to
     // the ordinary patterns below, preserving the gateless static.
-    if let Some(def) =
-        nth_qualified_spell_keyword_grant(subject, keyword.clone(), condition.clone(), text)
-    {
+    if let Some(def) = nth_qualified_spell_grant(
+        subject,
+        StaticMode::CastWithKeyword {
+            keyword: keyword.clone(),
+        },
+        condition.clone(),
+        text,
+    ) {
         return Some(def);
     }
 
@@ -568,14 +573,15 @@ pub(crate) fn parse_spells_have_keyword(tp: &TextPair<'_>, text: &str) -> Option
     None
 }
 
-/// CR 611.3a: Gated `CastWithKeyword` for a "the <ordinal> <qualifier> spell you
-/// cast <timing>" subject (`subject_lower`), the single owner of that lowering.
+/// CR 611.3a: Gated `mode` (`CastWithKeyword` or `CastWithFlash`) for a "the
+/// <ordinal> <qualifier> spell you cast <timing>" subject (`subject_lower`), the
+/// single owner of that lowering.
 /// `None` when the subject is not Nth-qualified, its caster is not "you", its
 /// qualifier/timing is unrepresentable, or text after the timing phrase would
 /// be dropped.
-pub(crate) fn nth_qualified_spell_keyword_grant(
+pub(crate) fn nth_qualified_spell_grant(
     subject_lower: &str,
-    keyword: Keyword,
+    mode: StaticMode,
     leading: Option<StaticCondition>,
     text: &str,
 ) -> Option<StaticDefinition> {
@@ -609,7 +615,7 @@ pub(crate) fn nth_qualified_spell_keyword_grant(
         None => nth_qualified,
     };
     Some(
-        StaticDefinition::new(StaticMode::CastWithKeyword { keyword })
+        StaticDefinition::new(mode)
             .affected(affected)
             .condition(condition)
             .description(text.to_string())
@@ -630,7 +636,7 @@ fn parse_singular_flash_permission_subject(lower: &str) -> OracleResult<'_, &str
 /// the classifier routes exactly the lines the static parser lowers.
 pub(crate) fn is_nth_qualified_spell_flash_permission(lower: &str) -> bool {
     parse_singular_flash_permission_subject(lower).is_ok_and(|(_, subject)| {
-        nth_qualified_spell_keyword_grant(subject, Keyword::Flash, None, lower).is_some()
+        nth_qualified_spell_grant(subject, StaticMode::CastWithFlash, None, lower).is_some()
     })
 }
 
@@ -642,14 +648,8 @@ pub(crate) fn is_nth_qualified_spell_flash_permission(lower: &str) -> bool {
 /// lets that player begin to cast it at instant speed. CR 702.8a: flash means
 /// the spell may be cast any time its controller could cast an instant.
 ///
-/// This must emit `StaticMode::CastWithKeyword { keyword: Flash }` with the
-/// spell-type filter in `affected` — that is the ONLY static mode the
-/// flash-timing path (`granted_spell_keywords` in casting.rs) actually reads.
-/// The legacy `StaticMode::CastWithFlash` carries no spell filter and is never
-/// consumed by that path, so it silently dropped both the timing grant and the
-/// "creature spells" restriction (issue #1957). Mirrors the activated/triggered
-/// `try_parse_cast_as_though_flash_permission` (oracle_effect) so the static and
-/// duration-scoped forms share one filter-construction contract.
+/// `CastWithFlash` is a timing permission read by `spell_has_effective_flash`;
+/// CR 609.4 keeps it out of the spell's keywords.
 pub(crate) fn parse_cast_as_though_flash_static(
     tp: &TextPair<'_>,
     text: &str,
@@ -657,7 +657,7 @@ pub(crate) fn parse_cast_as_though_flash_static(
     // CR 601.3b + CR 702.8a: singular nth-qualified subject (The Blue Spirit);
     // no ungated fallback, so "this spell" subjects never become a static.
     if let Ok((_, subject)) = parse_singular_flash_permission_subject(tp.lower) {
-        return nth_qualified_spell_keyword_grant(subject, Keyword::Flash, None, text);
+        return nth_qualified_spell_grant(subject, StaticMode::CastWithFlash, None, text);
     }
 
     let (type_text, all_players) = nom_on_lower(tp.original, tp.lower, |i| {
@@ -706,12 +706,10 @@ pub(crate) fn parse_cast_as_though_flash_static(
     };
 
     Some(
-        StaticDefinition::new(StaticMode::CastWithKeyword {
-            keyword: Keyword::Flash,
-        })
-        .affected(affected)
-        .description(text.to_string())
-        .active_zones(vec![Zone::Battlefield]),
+        StaticDefinition::new(StaticMode::CastWithFlash)
+            .affected(affected)
+            .description(text.to_string())
+            .active_zones(vec![Zone::Battlefield]),
     )
 }
 

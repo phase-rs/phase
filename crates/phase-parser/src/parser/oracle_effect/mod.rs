@@ -34896,17 +34896,14 @@ fn try_parse_cast_as_though_flash_permission(tp: TextPair<'_>) -> Option<ParsedE
         }
     }
 
-    let granted_static = StaticDefinition::new(StaticMode::CastWithKeyword {
-        keyword: Keyword::Flash,
-    })
-    .affected(spell_filter);
+    let granted_static = StaticDefinition::new(StaticMode::CastWithFlash).affected(spell_filter);
 
     // CR 611.2c + CR 601.3b + CR 702.8a: This grant modifies the rules of the game
     // for its CONTROLLER (the player gains permission to cast matching spells at
     // instant speed), not the characteristics of an object. Store it as a
     // player-scoped transient continuous effect: `target: Controller` resolves at
     // effect.rs (the `Some(TargetFilter::Controller)` arm) to a
-    // `SpecificPlayer { id: controller }` binding, read by `granted_spell_keywords`
+    // `SpecificPlayer { id: controller }` binding, read by `spell_has_effective_flash`
     // (casting.rs). Binding it to the source object (`SelfRef` → `SpecificObject`)
     // was the wrong seam — `prune_affected_object_left_effects` (layers.rs) drops it
     // the instant Teferi leaves, violating CR 611.2a/c (the effect's DURATION, not

@@ -470,7 +470,9 @@ fn zero_direct_spell_is_safe_to_reject(ctx: &PolicyContext<'_>) -> bool {
     if game_active_statics(ctx.state).any(|(_, definition)| {
         matches!(
             definition.mode,
-            StaticMode::CastWithAlternativeCost { .. } | StaticMode::CastWithKeyword { .. }
+            StaticMode::CastWithAlternativeCost { .. }
+                | StaticMode::CastWithKeyword { .. }
+                | StaticMode::CastWithFlash
         )
     }) || game_functioning_statics(ctx.state).any(|(_, definition)| {
         matches!(
@@ -492,7 +494,10 @@ fn zero_direct_spell_is_safe_to_reject(ctx: &PolicyContext<'_>) -> bool {
                 matches!(
                     modification,
                     ContinuousModification::GrantStaticAbility { definition }
-                        if matches!(definition.mode, StaticMode::CastWithKeyword { .. })
+                        if matches!(
+                            definition.mode,
+                            StaticMode::CastWithKeyword { .. } | StaticMode::CastWithFlash
+                        )
                 )
             })
         })
@@ -7292,13 +7297,14 @@ mod tests {
             StaticMode::CastWithKeyword {
                 keyword: Keyword::Flash,
             },
+            StaticMode::CastWithFlash,
         ];
         for (index, mode) in cases.into_iter().enumerate() {
             let (mut state, congregate) = funded_zero_congregate_state();
             let producer = add_battlefield_static(&mut state, 91_300 + index as u64, mode);
             assert!(
                 zero_cast_is_retained(&state, congregate),
-                "a live external static changes cost or keyword semantics"
+                "a live external static changes cost, keyword, or timing semantics"
             );
             state
                 .objects
@@ -7449,6 +7455,26 @@ mod tests {
         assert!(
             !zero_cast_is_retained(&state, congregate),
             "removing only the transient grant restores rejection"
+        );
+
+        state.add_transient_continuous_effect(
+            congregate,
+            P0,
+            Duration::Permanent,
+            TargetFilter::SpecificObject { id: congregate },
+            vec![ContinuousModification::GrantStaticAbility {
+                definition: Box::new(StaticDefinition::new(StaticMode::CastWithFlash)),
+            }],
+            None,
+        );
+        assert!(
+            zero_cast_is_retained(&state, congregate),
+            "a transient as-though-flash grant invalidates the zero-cast proof"
+        );
+        state.transient_continuous_effects.clear();
+        assert!(
+            !zero_cast_is_retained(&state, congregate),
+            "removing only the transient timing grant restores rejection"
         );
     }
 

@@ -2887,8 +2887,8 @@ fn granted_spell_keywords_for(
         }
     }
 
-    // CR 611.2c: Player-scoped flash-timing grants applied by activated/triggered
-    // abilities (e.g. Teferi +1) live in the TCE table, not on a battlefield static.
+    // CR 611.2c: Player-scoped keyword grants applied by activated/triggered
+    // abilities live in the TCE table, not on a battlefield static.
     transient_granted_spell_keywords_for(
         state,
         caster,
@@ -2899,7 +2899,7 @@ fn granted_spell_keywords_for(
         fused,
     );
 
-    // CR 601.2f: One-shot "the next spell …" keyword/flash grants (Insist, Quicken, Wand).
+    // CR 601.2f: One-shot "the next spell …" keyword grants (Insist, Wand).
     apply_pending_next_spell_keyword_grants(state, caster, object_id, &mut keywords, false, fused);
 
     // CR 118.9 + CR 601.2f: Concretize any self-referential (`SelfManaCost` /
@@ -3068,26 +3068,25 @@ pub(crate) fn effective_casualty_grant_sources(
     sources
 }
 
-/// CR 611.2c + CR 601.3b: Player-scoped spell-casting keyword grants (e.g. Teferi,
+/// CR 611.2c + CR 601.3b: Player-scoped spell-casting grants (e.g. Teferi,
 /// Time Raveler's +1 "you may cast sorcery spells as though they had flash") are
 /// registered by `effect.rs` as `SpecificPlayer { id }`-bound transient continuous
 /// effects rather than battlefield statics, so the grant survives the source
-/// permanent leaving play and expires on its own duration (CR 611.2a). This scan is
-/// the player-scoped counterpart to the `game_active_statics` loop in
-/// `granted_spell_keywords`; it mirrors the condition gating of the sibling player
+/// permanent leaving play and expires on its own duration (CR 611.2a). Returns
+/// the mode of each such grant to `caster` whose spell filter matches
+/// `spell_obj`: the player-scoped counterpart to the `game_active_statics`
+/// scans, mirroring the condition gating of the sibling player
 /// query `transient_grants_static_mode_to_player` (static_abilities.rs). `fused`
 /// projects a pre-payment fused split spell with its COMBINED characteristics
 /// (CR 702.102b); see [`granted_spell_keywords_for`] for the rationale.
-#[allow(clippy::too_many_arguments)]
-fn transient_granted_spell_keywords_for(
-    state: &GameState,
+fn transient_spell_grants<'a>(
+    state: &'a GameState,
     caster: PlayerId,
     spell_obj: &crate::game::game_object::GameObject,
     origin_zone: Zone,
-    keywords: &mut Vec<Keyword>,
-    preserve_instances: bool,
     fused: bool,
-) {
+) -> Vec<&'a StaticMode> {
+    let mut grants = Vec::new();
     for tce in &state.transient_continuous_effects {
         let TargetFilter::SpecificPlayer { id } = tce.affected else {
             continue;
@@ -3105,9 +3104,6 @@ fn transient_granted_spell_keywords_for(
         }
         for modification in &tce.modifications {
             let ContinuousModification::GrantStaticAbility { definition } = modification else {
-                continue;
-            };
-            let StaticMode::CastWithKeyword { keyword } = &definition.mode else {
                 continue;
             };
             // CR 611.2c: the grant is bound to the grantee (outer SpecificPlayer
@@ -3142,8 +3138,28 @@ fn transient_granted_spell_keywords_for(
                 )
             });
             if matches {
-                merge_spell_keyword(keywords, keyword.clone(), preserve_instances);
+                grants.push(&definition.mode);
             }
+        }
+    }
+    grants
+}
+
+/// CR 611.2c: merge the keywords of the player-scoped `CastWithKeyword` grants
+/// [`transient_spell_grants`] returns for this spell.
+#[allow(clippy::too_many_arguments)]
+fn transient_granted_spell_keywords_for(
+    state: &GameState,
+    caster: PlayerId,
+    spell_obj: &crate::game::game_object::GameObject,
+    origin_zone: Zone,
+    keywords: &mut Vec<Keyword>,
+    preserve_instances: bool,
+    fused: bool,
+) {
+    for mode in transient_spell_grants(state, caster, spell_obj, origin_zone, fused) {
+        if let StaticMode::CastWithKeyword { keyword } = mode {
+            merge_spell_keyword(keywords, keyword.clone(), preserve_instances);
         }
     }
 }
@@ -6136,10 +6152,11 @@ pub(crate) fn exile_static_permission_grants_flash(
 }
 
 /// CR 702.8a + CR 601.3b: Does `player` have flash for `object_id`: its own
-/// Flash keyword, a granted one (a `CastWithKeyword` static, a transient or
-/// next-spell grant; `effective_spell_keyword_kinds_for`), or an exile-cast
-/// permission that grants flash ("you may cast them as though they had
-/// flash")? `fused` projects a pre-payment fused split spell's combined
+/// Flash keyword, a granted one (a `CastWithKeyword` static or transient grant,
+/// a next-spell keyword grant; `effective_spell_keyword_kinds_for`), an
+/// "as though it had flash" permission (`as_though_flash_permission`), or an
+/// exile-cast permission that grants flash ("you may cast them as though they
+/// had flash")? `fused` projects a pre-payment fused split spell's combined
 /// characteristics (CR 702.102b). The single authority that
 /// `prepare_spell_cast`'s timing check and
 /// `restrictions::spell_confined_to_sorcery_timing` read.
@@ -6151,6 +6168,50 @@ pub(crate) fn spell_has_effective_flash(
 ) -> bool {
     effective_spell_keyword_kinds_for(state, player, object_id, fused).contains(&KeywordKind::Flash)
         || exile_static_permission_grants_flash(state, player, object_id)
+        || as_though_flash_permission(state, player, object_id, fused)
+}
+
+/// CR 601.3b + CR 609.4: `caster` may cast `object_id` as though it had flash —
+/// a `CastWithFlash` static (Leyline of Anticipation), a player-scoped
+/// `CastWithFlash` grant (Borne Upon a Wind), or a pending next-spell
+/// `CastAsThoughFlash` (Savage Summoning). The permission changes only when the
+/// spell may be cast; the spell does not gain the Flash keyword.
+fn as_though_flash_permission(
+    state: &GameState,
+    caster: PlayerId,
+    object_id: ObjectId,
+    fused: bool,
+) -> bool {
+    let Some(spell_obj) = state.objects.get(&object_id) else {
+        return false;
+    };
+    let origin_zone = spell_cast_origin_zone(state, spell_obj);
+    let static_grant = static_kind_present(state, StaticModeKind::CastWithFlash) && {
+        crate::game::perf_counters::record_spell_keyword_grant_scan();
+        super::functioning_abilities::game_active_statics(state).any(|(source_obj, def)| {
+            def.mode == StaticMode::CastWithFlash
+                && def.affected.as_ref().is_none_or(|filter| {
+                    super::filter::spell_object_matches_filter_from_state_for(
+                        state,
+                        spell_obj,
+                        origin_zone,
+                        caster,
+                        filter,
+                        source_obj.id,
+                        &state.all_creature_types,
+                        fused,
+                    )
+                })
+        })
+    };
+    static_grant
+        || transient_spell_grants(state, caster, spell_obj, origin_zone, fused)
+            .contains(&&StaticMode::CastWithFlash)
+        || state.pending_next_spell_modifiers.iter().any(|entry| {
+            entry.player == caster
+                && matches!(entry.modifier, NextSpellModifier::CastAsThoughFlash)
+                && spell_matches_pending_next_spell_filter(state, caster, object_id, entry, fused)
+        })
 }
 
 /// CR 118.9 + CR 601.2f: When `exiled_id` is castable via the
@@ -7837,7 +7898,7 @@ fn cast_free_permission_from_source(
 /// what a per-object `CastingPermission` cannot express.
 ///
 /// Mirrors the condition gating of the sibling player-scoped scan
-/// `transient_granted_spell_keywords_for` (Teferi, Time Raveler's flash grant).
+/// `transient_spell_grants` (Teferi, Time Raveler's flash grant).
 fn transient_cast_free_permission(
     state: &GameState,
     player: PlayerId,
@@ -8022,10 +8083,11 @@ fn apply_pending_next_spell_keyword_grants(
             NextSpellModifier::HasKeyword { keyword } => {
                 merge_spell_keyword(keywords, keyword.clone(), preserve_instances);
             }
-            NextSpellModifier::CastAsThoughFlash => {
-                upsert_keyword_by_kind(keywords, Keyword::Flash);
-            }
-            NextSpellModifier::CantBeCountered | NextSpellModifier::WithoutPayingManaCost => {}
+            // CR 609.4: "as though it had flash" is a timing permission read by
+            // `as_though_flash_permission`, not a keyword the spell gains.
+            NextSpellModifier::CastAsThoughFlash
+            | NextSpellModifier::CantBeCountered
+            | NextSpellModifier::WithoutPayingManaCost => {}
         }
     }
 }

@@ -10451,19 +10451,14 @@ fn teferi_time_raveler_loyalty_abilities_parse() {
         "+1 grant must expire 'until your next turn'"
     );
 
-    // The inner static grants Flash to Sorcery spells the controller casts.
+    // The inner static lets the controller cast Sorcery spells as though they had flash.
     let inner = match &static_abilities[0].modifications[0] {
         ContinuousModification::GrantStaticAbility { definition } => definition,
         other => panic!("expected GrantStaticAbility, got {other:?}"),
     };
     assert!(
-        matches!(
-            &inner.mode,
-            StaticMode::CastWithKeyword {
-                keyword: Keyword::Flash
-            }
-        ),
-        "inner static must be CastWithKeyword(Flash), got {:?}",
+        matches!(&inner.mode, StaticMode::CastWithFlash),
+        "inner static must be CastWithFlash, got {:?}",
         inner.mode
     );
     let Some(TargetFilter::Typed(tf)) = &inner.affected else {

@@ -897,9 +897,9 @@ pub fn record_static_full_scan() {
     with_mut(|s| s.static_full_scans += 1);
 }
 
-/// Counts full `game_active_statics` scans for `CastWithKeyword` spell grants.
-/// The O(1) `static_kind_present(CastWithKeyword)` gate should keep this at zero
-/// during candidate generation when no functioning spell-keyword grant exists.
+/// Counts full `game_active_statics` scans for `CastWithKeyword` and `CastWithFlash` spell grants.
+/// The O(1) `static_kind_present` gates should keep this at zero during candidate
+/// generation when no functioning spell grant exists.
 pub fn record_spell_keyword_grant_scan() {
     with_mut(|s| s.spell_keyword_grant_scans += 1);
 }

@@ -3809,9 +3809,8 @@ pub(crate) fn parse_static_line_inner(
     }
 
     // --- "You may cast [type] spells as though they had flash" (CR 601.3b / CR 702.8a) ---
-    // Emits `CastWithKeyword { Flash }` with the spell-type filter — the only
-    // static mode the flash-timing path (granted_spell_keywords) reads, and the
-    // one that preserves the "creature spells" restriction (issue #1957).
+    // Emits `CastWithFlash` with the spell-type filter, a timing permission read
+    // by `spell_has_effective_flash` that preserves the "creature spells" restriction.
     if let Some(def) = parse_cast_as_though_flash_static(&tp, &text) {
         return Some(def);
     }
