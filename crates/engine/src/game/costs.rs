@@ -666,7 +666,7 @@ pub enum PaymentOutcome {
     Failed { reason: PaymentFailure },
 }
 
-fn combine_remaining_costs(
+pub(crate) fn combine_remaining_costs(
     paused_remaining: Option<AbilityCost>,
     following_costs: &[AbilityCost],
 ) -> Option<AbilityCost> {
@@ -741,6 +741,42 @@ fn flatten_cost_components(cost: &AbilityCost, components: &mut Vec<AbilityCost>
         }
         cost => components.push(cost.clone()),
     }
+}
+
+/// CR 601.2h + CR 602.2b: A cost component that moves objects from a library to
+/// a PUBLIC zone belongs to the second payment tier — "first, they pay all costs
+/// that don't involve random elements or moving objects from the library to a
+/// public zone, in any order. Then they pay all remaining costs in any order."
+/// CR 602.2b binds 601.2b-i to activated abilities.
+///
+/// CR 400.2 fixes what "public" means: graveyard, battlefield, stack, exile,
+/// ante and command are public; LIBRARY AND HAND ARE HIDDEN. So a hypothetical
+/// library->hand cost is NOT deferred — only moves out of a library into a
+/// public zone are.
+///
+/// Single authority, shared by the payment partition in `pay_ability_cost_inner`
+/// and the interactive activation-cost scheduler
+/// (`casting_costs::surface_next_unpaid_interactive_activation_cost`) so the
+/// tier plan that schedules a prompt and the tier plan that pays cannot drift.
+///
+/// Classifies ONE component. Callers tier a composite by flattening it to leaves
+/// (`flatten_cost_components`) and applying this to each: tiering a whole child
+/// `Composite` on behalf of one nested library leg would wrongly defer that
+/// child's first-tier siblings too. `OneOf` and `PerCounter` never reach this
+/// classification — both are rejected earlier in `pay_ability_cost_inner`
+/// ("OneOf cost is only valid as an unless-cost", "PerCounter cost must be
+/// expanded against game state before reaching pay_ability_cost").
+pub(crate) fn is_library_to_public_zone_cost(cost: &AbilityCost) -> bool {
+    matches!(
+        cost,
+        AbilityCost::Exile {
+            zone: Some(Zone::Library),
+            ..
+        } | AbilityCost::ExileWithAggregate {
+            zone: Zone::Library,
+            ..
+        }
+    )
 }
 
 /// CR 118.12 + CR 605.3b + CR 616.1: A nested composite carries the unpaid
@@ -916,6 +952,9 @@ fn move_self_activation_cost(
                 paused_at_index: 0,
                 destination,
                 completion: PendingCostMoveCompletion::FinishPending,
+                // A self-move cost owes no published count (CR 118.11 applies to
+                // the deterministic library-exile shape below).
+                requested_cost_count: None,
                 // A self-move is one object, so no group can form.
                 deferred_cost_events: Vec::new(),
                 departure_record_indices: Vec::new(),
@@ -939,7 +978,11 @@ fn move_self_activation_cost(
 
 /// CR 406.6: Record an "exiled with [source] this turn" relation only for a
 /// cost object that actually arrived in exile after replacements applied.
-fn record_delivered_cost_exile(state: &mut GameState, exiled_id: ObjectId, source_id: ObjectId) {
+pub(crate) fn record_delivered_cost_exile(
+    state: &mut GameState,
+    exiled_id: ObjectId,
+    source_id: ObjectId,
+) {
     if state
         .objects
         .get(&exiled_id)
@@ -1546,12 +1589,42 @@ fn pay_ability_cost_inner(
             }
         },
         AbilityCost::Composite { costs } => {
+            // CR 601.2h + CR 602.2b: a composite activation cost pays its
+            // library-to-public-zone components LAST. `is_library_to_public_zone_cost`
+            // is the single authority for that classification and carries the rule
+            // text; this arm owns only the ORDER it imposes.
+            //
+            // Tier each LEAF, not each top-level child. A child `Composite` that
+            // merely *contains* a library-to-public leg must not be deferred whole:
+            // that would drag its own first-tier siblings into tier 2, which CR
+            // 601.2h does not say. Flattening first also means the classification
+            // needs no recursion of its own — every component it sees is a leaf.
+            //
+            // A STABLE partition: relative order within each tier is preserved, so a
+            // mana-leading composite stays mana-leading and
+            // `resume_cost_with_concrete_mana`'s "a mana payment root must begin with
+            // mana" invariant still holds. Payment order is reordered here rather
+            // than at parse time because a CONSTRUCTED `Composite` never passes
+            // through the parser, and the suffixes below are derived from this same
+            // vector. `enclosing_composite_suffix` is unaffected by the reordering:
+            // it only requires a resume cost to begin with its ACTIVE cost's own
+            // leaves, and `composite_cost_suffix` always emits `leading` first.
+            let mut leaves = Vec::new();
+            for sub_cost in costs {
+                flatten_cost_components(sub_cost, &mut leaves);
+            }
+            let ordered: Vec<AbilityCost> = leaves
+                .iter()
+                .filter(|sub| !is_library_to_public_zone_cost(sub))
+                .chain(leaves.iter().filter(|sub| is_library_to_public_zone_cost(sub)))
+                .cloned()
+                .collect();
             let enclosing_suffix = enclosing_composite_suffix(cost, resume_cost);
-            for (index, sub_cost) in costs.iter().enumerate() {
+            for (index, sub_cost) in ordered.iter().enumerate() {
                 let prior_waiting_for = state.waiting_for.clone();
                 let sub_resume_cost = composite_cost_suffix(
                     Some(sub_cost),
-                    &costs[index + 1..],
+                    &ordered[index + 1..],
                     &enclosing_suffix,
                 )
                 .expect("a composite component always has an unpaid suffix");
@@ -1579,7 +1652,7 @@ fn pay_ability_cost_inner(
                             return Ok(PaymentOutcome::Paused {
                                 remaining_cost: composite_cost_suffix(
                                     None,
-                                    &costs[index + 1..],
+                                    &ordered[index + 1..],
                                     &enclosing_suffix,
                                 ),
                             });
@@ -1606,7 +1679,7 @@ fn pay_ability_cost_inner(
                         return Ok(PaymentOutcome::Paused {
                             remaining_cost: composite_cost_suffix(
                                 remaining_cost.as_ref(),
-                                &costs[index + 1..],
+                                &ordered[index + 1..],
                                 &enclosing_suffix,
                             ),
                         });
@@ -2654,6 +2727,79 @@ fn pay_ability_cost_inner(
                 return Ok(outcome);
             }
         }
+        // CR 118.3 + CR 601.2h + CR 406.6: "Exile the top N cards of your
+        // library" is a DETERMINISTIC cost — the cards are not chosen, so no
+        // interactive detour intercepts it (`find_non_self_exile` matches only
+        // hand and graveyard, and `cost_payability::eligible_exile_cost_objects`
+        // already treats a library exile cost as top-of-library rather than a
+        // choice). Without this arm the cost fell through to the interactive
+        // no-op below and was silently treated as paid, so the ability resolved
+        // for free (issue #782). Covers Thought Lash, Phyrexian Devourer, Royal
+        // Herbalist, Storm Elemental and Whirling Catapult (which exiles two).
+        //
+        // Activation scope only: resolution-time payment of this shape (Thought
+        // Lash's cumulative upkeep) keeps its existing path and remains issue
+        // #581's territory.
+        AbilityCost::Exile {
+            count,
+            zone: Some(Zone::Library),
+            filter: None,
+        } if matches!(scope, PaymentScope::Activation { .. }) => {
+            let count = *count as usize;
+            let top: Vec<ObjectId> = state
+                .players
+                .get(player.0 as usize)
+                .map(|p| p.library.iter().copied().take(count).collect())
+                .unwrap_or_default();
+            // CR 118.3: a player can't pay a cost without the resources to pay it.
+            if top.len() < count {
+                return Ok(payment_failed(
+                    "not enough cards in library to exile for cost",
+                ));
+            }
+            for (index, &card_id) in top.iter().enumerate() {
+                match zone_pipeline::move_object(
+                    state,
+                    ZoneMoveRequest::cost(card_id, Zone::Exile, source_id),
+                    events,
+                ) {
+                    ZoneMoveResult::Done => record_delivered_cost_exile(state, card_id, source_id),
+                    ZoneMoveResult::NeedsChoice(choice_player) => {
+                        state.pending_cost_move_resume = Some(PendingCostMoveResume::Cast {
+                            player,
+                            pending: None,
+                            chosen: top.clone(),
+                            paused_at_index: index,
+                            destination: Zone::Exile,
+                            completion: PendingCostMoveCompletion::FinishPending,
+                            // CR 118.11: this payment pauses BEFORE the
+                            // `last_effect_count` write below, so carry the count the
+                            // cost called for across the round trip; the completion
+                            // publishes it once every leg has settled.
+                            requested_cost_count: Some(count as u32),
+                            // Library cards never leave the battlefield, so no
+                            // CR 603.10a simultaneous-departure group can form.
+                            deferred_cost_events: Vec::new(),
+                            departure_record_indices: Vec::new(),
+                        });
+                        if state.pending_replacement.is_some() {
+                            pause_cost_payment_for_replacement_choice(state, choice_player);
+                        }
+                        return Ok(PaymentOutcome::Paused {
+                            remaining_cost: None,
+                        });
+                    }
+                    ZoneMoveResult::NeedsAuraAttachmentChoice => {
+                        unreachable!("a cost move to Exile cannot require Aura attachment")
+                    }
+                }
+            }
+            // CR 118.11: "The actions performed when paying a cost may be modified
+            // by effects. Even if they are ... the cost has still been paid." So the
+            // paid count is the count the cost CALLED FOR, not how many objects a
+            // replacement let arrive in exile.
+            state.last_effect_count = Some(count as i32);
+        }
         // CR 702.37e + CR 118.1: Turn-face-up return-to-hand cost (e.g. Fathom Seer).
         AbilityCost::ReturnToHand {
             count,
@@ -3129,6 +3275,136 @@ pub(crate) fn is_resolution_optional_payment_prompt_branch(cost: &AbilityCost) -
         )
 }
 
+/// CR 702.21a + CR 118.3: Supported shape for a compound *unless* cost. The
+/// unless-payment adapter hands a paused payment back to the resume channel the
+/// paying source owns, so it settles only a shape whose single mana leg comes
+/// before the life legs: the mana leg is then the first component, which means
+/// an accepted pause happens before anything else is paid, and a resumed
+/// continuation cannot replay a paid prefix. Every printed compound Ward is
+/// "{N}, Pay M life."; every other leg (discard, sacrifice, energy) has no
+/// resume channel on this path.
+fn unless_composite_cost_shape(costs: &[AbilityCost]) -> bool {
+    // Fail closed: an empty composite is not a cost the adapter invents a
+    // payment for.
+    if costs.is_empty() {
+        return false;
+    }
+    let mut mana_seen = false;
+    let mut life_seen = false;
+    costs.iter().all(|cost| match cost {
+        AbilityCost::Mana { .. } if !mana_seen && !life_seen => {
+            mana_seen = true;
+            true
+        }
+        AbilityCost::PayLife { .. } => {
+            life_seen = true;
+            true
+        }
+        _ => false,
+    })
+}
+
+/// Whether a leg spends or produces one of the shared resources (mana, life)
+/// whose answer can change between legs of the same payment.
+fn composite_resource_leg(cost: &AbilityCost) -> bool {
+    matches!(
+        cost,
+        AbilityCost::Mana { .. } | AbilityCost::ManaDynamic { .. } | AbilityCost::PayLife { .. }
+    )
+}
+
+/// CR 118.3 + CR 118.12: Does this composite's payment need a whole-payment
+/// proof instead of per-leg resource answers? Another leg can change the
+/// resource a later leg reads: two life legs can each be below the life total
+/// while their sum is not, a mana source's own cost can spend life (Mana
+/// Confluence), and a mana source can supply life the life leg needs (Pristine
+/// Talisman's "{T}: Add {C}. You gain 1 life."). Per-leg answers computed from
+/// the original state would then veto a payment the payment authority can
+/// complete.
+fn composite_needs_joint_proof(costs: &[AbilityCost]) -> bool {
+    costs.len() > 1 && costs.iter().any(composite_resource_leg)
+}
+
+/// CR 118.3 + CR 118.12: Witness the whole composite on a shadow of the game. The
+/// authority pays the legs in sequence, so replaying the identical payment is
+/// the only witness that covers an earlier leg spending a later leg's resource.
+///
+/// `Paid` is a completed proof. `Paused` is a *staged* attempt: the payment can
+/// start and a live choice (`WaitingFor`) owns the rest, so a later suffix can
+/// still fail. That is sound for ordinary resolution `PayCost`, whose composite
+/// transaction restores the pre-payment base on failure, and for the compound
+/// Ward caller, which additionally requires a completed proof or a pause that
+/// carries the paying source's own resume. A caller without either boundary
+/// must not read a paused witness as "affordable".
+fn composite_legs_jointly_affordable(
+    state: &GameState,
+    payer: PlayerId,
+    ability: &ResolvedAbility,
+    costs: &[AbilityCost],
+) -> bool {
+    let mut shadow = state.clone();
+    let mut events = Vec::new();
+    match pay_ability_cost_for_resolution(
+        &mut shadow,
+        payer,
+        &AbilityCost::Composite {
+            costs: costs.to_vec(),
+        },
+        ability,
+        &mut events,
+    ) {
+        Ok(PaymentOutcome::Paid | PaymentOutcome::Paused { .. }) => true,
+        Ok(PaymentOutcome::Failed { .. }) | Err(_) => false,
+    }
+}
+
+/// CR 702.21a + CR 118.3 + CR 118.12: Can `payer` settle this compound unless-cost
+/// through the resolution payment authority? This is the unless adapter's single
+/// eligibility entry point: shape, affordability (via [`can_pay`], including the
+/// authority's joint composite proof), and pause ownership all live here, never
+/// at the call site.
+///
+/// A paused payment is accepted only when the paying source owns the resume
+/// (CR 605.3b + CR 616.1). The adapter hands the live prompt back in that case,
+/// exactly like the all-mana arm. Any other pause has no resume span on this
+/// path, so the cost stays unpaid before any component is spent.
+pub(crate) fn can_pay_unless_composite(
+    state: &GameState,
+    payer: PlayerId,
+    ability: &ResolvedAbility,
+    cost: &AbilityCost,
+) -> bool {
+    let AbilityCost::Composite { costs } = cost else {
+        return false;
+    };
+    if !unless_composite_cost_shape(costs) {
+        return false;
+    }
+    if !can_pay(
+        state,
+        payer,
+        ability.source_id,
+        cost,
+        &PaymentScope::Resolution {
+            ability,
+            cost_move_root: ResolutionCostMoveRoot::EffectPayCost,
+        },
+    ) {
+        return false;
+    }
+    let mut shadow = state.clone();
+    let mut events = Vec::new();
+    match pay_ability_cost_for_resolution(&mut shadow, payer, cost, ability, &mut events) {
+        Ok(PaymentOutcome::Paid) => true,
+        Ok(PaymentOutcome::Paused { .. }) => {
+            shadow.pending_cost_move_resume.is_some()
+                || shadow.pending_deferred_life_cost_resume.is_some()
+                || shadow.pending_triggered_mana_resume.is_some()
+        }
+        Ok(PaymentOutcome::Failed { .. }) | Err(_) => false,
+    }
+}
+
 /// CR 614.17b: would a mandatory can't-effect stop this player-counter gain?
 fn player_counter_gain_is_prohibited(
     state: &GameState,
@@ -3491,9 +3767,17 @@ fn can_pay_resolution(
         // physical card cannot satisfy two legs, so a per-leg check alone would
         // let the first leg pay and the second fail — a partial payment).
         AbilityCost::Composite { costs } => {
-            costs
-                .iter()
-                .all(|cost| can_pay_resolution(state, payer, cost, ability))
+            let jointly_proven = composite_needs_joint_proof(costs);
+            // CR 118.3: when legs share a resource, their original-state answers
+            // cannot veto the whole payment — an earlier leg can supply what a
+            // later one needs (life gained while funding mana, mana produced by
+            // an earlier leg). The whole-payment witness answers those leaves;
+            // every leg that uses up a chosen object is still checked per leg.
+            let leaves_payable = costs.iter().all(|cost| {
+                (jointly_proven && composite_resource_leg(cost))
+                    || can_pay_resolution(state, payer, cost, ability)
+            });
+            leaves_payable
                 && super::cost_payability::discard_legs_jointly_payable(
                     state,
                     payer,
@@ -3501,6 +3785,8 @@ fn can_pay_resolution(
                     ability.context.granting_object,
                     costs,
                 )
+                && (!jointly_proven
+                    || composite_legs_jointly_affordable(state, payer, ability, costs))
         }
         // CR 118.12a: Disjunctive — payable iff any sub-cost is payable. The
         // choice is made interactively via `UnlessPaymentChooseCost`; the
@@ -3612,6 +3898,169 @@ mod tests {
         assert!(
             can_pay(runner.state(), P0, source, &cost, &scope),
             "reach guard: opted-in player can pay"
+        );
+    }
+
+    fn unless_test_ability() -> ResolvedAbility {
+        ResolvedAbility::new(
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 7 },
+                player: TargetFilter::Controller,
+            },
+            vec![],
+            ObjectId(100),
+            P0,
+        )
+    }
+
+    /// CR 702.21a + CR 118.3: the compound unless-cost shape is one mana leg
+    /// followed by life legs. These test the shape predicate directly, with a
+    /// zero-mana leg so an authority payment would otherwise succeed — removing
+    /// the guard is observable.
+    #[test]
+    fn unless_composite_cost_shape_accepts_the_printed_ward_shape() {
+        let costs = vec![
+            AbilityCost::Mana {
+                cost: ManaCost::generic(2),
+            },
+            AbilityCost::PayLife {
+                amount: QuantityExpr::Fixed { value: 2 },
+            },
+        ];
+        assert!(unless_composite_cost_shape(&costs));
+    }
+
+    /// A life leg ahead of a mana leg is refused even though it would be
+    /// payable. No printed card orders a compound Ward that way; the nearest
+    /// printed shape is Captain Howler, Sea Scourge's "Ward—{2}, Pay 2 life."
+    /// (covered end to end in
+    /// `tests/integration/compound_ward_cost_pays_every_part.rs`).
+    #[test]
+    fn unless_composite_cost_shape_refuses_life_before_mana() {
+        let costs = vec![
+            AbilityCost::PayLife {
+                amount: QuantityExpr::Fixed { value: 2 },
+            },
+            AbilityCost::Mana {
+                cost: ManaCost::zero(),
+            },
+        ];
+        assert!(!unless_composite_cost_shape(&costs));
+    }
+
+    /// A second mana leg is refused: a paused mana source resumes from the whole
+    /// unless cost, which would replay an already-paid prefix. Synthetic shape:
+    /// no printed compound Ward carries two mana legs.
+    #[test]
+    fn unless_composite_cost_shape_refuses_a_second_mana_leg() {
+        let costs = vec![
+            AbilityCost::Mana {
+                cost: ManaCost::generic(1),
+            },
+            AbilityCost::Mana {
+                cost: ManaCost::generic(1),
+            },
+            AbilityCost::PayLife {
+                amount: QuantityExpr::Fixed { value: 1 },
+            },
+        ];
+        assert!(!unless_composite_cost_shape(&costs));
+    }
+
+    /// A leg this adapter cannot finish (a discard) refuses the whole cost.
+    /// Synthetic shape: no printed compound Ward mixes a discard with another
+    /// leg; the nearest printed discard ward is Arna Kennerüd, Skycaptain's
+    /// "Ward—Discard a card."
+    #[test]
+    fn unless_composite_cost_shape_refuses_an_unsupported_leg() {
+        let costs = vec![
+            AbilityCost::Mana {
+                cost: ManaCost::zero(),
+            },
+            AbilityCost::Discard {
+                count: QuantityExpr::Fixed { value: 1 },
+                filter: None,
+                selection: CardSelectionMode::Chosen,
+                self_scope: DiscardSelfScope::FromHand,
+            },
+        ];
+        assert!(!unless_composite_cost_shape(&costs));
+        assert!(!unless_composite_cost_shape(&[]));
+    }
+
+    /// CR 702.21a + CR 118.3: a payable mana-then-life composite is admitted,
+    /// and the eligibility witness spends nothing live.
+    #[test]
+    fn can_pay_unless_composite_accepts_a_payable_shape() {
+        let mut state = GameState::new_two_player(42);
+        state.players[0].life = 20;
+        let ability = unless_test_ability();
+        let cost = AbilityCost::Composite {
+            costs: vec![
+                AbilityCost::Mana {
+                    cost: ManaCost::zero(),
+                },
+                AbilityCost::PayLife {
+                    amount: QuantityExpr::Fixed { value: 2 },
+                },
+            ],
+        };
+        assert!(can_pay_unless_composite(&state, P0, &ability, &cost));
+        assert_eq!(
+            state.players[0].life, 20,
+            "the eligibility witness must not spend the live life total"
+        );
+    }
+
+    /// CR 118.3: an unaffordable life leg refuses the whole cost.
+    #[test]
+    fn can_pay_unless_composite_refuses_an_unaffordable_life_leg() {
+        let mut state = GameState::new_two_player(42);
+        state.players[0].life = 1;
+        let ability = unless_test_ability();
+        let cost = AbilityCost::Composite {
+            costs: vec![
+                AbilityCost::Mana {
+                    cost: ManaCost::zero(),
+                },
+                AbilityCost::PayLife {
+                    amount: QuantityExpr::Fixed { value: 2 },
+                },
+            ],
+        };
+        assert!(!can_pay_unless_composite(&state, P0, &ability, &cost));
+        assert_eq!(state.players[0].life, 1, "the live life total is untouched");
+    }
+
+    /// CR 118.3: per-leg life checks understate a composite — two life legs each
+    /// below the life total can still exceed it together.
+    #[test]
+    fn can_pay_resolution_composite_requires_life_legs_to_be_jointly_affordable() {
+        let mut state = GameState::new_two_player(42);
+        state.players[0].life = 6;
+        let ability = unless_test_ability();
+        let cost = AbilityCost::Composite {
+            costs: vec![
+                AbilityCost::PayLife {
+                    amount: QuantityExpr::Fixed { value: 3 },
+                },
+                AbilityCost::PayLife {
+                    amount: QuantityExpr::Fixed { value: 5 },
+                },
+            ],
+        };
+        let scope = PaymentScope::Resolution {
+            ability: &ability,
+            cost_move_root: ResolutionCostMoveRoot::EffectPayCost,
+        };
+        assert!(
+            !can_pay(&state, P0, ObjectId(100), &cost, &scope),
+            "6 life cannot pay 3 and 5 life legs"
+        );
+        state.players[0].life = 10;
+        assert!(
+            can_pay(&state, P0, ObjectId(100), &cost, &scope),
+            "reach guard: 10 life pays the same composite"
         );
     }
 
@@ -4767,6 +5216,69 @@ mod tests {
         assert!(
             can_pay_activation(&scenario.state, src, &cost),
             "hand-exile composite must keep its unchanged (payable) dry-run verdict"
+        );
+    }
+
+    /// CR 601.2h + CR 602.2b: "First, they pay all costs that don't involve random
+    /// elements or moving objects from the library to a public zone, in any order.
+    /// Then they pay all remaining costs in any order." CR 602.2b binds 601.2b-i to
+    /// activated abilities, so a composite that STORES its library-exile leg first
+    /// must still pay the mana leg first.
+    ///
+    /// Constructed deliberately: no printed card reaches this state. All seven
+    /// library-exile activation costs in the corpus store `['Mana','Exile']`, so
+    /// stored order happened to satisfy CR 601.2h already and the defect was latent
+    /// — which is exactly why a card-driven test cannot cover it.
+    ///
+    /// The discriminator is CR 601.2h's other half, "partial payments are not
+    /// allowed". With an unpayable mana leg, paying in STORED order exiles the top
+    /// card and only then fails, leaving the library permanently one card short;
+    /// paying in TIER order fails on mana first and the library is untouched.
+    #[test]
+    fn a_composite_pays_mana_before_its_library_exile_leg() {
+        let mut scenario = GameScenario::new();
+        let src = scenario.add_creature(P0, "Library Exiler", 0, 1).id();
+        let top = scenario.add_card_to_library_top(P0, "Top Card");
+        // Reach-guard: the card really starts in the library, so the assertion below
+        // cannot pass merely because it was never there.
+        assert_eq!(
+            scenario.state.objects[&top].zone,
+            Zone::Library,
+            "reach-guard: the cost's library card starts in the library"
+        );
+
+        // Library-exile leg STORED FIRST; the mana leg is unpayable (no sources).
+        let cost = AbilityCost::Composite {
+            costs: vec![
+                AbilityCost::Exile {
+                    count: 1,
+                    zone: Some(Zone::Library),
+                    filter: None,
+                },
+                AbilityCost::Mana {
+                    cost: ManaCost::generic(1),
+                },
+            ],
+        };
+
+        let outcome = pay_ability_cost_for_activation(
+            &mut scenario.state,
+            P0,
+            src,
+            &cost,
+            Some(0),
+            &mut None,
+            &mut Vec::new(),
+        );
+        assert!(
+            !matches!(outcome, Ok(PaymentOutcome::Paid)),
+            "an unpayable mana leg must not report a paid cost, got {outcome:?}"
+        );
+        assert_eq!(
+            scenario.state.objects[&top].zone,
+            Zone::Library,
+            "CR 601.2h: mana is tier 1 and is attempted first; it fails, and partial \
+             payments are not allowed, so the library-to-public-zone leg must never run"
         );
     }
 

@@ -42,6 +42,7 @@ fn graveyard_exile_replacement(description: &str) -> ReplacementDefinition {
         .execute(AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 destination: Zone::Exile,
                 origin: None,
                 target: TargetFilter::SelfRef,

@@ -625,6 +625,7 @@ mod tests {
             .execute(AbilityDefinition::new(
                 AbilityKind::Spell,
                 Effect::ChangeZone {
+                    library_shuffle: Default::default(),
                     destination: Zone::Exile,
                     origin: None,
                     target: TargetFilter::SelfRef,
@@ -832,6 +833,7 @@ mod tests {
 
         let exile_rider = ResolvedAbility::new(
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 destination: Zone::Exile,
                 origin: Some(Zone::Graveyard),
                 target: TargetFilter::ParentTarget,

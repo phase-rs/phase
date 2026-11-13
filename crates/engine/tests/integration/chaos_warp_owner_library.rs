@@ -48,6 +48,7 @@ fn library_top(
 fn chaos_warp_reveal_chain(source: ObjectId, target: ObjectId) -> ResolvedAbility {
     let put_revealed_onto_battlefield = ResolvedAbility::new(
         Effect::ChangeZone {
+            library_shuffle: Default::default(),
             origin: Some(Zone::Library),
             destination: Zone::Battlefield,
             target: TargetFilter::ParentTarget,
