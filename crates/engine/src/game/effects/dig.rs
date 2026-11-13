@@ -2560,7 +2560,7 @@ mod tests {
     }
 
     /// Issue #1365 (Thassa's Oracle reanimated via Dread Return with an empty
-    /// library — Hermit Druid milled the whole deck first). CR 401.5: a Dig
+    /// library — Hermit Druid milled the whole deck first). CR 609.3: a Dig
     /// against an empty library looks at zero cards. The chained "put up to
     /// one of them on top … the rest on the bottom" instruction has nothing to
     /// place, but the trailing `WinTheGame` gate (devotion >= library size)

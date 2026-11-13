@@ -26635,7 +26635,7 @@ declare_game_state! {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub last_revealed_ids: Vec<ObjectId>,
 
-    /// CR 401.5 + CR 608.2c + CR 609.3 + issue #4950: Set when the most
+    /// CR 608.2c + CR 609.3 + issue #4950: Set when the most
     /// recently resolved `Dig`/`RevealTop`/`ChooseFromZone`/`RevealHand` reveal-choice/
     /// `ExileTop` / library search came up with nothing (empty library, no eligible card, an
     /// empty reveal-choice set, or no card exiled respectively; `ExileTop`
