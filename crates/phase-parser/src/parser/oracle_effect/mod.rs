@@ -85,7 +85,7 @@ use nom::character::complete::{
     anychar, multispace0, multispace1, one_of, satisfy, space0, space1,
 };
 use nom::combinator::{
-    all_consuming, eof, map, map_opt, not, opt, peek, recognize, rest, value, verify,
+    all_consuming, eof, fail, map, map_opt, not, opt, peek, recognize, rest, success, value, verify,
 };
 use nom::multi::{many0, many1, many_till, separated_list1};
 use nom::sequence::{delimited, pair, preceded, terminated};
@@ -29516,21 +29516,24 @@ fn withhold_resolution_timing_beside_a_cast_time_choice(
 /// target state on it.
 fn clause_names_another_player(clause: &ClauseIr, ctx: &ParseContext) -> bool {
     clause.source.fragment().is_some_and(|fragment| {
-        // A leading condition ("If you do, ...", "When you do, ...", "If you control
-        // a Giant, ...") precedes the clause's own subject.
-        let lower = strip_leading_sequence_connector(fragment)
-            .trim()
-            .to_lowercase();
-        let body = preceded(
-            alt((tag::<_, _, OracleError<'_>>("if "), tag("when "))),
-            preceded(take_until(", "), tag(", ")),
-        )
-        .parse(lower.as_str())
-        .map_or(lower.as_str(), |(rest, _)| rest);
-        subject::parse_leading_subject_application(body.trim(), &mut ctx.clone_throwaway())
-            .is_some_and(|application| {
-                non_controller_subject_chooser(&application.affected).is_some()
-            })
+        // Whatever precedes the clause's own subject ("If you do, then ...", "If
+        // you control a Goblin, an Elf, or a Warrior, ...") is skipped by trying
+        // the subject at every word boundary. A subject found in a condition ("If
+        // an opponent controls a creature, ...") counts too, which only ever
+        // holds a choice at its base timing.
+        let lower = fragment.to_lowercase();
+        nom_primitives::scan_split_at_phrase(&lower, |input| {
+            if subject::parse_leading_subject_application(input.trim(), &mut ctx.clone_throwaway())
+                .is_some_and(|application| {
+                    non_controller_subject_chooser(&application.affected).is_some()
+                })
+            {
+                success::<_, _, OracleError<'_>>(()).parse(input)
+            } else {
+                fail::<_, (), OracleError<'_>>().parse(input)
+            }
+        })
+        .is_some()
     })
 }
 

@@ -652,8 +652,9 @@ pub struct ParseContext {
     /// else, for a chunk opening with a conjugated verb, as an elided third person
     /// (CR 608.2c). Inherited by the compound continuations that predicate
     /// splits into; a continuation with a controller subject of its own clears it
-    /// for that conjunct. `None` outside such a predicate. Set and consumed within
-    /// a single chunk parse; never serialized.
+    /// for that conjunct. `None` outside such a predicate. The chain loop assigns it
+    /// again before every chunk, so a value left by the last chunk is never read;
+    /// never serialized.
     pub clause_subject_chooser: Option<ClauseChooser>,
     /// CR 608.2c + CR 701.16a: Transient per-chunk `repeat_for` lifted from a
     /// fieldless-effect subject-predicate that carries a "for each <filter> …

@@ -81014,6 +81014,10 @@ fn bare_choose_beside_a_cast_time_choice_keeps_base_timing() {
         "Choose a creature you control. When you do, target opponent chooses a creature you control.",
         "Choose a creature you control. If you control a Giant, target opponent chooses a creature you control.",
         "Choose a creature you control. If you do, target player chooses a creature you control.",
+        "Choose a Goblin you control. If you do, then target opponent chooses a creature you control.",
+        "Choose a Goblin you control. If you control a Goblin, an Elf, or a Warrior, target opponent chooses a creature you control.",
+        "Choose a Goblin you control. If you control a creature, then target player chooses a creature you control.",
+        "Choose a Goblin you control. When you do, then target opponent chooses a creature you control.",
     ] {
         let def = parse_effect_chain(text, AbilityKind::Spell);
         assert_eq!(
