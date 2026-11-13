@@ -6,10 +6,9 @@ use engine::database::legality::LegalityFormat;
 use engine::database::CardDatabase;
 use engine::game::coverage::{
     analyze_coverage, audit_resolver_features, audit_semantic, build_warning_drilldown,
-    format_semantic_audit_markdown, retain_faces_legal_in, CardCoverageResult, CoverageSupport,
-    ParseWarningPattern, WarningDrilldownCard,
+    format_semantic_audit_markdown, CoverageSupport, ParseWarningPattern, WarningDrilldownCard,
 };
-use engine::game::gap_analysis::analyze_gaps;
+use engine::game::gap_analysis::{gap_report, GapReport};
 use flate2::read::GzDecoder;
 use serde::Serialize;
 
@@ -846,8 +845,8 @@ fn otherwise_supported_counts_a_face_gapped_only_by_its_warnings() {
             .chain([(RAM_THROUGH.to_string(), ram_through_face())]),
     ))
     .to_string();
-    let summary =
-        analyze_coverage(&CardDatabase::from_json_str(&export).expect("test export deserializes"));
+    let db = CardDatabase::from_json_str(&export).expect("test export deserializes");
+    let summary = analyze_coverage(&db);
 
     let ram_through = summary
         .cards
@@ -860,6 +859,18 @@ fn otherwise_supported_counts_a_face_gapped_only_by_its_warnings() {
         assert_eq!(patterns.len(), 1, "{prefix}");
         assert_eq!(patterns[0].card_count, 1, "{prefix}");
         assert_eq!(patterns[0].otherwise_supported_cards, 1, "{prefix}");
+        assert_eq!(patterns[0].single_gap_cards, 0, "{prefix}");
+        let drill = build_warning_drilldown(
+            &db,
+            &summary,
+            None,
+            Some(&patterns[0].pattern),
+            None,
+            usize::MAX,
+            false,
+        );
+        assert_eq!(drill.matched_cards, 1, "{prefix}");
+        assert_eq!(drill.single_gap_cards, 0, "{prefix}");
     }
     let jump = patterns_starting_with(&summary.parse_warning_patterns, "Duration_UntilEndOfTurn:");
     assert_eq!(jump.len(), 1);
@@ -872,27 +883,21 @@ fn gap_report_format_filter_reads_each_face_legality() {
         serde_json::Value::Object(serde_json::Map::from_iter(channel_faces_with_legalities()))
             .to_string();
     let db = CardDatabase::from_json_str(&export).expect("test export deserializes");
-    let mut cards = analyze_coverage(&db).cards;
-    let gaps = |cards: &[CardCoverageResult], key| {
-        cards
+    let gaps = |key| {
+        analyze_coverage(&db)
+            .cards
             .iter()
             .find(|card| card.card_face_key.as_deref() == Some(key))
             .map(|card| card.gap_count)
     };
-    let soc_gaps = gaps(&cards, CHANNEL_PREPARE).expect("SOC Channel is scanned");
-    assert!(soc_gaps > 0 && gaps(&cards, CHANNEL).is_some_and(|n| n > 0));
+    let soc_gaps = gaps(CHANNEL_PREPARE).expect("SOC Channel is scanned");
+    assert!(soc_gaps > 0 && gaps(CHANNEL).is_some_and(|n| n > 0));
 
-    retain_faces_legal_in(&mut cards, &db, LegalityFormat::Commander);
+    let GapReport { analysis, retained } = gap_report(&db, Some(LegalityFormat::Commander), None);
+    let retained = retained.expect("the format filter ran");
+    assert_eq!((retained.kept, retained.before), (1, 2));
     assert_eq!(
-        cards
-            .iter()
-            .map(|card| card.card_face_key.as_deref())
-            .collect::<Vec<_>>(),
-        [Some(CHANNEL_PREPARE)]
-    );
-    let report = analyze_gaps(&cards);
-    assert_eq!(
-        (report.total_unsupported, report.total_classified),
+        (analysis.total_unsupported, analysis.total_classified),
         (1, soc_gaps)
     );
 }

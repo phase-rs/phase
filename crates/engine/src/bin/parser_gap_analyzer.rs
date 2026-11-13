@@ -3,8 +3,7 @@ use std::process;
 
 use engine::database::legality::LegalityFormat;
 use engine::database::CardDatabase;
-use engine::game::coverage::{analyze_coverage, retain_faces_legal_in};
-use engine::game::gap_analysis::{analyze_gaps, GapClass};
+use engine::game::gap_analysis::{gap_report, GapClass, GapReport, RetainedRows};
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -96,25 +95,14 @@ fn main() {
     };
 
     eprintln!("Analyzing coverage...");
-    let mut summary = analyze_coverage(&db);
-
-    if let Some(fmt) = format_filter {
-        let before = summary.cards.len();
-        retain_faces_legal_in(&mut summary.cards, &db, fmt);
+    let GapReport { analysis, retained } = gap_report(&db, format_filter, category_filter);
+    if let (Some(fmt), Some(RetainedRows { kept, before })) = (format_filter, retained) {
         eprintln!(
             "Filtered to {}: {} / {} cards retained",
             fmt.as_key(),
-            summary.cards.len(),
+            kept,
             before
         );
-    }
-
-    eprintln!("Grouping gaps...");
-    let mut analysis = analyze_gaps(&summary.cards);
-
-    if let Some(class) = category_filter {
-        let label = class.label();
-        analysis.categories.retain(|key, _| *key == label);
     }
 
     // JSON to stdout

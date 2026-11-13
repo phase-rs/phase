@@ -8,8 +8,11 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::Serialize;
 use strum::IntoEnumIterator;
 
+use crate::database::legality::LegalityFormat;
+use crate::database::CardDatabase;
 use crate::game::coverage::{
-    normalize_oracle_pattern, CardCoverageResult, GapDetail, GapDiagnosis, ResolverFeatureFamily,
+    analyze_coverage, normalize_oracle_pattern, retain_faces_legal_in, CardCoverageResult,
+    GapDetail, GapDiagnosis, ResolverFeatureFamily,
 };
 use crate::parser::oracle_ir::diagnostic::{ClauseGap, ClauseGapKind};
 
@@ -269,6 +272,41 @@ pub fn analyze_gaps(cards: &[CardCoverageResult]) -> GapAnalysis {
             .map(|(label, category)| (label, category.finish()))
             .collect(),
     }
+}
+
+/// The `parser-gap-analyzer` report body and its format filter's row counts.
+pub struct GapReport {
+    pub analysis: GapAnalysis,
+    /// Present when a format filter ran.
+    pub retained: Option<RetainedRows>,
+}
+
+pub struct RetainedRows {
+    pub kept: usize,
+    pub before: usize,
+}
+
+/// Analyzes coverage, keeps the faces legal in `format`, groups their gaps, and keeps only `category`.
+pub fn gap_report(
+    card_db: &CardDatabase,
+    format: Option<LegalityFormat>,
+    category: Option<GapClass>,
+) -> GapReport {
+    let mut cards = analyze_coverage(card_db).cards;
+    let retained = format.map(|format| {
+        let before = cards.len();
+        retain_faces_legal_in(&mut cards, card_db, format);
+        RetainedRows {
+            kept: cards.len(),
+            before,
+        }
+    });
+    let mut analysis = analyze_gaps(&cards);
+    if let Some(class) = category {
+        let label = class.label();
+        analysis.categories.retain(|key, _| *key == label);
+    }
+    GapReport { analysis, retained }
 }
 
 #[cfg(test)]
