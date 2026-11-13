@@ -407,14 +407,12 @@ pub(crate) fn eliminate_players(
     // ability reads its source as it was immediately before that event, so an
     // observer a leaving player stole triggers under that player and is retired
     // with them (CR 800.4d) rather than handed to its owner.
-    for player in state
-        .players
-        .iter_mut()
-        .filter(|player| leaving_set.contains(&player.id))
-    {
-        player
-            .left_at_zone_change_record
-            .get_or_insert(first_record);
+    // CR 603.10a + CR 603.3a: a merged permanent's component child still holds
+    // departures its announcing owner has not collected. They happened before
+    // these players leave, so their abilities trigger now, under the observers
+    // and controllers the game has before the departure.
+    if !leaving_set.is_empty() {
+        super::triggers::collect_delegated_departures_before_a_player_leaves(state);
     }
     let mut looked_back_observers = (!leaving_set.is_empty())
         .then(|| super::triggers::ImmediatelyBeforeObservers::latch(state));

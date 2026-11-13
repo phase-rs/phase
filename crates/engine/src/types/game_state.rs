@@ -3700,18 +3700,13 @@ pub struct LogicalZoneChangeGroup {
     pub immediately_before_latched: bool,
     pub immediately_before_batched_triggers: Vec<LatchedBatchedTrigger>,
     pub immediately_before_suppress_triggers: Vec<LatchedSuppressTrigger>,
-    /// CR 603.10a + CR 603.3a: who controlled each permanent on the battlefield
-    /// immediately before the owner's event. An ordinary observer's abilities
-    /// that trigger for the owner's retained departures are controlled by that
-    /// player, even when the retained events are collected later, after a
-    /// control effect ended (a player who left, CR 800.4a).
+    /// CR 603.2c + CR 603.10a: the retained zone changes (object and per-turn
+    /// record index) whose ordinary triggers were already collected for this
+    /// owner before a player left the game, while its component child still held
+    /// them (`triggers::collect_delegated_departures_before_a_player_leaves`).
+    /// The owner's later collection of the handed-back slice skips them.
     #[serde(default)]
-    pub immediately_before_controllers: Vec<(ObjectIncarnationRef, PlayerId)>,
-    /// How many zone changes this turn had been recorded when the owner latched
-    /// its pre-event authority: a player who left at or after it left during this
-    /// owner's operation (`Player::left_at_zone_change_record`).
-    #[serde(default)]
-    pub immediately_before_zone_change_record: usize,
+    pub collected_before_departure: Vec<(ObjectId, usize)>,
     /// `true` only after final delivery has flushed layers and captured every
     /// ordinary CR 603.10 observation. This stays explicit even when no retained
     /// occurrence admits an immediately-after definition.
@@ -3734,9 +3729,7 @@ struct LogicalZoneChangeGroupWire {
     immediately_before_batched_triggers: Vec<LatchedBatchedTrigger>,
     immediately_before_suppress_triggers: Vec<LatchedSuppressTrigger>,
     #[serde(default)]
-    immediately_before_controllers: Vec<(ObjectIncarnationRef, PlayerId)>,
-    #[serde(default)]
-    immediately_before_zone_change_record: usize,
+    collected_before_departure: Vec<(ObjectId, usize)>,
     immediately_after_latched: bool,
     immediately_after_batched_triggers: Vec<LatchedBatchedTrigger>,
     immediately_after_suppress_triggers: Vec<LatchedSuppressTrigger>,
@@ -3753,8 +3746,7 @@ impl From<LogicalZoneChangeGroupWire> for LogicalZoneChangeGroup {
             immediately_before_latched: wire.immediately_before_latched,
             immediately_before_batched_triggers: wire.immediately_before_batched_triggers,
             immediately_before_suppress_triggers: wire.immediately_before_suppress_triggers,
-            immediately_before_controllers: wire.immediately_before_controllers,
-            immediately_before_zone_change_record: wire.immediately_before_zone_change_record,
+            collected_before_departure: wire.collected_before_departure,
             immediately_after_latched: wire.immediately_after_latched,
             immediately_after_batched_triggers: wire.immediately_after_batched_triggers,
             immediately_after_suppress_triggers: wire.immediately_after_suppress_triggers,
@@ -3999,8 +3991,7 @@ impl LogicalZoneChangeGroup {
             immediately_before_latched: false,
             immediately_before_batched_triggers: Vec::new(),
             immediately_before_suppress_triggers: Vec::new(),
-            immediately_before_controllers: Vec::new(),
-            immediately_before_zone_change_record: 0,
+            collected_before_departure: Vec::new(),
             immediately_after_latched: false,
             immediately_after_batched_triggers: Vec::new(),
             immediately_after_suppress_triggers: Vec::new(),

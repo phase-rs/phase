@@ -2565,15 +2565,6 @@ fn latch_logical_zone_change_group_immediately_before(
     group
         .latch_immediately_before(batched_triggers, suppress_triggers)
         .expect("a new logical zone-change group is latched exactly once");
-    group.immediately_before_controllers = state
-        .battlefield
-        .iter()
-        .filter_map(|id| {
-            let object = state.objects.get(id)?;
-            Some((ObjectIncarnationRef::from_object(object), object.controller))
-        })
-        .collect();
-    group.immediately_before_zone_change_record = state.zone_changes_this_turn.len();
 }
 
 fn trigger_observes_zone_change(
@@ -4773,73 +4764,108 @@ pub(crate) fn collect_logical_zone_trigger_segment(
     events: &[GameEvent],
 ) -> Vec<PendingTriggerContext> {
     let mut session = TriggerCollectionSession::new(TriggerCollectionOverlay::default());
-    let mut contexts = collect_pending_triggers_with_collection(
+    collect_pending_triggers_with_collection(
         state,
         events,
         LogicalZoneTriggerCollection::Segment(group),
         &mut session,
-    );
-    // CR 603.10a + CR 603.3a: the owner's event happened while each observer was
-    // controlled by whoever controlled it immediately before it, and an ability
-    // that triggers for it is that player's, however late the retained events
-    // are collected (a merged departure's owner collects them when its tail
-    // finishes). CR 800.4d: one controlled by a player who has since left the
-    // game is not put on the stack.
-    // A zone change recorded after a player left the game happened under the
-    // controllers the game then had, so only those recorded before it are read
-    // through the latch.
-    let performed_before_departure = |event: &GameEvent| match event {
+    )
+}
+
+/// The identity of a retained zone change: its object and its index in this
+/// turn's zone-change records.
+fn retained_zone_change_key(event: &GameEvent) -> Option<(ObjectId, usize)> {
+    match event {
         GameEvent::ZoneChanged {
-            object_id,
-            from,
-            to,
-            ..
-        } => state
-            .players
-            .iter()
-            .filter_map(|player| player.left_at_zone_change_record)
-            .filter(|left_at| *left_at >= group.immediately_before_zone_change_record)
-            .min()
-            .is_some_and(|boundary| {
-                state
-                    .zone_changes_this_turn
-                    .iter()
-                    .enumerate()
-                    .rfind(|(_, record)| {
-                        record.object_id == *object_id
-                            && record.from_zone == *from
-                            && record.to_zone == *to
-                    })
-                    .is_some_and(|(index, _)| index < boundary)
-            }),
-        _ => false,
-    };
-    for context in &mut contexts {
-        let mut events = context
-            .trigger_events
-            .iter()
-            .chain(context.pending.trigger_event.iter())
-            .peekable();
-        if events.peek().is_none() || !events.all(&performed_before_departure) {
-            continue;
-        }
-        let source = state
-            .objects
-            .get(&context.pending.source_id)
-            .map(ObjectIncarnationRef::from_object);
-        if let Some((_, controller)) = group
-            .immediately_before_controllers
-            .iter()
-            .find(|(latched, _)| Some(*latched) == source)
-        {
-            context.pending.controller = *controller;
-            context
-                .pending
-                .ability
-                .set_controller_recursive(*controller);
-        }
+            object_id, record, ..
+        } => Some((*object_id, record.turn_zone_change_index)),
+        _ => None,
     }
-    retire_departed_controller_contexts(state, contexts)
+}
+
+/// CR 603.10a + CR 603.3a + CR 603.2c: a merged permanent's component child
+/// retains the departures it delivered for the owner that announced them, and
+/// that owner collects them when the child hands them back. A player leaving
+/// the game in between would end control effects and remove observers
+/// (CR 800.4a), so before any player leaves, the owner collects what its child
+/// holds so far, against the game as it is: the abilities trigger under the
+/// players who control their sources now. The owner records what it collected
+/// and its later collection of the handed-back slice skips exactly those
+/// occurrences, so each is collected once.
+pub(crate) fn collect_delegated_departures_before_a_player_leaves(state: &mut GameState) {
+    use crate::types::resolution::ZoneChangeOwnerMut;
+
+    let Some((link, held)) = state.active_batch_delivery().and_then(|child| {
+        let link = child.component_delivery_parent.clone()?;
+        let held: Vec<GameEvent> = child
+            .logical_zone_change_group
+            .all_origin_occurrences
+            .iter()
+            .map(|occurrence| occurrence.event.clone())
+            .filter(|event| matches!(event, GameEvent::ZoneChanged { .. }))
+            .collect();
+        Some((link, held))
+    }) else {
+        return;
+    };
+    let mut owner = None;
+    state
+        .resolution_stack
+        .visit_active_zone_change_owners_mut(|visited| {
+            let group = match visited {
+                ZoneChangeOwnerMut::Batch(batch) => &batch.logical_zone_change_group,
+                ZoneChangeOwnerMut::ChangeZone(iteration) => &iteration.logical_zone_change_group,
+            };
+            if group.logical_group_id == link.parent_group_id {
+                owner = Some(group.clone());
+            }
+        });
+    let Some(mut owner) = owner else {
+        return;
+    };
+    let uncollected: Vec<GameEvent> = held
+        .into_iter()
+        .filter(|event| {
+            retained_zone_change_key(event)
+                .is_some_and(|key| !owner.collected_before_departure.contains(&key))
+        })
+        .collect();
+    if uncollected.is_empty() {
+        return;
+    }
+    // The owner's group reads the slice as its own while collecting; the real
+    // group takes the occurrences at the handback.
+    if owner.append_delivery_events(&uncollected).is_err() {
+        return;
+    }
+    let pending = collect_logical_zone_trigger_segment(state, &owner, &uncollected);
+    if resolve_and_apply_trigger_collection(
+        state,
+        ResolvedTriggerCollection::DeferPending { contexts: pending },
+    )
+    .is_err()
+    {
+        return;
+    }
+    let keys: Vec<(ObjectId, usize)> = uncollected
+        .iter()
+        .filter_map(retained_zone_change_key)
+        .collect();
+    state
+        .resolution_stack
+        .visit_active_zone_change_owners_mut(|visited| {
+            let group = match visited {
+                ZoneChangeOwnerMut::Batch(batch) => &mut batch.logical_zone_change_group,
+                ZoneChangeOwnerMut::ChangeZone(iteration) => {
+                    &mut iteration.logical_zone_change_group
+                }
+            };
+            if group.logical_group_id == link.parent_group_id {
+                group
+                    .collected_before_departure
+                    .extend(keys.iter().copied());
+            }
+        });
 }
 
 /// Retain one explicit zone-change delivery segment on its logical owner and
@@ -4859,7 +4885,16 @@ pub(crate) fn append_and_collect_logical_zone_trigger_segment(
         .cloned()
         .collect();
     group.append_delivery_events(&zone_change_events)?;
-    let pending = collect_logical_zone_trigger_segment(state, group, &zone_change_events);
+    // CR 603.2c: occurrences this owner collected before a player left the game
+    // are not collected a second time.
+    let uncollected: Vec<_> = zone_change_events
+        .into_iter()
+        .filter(|event| {
+            retained_zone_change_key(event)
+                .is_none_or(|key| !group.collected_before_departure.contains(&key))
+        })
+        .collect();
+    let pending = collect_logical_zone_trigger_segment(state, group, &uncollected);
     resolve_and_apply_trigger_collection(
         state,
         ResolvedTriggerCollection::DeferPending { contexts: pending },

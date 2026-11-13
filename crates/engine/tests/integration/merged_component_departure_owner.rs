@@ -1377,6 +1377,72 @@ fn kor_skyfisher_selection_hands_a_parked_component_back_to_its_loop() {
     }
 }
 
+/// CR 603.2 + CR 603.10a + CR 603.3a: the observer leaves with the leaver, but its
+/// trigger is a survivor's. P0 takes control of P2's Extractor Demon with Turn
+/// Against; P0's Totally Lost moves P1's merged commander pile and Brokkos's
+/// CR 903.9b prompt parks the split. P2 concedes while P1's prompt is open, and
+/// the Demon leaves the game with its owner. The Demon's ability had already
+/// triggered for the merged permanent's departure under P0, so after P1 answers
+/// P0 is putting it on the stack, exactly once.
+#[test]
+fn a_survivors_trigger_survives_its_source_leaving_with_another_seat() {
+    for answer_index in [0, 1] {
+        let db = shared_card_db().expect("integration card fixture must load");
+        let mut scenario = GameScenario::new_with_format(FormatConfig::commander(), 3, 7);
+        scenario.at_phase(Phase::PreCombatMain);
+        let (mender, brokkos) = add_pile(&mut scenario, P1);
+        let demon = scenario.add_real_card(P2, "Extractor Demon", Zone::Battlefield, db);
+        let turn_against = scenario.add_real_card(P0, "Turn Against", Zone::Hand, db);
+        let lost = scenario.add_real_card(P0, "Totally Lost", Zone::Hand, db);
+        scenario.with_library_top(P1, &["Library Card A"]);
+        let mut pool = mana(ManaType::Blue, 5);
+        pool.extend(mana(ManaType::Red, 5));
+        scenario.with_mana_pool(P0, pool);
+        let mut runner = scenario.build();
+        let pile = merge_pile(&mut runner, Pile::BrokkosUnderMender, mender, brokkos, true);
+        let label = format!("answer {answer_index}");
+        steal_for(&mut runner, P0, turn_against, demon);
+
+        cast_until_resolved_or_asked(&mut runner, lost, &[pile.survivor]);
+        assert_commander_prompt(runner.state(), P1, pile.brokkos);
+        concede(&mut runner, P2);
+        assert_eq!(runner.state().objects[&demon].zone, Zone::Exile, "{label}");
+        assert_commander_prompt(runner.state(), P1, pile.brokkos);
+
+        answer(&mut runner, answer_index);
+        // The Demon's ability is being put on the stack for P0, who chooses its
+        // target (CR 603.3d); nothing of the resolution is left parked.
+        match &runner.state().waiting_for {
+            WaitingFor::TriggerTargetSelection {
+                player: P0,
+                trigger_controller: Some(P0),
+                source_id: Some(source),
+                ..
+            } if *source == demon => {}
+            other => panic!("{label}: {other:?}"),
+        }
+        assert!(runner.state().pending_replacement.is_none(), "{label}");
+        assert!(runner.state().resolution_stack.is_empty(), "{label}");
+        let demon_triggers_in_flight = runner
+            .state()
+            .deferred_triggers
+            .iter()
+            .filter(|context| context.pending.source_id == demon)
+            .count()
+            + runner
+                .state()
+                .stack
+                .iter()
+                .filter(|entry| entry.source_id == demon)
+                .count();
+        assert_eq!(
+            demon_triggers_in_flight, 1,
+            "{label}: the Demon triggered once, for the one merged permanent that left: the \
+             ability P0 is announcing is its only one on the stack or waiting"
+        );
+    }
+}
+
 /// CR 603.10a + CR 603.3a + CR 800.4d: a second player leaves the same turn.
 /// In a four-player game P3 concedes first, so an earlier departure is already
 /// recorded this turn. P2 then steals P0's Extractor Demon, P0's Rebuking

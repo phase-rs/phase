@@ -184,16 +184,6 @@ pub struct Player {
     #[serde(default)]
     pub is_eliminated: bool,
 
-    /// CR 603.10a + CR 800.4a: how many zone changes this turn had been recorded
-    /// (`GameState::zone_changes_this_turn`) when this player left the game. A
-    /// zone change recorded before it happened while the leaver's control
-    /// effects still applied, so a parked owner collecting it later reads its
-    /// observers' controllers as they were immediately before it
-    /// (`LogicalZoneChangeGroup::immediately_before_controllers`); one recorded
-    /// at or after it reads the live game. Cleared with the records it indexes.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub left_at_zone_change_record: Option<usize>,
-
     /// Avatar crossover: which bending types this player has performed this turn.
     #[serde(
         default,
@@ -284,7 +274,6 @@ impl Default for Player {
             drew_from_empty_library: false,
             turns_taken: 0,
             is_eliminated: false,
-            left_at_zone_change_record: None,
             bending_types_this_turn: HashSet::new(),
             player_counters: HashMap::new(),
             companion: None,
