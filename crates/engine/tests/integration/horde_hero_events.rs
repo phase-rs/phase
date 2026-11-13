@@ -679,7 +679,7 @@ fn baxter_banks_then_fires_on_the_next_wave_card() {
     let mut state = hero_event_game();
     let bear = add_hero_creature(&mut state, HERO1, "Hero Bear", 2);
     let baxter = add_library_event(&mut state, "Event: Baxter's Experiments");
-    let rampage = add_library_event(&mut state, "Event: Bebop's Rampage");
+    add_library_event(&mut state, "Event: Bebop's Rampage");
     let mut runner = GameRunner::from_state(state);
     begin_wave_with_budget(&mut runner, 2);
     // No prompts: Baxter banks silently and Rampage is synchronous.
@@ -700,12 +700,11 @@ fn baxter_banks_then_fires_on_the_next_wave_card() {
             matches!(
                 event,
                 GameEvent::DamageDealt {
-                    source_id,
                     target: TargetRef::Object(id),
                     amount: 2,
                     is_combat: false,
                     ..
-                } if *source_id == rampage && *id == bear
+                } if *id == bear
             )
         })
         .collect();

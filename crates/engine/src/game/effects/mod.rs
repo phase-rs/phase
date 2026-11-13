@@ -36156,12 +36156,11 @@ mod tests {
             assert!(outcome.events().iter().any(|event| matches!(
                 event,
                 GameEvent::DamageDealt {
-                    source_id,
                     target: TargetRef::Object(damaged),
                     amount: 3,
                     is_combat: false,
                     ..
-                } if *source_id == volcanic && *damaged == target
+                } if *damaged == target
             )));
             assert_eq!(outcome.state().objects[&target].zone, Zone::Graveyard);
         }

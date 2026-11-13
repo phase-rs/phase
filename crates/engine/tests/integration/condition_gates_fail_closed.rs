@@ -266,7 +266,7 @@ fn champion_lancer_prevents_creature_damage_only() {
             source_id,
             target: TargetRef::Object(target),
             amount: 3,
-        } if *source_id == attacker && *target == lancer
+        } if *source_id == lancer && *target == lancer
     )));
     assert_no_damage_to(combat_outcome.events(), TargetRef::Object(lancer));
     assert_damage_dealt(

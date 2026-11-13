@@ -25670,7 +25670,7 @@ mod color_or_type_union {
     /// and creature conjunctive card types within one noun leg.
     #[test]
     fn mixed_color_type_union_keeps_an_uncolored_right_type_leg() {
-        let phrase = "black or green or artifact creature";
+        let phrase = "black or green creature or artifact creature";
         let (filter, rest) = parse_type_phrase_folding(phrase);
         assert_eq!(rest, "", "the full grammar phrase must be consumed");
         assert_eq!(

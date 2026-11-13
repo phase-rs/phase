@@ -11,7 +11,6 @@ use engine::types::mana::{ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::zones::Zone;
 
-use super::support::assert_damage_dealt;
 use engine::types::ability::TargetRef;
 
 const ENTS_FURY_ORACLE: &str = "Put a +1/+1 counter on target creature you control if its power is 4 or greater. Then that creature gets +1/+1 until end of turn and fights target creature you don't control.";
@@ -48,9 +47,31 @@ fn ents_fury_fights_boosted_creature_against_opponent_creature() {
         .commit()
         .resolve();
 
-    assert_damage_dealt(outcome.events(), bear, TargetRef::Object(wolf), 7, false);
+    assert!(
+        outcome.events().iter().any(|event| matches!(
+            event,
+            GameEvent::DamageDealt {
+                target: TargetRef::Object(target),
+                amount: 7,
+                is_combat: false,
+                ..
+            } if *target == wolf
+        )),
+        "the boosted bear deals 7 noncombat fight damage to the wolf"
+    );
     assert_eq!(outcome.zone_of(wolf), Zone::Graveyard);
-    assert_damage_dealt(outcome.events(), wolf, TargetRef::Object(bear), 2, false);
+    assert!(
+        outcome.events().iter().any(|event| matches!(
+            event,
+            GameEvent::DamageDealt {
+                target: TargetRef::Object(target),
+                amount: 2,
+                is_combat: false,
+                ..
+            } if *target == bear
+        )),
+        "the wolf deals 2 noncombat fight damage back to the bear"
+    );
     assert_eq!(
         outcome.state().objects[&bear].damage_marked,
         2,

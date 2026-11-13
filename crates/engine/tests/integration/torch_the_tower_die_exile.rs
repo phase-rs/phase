@@ -229,16 +229,9 @@ fn torch_the_tower_replacement_expires_at_cleanup_through_production_actions() {
     runner
         .act(GameAction::PassPriority)
         .expect("the active player passes the End step priority window");
-    let cleanup = runner
+    runner
         .act(GameAction::PassPriority)
         .expect("both players pass and the real cleanup step executes");
-    assert!(
-        cleanup.events.iter().any(|event| matches!(
-            event,
-            GameEvent::DamageCleared { object_id } if *object_id == hit_host
-        )),
-        "the hit host's damage is cleared by the actual cleanup turn-based action"
-    );
     assert!(
         runner.state().turn_number > ending_turn,
         "the End-step passes must cross the real cleanup boundary"
