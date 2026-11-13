@@ -10367,14 +10367,39 @@ pub(crate) fn parked_entry_payment_is_copy_surface(pending: &PendingReplacement)
     )
 }
 
-/// CR 614.12a: a copied as-enters payment remains before the token group's
-/// entry, including while its life-loss replacement owns the active prompt.
-/// Both owners are serialized, so the observer population survives restore.
-pub(crate) fn copy_entry_payment_source(state: &GameState) -> Option<ObjectId> {
-    let pending = state
+/// CR 614.12a: identify the payer's entry group for a pre-entry payment.
+/// Ordinary card entries retain the live board; direct tokens and synthetic
+/// copy surfaces exclude their co-entrants, including during nested life loss.
+fn entry_group_payment_entrant(proposed: &ProposedEvent) -> Option<ObjectId> {
+    match proposed {
+        ProposedEvent::TokenEntry { entry_ref, .. } => Some(*entry_ref),
+        ProposedEvent::ZoneChange {
+            object_id,
+            from: Zone::Battlefield,
+            to: Zone::Battlefield,
+            ..
+        } => Some(*object_id),
+        _ => None,
+    }
+}
+
+/// CR 614.12a + CR 603.2: the parked payment's entry-group witness survives
+/// nested life-loss replacement and restore, keeping pre-entry observers fixed.
+pub(crate) fn entry_group_payment_source(state: &GameState) -> Option<ObjectId> {
+    let payment_source = |pending: &PendingReplacement| {
+        let entrant = entry_group_payment_entrant(&pending.proposed)?;
+        let [rid] = pending.candidates.as_slice() else {
+            return None;
+        };
+        // TokenEntry also parks non-payment entry choices. Only the entrant's
+        // as-enters payment establishes this observer boundary (CR 614.12a).
+        let board = copy_entry_board(state, entrant);
+        as_enters_payment_for_entry(&board, &pending.proposed, *rid).map(|_| entrant)
+    };
+    state
         .pending_replacement
         .as_ref()
-        .filter(|pending| parked_entry_payment_is_copy_surface(pending))
+        .and_then(payment_source)
         .or_else(|| {
             let crate::types::game_state::DeferredLifeCostResume::PayAmount {
                 pending_entry, ..
@@ -10382,14 +10407,8 @@ pub(crate) fn copy_entry_payment_source(state: &GameState) -> Option<ObjectId> {
             else {
                 return None;
             };
-            pending_entry
-                .as_deref()
-                .filter(|pending| parked_entry_payment_is_copy_surface(pending))
-        })?;
-    let ProposedEvent::ZoneChange { object_id, .. } = &pending.proposed else {
-        unreachable!("a copy-surfaced entry payment is a ZoneChange proposal")
-    };
-    Some(*object_id)
+            payment_source(pending_entry.as_deref()?)
+        })
 }
 
 fn battlefield_entry_current_tapped(event: &ProposedEvent) -> Option<bool> {
@@ -12808,13 +12827,21 @@ struct AsEntersPayChoice {
 
 /// CR 614.12a: the payment terms for `rid` on this entry — `(max, payer)`
 /// — or `None` when `rid` is not this entry's unanswered as-enters payment.
-/// The cap (`entry_payment_max`, Nameless Race) is evaluated live at raise
-/// time against the payer's board, like every other `resolve_quantity`.
+/// The cap (`entry_payment_max`, Nameless Race) is evaluated at raise time
+/// against the same entry-group board as the payment prohibition.
 fn as_enters_pay_terms(
     state: &GameState,
     proposed: &ProposedEvent,
     rid: ReplacementId,
 ) -> Option<(u32, PlayerId)> {
+    // CR 614.12a + CR 119.8: co-entrants cannot prohibit this pre-entry payment.
+    // The synthetic copy-surface caller already supplies its projected board;
+    // direct TokenEntry callers still supply the live board and project here.
+    let board = match proposed {
+        ProposedEvent::TokenEntry { entry_ref, .. } => Some(copy_entry_board(state, *entry_ref)),
+        _ => None,
+    };
+    let state = board.as_deref().unwrap_or(state);
     let def = as_enters_payment_for_entry(state, proposed, rid)?;
     if proposed.already_applied(&rid) {
         return None;
@@ -12981,11 +13008,11 @@ pub(crate) fn pending_entry_payment_is_live(state: &GameState) -> bool {
     !pending.is_optional
         && !pending.proposed.already_applied(rid)
         // CR 614.12a + CR 707.5: a copy-surface park was found on the entrant's copy-entry
-        // board (`surface_copied_entry_payment`), so its definition is re-read there; a
-        // pre-entry park keeps the live read.
+        // board (`surface_copied_entry_payment`), as is a direct token payment;
+        // ordinary card entries keep the live read.
         && {
-            let board = if parked_entry_payment_is_copy_surface(pending) {
-                copy_entry_board(state, *source_id)
+            let board = if let Some(entrant) = entry_group_payment_entrant(&pending.proposed) {
+                copy_entry_board(state, entrant)
             } else {
                 std::borrow::Cow::Borrowed(state)
             };

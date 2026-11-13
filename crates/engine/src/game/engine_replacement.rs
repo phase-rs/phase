@@ -2465,17 +2465,9 @@ pub(super) fn handle_entry_payment(
     };
     // CR 614.12a: the copied payment precedes simultaneous entry. Judge its
     // prohibition on the same board as its offer, before taking the parked
-    // record; ordinary pre-entry payments retain the live-board context.
-    let prohibition_board = state.pending_replacement.as_ref().and_then(|pending| {
-        if super::replacement::parked_entry_payment_is_copy_surface(pending) {
-            let WaitingFor::PayAmountChoice { source_id, .. } = &state.waiting_for else {
-                unreachable!("a live entry payment owns its prompt")
-            };
-            Some(super::replacement::copy_entry_board(state, *source_id).into_owned())
-        } else {
-            None
-        }
-    });
+    // record; ordinary card-entry payments retain the live-board context.
+    let prohibition_board = super::replacement::entry_group_payment_source(state)
+        .map(|entrant| super::replacement::copy_entry_board(state, entrant).into_owned());
     // Take the outer record FIRST so the inner life-loss ordering (which owns
     // `pending_replacement` while IT resolves) cannot collide with it; pin the
     // taken local's delivery boundary BEFORE the payment can change the
@@ -2503,7 +2495,7 @@ pub(super) fn handle_entry_payment(
                     .push(ChosenAttribute::Number(amount));
             }
             state.pending_replacement = Some(pending);
-            collect_copy_entry_payment_triggers(state, events, payment_event_start);
+            collect_entry_group_payment_triggers(state, events, payment_event_start);
             resume_parked_entry_payment(state, events)
         }
         PayLifeCostResult::PaidWithDeferredSubstitution { .. }
@@ -2523,7 +2515,7 @@ pub(super) fn handle_entry_payment(
                 resume_at_resolution_depth,
                 pending_entry: Some(Box::new(pending)),
             });
-            collect_copy_entry_payment_triggers(state, events, payment_event_start);
+            collect_entry_group_payment_triggers(state, events, payment_event_start);
             Ok(state.waiting_for.clone())
         }
         PayLifeCostResult::InsufficientLife | PayLifeCostResult::Prohibited => {
@@ -2541,12 +2533,12 @@ pub(super) fn handle_entry_payment(
 /// parked entry still identifies the pre-entry population, before replay or
 /// continuation can retire its token cohort. The existing occurrence ledger
 /// leaves delayed observers visible and prevents a second ordinary scan.
-fn collect_copy_entry_payment_triggers(
+fn collect_entry_group_payment_triggers(
     state: &mut GameState,
     events: &[GameEvent],
     event_start: usize,
 ) {
-    if super::replacement::copy_entry_payment_source(state).is_none() {
+    if super::replacement::entry_group_payment_source(state).is_none() {
         return;
     }
     let unconsumed = super::triggers::filter_already_collected_trigger_events_from(
@@ -2644,7 +2636,7 @@ pub(crate) fn complete_entry_payment(
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
     state.pending_replacement = Some(pending);
-    collect_copy_entry_payment_triggers(state, events, 0);
+    collect_entry_group_payment_triggers(state, events, 0);
     resume_parked_entry_payment(state, events)
 }
 

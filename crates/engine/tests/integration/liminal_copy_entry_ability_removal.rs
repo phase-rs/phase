@@ -2544,3 +2544,179 @@ fn clone_legion_lone_gargantuan_copy_of_squad_captain_counts_the_board() {
     assert_eq!(power_toughness(&runner, copy), (Some(8), Some(8)));
     assert!(runner.state().objects[&copy].has_keyword(&Keyword::Vigilance));
 }
+
+/// D8: CR 614.12a + CR 119.8 + CR 603.2: direct token payments use the
+/// pre-entry population for both prohibitions and life-loss observers.
+fn direct_minion_payment(
+    carry: PauseCarry,
+    co: Option<Donor>,
+    resident: Option<Donor>,
+) -> RowOutcome {
+    let minion = std::cell::Cell::new(None);
+    let resident_id = std::cell::Cell::new(None);
+    let hand_before = std::cell::Cell::new(None);
+    let donors: Vec<Donor> = if co.is_none() {
+        vec![VOICE_DONOR, VOICE_DONOR]
+    } else {
+        co.into_iter().collect()
+    };
+    let (runner, answered) = clone_legion_carried(
+        &donors,
+        |scenario| {
+            if resident.is_some_and(|donor| donor.name == EMPERION_NAME) {
+                // CR 613.1g: keep the determined-zero token alive to inspect its latch.
+                scenario.add_enchantment_from_oracle(
+                    P0,
+                    "Glorious Anthem",
+                    "Creatures you control get +1/+1.",
+                );
+            }
+
+            minion.set(Some(
+                scenario
+                    .add_creature_to_hand_from_oracle(P0, MINION_NAME, 0, 0, MINION_OF_THE_WASTES)
+                    .with_mana_cost(ManaCost::generic(0))
+                    .id(),
+            ));
+            if let Some(donor) = resident {
+                resident_id.set(Some(
+                    scenario
+                        .add_creature_to_hand_from_oracle(
+                            P0,
+                            donor.name,
+                            donor.power,
+                            donor.toughness,
+                            donor.oracle,
+                        )
+                        .with_mana_cost(ManaCost::generic(0))
+                        .id(),
+                ));
+            }
+        },
+        |runner| {
+            cast_minion_paying_three(runner, minion.get().unwrap());
+            // Fixture control assignment leaves the donor's production-paid latch intact.
+            // It is delivered after the earlier donor, so its co-entrant is live at payment.
+            let donor = runner
+                .state_mut()
+                .objects
+                .get_mut(&minion.get().unwrap())
+                .unwrap();
+            donor.controller = P1;
+            donor.base_controller = Some(P1);
+            engine::game::layers::mark_layers_full(runner.state_mut());
+            engine::game::layers::flush_layers(runner.state_mut());
+            if let Some(id) = resident_id.get() {
+                runner.cast(id).resolve();
+                assert_settled(runner, "D8 resident resolved");
+                assert_eq!(
+                    runner.state().objects[&id].zone,
+                    Zone::Battlefield,
+                    "REACH-GUARD D8: resident is live before Clone Legion"
+                );
+            }
+        },
+        carry,
+        &Script {
+            pays: vec![5],
+            ..Script::default()
+        },
+        |runner, prompt| {
+            if let Prompt::PayAmount { player, min, max } = prompt {
+                assert_eq!((*player, *min, *max), (P0, 0, 17));
+                assert!(
+                    matches!(
+                        runner
+                            .state()
+                            .pending_replacement
+                            .as_ref()
+                            .unwrap()
+                            .proposed,
+                        ProposedEvent::TokenEntry { .. }
+                    ),
+                    "REACH-GUARD D8: direct TokenEntry park"
+                );
+                if let Some(donor) = co {
+                    let token = the_token(runner, donor.name);
+                    assert_eq!(
+                        runner.state().objects[&token].zone,
+                        Zone::Battlefield,
+                        "REACH-GUARD D8: co-entrant delivered before Minion payment"
+                    );
+                }
+                hand_before.set(Some(runner.state().players[0].hand.len()));
+            }
+        },
+    );
+    assert_settled(&runner, "D8");
+    let locked = resident.is_some_and(|d| d.name == EMPERION_NAME);
+    if locked {
+        assert!(
+            !answered
+                .prompts
+                .iter()
+                .any(|prompt| matches!(prompt, Prompt::PayAmount { .. })),
+            "D8 resident Emperion: determined zero"
+        );
+        assert_eq!(runner.state().players[0].life, 17);
+        assert_eq!(
+            chosen_number(&runner, the_token(&runner, MINION_NAME)),
+            Some(0)
+        );
+    } else {
+        assert_eq!(prompt_kinds(&answered.prompts), vec!["PayAmount"]);
+        assert_eq!(runner.state().players[0].life, 12);
+        assert_eq!(
+            chosen_number(&runner, the_token(&runner, MINION_NAME)),
+            Some(5)
+        );
+        let drawn = if resident.is_some() { 5 } else { 0 };
+        assert_eq!(
+            runner.state().players[0].hand.len(),
+            hand_before.get().unwrap() + drawn,
+            "D8: only resident Vilis observes pre-entry payment"
+        );
+        if let Some(id) = resident_id.get() {
+            assert!(answered.stack_trigger_sources.contains(&id));
+        } else if co.is_some_and(|d| d.name == VILIS_NAME) {
+            assert!(!answered
+                .stack_trigger_sources
+                .contains(&the_token(&runner, VILIS_NAME)));
+        }
+    }
+    assert_eq!(chosen_number(&runner, minion.get().unwrap()), Some(3));
+    assert!(runner.state().deferred_triggers.is_empty());
+    row_outcome(&runner, answered)
+}
+
+#[test]
+fn d8_direct_minion_co_entering_emperion() {
+    assert_restored_row_matches_live(
+        |carry| direct_minion_payment(carry, Some(EMPERION_DONOR), None),
+        "D8 Emperion",
+    );
+}
+
+#[test]
+fn d8_direct_minion_co_entering_vilis() {
+    assert_restored_row_matches_live(
+        |carry| direct_minion_payment(carry, Some(VILIS_DONOR), None),
+        "D8 Vilis",
+    );
+}
+
+#[test]
+fn d8_direct_minion_resident_vilis() {
+    assert_restored_row_matches_live(
+        |carry| direct_minion_payment(carry, Some(VILIS_DONOR), Some(VILIS_DONOR)),
+        "D8 resident Vilis",
+    );
+}
+
+#[test]
+fn d8_direct_minion_resident_emperion() {
+    assert_restored_row_matches_live(
+        |carry| direct_minion_payment(carry, None, Some(EMPERION_DONOR)),
+        "D8 resident Emperion",
+    );
+}
