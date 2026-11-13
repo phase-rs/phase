@@ -657,6 +657,17 @@ pub(crate) fn eliminate_players(
             }
         }
 
+        // CR 800.4a + CR 608.2d: an open resolution-time object choice ("choose a
+        // creature you control") stored its candidates when it was raised. The
+        // departure removed the leaving player's objects and ended their control
+        // effects, so the choice is re-offered, bound or settled against the
+        // objects that are eligible now.
+        if let Err(error) =
+            super::effects::reconcile_resolution_object_choice_after_departure(state, events)
+        {
+            tracing::error!(%error, "resolution object choice was not reconciled after a departure");
+        }
+
         // CR 800.4f + CR 805.6 + CR 118.12: an in-progress collective
         // tap-creatures payment is reconciled with the surviving heroes
         // (pruned session, next contributor, or explicit settlement) before

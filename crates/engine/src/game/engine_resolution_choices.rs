@@ -5951,6 +5951,16 @@ pub(super) fn handle_resolution_choice(
                     "A zone-choice card may be selected only once".to_string(),
                 ));
             }
+            // CR 608.2d: a resolution-time object choice is validated against the
+            // objects eligible now, not only the candidates stored when the
+            // prompt was raised (a player can't choose an illegal option).
+            if let Some(current) = effects::open_resolution_object_choice_candidates(state) {
+                if chosen.iter().any(|id| !current.contains(id)) {
+                    return Err(EngineError::InvalidAction(
+                        "Selected object is no longer eligible for this choice".to_string(),
+                    ));
+                }
+            }
             if !effects::choose_from_zone::selection_satisfies_constraint(
                 state,
                 &chosen,

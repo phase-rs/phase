@@ -13567,6 +13567,62 @@ fn park_resolution_object_choice(
     ResolutionProgress::Waiting
 }
 
+/// CR 608.2d: the objects a parked untargeted `TargetOnly` choice ("choose a
+/// creature you control") may pick NOW, when that choice owns the open
+/// `ChooseFromZoneChoice` prompt. The candidates stored on the prompt were
+/// scanned when it was raised; objects can leave or change controller while it
+/// is open (CR 800.4a: a player who leaves the game takes the objects they own,
+/// and control effects they owned end), and a player can't choose an illegal or
+/// impossible option. `None` when the open prompt is not such a choice.
+pub(crate) fn open_resolution_object_choice_candidates(state: &GameState) -> Option<Vec<ObjectId>> {
+    if !matches!(state.waiting_for, WaitingFor::ChooseFromZoneChoice { .. }) {
+        return None;
+    }
+    let chain = &state.active_ability_continuation_frame()?.pending.chain;
+    let Effect::TargetOnly { target } = &chain.effect else {
+        return None;
+    };
+    awaits_resolution_object_choice(chain)
+        .then(|| resolution_choice_candidates(state, chain, target, |_| true))
+}
+
+/// CR 800.4a + CR 608.2d: after a player leaves the game, bring an open
+/// resolution-time object choice back in line with the objects that are still
+/// eligible. With two or more candidates the prompt is re-offered with the
+/// current set. With one or none the parked instruction is run again, which
+/// binds the only candidate or records that the choice named nothing, exactly
+/// as it does when first reached; the resolution then carries on (CR 608.2m).
+/// A choice whose chooser left is not handled here.
+///
+/// Returns `Ok(false)` when there was nothing to reconcile.
+pub(crate) fn reconcile_resolution_object_choice_after_departure(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+) -> Result<bool, crate::game::EngineError> {
+    let Some(current) = open_resolution_object_choice_candidates(state) else {
+        return Ok(false);
+    };
+    let WaitingFor::ChooseFromZoneChoice { player, cards, .. } = &state.waiting_for else {
+        return Ok(false);
+    };
+    let chooser = *player;
+    if !crate::game::players::is_alive(state, chooser)
+        || (cards.len() == current.len() && current.iter().all(|id| cards.contains(id)))
+    {
+        return Ok(false);
+    }
+    if current.len() >= 2 {
+        if let WaitingFor::ChooseFromZoneChoice { cards, .. } = &mut state.waiting_for {
+            *cards = current;
+        }
+        return Ok(true);
+    }
+    state.waiting_for = WaitingFor::Priority { player: chooser };
+    state.priority_player = chooser;
+    crate::game::engine::resume_pending_continuation_if_priority(state, events)?;
+    Ok(true)
+}
+
 /// CR 608.2c + CR 608.2d: once its resolution-time object choice is answered,
 /// does the parked `head` publish its own result into the chain's tracked set?
 ///

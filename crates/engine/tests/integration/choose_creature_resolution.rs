@@ -2143,3 +2143,163 @@ fn bare_choice_feeding_a_delayed_sacrifice_binds_the_chosen_creature() {
     // behavior (the chain is lowered exactly as before the bare-choice change) and
     // is not asserted here.
 }
+
+// ---------------------------------------------------------------------------
+// CR 800.4a + CR 608.2d: a player who leaves the game takes the objects they own
+// with them, so an open resolution-time choice must not keep offering them.
+// Final Showdown's second mode ("Choose a creature you control. It gains
+// indestructible until end of turn.") in a three-player game, with P0
+// controlling a creature P1 owns.
+// ---------------------------------------------------------------------------
+
+/// Casts Final Showdown's second mode for P0 and passes priority until the
+/// resolution-time creature choice is open. P0 controls `own` creatures it owns
+/// and one creature that P1 owns.
+fn final_showdown_choice_with_a_borrowed_creature(
+    own: usize,
+) -> (GameRunner, ObjectId, Vec<ObjectId>, ObjectId) {
+    let mut scenario = GameScenario::new_n_player(3, 7);
+    scenario.at_phase(Phase::PreCombatMain);
+    let own_ids: Vec<ObjectId> = (0..own)
+        .map(|index| {
+            scenario
+                .add_creature(P0, &format!("Own creature {index}"), 2, 2)
+                .id()
+        })
+        .collect();
+    let borrowed = scenario
+        .add_creature(P1, "Borrowed creature", 3, 3)
+        .controlled_by(P0)
+        .id();
+    scenario.add_basic_land(P0, ManaColor::White);
+    scenario.add_basic_land(P0, ManaColor::White);
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Final Showdown", true, FINAL_SHOWDOWN)
+        .with_mana_cost(parse_mtgjson_mana_cost("{W}"))
+        .id();
+    let mut runner = scenario.build();
+    let card_id = runner.state().objects[&spell].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: spell,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .unwrap();
+    runner
+        .act(GameAction::SelectModes { indices: vec![1] })
+        .unwrap();
+    pass_priority_to_prompt(&mut runner, "Final Showdown's creature choice");
+    let WaitingFor::ChooseFromZoneChoice { player, cards, .. } = &runner.state().waiting_for else {
+        panic!(
+            "expected the resolution creature choice: {:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert_eq!(*player, P0);
+    let mut offered = own_ids.clone();
+    offered.push(borrowed);
+    assert_eq!(
+        id_set(cards),
+        id_set(&offered),
+        "reach guard: the borrowed creature is offered while its owner is in the game"
+    );
+    (runner, spell, own_ids, borrowed)
+}
+
+/// With one other candidate left, the departure settles the choice: the remaining
+/// creature is the only legal pick, gains indestructible, and the spell finishes
+/// resolving (CR 608.2m).
+#[test]
+fn final_showdown_choice_settles_on_the_remaining_creature_when_an_owner_concedes() {
+    let (mut runner, spell, own, borrowed) = final_showdown_choice_with_a_borrowed_creature(1);
+    runner.act(GameAction::Concede { player_id: P1 }).unwrap();
+    assert!(runner.state().players[1].is_eliminated);
+    assert!(!runner.state().players[2].is_eliminated);
+    assert_ne!(
+        runner
+            .state()
+            .objects
+            .get(&borrowed)
+            .map(|object| object.zone),
+        Some(Zone::Battlefield),
+        "reach guard: the conceding owner's creature left the battlefield"
+    );
+    assert!(
+        runner
+            .act(GameAction::SelectCards {
+                cards: vec![borrowed],
+            })
+            .is_err(),
+        "the departed creature can no longer be chosen"
+    );
+    assert!(runner.state().objects[&own[0]].has_keyword(&Keyword::Indestructible));
+    assert_resolution_settled(&runner, "Final Showdown after the concession");
+    assert_eq!(runner.state().objects[&spell].zone, Zone::Graveyard);
+}
+
+/// With two candidates left, the prompt is re-offered with exactly those, the
+/// departed creature is rejected, and a remaining one can be chosen.
+#[test]
+fn final_showdown_choice_is_reoffered_without_a_conceded_owners_creature() {
+    let (mut runner, spell, own, borrowed) = final_showdown_choice_with_a_borrowed_creature(2);
+    runner.act(GameAction::Concede { player_id: P1 }).unwrap();
+    let WaitingFor::ChooseFromZoneChoice { player, cards, .. } = &runner.state().waiting_for else {
+        panic!(
+            "the choice stays open for the remaining creatures: {:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert_eq!(*player, P0);
+    assert_eq!(
+        id_set(cards),
+        id_set(&own),
+        "only P0's own creatures remain"
+    );
+    assert!(
+        runner
+            .act(GameAction::SelectCards {
+                cards: vec![borrowed],
+            })
+            .is_err(),
+        "the departed creature is rejected"
+    );
+    runner
+        .act(GameAction::SelectCards {
+            cards: vec![own[1]],
+        })
+        .unwrap();
+    assert!(runner.state().objects[&own[1]].has_keyword(&Keyword::Indestructible));
+    assert!(!runner.state().objects[&own[0]].has_keyword(&Keyword::Indestructible));
+    assert_resolution_settled(&runner, "Final Showdown after the concession");
+    assert_eq!(runner.state().objects[&spell].zone, Zone::Graveyard);
+}
+
+/// CR 608.2d: the answer is validated against the objects eligible now, not only
+/// the candidates stored when the prompt was raised. No public action changes
+/// eligibility while this prompt is open other than a departure (covered above),
+/// so this row edits the state directly: a stored candidate stops being P0's.
+#[test]
+fn final_showdown_choice_rejects_a_stored_candidate_that_is_no_longer_eligible() {
+    let (mut runner, _, own, _) = final_showdown_choice_with_a_borrowed_creature(2);
+    {
+        let object = runner.state_mut().objects.get_mut(&own[0]).unwrap();
+        object.base_controller = Some(P1);
+        object.controller = P1;
+    }
+    assert!(
+        runner
+            .act(GameAction::SelectCards {
+                cards: vec![own[0]],
+            })
+            .is_err(),
+        "a creature P0 no longer controls is rejected"
+    );
+    runner
+        .act(GameAction::SelectCards {
+            cards: vec![own[1]],
+        })
+        .unwrap();
+    assert!(runner.state().objects[&own[1]].has_keyword(&Keyword::Indestructible));
+}
