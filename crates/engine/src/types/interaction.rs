@@ -582,6 +582,7 @@ pub enum InteractionActionCode {
     ChooseRoomDoor,
     TapForConvoke,
     HarmonizeTap,
+    ChooseSecretAgendaNames,
     DeclareCompanion,
     CompanionToHand,
     DiscoverChoice,
@@ -994,8 +995,10 @@ pub enum InteractionResponseSpec {
         escape: Option<InteractionChoiceId>,
         confirm: ConfirmSemantics,
     },
+    /// `count` strings answered together, each at most `max_len` long.
     Text {
         allow_arbitrary: bool,
+        count: u32,
         max_len: u32,
         confirm: ConfirmSemantics,
     },
@@ -1481,7 +1484,7 @@ pub enum InteractionResponse {
         count: u32,
     },
     Text {
-        value: String,
+        values: Vec<String>,
     },
     DeckPartition {
         main: Vec<AmountAssignment>,

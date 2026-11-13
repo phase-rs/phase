@@ -20,6 +20,7 @@ use crate::types::zones::Zone;
 
 use super::elimination::DepartureTriggers;
 use super::filter::{matches_target_filter, FilterContext};
+use super::players::PoisonLossMeasure;
 use super::speed::{controls_start_your_engines_in, set_speed};
 use super::zones;
 
@@ -173,6 +174,15 @@ fn run_state_based_actions(
         // so the game-over check sees the true post-event living set — a draw
         // (winner: None) when all remaining players lose at once, instead of
         // crowning whichever player happened to be eliminated first.
+        // Turtle Team-Up: a Boss stage clearing (life hit zero on a non-final
+        // stage) exiles the deployed Bosses, resets Boss life, and deploys
+        // the next stage — BEFORE life losers are collected, so the reset
+        // seat is not a loser this pass. On the final stage this returns
+        // false and the normal CR 704.5a loss below proceeds (the heroes
+        // win). A clear performs game actions, so it counts as SBA progress.
+        if super::boss::maybe_clear_boss_stage(state, events) {
+            any_performed = true;
+        }
         // CR 704.5a-c + CR 704.6c: collect every player-loss SBA from this
         // check before applying any of them.
         let mut losers: Vec<PlayerId> = collect_life_losers(state);
@@ -681,15 +691,14 @@ pub(crate) fn has_pending_player_loss_sba(state: &GameState) -> bool {
     }
 
     let poison_loss = state.players.iter().any(|player| {
-        // CR 704.5c + CR 810.8d: 10+ individually, or 15+ shared by the team.
-        // Archenemy Commander takes the individual branch for every seat —
-        // CR 904.13c keeps poison unshared even though life is shared.
+        // CR 704.5c + CR 704.6b / CR 810.8d: the format's individual threshold
+        // (ten by default), or fifteen shared by the team. Archenemy Commander
+        // takes the individual branch for every seat — CR 904.13c keeps poison
+        // unshared even though life is shared. `players::poison_loss_measure`
+        // is the shared authority (twin of `collect_poison_losers`).
         !player.is_eliminated
-            && if super::topology::has_shared_poison(state, player.id) {
-                super::players::team_poison_total(state, player.id) >= 15
-            } else {
-                player.poison_counters >= 10
-            }
+            && super::players::poison_loss_measure(state, player)
+                .is_some_and(PoisonLossMeasure::is_lethal)
             && !player_has_cant_lose(state, player.id)
     });
     if poison_loss {
@@ -781,6 +790,11 @@ fn collect_life_losers(state: &GameState) -> Vec<PlayerId> {
         .players
         .iter()
         .filter(|p| !p.is_eliminated && !p.is_phased_out())
+        // Horde Magic (casual variant): the Horde seat has no life total, so it
+        // is never a CR 704.5a "0 or less life" loser. Belt-and-suspenders with
+        // the life-loss→mill redirect (its life never drops), but this makes
+        // "no life total" a hard guarantee independent of the redirect.
+        .filter(|p| !super::horde::player_has_no_life_total(state, p.id))
         .filter(|p| super::players::team_life_total(state, p.id) <= 0)
         .filter(|p| !player_has_cant_lose(state, p.id))
         .map(|p| p.id)
@@ -799,8 +813,9 @@ fn collect_draw_from_empty_losers(state: &GameState) -> Vec<PlayerId> {
         .collect()
 }
 
-/// CR 704.5c + CR 810.8d: A player with ten or more poison counters loses the
-/// game; in a team-based format, a team with fifteen or more shared poison
+/// CR 704.5c + CR 704.6b / CR 810.8d + CR 904.13c: A player with the format's
+/// individual threshold (ten by default) or more poison counters loses the
+/// game; where poison is shared, a team with fifteen or more shared poison
 /// counters loses instead (CR 810.10/810.10a: poison counters are shared by
 /// the team and checked via `team_poison_total`). Pure collector (see
 /// `collect_life_losers`).
@@ -810,13 +825,10 @@ fn collect_poison_losers(state: &GameState) -> Vec<PlayerId> {
         .iter()
         .filter(|p| !p.is_eliminated)
         .filter(|p| {
-            // Twin of the `has_pending_player_loss_sba` poison branch above:
+            // Twin of the `has_pending_player_loss_sba` poison branch above,
+            // through the same authority, `players::poison_loss_measure`:
             // Archenemy Commander takes the individual branch (CR 904.13c).
-            if super::topology::has_shared_poison(state, p.id) {
-                super::players::team_poison_total(state, p.id) >= 15
-            } else {
-                p.poison_counters >= 10
-            }
+            super::players::poison_loss_measure(state, p).is_some_and(PoisonLossMeasure::is_lethal)
         })
         .filter(|p| !player_has_cant_lose(state, p.id))
         .map(|p| p.id)
@@ -2463,8 +2475,17 @@ fn check_token_cease_to_exist(state: &mut GameState, any_performed: &mut bool) {
         .objects
         .iter()
         .filter(|(_, obj)| {
-            zones::token_is_outside_battlefield_and_stack(state, obj)
-                || zones::copy_of_card_outside_battlefield_and_stack(state, obj)
+            // Horde-deck-token exemption (casual Horde Magic variant): a token
+            // that IS a Horde deck card lives outside the battlefield by
+            // design (library placeholders, the Boss pile, the command zone,
+            // boss-deck graveyard instances), so it is NOT swept here. The
+            // same flag carves these tokens out of the CR 111.8 movement
+            // freeze (`zones::token_cannot_change_zones`) — boss-deck loops
+            // move them by design, while classic decks never move theirs.
+            // Not a CR-sanctioned rule; Horde Magic is casual.
+            !obj.is_horde_deck_token
+                && (zones::token_is_outside_battlefield_and_stack(state, obj)
+                    || zones::copy_of_card_outside_battlefield_and_stack(state, obj))
         })
         .map(|(id, obj)| (*id, obj.zone, obj.owner))
         .collect();
@@ -3079,6 +3100,7 @@ mod tests {
             .execute(AbilityDefinition::new(
                 AbilityKind::Spell,
                 Effect::ChangeZone {
+                    library_shuffle: Default::default(),
                     destination: Zone::Exile,
                     origin: None,
                     target: TargetFilter::SelfRef,
@@ -3209,6 +3231,7 @@ mod tests {
             .execute(AbilityDefinition::new(
                 AbilityKind::Spell,
                 Effect::ChangeZone {
+                    library_shuffle: Default::default(),
                     destination: Zone::Exile,
                     origin: None,
                     target: TargetFilter::SelfRef,
@@ -4775,6 +4798,7 @@ mod tests {
             .execute(AbilityDefinition::new(
                 AbilityKind::Spell,
                 Effect::ChangeZone {
+                    library_shuffle: Default::default(),
                     origin: None,
                     destination: Zone::Library,
                     target: TargetFilter::SelfRef,
@@ -7720,6 +7744,7 @@ mod tests {
                 .execute(AbilityDefinition::new(
                     AbilityKind::Spell,
                     Effect::ChangeZone {
+                        library_shuffle: Default::default(),
                         destination: Zone::Battlefield,
                         origin: None,
                         target: TargetFilter::SelfRef,

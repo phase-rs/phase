@@ -22,6 +22,7 @@ use engine::types::format::{
     DeckCopyLimit, DeckSizeRule, FormatConfig, GameFormat, RangeOfInfluenceConfig, SelectedFormat,
     SideboardPolicy,
 };
+use engine::types::game_state::PersistedGameState;
 use engine::types::player::PlayerId;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -37,6 +38,7 @@ fn sample_structural() -> StructuralRules {
         team_based: false,
         sideboard_policy: SideboardPolicy::Unlimited,
         default_deck_copy_limit: DeckCopyLimit::UpTo(4),
+        poison_counter_threshold: 10,
     }
 }
 
@@ -839,6 +841,9 @@ fn commander_eligibility_rule_from_source_format_covers_every_builtin() {
         // CR 903.3, unchanged by CR 901 planar seating.
         (GameFormat::PlanechaseCommander, Some(Standard)),
         (GameFormat::Momir, None),
+        // Horde holds an engine emblem in the command zone, not a decklist
+        // commander — `from_source_format` answers `Ok(None)` like Momir.
+        (GameFormat::Horde, None),
         // CR 903.13g: Commander Draft games follow Commander's rules, and
         // CR 903.13f routes deck construction through CR 903.5, so CR 903.3's
         // eligibility test applies unchanged — the value `from_source_format`
@@ -913,6 +918,7 @@ fn game_format_serialization_is_byte_identical_to_old_derive_for_builtins() {
         (GameFormat::Planechase, "Planechase"),
         (GameFormat::PlanechaseCommander, "PlanechaseCommander"),
         (GameFormat::Momir, "Momir"),
+        (GameFormat::Horde, "Horde"),
         (GameFormat::CommanderDraft, "CommanderDraft"),
         (GameFormat::Freeform, "Freeform"),
         (GameFormat::FreeformCommander, "FreeformCommander"),
@@ -2036,6 +2042,149 @@ fn format_config_deserialization_commander_damage_threshold_floor_is_exactly_one
     assert!(
         serde_json::from_value::<FormatConfig>(json).is_ok(),
         "commander_damage_threshold Some(1) must be accepted"
+    );
+}
+
+/// V4: the built-in arm admits house-ruled poison thresholds (CR 704.5c's
+/// magnitude is a host dial) and rejects zero, pinning the floor at 1.
+#[test]
+fn format_config_deserialization_poison_counter_threshold_house_rules_and_floor() {
+    for magnitude in [1u8, 15, 255] {
+        let mut config = FormatConfig::commander();
+        config.poison_counter_threshold = Some(magnitude);
+        let json = serde_json::to_value(&config).unwrap();
+        let restored = serde_json::from_value::<FormatConfig>(json).unwrap_or_else(|error| {
+            panic!("Commander poison_counter_threshold Some({magnitude}) must be accepted: {error}")
+        });
+        assert_eq!(restored.poison_counter_threshold, Some(magnitude));
+    }
+
+    let mut zero = FormatConfig::commander();
+    zero.poison_counter_threshold = Some(0);
+    let json = serde_json::to_value(&zero).unwrap();
+    let error = serde_json::from_value::<FormatConfig>(json)
+        .expect_err("poison_counter_threshold Some(0) must be rejected");
+    assert!(
+        error.to_string().contains("poison_counter_threshold"),
+        "got: {error}"
+    );
+}
+
+/// V4b: the Custom arm rejects a self-consistent zero threshold — its blanket
+/// equality against `for_custom_rules` alone would admit it.
+#[test]
+fn format_config_deserialization_custom_poison_counter_threshold_floor() {
+    let mut rules = sample_rules(77);
+    rules.structural.poison_counter_threshold = 0;
+    let json = serde_json::to_value(FormatConfig::for_custom_rules(&rules)).unwrap();
+    let error = serde_json::from_value::<FormatConfig>(json)
+        .expect_err("a Custom structural poison_counter_threshold of 0 must be rejected");
+    assert!(
+        error.to_string().contains("poison_counter_threshold"),
+        "got: {error}"
+    );
+
+    // Reach guard: the same rules at 1 deserialize.
+    rules.structural.poison_counter_threshold = 1;
+    let json = serde_json::to_value(FormatConfig::for_custom_rules(&rules)).unwrap();
+    let restored = serde_json::from_value::<FormatConfig>(json)
+        .expect("a Custom structural poison_counter_threshold of 1 must be accepted");
+    assert_eq!(restored.poison_counter_threshold, Some(1));
+}
+
+/// V5: the `Option` shape is locked in both directions — the Two-Headed Giant
+/// family ignores CR 704.5c (CR 704.6b) — and payloads that predate the field
+/// migrate to the registry value.
+#[test]
+fn format_config_deserialization_poison_counter_threshold_shape_and_legacy_migration() {
+    let mut thg_with_threshold = FormatConfig::two_headed_giant();
+    thg_with_threshold.poison_counter_threshold = Some(10);
+    let json = serde_json::to_value(&thg_with_threshold).unwrap();
+    let error = serde_json::from_value::<FormatConfig>(json)
+        .expect_err("Two-Headed Giant ignores CR 704.5c and may not declare a threshold");
+    assert!(
+        error.to_string().contains("poison_counter_threshold"),
+        "got: {error}"
+    );
+
+    let without_key = |config: &FormatConfig| {
+        let mut json = serde_json::to_value(config).unwrap();
+        json.as_object_mut()
+            .unwrap()
+            .remove("poison_counter_threshold")
+            .expect("the field serializes");
+        serde_json::from_value::<FormatConfig>(json).expect("a pre-field payload deserializes")
+    };
+    assert_eq!(
+        without_key(&FormatConfig::commander()).poison_counter_threshold,
+        Some(10)
+    );
+    assert_eq!(
+        without_key(&FormatConfig::two_headed_giant()).poison_counter_threshold,
+        None
+    );
+
+    // An explicit `null` on a format with an individual rule migrates the same
+    // way, to the CR 704.5c value.
+    let mut json = serde_json::to_value(FormatConfig::commander()).unwrap();
+    json["poison_counter_threshold"] = serde_json::Value::Null;
+    assert_eq!(
+        serde_json::from_value::<FormatConfig>(json)
+            .unwrap()
+            .poison_counter_threshold,
+        Some(10)
+    );
+
+    // A committed save written before the field existed restores at ten.
+    let state = serde_json::from_str::<PersistedGameState>(include_str!(
+        "fixtures/p1_9354_task33_a_stable_raw_v3.json"
+    ))
+    .expect("a pre-field save deserializes")
+    .into_game_state()
+    .expect("a pre-field save restores");
+    assert_eq!(state.format_config.format, GameFormat::Standard);
+    assert_eq!(state.format_config.poison_counter_threshold, Some(10));
+}
+
+/// V6: saving a lobby config as a custom format keeps the host's threshold
+/// through the resolver and the Custom arm; a custom definition persisted
+/// before the field existed loads at ten, as does a Two-Headed Giant source
+/// (a custom format never shares poison, so CR 704.5c governs it).
+#[test]
+fn custom_format_round_trip_keeps_the_poison_counter_threshold() {
+    let mut commander_with_15 = FormatConfig::commander();
+    commander_with_15.poison_counter_threshold = Some(15);
+    let def = CustomFormatDef::from_lobby_config("House".to_string(), &commander_with_15)
+        .expect("Commander is saveable as a custom format");
+    assert_eq!(def.rules.structural.poison_counter_threshold, 15);
+    let json = serde_json::to_value(FormatConfig::for_custom_rules(&def.rules)).unwrap();
+    let restored = serde_json::from_value::<FormatConfig>(json)
+        .expect("the Custom arm's equality check passes");
+    assert_eq!(restored.poison_counter_threshold, Some(15));
+
+    // Legacy custom payload: neither the top-level field nor the structural
+    // mirror is present.
+    let mut json = serde_json::to_value(FormatConfig::for_custom_rules(&sample_rules(78))).unwrap();
+    json.as_object_mut()
+        .unwrap()
+        .remove("poison_counter_threshold")
+        .expect("the field serializes");
+    json["custom_rules"]["structural"]
+        .as_object_mut()
+        .unwrap()
+        .remove("poison_counter_threshold")
+        .expect("the structural mirror serializes");
+    let restored = serde_json::from_value::<FormatConfig>(json)
+        .expect("a pre-field custom payload deserializes");
+    assert_eq!(restored.poison_counter_threshold, Some(10));
+
+    let thg =
+        CustomFormatDef::from_lobby_config("Heads".to_string(), &FormatConfig::two_headed_giant())
+            .expect("Two-Headed Giant is saveable as a custom format");
+    assert_eq!(thg.rules.structural.poison_counter_threshold, 10);
+    assert_eq!(
+        FormatConfig::for_custom_rules(&thg.rules).poison_counter_threshold,
+        Some(10)
     );
 }
 

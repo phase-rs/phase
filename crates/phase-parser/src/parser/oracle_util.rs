@@ -929,7 +929,14 @@ fn parse_count_binder(input: &str) -> OracleResult<'_, CountBinder> {
     alt((
         value(CountBinder::EqualTo, tag("equal to ")),
         value(CountBinder::WhereX, tag("where x is ")),
-        value(CountBinder::ForEach, tag("for each ")),
+        // CR 107.1a + CR 608.2c: "for every" is a marker spelling of "for each"
+        // ("draw a card for every five creature types among …" — Sarek). The
+        // quantity after either marker goes to the same for-each authority,
+        // which owns the grouped "N <things>" floor division.
+        value(
+            CountBinder::ForEach,
+            preceded(tag("for "), alt((tag("each "), tag("every ")))),
+        ),
     ))
     .parse(input)
 }
@@ -1034,7 +1041,7 @@ pub(crate) fn parse_count_slot<'a>(text: &'a str, ctx: &mut ParseContext) -> Opt
             } else {
                 super::oracle_effect::lower::apply_where_x_quantity_expression(
                     count,
-                    Some(quantity),
+                    super::oracle_effect::lower::WhereXBinding::bare(Some(quantity)),
                 )?
             };
             (count, Some(x))
@@ -1668,15 +1675,14 @@ pub fn has_unconsumed_conditional(text: &str) -> bool {
 /// CR 201.5c: Some cards refer to themselves by a shortened printed name.
 ///
 /// For comma-form names, the short self-reference is the span before the comma
-/// after removing MTGJSON's structural Alchemy `A-` prefix.
+/// after removing MTGJSON's structural Alchemy `A-` prefix. A single-letter
+/// short name is a real self-reference too ("When Q enters" on Q, Stacking the
+/// Deck; "When X enters" on X, Mystery Racer); callers match a single-word short
+/// name case-sensitively at word boundaries, so it never rewrites prose.
 pub(crate) fn comma_short_self_name(card_name: &str) -> Option<&str> {
     let effective_name = alchemy_effective_name(card_name);
     let (_, (short_name, _)) = nom_primitives::split_once_on(effective_name, ", ").ok()?;
-    if short_name.len() >= 2 {
-        Some(short_name)
-    } else {
-        None
-    }
+    (!short_name.is_empty()).then_some(short_name)
 }
 
 /// Remove MTGJSON's structural Alchemy prefix while accepting either casing.
@@ -3812,6 +3818,15 @@ mod tests {
     fn comma_short_self_name_extracts_comma_prefix() {
         assert_eq!(comma_short_self_name("Mishra, Eminent One"), Some("Mishra"));
         assert_eq!(comma_short_self_name("Gilded Lotus"), None);
+        // CR 201.5c: a one-letter comma short name is still the card's name.
+        assert_eq!(comma_short_self_name("Q, Stacking the Deck"), Some("Q"));
+        assert_eq!(
+            normalize_card_name_refs(
+                "When Q enters, shuffle your library.",
+                "Q, Stacking the Deck"
+            ),
+            "When ~ enters, shuffle your library."
+        );
     }
 
     #[test]

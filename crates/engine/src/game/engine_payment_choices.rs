@@ -6,7 +6,7 @@ use crate::types::ability::{
 };
 use crate::types::events::{GameEvent, PlayerActionKind};
 use crate::types::game_state::{
-    ActionResult, AutoMayChoice, GameState, MayTriggerAutoChoiceScope,
+    ActionResult, AutoMayChoice, CastPaymentMode, GameState, MayTriggerAutoChoiceScope,
     MayTriggerAutoChoiceSelector, PendingContinuation, PendingCostMoveResume,
     PendingPlayerScopeUnlessPayment, ResolutionOptionalPaymentOption, WaitingFor,
     WardSacrificePaymentResume,
@@ -1641,10 +1641,8 @@ pub(super) fn handle_unless_payment(
             // "Then either the entire set of costs is paid, or none of them
             // is paid. Partial payments aren't allowed."
             //
-            // Mixed Composite costs are unsupported by this unless-payment
-            // adapter. Printed mana-and-life conjunctions exist; rejecting
-            // this shape is an implementation limit, not proof that no card
-            // produces it.
+            // Composites with non-mana legs are settled by the sibling arm
+            // below, which stages the whole payment before spending anything.
             AbilityCost::Composite { costs }
                 if costs.iter().all(|c| matches!(c, AbilityCost::Mana { .. })) =>
             {
@@ -1673,11 +1671,45 @@ pub(super) fn handle_unless_payment(
                     }
                 }
             }
-            AbilityCost::Composite { .. } => {
-                // Mixed Composite costs are unsupported by this unless-payment
-                // adapter. The current handler falls through to the unpaid
-                // effect without spending resources.
-                payment_failed = true;
+            // CR 118.12 + CR 118.3 + CR 702.21a: A compound unless-cost whose
+            // legs are not all mana ("Ward—{2}, Pay 2 life.") is one cost, paid
+            // in full or not at all. Only a mana-then-life shape is settled
+            // here, and only after the same payment settles on a shadow of the
+            // game: a leg this adapter cannot finish (discard, sacrifice,
+            // energy), a second mana leg, a life leg placed before a mana leg,
+            // or a non-mana pause leaves the whole cost unpaid rather than
+            // spending part of it. A paused mana source is expected — the
+            // shadow either completed or showed that the pause carries the
+            // payment's own resume — so hand the live prompt back. A failed
+            // payment falls through to the unless effect, exactly like the
+            // single-cost arms.
+            AbilityCost::Composite { costs } => {
+                let composite = AbilityCost::Composite { costs };
+                if !costs::can_pay_unless_composite(
+                    state,
+                    player,
+                    pending_effect.as_ref(),
+                    &composite,
+                ) {
+                    payment_failed = true;
+                } else {
+                    match super::costs::pay_ability_cost_for_resolution(
+                        state,
+                        player,
+                        &composite,
+                        pending_effect.as_ref(),
+                        events,
+                    )? {
+                        PaymentOutcome::Paid => {}
+                        PaymentOutcome::Failed { .. } => payment_failed = true,
+                        // CR 605.3b + CR 616.1: a paused mana source owns the
+                        // resume; keep the live prompt instead of resolving the
+                        // unless effect over a live replacement choice.
+                        PaymentOutcome::Paused { .. } => {
+                            return Ok(action_result(events, state.waiting_for.clone()));
+                        }
+                    }
+                }
             }
             // CR 701.17a + CR 118.12: "you mill N cards" as an unless-cost
             // payment (Deep Spawn). Mill is deterministic — the paying player
@@ -2351,6 +2383,7 @@ pub(super) fn handle_unless_payment_activate_ability(
     waiting_for: WaitingFor,
     source_id: ObjectId,
     ability_index: usize,
+    payment_mode: CastPaymentMode,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
     let WaitingFor::UnlessPayment {
@@ -2387,7 +2420,10 @@ pub(super) fn handle_unless_payment_activate_ability(
     // those prompts and left the unless payment reprompted with the interactive
     // step never taken. Every pause that DOES write the field (a replacement
     // choice) returns the same value it wrote, so this is a strict improvement.
-    mana_abilities::activate_mana_ability(
+    // CR 605.3a + CR 118.12a: an unless cost asks for a mana payment; a mana
+    // ability activated to pay it is its own activation whose mana cost the
+    // player may direct.
+    mana_abilities::activate_mana_ability_with_payment_mode(
         state,
         source_id,
         player,
@@ -2403,6 +2439,7 @@ pub(super) fn handle_unless_payment_activate_ability(
             remaining,
         },
         None,
+        payment_mode,
     )
 }
 
@@ -3598,6 +3635,7 @@ mod tests {
 
     fn redirect_to(destination: Zone) -> Effect {
         Effect::ChangeZone {
+            library_shuffle: Default::default(),
             origin: None,
             destination,
             target: TargetFilter::SelfRef,
@@ -5533,6 +5571,7 @@ mod tests {
             current_waiting,
             source,
             0,
+            CastPaymentMode::Auto,
             &mut events,
         )
         .expect("mana ability should activate during unless payment");
@@ -6499,6 +6538,7 @@ mod tests {
             ReplacementDefinition::new(ReplacementEvent::Moved).execute(AbilityDefinition::new(
                 AbilityKind::Spell,
                 Effect::ChangeZone {
+                    library_shuffle: Default::default(),
                     origin: None,
                     destination: Zone::Exile,
                     target: TargetFilter::SelfRef,
@@ -6518,6 +6558,7 @@ mod tests {
             ReplacementDefinition::new(ReplacementEvent::Moved).execute(AbilityDefinition::new(
                 AbilityKind::Spell,
                 Effect::ChangeZone {
+                    library_shuffle: Default::default(),
                     origin: None,
                     destination: Zone::Library,
                     target: TargetFilter::SelfRef,

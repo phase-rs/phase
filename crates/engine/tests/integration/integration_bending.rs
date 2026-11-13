@@ -42,6 +42,8 @@ fn add_mana(state: &mut GameState, player: PlayerId, color: ManaType, count: usi
 // Step 1: Earthbend event emission
 // ---------------------------------------------------------------------------
 
+const BADGERMOLE_CUB_ORACLE: &str = "When this creature enters, earthbend 1. (Target land you control becomes a 0/0 creature with haste that's still a land. Put a +1/+1 counter on it. When it dies or is exiled, return it to the battlefield tapped.)\nWhenever you tap a creature for mana, add an additional {G}.";
+
 #[test]
 fn test_earthbending_registers_event_and_turn_tracking() {
     let mut state = GameState::new_two_player(42);
@@ -138,14 +140,18 @@ fn badgermole_cub_earthbend_returns_khalni_garden_after_yawgmoth_sacrifice() {
             ManaUnit::new(ManaType::Green, ObjectId(0), false, vec![]),
         ],
     );
-    let cub = scenario.add_real_card(P0, "Badgermole Cub", Zone::Hand, db);
+    let cub = scenario
+        .add_creature_to_hand_from_oracle(P0, "Badgermole Cub", 2, 2, BADGERMOLE_CUB_ORACLE)
+        .with_mana_cost(ManaCost::Cost {
+            generic: 1,
+            shards: vec![ManaCostShard::Green],
+        })
+        .id();
     let garden = scenario.add_real_card(P0, "Khalni Garden", Zone::Battlefield, db);
     let yawgmoth = scenario.add_real_card(P0, "Yawgmoth, Thran Physician", Zone::Battlefield, db);
     scenario.add_card_to_library_top(P0, "Yawgmoth draw");
 
     let mut runner = scenario.build();
-    engine::game::rehydrate_game_from_card_db(runner.state_mut(), db);
-
     runner.cast(cub).target_object(garden).resolve();
     let animated_garden = &runner.state().objects[&garden];
     assert!(
@@ -200,6 +206,54 @@ fn badgermole_cub_earthbend_returns_khalni_garden_after_yawgmoth_sacrifice() {
     );
 }
 
+/// The same delayed return must bind the land's exile event, rather than the
+/// earlier ETB event that created the delayed trigger.
+#[test]
+fn badgermole_cub_earthbend_returns_khalni_garden_after_exile() {
+    let db = crate::support::shared_card_db().expect("curated real-card fixture");
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_mana_pool(
+        P0,
+        vec![
+            ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]),
+            ManaUnit::new(ManaType::Green, ObjectId(0), false, vec![]),
+        ],
+    );
+    let cub = scenario
+        .add_creature_to_hand_from_oracle(P0, "Badgermole Cub", 2, 2, BADGERMOLE_CUB_ORACLE)
+        .with_mana_cost(ManaCost::Cost {
+            generic: 1,
+            shards: vec![ManaCostShard::Green],
+        })
+        .id();
+    let garden = scenario.add_real_card(P0, "Khalni Garden", Zone::Battlefield, db);
+    let exile = scenario
+        .add_spell_to_hand_from_oracle(P0, "Exile spell", true, "Exile target creature.")
+        .id();
+    let mut runner = scenario.build();
+
+    runner.cast(cub).target_object(garden).resolve();
+    assert!(
+        runner.state().objects[&garden]
+            .card_types
+            .core_types
+            .contains(&CoreType::Creature),
+        "the live-parsed Earthbend trigger must animate the land"
+    );
+
+    // CR 603.7c: the delayed trigger observes the land's own later exile event.
+    runner.cast(exile).target_object(garden).resolve();
+    runner.advance_until_stack_empty();
+
+    let returned = &runner.state().objects[&garden];
+    assert_eq!(returned.zone, Zone::Battlefield);
+    assert!(
+        returned.tapped,
+        "the delayed trigger returns the land tapped"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Step 2: Waterbend event emission + zone check
 // ---------------------------------------------------------------------------
@@ -215,6 +269,13 @@ fn test_waterbending_tap_to_pay() {
 
     // Set up ManaPayment state with Waterbend mode.
     runner.enter_mana_payment(P0, Some(ConvokeMode::Waterbend));
+    // CR 701.67a: the waterbend tap cap needs generic mana to tap toward.
+    runner
+        .state_mut()
+        .pending_cast
+        .as_mut()
+        .expect("synthetic payment")
+        .cost = ManaCost::generic(1);
 
     let result = runner
         .act(GameAction::TapForConvoke {
@@ -414,6 +475,13 @@ fn test_ai_waterbend_candidates() {
     let mut runner = scenario.build();
 
     runner.enter_mana_payment(P0, Some(ConvokeMode::Waterbend));
+    // CR 701.67a: the waterbend tap cap needs generic mana to tap toward.
+    runner
+        .state_mut()
+        .pending_cast
+        .as_mut()
+        .expect("synthetic payment")
+        .cost = ManaCost::generic(1);
 
     let actions = candidate_actions(runner.state());
 
@@ -479,6 +547,13 @@ fn test_ai_convoke_ignores_summoning_sickness() {
 
     let mut runner = scenario.build();
     runner.enter_mana_payment(P0, Some(ConvokeMode::Waterbend));
+    // CR 701.67a: the waterbend tap cap needs generic mana to tap toward.
+    runner
+        .state_mut()
+        .pending_cast
+        .as_mut()
+        .expect("synthetic payment")
+        .cost = ManaCost::generic(1);
 
     let actions = candidate_actions(runner.state());
 
@@ -698,6 +773,13 @@ fn test_waterbend_tap_does_emit_waterbend_event() {
     let mut runner = scenario.build();
 
     runner.enter_mana_payment(P0, Some(ConvokeMode::Waterbend));
+    // CR 701.67a: the waterbend tap cap needs generic mana to tap toward.
+    runner
+        .state_mut()
+        .pending_cast
+        .as_mut()
+        .expect("synthetic payment")
+        .cost = ManaCost::generic(1);
 
     let result = runner
         .act(GameAction::TapForConvoke {
@@ -907,6 +989,7 @@ fn test_search_changezone_shuffle_continuation_completes() {
 
     let change_zone_ability = ResolvedAbility {
         effect: Effect::ChangeZone {
+            library_shuffle: Default::default(),
             origin: Some(Zone::Library),
             destination: Zone::Battlefield,
             target: TargetFilter::Any,
@@ -924,6 +1007,7 @@ fn test_search_changezone_shuffle_continuation_completes() {
         sub_ability: Some(Box::new(shuffle_ability)),
         ..ResolvedAbility::new(
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Library),
                 destination: Zone::Battlefield,
                 target: TargetFilter::Any,
@@ -1248,6 +1332,7 @@ fn test_earthbender_ascension_etb_completes_with_landfall() {
 
     let change_zone_ability = ResolvedAbility {
         effect: Effect::ChangeZone {
+            library_shuffle: Default::default(),
             origin: Some(Zone::Library),
             destination: Zone::Battlefield,
             target: TargetFilter::Any,
@@ -1265,6 +1350,7 @@ fn test_earthbender_ascension_etb_completes_with_landfall() {
         sub_ability: Some(Box::new(shuffle_ability)),
         ..ResolvedAbility::new(
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Library),
                 destination: Zone::Battlefield,
                 target: TargetFilter::Any,
@@ -1942,6 +2028,7 @@ fn earthbend_return_skips_shock_land_pay_life_prompt() {
         enter_tapped: EtbTapState::Tapped,
         enters_attacking: false,
         enter_with_counters: Vec::new(),
+        enter_with_grants: Vec::new(),
         controller_override: Some(P0),
         enter_transformed: false,
         face_down_profile: None,
@@ -2024,6 +2111,7 @@ fn plain_shock_land_etb_still_prompts_for_life_payment() {
         enter_tapped: EtbTapState::Unspecified,
         enters_attacking: false,
         enter_with_counters: Vec::new(),
+        enter_with_grants: Vec::new(),
         controller_override: None,
         enter_transformed: false,
         face_down_profile: None,
@@ -2089,6 +2177,7 @@ fn build_earthbend_ability(
     let return_effect_def = AbilityDefinition::new(
         AbilityKind::Spell,
         Effect::ChangeZone {
+            library_shuffle: Default::default(),
             origin: None,
             destination: Zone::Battlefield,
             target: TargetFilter::TriggeringSource,

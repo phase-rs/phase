@@ -117,6 +117,7 @@ pub fn resolve(
         .map(|src| EmblemSource {
             name: src.name.clone(),
             printed_ref: src.printed_ref.clone(),
+            printing: src.printing.clone(),
         });
 
     // CR 607.1d + CR 607.5 + CR 400.7: latch the creating object's exact
@@ -365,6 +366,7 @@ mod tests {
 
         let ability = ResolvedAbility::new(
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Command),
                 destination: Zone::Exile,
                 target: TargetFilter::Any,
