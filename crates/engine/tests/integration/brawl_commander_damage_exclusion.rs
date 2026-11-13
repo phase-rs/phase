@@ -2,24 +2,31 @@
 
 use engine::game::combat::AttackTarget;
 use engine::game::scenario::{GameScenario, P0, P1};
-use engine::types::counter::CounterType;
 use engine::types::format::FormatConfig;
-use engine::types::game_state::{GameState, WaitingFor};
+use engine::types::game_state::{CommanderDamageEntry, GameState, WaitingFor};
 use engine::types::phase::Phase;
 
 const GHALTA_PRIMAL_HUNGER: &str = "This spell costs {X} less to cast, where X is the total power of creatures you control.\nTrample (This creature can deal excess combat damage to the player or planeswalker it's attacking.)";
 
-/// P0's 21/21 Ghalta commander attacks P1 unblocked; returns the state after
-/// combat damage and state-based actions.
-fn hit_with_a_21_power_commander(format: FormatConfig) -> GameState {
+/// P1 has already taken 9 combat damage from P0's Ghalta commander; Ghalta
+/// attacks P1 unblocked for 12 more. Returns the state after combat damage
+/// and state-based actions.
+fn ghalta_brings_commander_damage_to_21(format: FormatConfig) -> GameState {
     let mut scenario = GameScenario::new_with_format(format, 2, 42);
     scenario.at_phase(Phase::PreCombatMain);
     let ghalta = scenario
         .add_creature_from_oracle(P0, "Ghalta, Primal Hunger", 12, 12, GHALTA_PRIMAL_HUNGER)
         .commander()
         .id();
-    scenario.with_counter(ghalta, CounterType::Plus1Plus1, 9);
     let mut runner = scenario.build();
+    runner
+        .state_mut()
+        .commander_damage
+        .push(CommanderDamageEntry {
+            player: P1,
+            commander: ghalta,
+            damage: 9,
+        });
 
     runner.advance_to_combat();
     runner
@@ -43,8 +50,8 @@ fn hit_with_a_21_power_commander(format: FormatConfig) -> GameState {
 fn brawl_family_ignores_the_commander_damage_loss() {
     for format in [FormatConfig::brawl(), FormatConfig::historic_brawl()] {
         let label = format.format;
-        let state = hit_with_a_21_power_commander(format);
-        assert_eq!(state.players[1].life, 25 - 21, "{label:?}");
+        let state = ghalta_brings_commander_damage_to_21(format);
+        assert_eq!(state.players[1].life, 25 - 12, "{label:?}");
         assert!(!state.players[1].is_eliminated, "{label:?}");
         assert!(
             !matches!(state.waiting_for, WaitingFor::GameOver { .. }),
@@ -55,7 +62,7 @@ fn brawl_family_ignores_the_commander_damage_loss() {
 
 #[test]
 fn commander_loses_to_21_commander_combat_damage() {
-    let state = hit_with_a_21_power_commander(FormatConfig::commander());
-    assert_eq!(state.players[1].life, 40 - 21);
+    let state = ghalta_brings_commander_damage_to_21(FormatConfig::commander());
+    assert_eq!(state.players[1].life, 40 - 12);
     assert!(state.players[1].is_eliminated);
 }
