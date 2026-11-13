@@ -1321,3 +1321,95 @@ fn losing_at_a_priority_boundary_puts_the_departure_triggers_on_the_stack() {
          the stack"
     );
 }
+
+/// CR 603.3b + CR 704.3: the sandbox's state-based-action check orders everything
+/// it triggered in one pass. P2 is at 0 life and owns a Grizzly Bears; P0
+/// controls Super Shredder and a Circuit Mender with lethal damage marked. The
+/// check makes P2 lose and destroys the Mender: Shredder's ability for the Bears
+/// (queued by the departure), Shredder's ability for the Mender and the Mender's
+/// own leaves-the-battlefield ability are all P0's, and P0 orders the three
+/// together.
+#[test]
+fn debug_state_based_actions_order_departure_and_other_triggers_in_one_pass() {
+    let db = shared_card_db().expect("integration card fixture must load");
+    let mut scenario = GameScenario::new_n_player(3, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.add_real_card(P0, "Super Shredder", Zone::Battlefield, db);
+    let mender = scenario.add_real_card(P0, "Circuit Mender", Zone::Battlefield, db);
+    let bears = scenario.add_real_card(P2, "Grizzly Bears", Zone::Battlefield, db);
+    scenario.with_library_top(P0, &["Forest", "Forest"]);
+    let mut runner = scenario.build();
+    runner.state_mut().debug_mode = true;
+    runner.state_mut().players[2].life = 0;
+    let toughness = runner.state().objects[&mender]
+        .toughness
+        .expect("Circuit Mender has toughness");
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&mender)
+        .expect("Circuit Mender exists")
+        .damage_marked = toughness as u32;
+    runner
+        .act(GameAction::Debug(
+            engine::types::actions::DebugAction::RunStateBasedActions,
+        ))
+        .expect("the debug state-based-action check runs");
+    assert!(runner.state().players[2].is_eliminated);
+    assert_eq!(zone(&runner, bears), Zone::Exile);
+    assert_eq!(zone(&runner, mender), Zone::Graveyard);
+    match &runner.state().waiting_for {
+        WaitingFor::OrderTriggers {
+            player: P0,
+            triggers,
+            ..
+        } => assert_eq!(
+            triggers.len(),
+            3,
+            "one ordering pass holds the departure's trigger and the two others: {triggers:?}"
+        ),
+        other => panic!("P0 orders all three triggers together: {other:?}"),
+    }
+    assert!(runner.state().stack.is_empty());
+}
+
+/// CR 704.5b + CR 603.3 + CR 117.5: a sandbox draw from an empty library makes
+/// P2 lose in the action's own state-based-action check. P0's Super Shredder
+/// saw P2's Grizzly Bears leave the game: its ability is on the stack when the
+/// action returns, and nothing is left waiting.
+#[test]
+fn debug_draw_from_an_empty_library_places_the_departure_triggers() {
+    let db = shared_card_db().expect("integration card fixture must load");
+    let mut scenario = GameScenario::new_n_player(3, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    let shredder = scenario.add_real_card(P0, "Super Shredder", Zone::Battlefield, db);
+    let bears = scenario.add_real_card(P2, "Grizzly Bears", Zone::Battlefield, db);
+    let mut runner = scenario.build();
+    runner.state_mut().debug_mode = true;
+    assert!(
+        runner.state().players[2].library.is_empty(),
+        "reach guard: P2's library is empty"
+    );
+    runner
+        .act(GameAction::Debug(
+            engine::types::actions::DebugAction::DrawCards {
+                player_id: P2,
+                count: 1,
+            },
+        ))
+        .expect("the debug draw runs");
+    assert!(
+        runner.state().players[2].is_eliminated,
+        "CR 704.5b: P2 drew from an empty library"
+    );
+    assert_eq!(zone(&runner, bears), Zone::Exile);
+    assert!(
+        runner.state().deferred_triggers.is_empty(),
+        "the departure's triggers are not left waiting"
+    );
+    assert_eq!(
+        triggers_from(&runner, shredder),
+        1,
+        "Super Shredder's ability for the Bears is on the stack"
+    );
+}
