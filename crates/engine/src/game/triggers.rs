@@ -5903,7 +5903,7 @@ struct TriggerObservationBoard {
 
 impl TriggerObservationBoard {
     fn prepare(state: &GameState) -> Self {
-        let pre_entry = super::replacement::copy_entry_payment_source(state).and_then(|entrant| {
+        let pre_entry = super::replacement::entry_group_payment_source(state).and_then(|entrant| {
             let mut absent = super::effects::token_copy::entering_token_co_entrants(state, entrant);
             absent.push(entrant);
             match super::filter::pre_entry_board(state, &absent) {
@@ -5997,7 +5997,7 @@ fn collect_pending_triggers_with_collection(
     // entry even when earlier tokens have physically moved on a prior action.
     // Extend the same observation boundary used by both indexed and shadow
     // scans; no event in this payment batch is inside their entry lifetime.
-    if let Some(entrant) = super::replacement::copy_entry_payment_source(state) {
+    if let Some(entrant) = super::replacement::entry_group_payment_source(state) {
         battlefield_entry_observations.treat_as_not_yet_entered(
             super::effects::token_copy::entering_token_co_entrants(state, entrant)
                 .into_iter()
