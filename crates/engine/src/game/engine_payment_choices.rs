@@ -6,7 +6,7 @@ use crate::types::ability::{
 };
 use crate::types::events::{GameEvent, PlayerActionKind};
 use crate::types::game_state::{
-    ActionResult, AutoMayChoice, GameState, MayTriggerAutoChoiceScope,
+    ActionResult, AutoMayChoice, CastPaymentMode, GameState, MayTriggerAutoChoiceScope,
     MayTriggerAutoChoiceSelector, PendingContinuation, PendingCostMoveResume,
     PendingPlayerScopeUnlessPayment, ResolutionOptionalPaymentOption, UnpaidCostRemainder,
     UnpaidCostSuffix, WaitingFor, WardSacrificePaymentResume,
@@ -2856,6 +2856,7 @@ pub(super) fn handle_unless_payment_activate_ability(
     waiting_for: WaitingFor,
     source_id: ObjectId,
     ability_index: usize,
+    payment_mode: CastPaymentMode,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
     refuse_mana_at_draw_only_payment(state)?;
@@ -2894,7 +2895,10 @@ pub(super) fn handle_unless_payment_activate_ability(
     // those prompts and left the unless payment reprompted with the interactive
     // step never taken. Every pause that DOES write the field (a replacement
     // choice) returns the same value it wrote, so this is a strict improvement.
-    mana_abilities::activate_mana_ability(
+    // CR 605.3a + CR 118.12a: an unless cost asks for a mana payment; a mana
+    // ability activated to pay it is its own activation whose mana cost the
+    // player may direct.
+    mana_abilities::activate_mana_ability_with_payment_mode(
         state,
         source_id,
         player,
@@ -2911,6 +2915,7 @@ pub(super) fn handle_unless_payment_activate_ability(
             repeat,
         },
         None,
+        payment_mode,
     )
 }
 
@@ -6134,6 +6139,7 @@ mod tests {
             current_waiting,
             source,
             0,
+            CastPaymentMode::Auto,
             &mut events,
         )
         .expect("mana ability should activate during unless payment");

@@ -354,7 +354,6 @@
     "pickNone": "Nic",
     "underAttack_one": "Atakowany przez {{count}} stwora",
     "underAttack_other": "Atakowany przez {{count}} stworów",
-    "target": "Cel",
     "token": "Żeton",
     "tokenTooltip": "Żeton będący kopią prawdziwej karty",
     "copy": "Kopia",
@@ -575,7 +574,9 @@
     "dungeonTooltip": "Wyprawa w {{name}}",
     "poisonAriaLabel_one": "{{count}} znacznik trucizny",
     "poisonAriaLabel_other": "{{count}} znaczników trucizny",
-    "poisonTooltip": "Znaczniki trucizny: {{count}}\nGracz z co najmniej dziesięcioma znacznikami trucizny przegrywa grę.",
+    "poisonTooltip": "Znaczniki trucizny: {{count}}",
+    "poisonLossPlayer": "Gracz z co najmniej {{threshold}} znacznikami trucizny przegrywa grę.",
+    "poisonLossTeam": "Drużyna z co najmniej {{threshold}} znacznikami trucizny przegrywa grę.",
     "energyAriaLabel_one": "{{count}} znacznik energii",
     "energyAriaLabel_other": "{{count}} znaczników energii",
     "energyTooltip": "Znaczniki energii: {{count}}\nZnaczniki energii są zasobem gracza wydawanym przez zdolności kart.",
@@ -1185,6 +1186,11 @@
       "drawFirst": "Dobieraj pierwszy",
       "drawFirstDescription": "Wykonaj dodatkowe dobranie w swojej pierwszej turze"
     },
+    "startingPlayer": {
+      "title": "Wybierz, kto zaczyna",
+      "playerPlaysFirst": "{{name}} zaczyna",
+      "opponentChoosing": "{{name}} wybiera, kto zaczyna…"
+    },
     "mulligan": {
       "opponentDeciding": "Przeciwnik wybiera swoją rękę startową…",
       "londonTitle": "Mulligan londyński ({{count}} wziętych)",
@@ -1207,7 +1213,10 @@
       "subtitleKeepWithBottom": "Zatrzymaj tę rękę (położysz {{count}} na spód) lub zrób mulligan ponownie po świeże 7.",
       "subtitleKeepFree": "Zatrzymaj tę rękę (darmowy mulligan — brak kart na spód) lub zrób mulligan ponownie po świeże 7.",
       "subtitleOpeningFree": "Zatrzymaj tę rękę lub zrób darmowy mulligan (brak kart na spód).",
-      "subtitleOpeningOne": "Zatrzymaj tę rękę lub zrób mulligan po świeże 7 (gdy zatrzymasz, położysz 1 na spód)."
+      "subtitleOpeningOne": "Zatrzymaj tę rękę lub zrób mulligan po świeże 7 (gdy zatrzymasz, położysz 1 na spód).",
+      "onThePlay": "Zaczynasz",
+      "onTheDraw": "Dobierasz pierwszy",
+      "takeTurn": "Rozgrywasz turę {{turn}}"
     },
     "companion": {
       "eyebrow": "Przed grą",
@@ -1423,6 +1432,7 @@
     "config": {
       "startingLife": "Życie początkowe",
       "commanderDamage": "Obrażenia od dowódcy",
+      "poisonCounters": "Znaczniki trucizny",
       "players": "Gracze",
       "whoGoesFirst": "Kto zaczyna",
       "firstPlayer": {

@@ -354,7 +354,6 @@
     "pickNone": "Keine",
     "underAttack_one": "Von {{count}} Kreatur angegriffen",
     "underAttack_other": "Von {{count}} Kreaturen angegriffen",
-    "target": "Ziel",
     "token": "Spielstein",
     "tokenTooltip": "Spielstein-Kopie einer echten Karte",
     "copy": "Kopie",
@@ -575,7 +574,9 @@
     "dungeonTooltip": "Wagt sich in {{name}} vor",
     "poisonAriaLabel_one": "{{count}} Giftmarke",
     "poisonAriaLabel_other": "{{count}} Giftmarken",
-    "poisonTooltip": "Giftmarken: {{count}}\nEin Spieler mit zehn oder mehr Giftmarken verliert das Spiel.",
+    "poisonTooltip": "Giftmarken: {{count}}",
+    "poisonLossPlayer": "Ein Spieler mit {{threshold}} oder mehr Giftmarken verliert das Spiel.",
+    "poisonLossTeam": "Ein Team mit {{threshold}} oder mehr Giftmarken verliert das Spiel.",
     "energyAriaLabel_one": "{{count}} Energiemarke",
     "energyAriaLabel_other": "{{count}} Energiemarken",
     "energyTooltip": "Energiemarken: {{count}}\nEnergiemarken sind eine spielerbezogene Ressource, die von Kartenfähigkeiten ausgegeben wird.",
@@ -1185,6 +1186,11 @@
       "drawFirst": "Zuerst ziehen",
       "drawFirstDescription": "Nimm den zusätzlichen Zug in deinem ersten Zug"
     },
+    "startingPlayer": {
+      "title": "Wähle, wer beginnt",
+      "playerPlaysFirst": "{{name}} beginnt",
+      "opponentChoosing": "{{name}} wählt, wer beginnt…"
+    },
     "mulligan": {
       "opponentDeciding": "Der Gegner entscheidet über seine Starthand…",
       "londonTitle": "London-Mulligan ({{count}} genommen)",
@@ -1207,7 +1213,10 @@
       "subtitleKeepWithBottom": "Behalte diese Hand (du legst {{count}} unter die Bibliothek) oder nimm einen weiteren Mulligan für frische 7.",
       "subtitleKeepFree": "Behalte diese Hand (Gratis-Mulligan — keine Karten unter die Bibliothek) oder nimm einen weiteren Mulligan für frische 7.",
       "subtitleOpeningFree": "Behalte diese Hand oder nimm einen Gratis-Mulligan (keine Karten unter die Bibliothek).",
-      "subtitleOpeningOne": "Behalte diese Hand oder nimm einen Mulligan für frische 7 (du legst beim Behalten 1 unter die Bibliothek)."
+      "subtitleOpeningOne": "Behalte diese Hand oder nimm einen Mulligan für frische 7 (du legst beim Behalten 1 unter die Bibliothek).",
+      "onThePlay": "Du spielst zuerst",
+      "onTheDraw": "Du ziehst zuerst",
+      "takeTurn": "Du bist in Zug {{turn}} dran"
     },
     "companion": {
       "eyebrow": "Vorspiel",
@@ -1423,6 +1432,7 @@
     "config": {
       "startingLife": "Startleben",
       "commanderDamage": "Kommandeurschaden",
+      "poisonCounters": "Giftmarken",
       "players": "Spieler",
       "whoGoesFirst": "Wer beginnt",
       "firstPlayer": {

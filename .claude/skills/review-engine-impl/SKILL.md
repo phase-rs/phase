@@ -12,7 +12,7 @@ Review for gaps: things that are missing or wrong. Do not spend findings on styl
 This applies in every mode. Findings are defects in the change under review: what it introduces, the premises it rests on, and what it states it delivers but does not.
 
 - A defect is **pre-existing** when it reproduces at the change's base. The change **depends on** it when a test or acceptance row the change asserts cannot pass, or would have to be weakened, without fixing it. Run that one probe only when the answer changes what happens next.
-- A pre-existing defect the change depends on is a finding (`behavior`; in charter mode, a decision finding).
+- A pre-existing defect the change depends on is a finding (`behavior`; in charter mode, a decision finding). In [PR Review Mode](#pr-review-mode) the tiers there replace this rule.
 - Any other pre-existing defect goes in a separate **Pre-existing** list after the findings, once, with its evidence. It is untagged, never blocks, and is not repeated in a later round.
 - Aim probes at the change's own claims. Do not hunt for pre-existing defects.
 
@@ -70,6 +70,27 @@ Activated when the spawn inputs include a phase charter and the **run-span diff 
 
 The universal-lens full sweep is NOT re-run over the cumulative diff — each phase's review already ran it phase-scoped, and re-running it over the whole span would recreate the oversized-review non-convergence this machinery exists to eliminate. Chain integrity is NOT this review's job — the orchestrator verifies it mechanically at run-level acceptance. This mode is findings-only.
 
+## PR Review Mode
+
+Activated when the scope is a contributor PR. Checkpoint, Phase and Integration modes are unaffected.
+
+**Tiers.**
+- `introduced`:
+  - **(a)** a defect in code or data the PR adds or changes. It is cleared only by correcting it, removing it, or fencing it in code, with a test proving the fence. Editing the title, body or claims never clears (a).
+  - **(b)** an **incomplete claim**: a case, sibling or outcome the PR claims (title, body, linked issue, reported coverage) that it does not deliver, including because of a base defect. It is cleared by delivering it, or by narrowing the claim everywhere it is made. A claim made by code is narrowed by a fence.
+  - Both are fixed in this PR at every severity, never as follow-ups.
+- `pre-existing`: a defect that reproduces at the base and lies outside the claim. List it once under **Pre-existing**. It never blocks and is never raised again.
+- When a claimed outcome fails because of a base defect, report both.
+
+**Round 1.** Confirm or refute each CodeRabbit item against the head. A confirmed item becomes your own finding. List each refuted item in one line.
+
+**Re-reviews.** When an earlier maintainer review exists (it is in the feedback you were given), review the complete diff and also:
+- **Carry findings forward.** For every finding in an earlier maintainer review that no later maintainer review has credited as fixed or withdrawn, verify it at this head against its `Closes when:` line when it has one. If it remains, re-raise it as your own numbered finding marked `(carried from <URL>)`; if it is fixed, credit it under ✅ Clean. Re-verifying an open finding is not a new finding. An author's reply that a finding is fixed or disputed is a claim to verify, never a disposition.
+- **Late findings.** A new finding is **late** when it is on code the author has not changed since the last reviewed head (you are given that diff). A defect caused by a changed or deleted line is anchored at that change and is not late.
+- **When a late finding is raised:** only when it is must-fix — wrong behaviour you reproduced or derived step by step on any surface the PR touches, a false CR claim, a test that does not discriminate the PR's claim, security, a hard stop, or a broken build. Name the category.
+- **Late notes:** any other late point is a `Late note:` line. It is non-blocking and never a follow-up.
+- Findings that are not late keep the severity calibration and are fixed at every severity.
+
 ## Scout fact pack
 
 A scout fact pack may accompany the diff. Treat it as unverified leads: check anything you rely on, and look beyond it. A missing fact is not evidence of absence, and the pack never bounds a sweep: the new-field-threading and sibling-coverage greps are yours to run in full.
@@ -79,6 +100,7 @@ A scout fact pack may accompany the diff. Treat it as unverified leads: check an
 Two gates lead every review; apply them before the rest.
 
 1. **Correct seam / location:** Is the change at the architecturally correct location — the layer/module/function the codebase's design says owns this responsibility — or a symptom-patch at the wrong seam that merely makes a test pass? A wrong-location fix is technical debt even when it works: it ossifies a dead or duplicate path and leaves the real seam (and the rest of the card class) untouched. This is the highest-priority check; a wrong seam is disqualifying no matter how clean the code looks. Name the correct seam in the finding.
+   - **Grep for the rule, not the symbol.** `rg "CR 115\.3" crates/` finds the code that already asserts ownership of the behavior. If an authority already cites the rule the change implements, the change belongs *there* — extending it — not beside it. This paragraph is the check's one home; other skills link here instead of restating it.
 2. **Most idiomatic change at the seam:** Given the right seam, is this the implementation a principal engineer steeped in this repository would write — the established building block reused rather than re-implemented, an existing typed enum parameterized rather than a new `bool` or sibling variant, `nom` combinators composed rather than string dispatch? "Works and is in the right place" is not enough when a cleaner house idiom exists; a correct-but-unidiomatic change is a finding, not a style nit. Three structural checks make this concrete: a *reference* enum (`HandSize`, `LifeTotal`) must not carry a `Fixed`/constant payload that belongs one level up in an expression wrapper (mixed abstraction layers); a new sibling on an `X`/`OpponentX`/`TargetX` cluster should be one parameterized variant — but only when the axis stays within a single CR rule section (don't unify across sections, e.g. life CR 119 vs power/toughness CR 208/209); and before flagging or accepting any new enum variant, grep `data/engine-inventory.json` (gitignored — run `cargo engine-inventory` to (re)generate it locally first) to confirm it doesn't already exist and to surface the cluster smell.
 
 - **Class vs single case:** Does the change cover a reusable class? Name at least three examples in that class. If there is only one, flag a special-case smell.
@@ -151,6 +173,14 @@ Use this exact finding shape:
 ```
 
 When a finding turns on what a card does, its evidence names the printed card and quotes its Oracle text and the CR ([real cards](../engine-implementer/SKILL.md#real-cards)).
+
+In PR Review Mode, number each finding `F1…Fn` (introduced findings only; all of them block). The finding head replaces the bracketed shape above and is exactly `**F<n> · <SEV> — <short summary>**` at the start of a paragraph, with `<SEV>` one of CRITICAL, HIGH, MED, LOW or NIT and `<n>` counting from 1. Tag a finding `[late: <category>]` or `[incomplete-claim]` as applicable, after the summary and inside the head. The Evidence, Why it matters and Suggested fix parts follow as above. Each finding then ends with a `**Closes when:**` label: the observable outcome that clears it, stated so the author can aim at it and a re-review can check it — a behaviour a production-path test asserts; for an architecture, citation or wording finding, what the corrected source shows; for an incomplete claim, the claim that must be delivered or the text that must change. It states the outcome, never the implementation. It is evidence that the finding is resolved: it replaces no part of the finding, and it never limits what a re-review may raise. Any other bold-led paragraph or list item inside a finding is a label: one to four words, then a colon. Example head:
+
+<!-- finding-head-example -->
+**F1 · MED — Opponent filter ignored on the resolver path**
+<!-- /finding-head-example -->
+
+Then list the `Late note:` lines, the **Pre-existing** list and refuted external items, unnumbered.
 
 In engine-implementer reviews, including the final PR review, append the orchestrator's tag to each finding — `[behavior]`, `[text]` or `[machinery]`, as its [run limits](../engine-implementer/SKILL.md#run-limits) define them; when in doubt, `[behavior]`. A `[text]` finding quotes the old text and gives the replacement. A finding that names a pattern gives the predicate, the command, and every matching site with its disposition; that list is the fix's scope. On a fix round, check the fix executor's unrequested edits first: a sentence added beyond the prior finding's supplied text is the least-reviewed line in the diff.
 

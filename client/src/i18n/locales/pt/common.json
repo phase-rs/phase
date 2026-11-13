@@ -303,16 +303,13 @@
     "skip": "Toque para pular",
     "continue": "Toque para continuar",
     "you": "Você",
-    "youPlayFirst": "Você joga primeiro",
-    "playerPlaysFirst": "{{name}} joga primeiro",
+    "youWonRoll": "Você venceu a rolagem",
+    "playerWonRoll": "{{name}} venceu a rolagem",
     "heads": "Cara",
     "tails": "Coroa",
     "coinFlip": "Cara ou coroa",
     "wonCoinFlip": "{{name}} venceu o lançamento",
     "lostCoinFlip": "{{name}} perdeu o lançamento",
-    "turnOrder": "Ordem dos turnos",
-    "turnOrderItem": "Turno {{turn}}: {{name}}",
-    "youTakeTurn": "Você joga no turno {{turn}}",
     "ignoredDie": "Ignorado"
   },
   "chrome": {

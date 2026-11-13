@@ -354,7 +354,6 @@
     "pickNone": "Nessuno",
     "underAttack_one": "Attaccato da {{count}} creatura",
     "underAttack_other": "Attaccato da {{count}} creature",
-    "target": "Bersaglio",
     "token": "Pedina",
     "tokenTooltip": "Pedina che è una copia di una carta reale",
     "copy": "Copia",
@@ -575,7 +574,9 @@
     "dungeonTooltip": "Avventura in {{name}}",
     "poisonAriaLabel_one": "{{count}} segnalino veleno",
     "poisonAriaLabel_other": "{{count}} segnalini veleno",
-    "poisonTooltip": "Segnalini veleno: {{count}}\nUn giocatore con dieci o più segnalini veleno perde la partita.",
+    "poisonTooltip": "Segnalini veleno: {{count}}",
+    "poisonLossPlayer": "Un giocatore con {{threshold}} o più segnalini veleno perde la partita.",
+    "poisonLossTeam": "Una squadra con {{threshold}} o più segnalini veleno perde la partita.",
     "energyAriaLabel_one": "{{count}} segnalino energia",
     "energyAriaLabel_other": "{{count}} segnalini energia",
     "energyTooltip": "Segnalini energia: {{count}}\nI segnalini energia sono una risorsa del giocatore spesa dalle abilità delle carte.",
@@ -1185,6 +1186,11 @@
       "drawFirst": "Pesca per primo",
       "drawFirstDescription": "Effettua la pesca extra nel tuo primo turno"
     },
+    "startingPlayer": {
+      "title": "Scegli chi gioca per primo",
+      "playerPlaysFirst": "{{name}} gioca per primo",
+      "opponentChoosing": "{{name}} sta scegliendo chi gioca per primo…"
+    },
     "mulligan": {
       "opponentDeciding": "L'avversario sta decidendo la sua mano iniziale…",
       "londonTitle": "Mulligan di Londra ({{count}} effettuati)",
@@ -1207,7 +1213,10 @@
       "subtitleKeepWithBottom": "Tieni questa mano (metterai {{count}} in fondo) o fai di nuovo mulligan per 7 carte nuove.",
       "subtitleKeepFree": "Tieni questa mano (mulligan gratuito — nessuna carta in fondo) o fai di nuovo mulligan per 7 carte nuove.",
       "subtitleOpeningFree": "Tieni questa mano o fai un mulligan gratuito (nessuna carta in fondo).",
-      "subtitleOpeningOne": "Tieni questa mano o fai mulligan per 7 carte nuove (metterai 1 carta in fondo quando tieni)."
+      "subtitleOpeningOne": "Tieni questa mano o fai mulligan per 7 carte nuove (metterai 1 carta in fondo quando tieni).",
+      "onThePlay": "Giochi per primo",
+      "onTheDraw": "Peschi per primo",
+      "takeTurn": "Giochi il turno {{turn}}"
     },
     "companion": {
       "eyebrow": "Pre-partita",
@@ -1423,6 +1432,7 @@
     "config": {
       "startingLife": "Punti vita iniziali",
       "commanderDamage": "Danno da comandante",
+      "poisonCounters": "Segnalini veleno",
       "players": "Giocatori",
       "whoGoesFirst": "Chi inizia",
       "firstPlayer": {

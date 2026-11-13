@@ -20,6 +20,7 @@ use crate::types::zones::Zone;
 
 use super::elimination::DepartureTriggers;
 use super::filter::{matches_target_filter, FilterContext};
+use super::players::PoisonLossMeasure;
 use super::speed::{controls_start_your_engines_in, set_speed};
 use super::zones;
 
@@ -690,15 +691,14 @@ pub(crate) fn has_pending_player_loss_sba(state: &GameState) -> bool {
     }
 
     let poison_loss = state.players.iter().any(|player| {
-        // CR 704.5c + CR 810.8d: 10+ individually, or 15+ shared by the team.
-        // Archenemy Commander takes the individual branch for every seat —
-        // CR 904.13c keeps poison unshared even though life is shared.
+        // CR 704.5c + CR 704.6b / CR 810.8d: the format's individual threshold
+        // (ten by default), or fifteen shared by the team. Archenemy Commander
+        // takes the individual branch for every seat — CR 904.13c keeps poison
+        // unshared even though life is shared. `players::poison_loss_measure`
+        // is the shared authority (twin of `collect_poison_losers`).
         !player.is_eliminated
-            && if super::topology::has_shared_poison(state, player.id) {
-                super::players::team_poison_total(state, player.id) >= 15
-            } else {
-                player.poison_counters >= 10
-            }
+            && super::players::poison_loss_measure(state, player)
+                .is_some_and(PoisonLossMeasure::is_lethal)
             && !player_has_cant_lose(state, player.id)
     });
     if poison_loss {
@@ -813,8 +813,9 @@ fn collect_draw_from_empty_losers(state: &GameState) -> Vec<PlayerId> {
         .collect()
 }
 
-/// CR 704.5c + CR 810.8d: A player with ten or more poison counters loses the
-/// game; in a team-based format, a team with fifteen or more shared poison
+/// CR 704.5c + CR 704.6b / CR 810.8d + CR 904.13c: A player with the format's
+/// individual threshold (ten by default) or more poison counters loses the
+/// game; where poison is shared, a team with fifteen or more shared poison
 /// counters loses instead (CR 810.10/810.10a: poison counters are shared by
 /// the team and checked via `team_poison_total`). Pure collector (see
 /// `collect_life_losers`).
@@ -824,13 +825,10 @@ fn collect_poison_losers(state: &GameState) -> Vec<PlayerId> {
         .iter()
         .filter(|p| !p.is_eliminated)
         .filter(|p| {
-            // Twin of the `has_pending_player_loss_sba` poison branch above:
+            // Twin of the `has_pending_player_loss_sba` poison branch above,
+            // through the same authority, `players::poison_loss_measure`:
             // Archenemy Commander takes the individual branch (CR 904.13c).
-            if super::topology::has_shared_poison(state, p.id) {
-                super::players::team_poison_total(state, p.id) >= 15
-            } else {
-                p.poison_counters >= 10
-            }
+            super::players::poison_loss_measure(state, p).is_some_and(PoisonLossMeasure::is_lethal)
         })
         .filter(|p| !player_has_cant_lose(state, p.id))
         .map(|p| p.id)

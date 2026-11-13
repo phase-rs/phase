@@ -24,10 +24,12 @@ use crate::game::combat_damage::combat_damage_to_defender;
 use crate::game::effects::deal_damage::DamageContext;
 use crate::game::filter::{matches_target_filter, FilterContext};
 use crate::game::game_object::{AttachTarget, DisplaySource, GameObject};
+use crate::game::players::{poison_loss_measure, PoisonLossScope};
 use crate::game::stack::{
     effective_stack_ability, stack_display_groups, stack_display_groups_revealing,
     stack_revealed_card_names, StackDisplayGroup,
 };
+use crate::game::topology::Side;
 use crate::types::ability::{
     AbilityCost, ContinuousModification, Duration, Effect, GameRestriction, KeywordAction,
     ProhibitedActivity, RestrictionExpiry, RestrictionPlayerScope, TargetFilter, TargetRef,
@@ -39,15 +41,16 @@ use crate::types::card_type::CoreType;
 use crate::types::counter::{positive_counter_entries, CounterType};
 use crate::types::display_only::{CanonicalDigest, DisplayOnly};
 use crate::types::events::GameEvent;
+use crate::types::format::TurnStructure;
 use crate::types::game_state::{
-    CastingVariant, CombatDamageSubStep, GameState, StackEntry, StackEntryKind, StackPaidSnapshot,
-    SyntheticTriggerProvenance, TriggerSourceRead, WaitingFor,
+    CastingVariant, CombatDamageSubStep, GameState, PendingManaAbility, StackEntry, StackEntryKind,
+    StackPaidSnapshot, SyntheticTriggerProvenance, TriggerSourceRead, WaitingFor,
 };
 use crate::types::identifiers::ObjectId;
 use crate::types::interaction::InteractionId;
 use crate::types::keywords::Keyword;
 use crate::types::layers::Layer;
-use crate::types::mana::ManaCost;
+use crate::types::mana::{ManaCost, ManaPipId, ManaPool, PaymentContext};
 use crate::types::player::PlayerId;
 use crate::types::statics::{StaticMode, StaticModeKind};
 use crate::types::zones::Zone;
@@ -459,6 +462,15 @@ pub fn family_of(axis: ResourceAxis) -> UnboundedFamily {
     }
 }
 
+/// CR 601.2g + CR 605.3a: display data for a manual mana ability's payment
+/// window: the ability's source, its mana sub-cost and the pinned pool units.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ManaAbilityPaymentView {
+    pub source_id: ObjectId,
+    pub cost: ManaCost,
+    pub pinned_pool_units: Vec<ManaPipId>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PlanechaseView {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -496,10 +508,16 @@ pub struct TurnOrderSlotView {
     /// display classification rather than comparing player IDs themselves.
     #[serde(default, skip_serializing_if = "is_false")]
     pub is_viewer: bool,
-    /// Whether this projected slot is the game's starting player. It is only
-    /// true while that player is also the current turn representative.
-    #[serde(default, skip_serializing_if = "is_false")]
-    pub is_starting_player: bool,
+}
+
+/// CR 103.1 + CR 103.1a: whether the viewer's side takes the first turn of a
+/// game with exactly two sides — the starting player's side ("on the play") or
+/// the other side ("on the draw"). Display classification only; no rules path
+/// reads it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PlayDrawPosition {
+    OnThePlay,
+    OnTheDraw,
 }
 
 /// A card identity deliberately exposed to the debug library browser. This
@@ -823,6 +841,14 @@ pub struct DerivedViews {
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub dungeon_rooms: BTreeMap<PlayerId, DungeonRoomView>,
 
+    /// CR 704.5c / CR 704.6b + CR 810.8d / CR 904.13c: the poison-loss rule each
+    /// player with a nonzero poison-loss count is measured against, so the HUD
+    /// states the threshold the SBA actually uses (a house-rule dial, or the
+    /// shared fifteen) instead of a client literal. Keyed by PlayerId; omitted
+    /// when nobody is poisoned. Poison counters and the format are public.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub poison_loss: BTreeMap<PlayerId, PoisonLossView>,
+
     /// Engine-authored coalesced view of the stack. Adjacent entries with
     /// the same (source, kind, description, targets) signature collapse
     /// into one `StackDisplayGroup` with a `count`. Empty when the stack
@@ -934,14 +960,22 @@ pub struct DerivedViews {
     pub player_status: Vec<PlayerStatusView>,
 
     /// CR 118.3a + CR 601.2g: during the viewer's own manual mana payment for a
-    /// spell, the portion of the locked cost still UNPAID by the pool units they
-    /// have pinned (selected) so far — the cost reduced against a pool of ONLY
-    /// those pinned units. Lets the payment UI show the cost shrinking as the
-    /// player picks mana, and "covered" (`NoCost`) when their selection alone
-    /// pays the whole cost. `None` outside a non-convoke spell `ManaPayment` the
+    /// spell or a manual mana ability, the portion of the locked cost still
+    /// UNPAID by the pool units they have pinned (selected) so far — the cost
+    /// reduced against a pool of ONLY those pinned units. Lets the payment UI
+    /// show the cost shrinking as the player picks mana, and "covered"
+    /// (`NoCost`) when their selection alone pays the whole cost. `None` outside
+    /// a non-convoke spell `ManaPayment` or a manual `ManaAbilityManaPayment` the
     /// viewer controls. Viewer-scoped — one caster's private in-progress choice.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_payment_remaining: Option<ManaCost>,
+
+    /// CR 601.2g + CR 602.2b + CR 605.3a: the viewer's own manual payment of a
+    /// mana ability's mana cost — its source, the mana it costs (X announced)
+    /// and the pool units they've directed. `None` outside that window.
+    /// Viewer-scoped, like `pending_payment_remaining`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mana_ability_payment: Option<ManaAbilityPaymentView>,
 
     /// CR 901: Engine-authored Planechase presentation state. The frontend
     /// renders this directly instead of deriving the active plane from command
@@ -959,15 +993,26 @@ pub struct DerivedViews {
     /// multiplayer turn-order slots. Empty for one-on-one games because the
     /// existing active-player ring is sufficient; populated by engine-owned
     /// projection so the frontend never computes extra/skipped/controlled turn
-    /// order from raw state.
+    /// order from raw state. Empty until the starting player is determined
+    /// (CR 103.1: there is no turn order before the starting player).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub turn_order: Vec<TurnOrderSlotView>,
 
     /// One-based projected turn position for the viewing player. This keeps
     /// player-specific turn-order interpretation in the engine while allowing
-    /// the client to render "You take turn N" directly.
+    /// the client to render "You take turn N" directly. Empty until the
+    /// starting player is determined (CR 103.1: there is no turn order before
+    /// the starting player).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub viewer_turn_number: Option<u8>,
+
+    /// CR 103.1 + CR 103.1a + CR 805.3: the viewer's side relative to the starting
+    /// side, for a game of exactly two sides that each take one turn per round
+    /// (two-player, Two-Headed Giant, Archenemy, Horde). `None` for an unseated
+    /// viewer, before the starting player is determined, and in every other
+    /// multiplayer game — where `viewer_turn_number` carries the viewer's position.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub viewer_play_draw: Option<PlayDrawPosition>,
 
     /// CR 732.2a: the `∞` HUD rows — one per (attributed player, pumped axis) of
     /// every unbounded-resource loop in `GameState::unbounded_resources`. The
@@ -1258,20 +1303,36 @@ pub struct ClientGameState {
 }
 
 /// CR 118.3a + CR 601.2g: the cost still unpaid by `viewer`'s pinned pool units
-/// during their own manual mana payment for a spell. Reduces the locked spell
-/// cost against a pool containing ONLY the pinned units (so the residual is
-/// exactly what the player has chosen to spend), under the same spend-restriction
-/// context (`PaymentContext::Spell`) the finalize spend uses. Returns `None`
+/// during their own manual mana payment for a spell or a manual mana ability.
+/// Reduces the locked cost against a pool containing ONLY the pinned units (so
+/// the residual is exactly what the player has chosen to spend), under the same
+/// spend-restriction context the finalize spend uses (`PaymentContext::Spell`
+/// for a spell, the activation's context for a mana ability). Returns `None`
 /// unless the viewer is mid (non-convoke) spell `ManaPayment` with a pending
-/// cast — activated-ability mana payment keeps its full-cost display, and
-/// convoke/improvise/delve pay via board taps tracked by their own staged UI.
+/// cast, or mid their own manual `ManaAbilityManaPayment` — activated-ability
+/// mana payment keeps its full-cost display, and convoke/improvise/delve pay
+/// via board taps tracked by their own staged UI.
 ///
-/// Uses the current spell's typed mana-spend permission when matching pinned
-/// units to colored or colorless requirements. This projection subtracts only
-/// pinned mana units; it does not subtract life payments.
+/// Uses the payment's typed mana-spend permission when matching pinned units to
+/// colored or colorless requirements. This projection subtracts only pinned
+/// mana units; it does not subtract life payments.
 fn pending_payment_remaining(state: &GameState, viewer: PlayerId) -> Option<ManaCost> {
-    use crate::types::game_state::WaitingFor;
-    use crate::types::mana::{ManaPool, PaymentContext};
+    if let Some(pending) = manual_mana_ability_payment(state, viewer) {
+        let cost = crate::game::mana_abilities::pending_mana_sub_cost(state, pending).ok()??;
+        let activation_context = crate::game::casting::activation_payment_context(
+            state,
+            pending.source_id,
+            pending.ability_index,
+        );
+        return remaining_after_pins(
+            state,
+            viewer,
+            pending.source_id,
+            &pending.pinned_pool_units,
+            &cost,
+            Some(&activation_context.as_payment_context()),
+        );
+    }
 
     let WaitingFor::ManaPayment {
         player,
@@ -1291,33 +1352,89 @@ fn pending_payment_remaining(state: &GameState, viewer: PlayerId) -> Option<Mana
     if pending.activation_ability_index.is_some() {
         return None;
     }
-    let cost = pending.cost.clone();
-
-    // Scratch pool of ONLY the pinned units = the player's current selection.
-    let player_obj = state.players.iter().find(|p| p.id == viewer)?;
-    let selected = ManaPool::from_units(
-        player_obj
-            .mana_pool
-            .units()
-            .filter(|unit| pending.pinned_pool_units.contains(&unit.pip_id)),
-    );
 
     // CR 106.6: reduce under the SAME spend-restriction context the finalize
     // spend uses, so restricted mana the spell can't accept stays in the residual.
     let spell_meta = crate::game::casting::build_spell_meta(state, viewer, pending.object_id);
     let ctx = spell_meta.as_ref().map(PaymentContext::Spell);
+    remaining_after_pins(
+        state,
+        viewer,
+        pending.object_id,
+        &pending.pinned_pool_units,
+        &pending.cost,
+        ctx.as_ref(),
+    )
+}
+
+/// CR 118.3a + CR 106.6: `cost` reduced against a scratch pool of ONLY
+/// `viewer`'s pinned units (their current selection), under `ctx` and the
+/// payment's mana-spend permission for `source`.
+fn remaining_after_pins(
+    state: &GameState,
+    viewer: PlayerId,
+    source: ObjectId,
+    pins: &[ManaPipId],
+    cost: &ManaCost,
+    ctx: Option<&PaymentContext<'_>>,
+) -> Option<ManaCost> {
+    let player_obj = state.players.iter().find(|p| p.id == viewer)?;
+    let selected = ManaPool::from_units(
+        player_obj
+            .mana_pool
+            .units()
+            .filter(|unit| pins.contains(&unit.pip_id)),
+    );
     Some(crate::game::mana_payment::reduce_cost_by_pool(
         &selected,
-        &cost,
-        ctx.as_ref(),
+        cost,
+        ctx,
         crate::game::casting::player_mana_spend_permission_for_payment(
             state,
             viewer,
-            Some(pending.object_id),
-            ctx.as_ref(),
+            Some(source),
+            ctx,
         ),
         None,
     ))
+}
+
+/// CR 601.2g + CR 605.3a: the mana ability `viewer` is paying for by hand in
+/// its own `ManaAbilityManaPayment` window. An automatic window is paid by
+/// activating mana abilities alone, so it has nothing to display here.
+fn manual_mana_ability_payment(state: &GameState, viewer: PlayerId) -> Option<&PendingManaAbility> {
+    let WaitingFor::ManaAbilityManaPayment {
+        player,
+        pending_mana_ability,
+    } = &state.waiting_for
+    else {
+        return None;
+    };
+    (*player == viewer
+        && crate::game::casting::payment_mode_pays_mana_manually(pending_mana_ability.payment_mode))
+    .then_some(pending_mana_ability.as_ref())
+}
+
+/// CR 601.2g + CR 602.2b + CR 605.3a: the viewer's own manual mana-ability
+/// payment window — the source, its mana sub-cost (X announced) and the pins
+/// still naming a unit in their pool.
+fn mana_ability_payment_view(
+    state: &GameState,
+    viewer: PlayerId,
+) -> Option<ManaAbilityPaymentView> {
+    let pending = manual_mana_ability_payment(state, viewer)?;
+    let cost = crate::game::mana_abilities::pending_mana_sub_cost(state, pending).ok()??;
+    let pool = &state.players.iter().find(|p| p.id == viewer)?.mana_pool;
+    Some(ManaAbilityPaymentView {
+        source_id: pending.source_id,
+        cost,
+        pinned_pool_units: pending
+            .pinned_pool_units
+            .iter()
+            .copied()
+            .filter(|pip| pool.contains_pip(*pip))
+            .collect(),
+    })
 }
 
 /// CR 309.4a-c: name the room each venturing player's marker currently sits on.
@@ -1345,6 +1462,60 @@ fn dungeon_rooms(state: &GameState) -> BTreeMap<PlayerId, DungeonRoomView> {
                     rooms: crate::game::dungeon::room_nodes(dungeon),
                 },
             ))
+        })
+        .collect()
+}
+
+/// The poison-loss rule one player is measured against, projected from
+/// `players::poison_loss_measure` — the authority the poison SBA reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PoisonLossView {
+    pub scope: PoisonLossScope,
+    pub threshold: u32,
+    pub proximity: PoisonLossProximity,
+}
+
+/// Display classification (no CR): how close a player's poison-loss count is
+/// to its threshold, which the HUD badge styles from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PoisonLossProximity {
+    /// More than `POISON_NEAR_LETHAL_MARGIN` counters short of the threshold.
+    Normal,
+    /// Within `POISON_NEAR_LETHAL_MARGIN` counters of the threshold.
+    NearLethal,
+}
+
+/// Display-only: how many counters short of the loss threshold the HUD starts
+/// warning. 2 reproduces the badge's pre-dial `value >= 8` at the CR default
+/// of ten. No CR governs it.
+const POISON_NEAR_LETHAL_MARGIN: u32 = 2;
+
+/// CR 704.5c / CR 704.6b + CR 810.8d: the poison-loss rule for every player
+/// with a nonzero poison-loss count, read from the same measure the SBA uses.
+/// Empty (and omitted from the wire) when nobody is poisoned.
+fn poison_loss(state: &GameState) -> BTreeMap<PlayerId, PoisonLossView> {
+    state
+        .players
+        .iter()
+        .filter_map(|player| {
+            let measure = poison_loss_measure(state, player)?;
+            (measure.count > 0).then(|| {
+                let proximity = if measure.count.saturating_add(POISON_NEAR_LETHAL_MARGIN)
+                    >= measure.threshold
+                {
+                    PoisonLossProximity::NearLethal
+                } else {
+                    PoisonLossProximity::Normal
+                };
+                (
+                    player.id,
+                    PoisonLossView {
+                        scope: measure.scope,
+                        threshold: measure.threshold,
+                        proximity,
+                    },
+                )
+            })
         })
         .collect()
 }
@@ -1604,6 +1775,7 @@ pub fn derive_views(state: &GameState, viewer: Option<PlayerId>) -> DerivedViews
         unless_draw_cost: unless_draw_cost(state),
         current_target_kind: current_target_kind(state),
         dungeon_rooms: dungeon_rooms(state),
+        poison_loss: poison_loss(state),
         storm_count: storm_count(state),
         unblocked_attack_previews: unblocked_attack_previews(state),
         attack_targets: attack_targets(state),
@@ -1836,6 +2008,7 @@ pub fn derive_views(state: &GameState, viewer: Option<PlayerId>) -> DerivedViews
     // pinned (selected) pool mana — drives the payment UI's live-shrinking cost.
     if let Some(viewer) = viewer {
         views.pending_payment_remaining = pending_payment_remaining(state, viewer);
+        views.mana_ability_payment = mana_ability_payment_view(state, viewer);
     }
 
     if state.format_config.format.is_planechase_family() {
@@ -1880,6 +2053,7 @@ pub fn derive_views(state: &GameState, viewer: Option<PlayerId>) -> DerivedViews
     let (turn_order, viewer_turn_number) = turn_order_views(state, viewer);
     views.turn_order = turn_order;
     views.viewer_turn_number = viewer_turn_number;
+    views.viewer_play_draw = viewer_play_draw(state, viewer);
 
     // WHY THE THREE ∞ SURFACE CHANNELS BELOW ARE UNCONDITIONAL — the accept→boundary window.
     //
@@ -2477,22 +2651,52 @@ fn unique_authorized_submitter(state: &GameState) -> Option<PlayerId> {
     (submitters.len() == 1).then(|| submitters[0])
 }
 
+/// CR 103.1: the starting player of the game this state describes, once it has
+/// been determined. `current_starting_player` alone cannot answer this: it is
+/// non-optional and `GameState::new` seeds it with a format default before any
+/// determination. Turn 1 is established in the same step that assigns the
+/// starter (`engine::start_game_with_starting_player`,
+/// `engine::start_game_skip_mulligan`), so a state still on turn 0 has none.
+fn determined_starting_player(state: &GameState) -> Option<PlayerId> {
+    (state.turn_number > 0).then_some(state.current_starting_player)
+}
+
+/// CR 103.1 + CR 103.1a + CR 805.4: the viewer's play/draw position — see
+/// `DerivedViews::viewer_play_draw`. Sides come from `topology::sides`, which
+/// includes departed seats, so the position stays fixed for the whole game.
+fn viewer_play_draw(state: &GameState, viewer: Option<PlayerId>) -> Option<PlayDrawPosition> {
+    let viewer = viewer?;
+    let starter = determined_starting_player(state)?;
+    let sides = crate::game::topology::sides(state);
+    let [first, second] = sides.as_slice() else {
+        return None;
+    };
+    // CR 805.4: a side takes one turn per round when it is a single seat or
+    // takes shared team turns; any other side makes the game multiplayer-ordered.
+    let one_turn_per_round = |side: &Side| {
+        side.seats.len() == 1 || side.turn_structure == TurnStructure::SharedTeamTurns
+    };
+    if !(one_turn_per_round(first) && one_turn_per_round(second)) {
+        return None;
+    }
+    let side_index = |player| sides.iter().position(|side| side.seats.contains(&player));
+    Some(if side_index(viewer)? == side_index(starter)? {
+        PlayDrawPosition::OnThePlay
+    } else {
+        PlayDrawPosition::OnTheDraw
+    })
+}
+
 fn turn_order_views(
     state: &GameState,
     viewer: Option<PlayerId>,
 ) -> (Vec<TurnOrderSlotView>, Option<u8>) {
-    let mut seen = BTreeSet::new();
-    let representatives: Vec<PlayerId> = state
-        .seat_order
-        .iter()
-        .copied()
-        .filter(|&player| crate::game::players::is_alive(state, player))
-        .filter_map(|player| {
-            let representative =
-                crate::game::topology::normalize_shared_turn_recipient(state, player);
-            seen.insert(representative).then_some(representative)
-        })
-        .collect();
+    // CR 103.1: no turn order exists before the starting player is determined.
+    if determined_starting_player(state).is_none() {
+        return (Vec::new(), None);
+    }
+
+    let representatives = crate::game::topology::turn_representatives(state);
 
     if representatives.len() <= 2 {
         return (Vec::new(), None);
@@ -2509,7 +2713,6 @@ fn turn_order_views(
                 turns_from_now: slot_index,
                 turn_number: slot_index + 1,
                 is_viewer: viewer == Some(player),
-                is_starting_player: slot_index == 0 && player == state.current_starting_player,
             }
         })
         .collect();
@@ -3357,24 +3560,27 @@ mod tests {
     use super::*;
     use crate::game::combat::CombatState;
     use crate::game::game_object::ObjectIncarnationRefExt;
+    use crate::game::scenario::{GameScenario, P0, P1};
     use crate::game::triggers::{PendingTrigger, PendingTriggerContext};
     use crate::game::zones::create_object;
     use crate::types::ability::{
         DelayedTriggerCondition, DelayedTriggerKind, Duration, Effect, EffectKind, ModalChoice,
         ResolvedAbility, RestrictionExpiry, StaticCondition, TargetFilter, TargetRef,
     };
+    use crate::types::actions::GameAction;
     use crate::types::card_printing::CardPrinting;
     use crate::types::card_type::CoreType;
     use crate::types::format::FormatConfig;
     use crate::types::game_state::{
-        CommanderDamageEntry, DelayedTrigger, DistributionScope, DistributionUnit, PendingCast,
-        StackEntry, StackEntryKind, StackPaidSnapshot, TargetEffectDetail, TargetSelectionProgress,
-        TargetSelectionSlot, TriggerOrderGroup, WaitingFor, ZoneChangeRecord,
+        CastPaymentMode, CommanderDamageEntry, DelayedTrigger, DistributionScope, DistributionUnit,
+        PendingCast, StackEntry, StackEntryKind, StackPaidSnapshot, TargetEffectDetail,
+        TargetSelectionProgress, TargetSelectionSlot, TriggerOrderGroup, WaitingFor,
+        ZoneChangeRecord,
     };
     use crate::types::identifiers::{
         CardId, DelayedTriggerInstanceId, DelayedTriggerOrigin, DelayedTriggerToken, TriggerFiring,
     };
-    use crate::types::mana::ManaCost;
+    use crate::types::mana::{ManaCost, ManaType, ManaUnit};
     use crate::types::phase::Phase;
     use crate::types::statics::ActivationExemption;
     use crate::types::zones::Zone;
@@ -5370,7 +5576,17 @@ mod tests {
 
     #[test]
     fn turn_order_hidden_for_two_or_fewer_live_representatives() {
-        let state = GameState::new(FormatConfig::standard(), 2, 42);
+        let mut state = GameState::new(FormatConfig::standard(), 2, 42);
+        // A game in progress: the starting player is determined (CR 103.1), so
+        // the representative count and not determination is what hides turn order.
+        state.turn_number = 1;
+
+        assert!(
+            derive_views(&state, Some(PlayerId(0)))
+                .viewer_play_draw
+                .is_some(),
+            "the determination guard passed, so the <= 2 branch hides turn order"
+        );
 
         let views = derive_views(&state, None);
 
@@ -5390,6 +5606,8 @@ mod tests {
     #[test]
     fn turn_order_duplicates_survive_wire_round_trip() {
         let mut state = GameState::new(FormatConfig::free_for_all(), 4, 42);
+        // A game in progress: the starting player is determined (CR 103.1).
+        state.turn_number = 1;
         state.active_player = PlayerId(0);
         state.extra_turns.push(crate::types::game_state::ExtraTurn {
             player: PlayerId(2),
@@ -5411,7 +5629,6 @@ mod tests {
                     turns_from_now: 0,
                     turn_number: 1,
                     is_viewer: false,
-                    is_starting_player: true,
                 },
                 TurnOrderSlotView {
                     player: PlayerId(0),
@@ -5419,7 +5636,6 @@ mod tests {
                     turns_from_now: 1,
                     turn_number: 2,
                     is_viewer: false,
-                    is_starting_player: false,
                 },
             ],
             "same player can be both NOW and NEXT when an extra turn is queued"
@@ -5958,6 +6174,70 @@ mod tests {
             derive_views(&state, Some(PlayerId(1))).pending_payment_remaining,
             None,
         );
+    }
+
+    /// CR 601.2g + CR 602.2b + CR 605.3a: in the payer's own manual Rakdos
+    /// Signet window (`{1}, {T}: Add {B}{R}.`) the engine publishes the Signet,
+    /// its `{1}` and the pins, and the remaining cost shrinks with the pins.
+    /// The opponent sees neither.
+    #[test]
+    fn mana_ability_payment_view_reflects_the_manual_window_for_its_payer_only() {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let signet = scenario
+            .add_artifact_from_oracle(P0, "Rakdos Signet", "{1}, {T}: Add {B}{R}.")
+            .id();
+        let mut runner = scenario.build();
+        for color in [ManaType::Black, ManaType::Red] {
+            let _ = runner
+                .state_mut()
+                .add_mana_to_pool(P0, ManaUnit::new(color, ObjectId(0), false, vec![]));
+        }
+        let red = runner.state().players[0]
+            .mana_pool
+            .units()
+            .find(|unit| unit.color == ManaType::Red)
+            .map(|unit| unit.pip_id)
+            .expect("the floating {R}");
+        let ability_index = runner.state().objects[&signet]
+            .abilities
+            .iter()
+            .position(crate::game::mana_abilities::is_mana_ability)
+            .expect("the Signet's mana ability");
+        runner
+            .act(GameAction::ActivateAbility {
+                source_id: signet,
+                ability_index,
+                payment_mode: CastPaymentMode::Manual,
+            })
+            .expect("the manual activation opens its window");
+
+        let views = derive_views(runner.state(), Some(P0));
+        assert_eq!(
+            views.mana_ability_payment,
+            Some(ManaAbilityPaymentView {
+                source_id: signet,
+                cost: ManaCost::generic(1),
+                pinned_pool_units: vec![],
+            })
+        );
+        assert_eq!(views.pending_payment_remaining, Some(ManaCost::generic(1)));
+
+        runner
+            .act(GameAction::SpendPoolMana { pip_id: red })
+            .expect("the {R} can pay the {1}");
+        let views = derive_views(runner.state(), Some(P0));
+        assert_eq!(
+            views
+                .mana_ability_payment
+                .map(|view| view.pinned_pool_units),
+            Some(vec![red])
+        );
+        assert_eq!(views.pending_payment_remaining, Some(ManaCost::NoCost));
+
+        let opponent = derive_views(runner.state(), Some(P1));
+        assert_eq!(opponent.mana_ability_payment, None);
+        assert_eq!(opponent.pending_payment_remaining, None);
     }
 
     #[test]
