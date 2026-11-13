@@ -1747,7 +1747,7 @@ fn apply_action_boundary_core(
     // (CR 603.2 + CR 603.3b place them on the stack before the next player receives priority).
     // Reaching here with something to realize means the action settled WITHOUT running
     // `run_post_action_pipeline` — one of the reducer arms that builds an `ActionResult` straight
-    // out of the match (`handle_tribute_choice` is the reachable one). Converge those onto the same
+    // out of the match. Converge those onto the same
     // pipeline the rest of the reducer uses, scanning ONLY the slice this realization appended, so
     // a handler that already settled its own events (`handle_opponent_may_choice`, which collects
     // into `deferred_triggers` without recording them in `consumed_before_priority_trigger_events`)
@@ -15473,12 +15473,15 @@ fn apply_non_priority_pass_action(
             waiting_for @ WaitingFor::TributeChoice { .. },
             GameAction::DecideOptionalEffect { accept },
         ) => {
-            return engine_payment_choices::handle_tribute_choice(
+            // CR 603.3b: the resumed entry carrier can emit its committed entry
+            // inside this handler. Run the shared post-action pipeline over those
+            // events even when the boundary has no parked entry left to realize.
+            engine_payment_choices::handle_tribute_choice(
                 state,
                 waiting_for.clone(),
                 accept,
                 &mut events,
-            );
+            )?
         }
         // CR 118.12: Player decided whether to pay an "unless pays" cost.
         (waiting_for @ WaitingFor::UnlessPayment { .. }, GameAction::PayUnlessCost { pay }) => {

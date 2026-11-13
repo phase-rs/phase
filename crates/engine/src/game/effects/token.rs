@@ -3233,8 +3233,8 @@ pub(crate) fn flush_pending_token_battlefield_entry(
 ///   also puts the CR 400.7 row on the ledger before that pipeline's SBA pass (CR 704.3) can bury a
 ///   0-toughness copy under CR 704.5f.
 /// * in `apply_action_boundary_core`, after `apply_action` returned — for the handlers that build
-///   an `ActionResult` straight out of the reducer match and never reach that pipeline
-///   (`handle_tribute_choice` is the reachable one). That call site converges them onto
+///   an `ActionResult` straight out of the reducer match and never reach that pipeline.
+///   That call site converges them onto
 ///   `engine_priority::run_post_action_pipeline_from` over exactly the slice this realization
 ///   appended, so the CR 603.6a check runs for them too and their ETB observers fire. For the
 ///   REALIZED ENTRY the only remaining difference from the in-`apply_action` call is ordering
