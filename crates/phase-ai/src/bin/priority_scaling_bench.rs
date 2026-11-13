@@ -1,22 +1,13 @@
 //! Profile one AI priority decision as the opponent's board scales.
 //!
-//! The board is a precombat main phase where the AI holds Grizzly Bears with
-//! {G}{G} floating, facing N vanilla 1/1s. Per N this prints the battlefield
-//! size, the route the decision takes, the fastest and mean time per
-//! `choose_action`, and the engine perf counters accrued over all repetitions.
-//!
-//! Routes: below 128 battlefield objects (`LARGE_BOARD_FAST_PRIORITY_BATTLEFIELD_OBJECTS`
-//! in `search.rs`) the decision runs scored search; at or above it the
-//! large-board fast route answers. N = 1 and 100 sit on the scored route, 128
-//! and 1000 on the fast route.
-//!
-//! Reading it: within a route the perf counters match across N, but time per
-//! decision still grows with N because evaluation and layer passes walk the
-//! battlefield. Compare the `min` ratio from N = 1 to 100 (and 128 to 1000)
-//! against a baseline run of the parent commit on the same machine: a ratio well
-//! above baseline flags repeated board-dependent work (a battlefield walk nested
-//! inside evaluation, candidate enumeration, or policy scoring). Read `min`, not
-//! `mean`; the mean absorbs load from other processes.
+//! The AI holds Grizzly Bears with {G}{G} floating in its precombat main phase,
+//! facing N vanilla 1/1s; each N prints the fastest of the repeated
+//! `choose_action` calls and the perf counters they accrued. N = 1 and 100 run
+//! the scored route (below `LARGE_BOARD_FAST_PRIORITY_BATTLEFIELD_OBJECTS`, 128,
+//! in `search.rs`): compare their `min` ratio with the same bench on the parent
+//! commit, and a higher ratio flags repeated board-dependent work. N = 1000 and
+//! 2000 run the large-board fast route: their `min` ratio reads about 2x for
+//! work linear in the board and about 4x for quadratic.
 //!
 //! Build/run (measurement mode: node-bounded, no wall-clock cap, so the time
 //! reflects the work rather than the search deadline):
@@ -113,7 +104,7 @@ fn board(tokens: usize) -> GameState {
     state
 }
 
-fn bench_n(n: usize) {
+fn bench_n(n: usize) -> Duration {
     let state = board(n);
     let objects = state.battlefield.len();
     let route = if objects >= LARGE_BOARD_OBJECTS {
@@ -124,7 +115,6 @@ fn bench_n(n: usize) {
     let config = create_config(AiDifficulty::Hard, Platform::Native).into_measurement(42);
 
     perf_counters::reset();
-    let start = Instant::now();
     let mut action = None;
     let mut fastest = Duration::MAX;
     for _ in 0..REPS {
@@ -133,18 +123,20 @@ fn bench_n(n: usize) {
         action = choose_action(&state, P0, &config, &mut rng);
         fastest = fastest.min(rep_start.elapsed());
     }
-    let mean = start.elapsed() / REPS;
     let c = perf_counters::snapshot();
 
     println!(
-        "N={n:5} battlefield={objects:5} route={route:6} min={fastest:>10.3?} mean={mean:>10.3?}  \
-         clones={} static_scans={} layers(full={} inc={}) mana_sweeps={} swept={}  -> {action:?}",
-        c.state_clone_for_legality,
-        c.static_full_scans,
-        c.layers_full_eval,
-        c.layers_incremental,
-        c.mana_display_sweeps,
-        c.mana_display_swept_objects,
+        "N={n:5} battlefield={objects:5} route={route:6} min={fastest:>10.3?}  \
+         clones={} static_scans={} layers(full={} inc={})  -> {action:?}",
+        c.state_clone_for_legality, c.static_full_scans, c.layers_full_eval, c.layers_incremental,
+    );
+    fastest
+}
+
+fn print_ratio(from: usize, to: usize, from_min: Duration, to_min: Duration) {
+    println!(
+        "  min ratio N={to}/N={from}: {:.2}x",
+        to_min.as_secs_f64() / from_min.as_secs_f64()
     );
 }
 
@@ -154,7 +146,11 @@ fn main() {
         cfg!(debug_assertions)
     );
     println!();
-    for n in [1usize, 100, 128, 1000] {
-        bench_n(n);
-    }
+    let one = bench_n(1);
+    let hundred = bench_n(100);
+    print_ratio(1, 100, one, hundred);
+
+    let thousand = bench_n(1000);
+    let two_thousand = bench_n(2000);
+    print_ratio(1000, 2000, thousand, two_thousand);
 }
