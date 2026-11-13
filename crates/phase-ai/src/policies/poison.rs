@@ -78,13 +78,32 @@ use super::registry::{
 pub struct PoisonClockPolicy;
 
 /// One poison clock a candidate advances (CR 810.10: teammates share one), the seat that opened
-/// it, the counters credited to it, and the highest band its claim may reach.
+/// it, the counters credited to it, and whether those counters may claim lethal.
 #[derive(Debug, Clone, PartialEq)]
 struct PoisonPool {
     seat: PlayerId,
     measure: PoisonLossMeasure,
     added: u32,
-    ceiling: f64,
+    delivery: Delivery,
+}
+
+/// Whether a pool's credited counters count toward lethal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Delivery {
+    /// The engine read the delivery, or the estimate is short of lethal and needs no read.
+    Counted,
+    /// The engine could not read the delivery, so its estimate is pressure, never lethal.
+    Unread,
+}
+
+impl PoisonPool {
+    /// The counters that count toward lethal: an unread delivery stops one short of it.
+    fn credited(&self) -> u32 {
+        match self.delivery {
+            Delivery::Counted => self.added,
+            Delivery::Unread => self.added.min(headroom(self.measure).saturating_sub(1)),
+        }
+    }
 }
 
 /// What the candidate action contributes to the poison clock. Typed rather
@@ -309,7 +328,7 @@ fn combat_contribution<'a>(
         .collect();
     closest_delivered(
         ctx.ai_player,
-        clock_pools(ctx.state, ctx.ai_player, gains, STRONG_MAX),
+        clock_pools(ctx.state, ctx.ai_player, gains),
         |_| preview_unblocked_combat_damage(ctx.state, &at_players, gives_poison),
         false,
     )
@@ -321,7 +340,6 @@ fn clock_pools(
     state: &GameState,
     ai_player: PlayerId,
     gains: impl IntoIterator<Item = (PlayerId, u32)>,
-    ceiling: f64,
 ) -> Vec<PoisonPool> {
     let mut pools: Vec<PoisonPool> = Vec::new();
     for (seat, gained) in gains {
@@ -339,7 +357,7 @@ fn clock_pools(
                 seat,
                 measure,
                 added: gained,
-                ceiling,
+                delivery: Delivery::Counted,
             }),
         }
     }
@@ -353,7 +371,6 @@ fn seat_pools(
     ai_player: PlayerId,
     added: u32,
     keep: impl Fn(&PoisonLossMeasure) -> bool,
-    ceiling: f64,
 ) -> Vec<PoisonPool> {
     opponent_poison_seats(state, ai_player)
         .filter(|(_, measure)| keep(measure))
@@ -361,7 +378,7 @@ fn seat_pools(
             seat,
             measure,
             added,
-            ceiling,
+            delivery: Delivery::Counted,
         })
         .collect()
 }
@@ -389,7 +406,7 @@ pub(crate) fn previewed_poison(
 /// (Solemnity) or a replacement (Vorinclex) can change every counter, so a lethal estimate is
 /// replaced by the pool's poison on the board `deliver` returns for its seat. `must_resolve`
 /// reads it even below lethal, for a count with no printed estimate. A delivery the engine
-/// could not read never earns a lethal claim, so its estimate is held below the threshold.
+/// could not read keeps its estimate and is marked `Delivery::Unread`.
 fn confirm_lethal(
     ai_player: PlayerId,
     mut pool: PoisonPool,
@@ -404,7 +421,7 @@ fn confirm_lethal(
         deliver(pool.seat).and_then(|after| live_opponent_poison(&after, ai_player, pool.seat));
     match delivered {
         Some(after) => pool.added = after.count.saturating_sub(pool.measure.count),
-        None => pool.added = pool.added.min(headroom(pool.measure).saturating_sub(1)),
+        None => pool.delivery = Delivery::Unread,
     }
     pool
 }
@@ -420,7 +437,7 @@ fn closest_delivered(
         .into_iter()
         .map(|pool| confirm_lethal(ai_player, pool, &deliver, must_resolve))
         .filter(|pool| pool.added > 0)
-        .min_by_key(|pool| headroom(pool.measure).saturating_sub(pool.added))
+        .min_by_key(|pool| headroom(pool.measure).saturating_sub(pool.credited()))
 }
 
 /// Counters still needed before this measure is lethal.
@@ -508,7 +525,7 @@ impl TacticalPolicy for PoisonClockPolicy {
                 let estimate = printed.unwrap_or(1);
                 let pools = match recipients {
                     PoisonRecipients::One => {
-                        seat_pools(ctx.state, ctx.ai_player, estimate, |_| true, CRITICAL_MAX)
+                        seat_pools(ctx.state, ctx.ai_player, estimate, |_| true)
                     }
                     // CR 810.10: each opponent gets its counter individually; teammates' counters share one pool.
                     PoisonRecipients::EachOpponent => clock_pools(
@@ -517,13 +534,12 @@ impl TacticalPolicy for PoisonClockPolicy {
                         players::opponents(ctx.state, ctx.ai_player)
                             .into_iter()
                             .map(|seat| (seat, estimate)),
-                        CRITICAL_MAX,
                     ),
                 };
                 let deliver =
                     |seat| direct_delivery(ctx.state, ctx.ai_player, source, &abilities, seat);
                 match closest_delivered(ctx.ai_player, pools, deliver, printed.is_none()) {
-                    Some(pool) => score_clock(scalar, pool.measure, pool.added, pool.ceiling),
+                    Some(pool) => score_clock(scalar, &pool, CRITICAL_MAX),
                     None => {
                         PolicyVerdict::neutral(PolicyReason::new("poison_clock_no_poison_loss"))
                     }
@@ -534,16 +550,10 @@ impl TacticalPolicy for PoisonClockPolicy {
                 // CR 701.34a: proliferate chooses among permanents and players
                 // that ALREADY have a counter. With no poisoned opponent it
                 // advances nothing, so it earns nothing on this axis.
-                let pools = seat_pools(
-                    ctx.state,
-                    ctx.ai_player,
-                    1,
-                    |measure| measure.count > 0,
-                    CRITICAL_MAX,
-                );
+                let pools = seat_pools(ctx.state, ctx.ai_player, 1, |measure| measure.count > 0);
                 let deliver = |seat| proliferate_delivery(ctx.state, ctx.ai_player, source, seat);
                 match closest_delivered(ctx.ai_player, pools, deliver, false) {
-                    Some(pool) => score_clock(scalar, pool.measure, pool.added, pool.ceiling),
+                    Some(pool) => score_clock(scalar, &pool, CRITICAL_MAX),
                     None => PolicyVerdict::neutral(PolicyReason::new(
                         "poison_clock_no_counters_to_proliferate",
                     )),
@@ -554,9 +564,7 @@ impl TacticalPolicy for PoisonClockPolicy {
             // swing is held below the critical band (`STRONG_MAX` ceiling) that
             // a direct poison confirmed through the engine earns. A committed attacker is still a
             // strong play, just not a booked win.
-            PoisonContribution::CombatDamage(pool) => {
-                score_clock(scalar, pool.measure, pool.added, pool.ceiling)
-            }
+            PoisonContribution::CombatDamage(pool) => score_clock(scalar, &pool, STRONG_MAX),
         }
     }
 }
@@ -577,7 +585,8 @@ const MIN_CLOCK_PROGRESS: f64 = 0.25;
 /// `PolicyVerdict::score`, which selects the band from the clamped value. The
 /// sub-lethal case is always held under `STRONG_MAX`, so an advancing-but-not-
 /// lethal clock never outranks a booked win.
-fn score_clock(scalar: f64, measure: PoisonLossMeasure, added: u32, ceiling: f64) -> PolicyVerdict {
+fn score_clock(scalar: f64, pool: &PoisonPool, ceiling: f64) -> PolicyVerdict {
+    let PoisonPool { measure, added, .. } = *pool;
     let facts = |reason: PolicyReason| {
         reason
             .with_fact("opponent_poison", i64::from(measure.count))
@@ -585,14 +594,15 @@ fn score_clock(scalar: f64, measure: PoisonLossMeasure, added: u32, ceiling: f64
             .with_fact("poison_threshold", i64::from(measure.threshold))
     };
 
-    if reaches_lethal(measure, added) {
+    let credited = pool.credited();
+    if reaches_lethal(measure, credited) {
         return PolicyVerdict::score(
             scalar.min(ceiling),
             facts(PolicyReason::new("poison_clock_lethal")),
         );
     }
 
-    let projected = measure.count.saturating_add(added);
+    let projected = measure.count.saturating_add(credited);
     let progress = f64::from(projected) / f64::from(measure.threshold);
     PolicyVerdict::score(
         scalar.min(STRONG_MAX) * progress.max(MIN_CLOCK_PROGRESS),

@@ -1703,42 +1703,118 @@ fn poisonous_counters_come_from_the_trigger_controller() {
     }
 }
 
+/// `elves` Glistener Elves and Archfiend's Vessel attacking the opponent at `at` poison, with the
+/// opponent's Vorinclex and the AI's Alhammarret's Archive and Leyline of Hope as asked: the verdict,
+/// and the opponent's poison on the unblocked combat preview (`None` when it stops for a choice).
+fn vessel_attack(
+    at: u32,
+    elves: usize,
+    opponent_vorinclex: bool,
+    gain_replacements: bool,
+) -> ((f64, PolicyReason), Option<u32>) {
+    let (mut runner, ids) = board(FormatConfig::standard(), 2, &[(OPPONENT, at)], |s| {
+        s.at_phase(Phase::PreCombatMain);
+        let db = shared_integration_card_db();
+        let mut ids: Vec<_> = (0..elves).map(|_| glistener_elf(s)).collect();
+        ids.push(s.add_real_card(AI, "Archfiend's Vessel", Zone::Battlefield, db));
+        if opponent_vorinclex {
+            vorinclex(s, OPPONENT);
+        }
+        if gain_replacements {
+            s.add_real_card(AI, "Alhammarret's Archive", Zone::Battlefield, db);
+            s.add_real_card(AI, "Leyline of Hope", Zone::Battlefield, db);
+        }
+        ids
+    });
+    runner.state_mut().layers_dirty.mark_full();
+    engine::game::layers::evaluate_layers(runner.state_mut());
+    runner.advance_to_combat();
+    let attack: Vec<_> = ids
+        .iter()
+        .map(|&id| (id, AttackTarget::Player(OPPONENT)))
+        .collect();
+    let at_players: Vec<_> = ids.iter().map(|&id| (id, OPPONENT)).collect();
+    let preview = engine::game::combat_damage::preview_unblocked_combat_damage(
+        runner.state(),
+        &at_players,
+        |_| true,
+    )
+    .map(|after| poison_of(&after, OPPONENT));
+    (
+        verdict_on(runner.state(), &attack_candidate(attack)),
+        preview,
+    )
+}
+
 /// CR 616.1: Archfiend's Vessel's lifelink gain meets the AI's Alhammarret's Archive and Leyline
 /// of Hope, so the combat preview stops for the order choice and never reads whether Glistener
-/// Elf's counter survives the opponent's Vorinclex; an unread delivery is not lethal.
+/// Elf's counter survives the opponent's Vorinclex; an unread delivery is pressure, not lethal.
 #[test]
 fn unread_combat_delivery_is_not_lethal() {
+    let ((lethal, lethal_reason), _) = vessel_attack(9, 1, false, false);
+    assert_eq!(lethal_reason.kind, "poison_clock_lethal");
     for gain_replacements in [false, true] {
-        let (mut runner, ids) = board(FormatConfig::standard(), 2, &[(OPPONENT, 9)], |s| {
-            s.at_phase(Phase::PreCombatMain);
-            let db = shared_integration_card_db();
-            let elf = glistener_elf(s);
-            let vessel = s.add_real_card(AI, "Archfiend's Vessel", Zone::Battlefield, db);
-            vorinclex(s, OPPONENT);
-            if gain_replacements {
-                s.add_real_card(AI, "Alhammarret's Archive", Zone::Battlefield, db);
-                s.add_real_card(AI, "Leyline of Hope", Zone::Battlefield, db);
-            }
-            vec![elf, vessel]
-        });
-        runner.state_mut().layers_dirty.mark_full();
-        engine::game::layers::evaluate_layers(runner.state_mut());
-        runner.advance_to_combat();
-        let attack: Vec<_> = ids
-            .iter()
-            .map(|&id| (id, AttackTarget::Player(OPPONENT)))
-            .collect();
-        let at_players: Vec<_> = ids.iter().map(|&id| (id, OPPONENT)).collect();
-        let preview = engine::game::combat_damage::preview_unblocked_combat_damage(
-            runner.state(),
-            &at_players,
-            |_| true,
-        )
-        .map(|after| poison_of(&after, OPPONENT));
-        let (delta, reason) = verdict_on(runner.state(), &attack_candidate(attack));
+        let ((delta, reason), preview) = vessel_attack(9, 1, true, gain_replacements);
         assert_eq!(preview, (!gain_replacements).then_some(9));
-        assert_eq!(reason.kind, "poison_clock_na");
-        assert_eq!(delta, 0.0);
+        if gain_replacements {
+            assert_eq!(reason.kind, "poison_clock_pressure");
+            assert_eq!(fact(&reason, "poison_added"), Some(1));
+            assert!(delta > 0.0 && delta < lethal);
+        } else {
+            assert_eq!(reason.kind, "poison_clock_na");
+            assert_eq!(delta, 0.0);
+        }
+    }
+}
+
+/// An unread delivery keeps its estimate and is held one counter short of lethal, so two Elves at
+/// eight score the same pressure as one Elf at nine.
+#[test]
+fn unread_combat_delivery_is_capped_one_short_of_lethal() {
+    let ((read, read_reason), read_preview) = vessel_attack(8, 2, false, false);
+    assert_eq!(read_preview, Some(10));
+    assert_eq!(read_reason.kind, "poison_clock_lethal");
+
+    let ((delta, reason), preview) = vessel_attack(8, 2, false, true);
+    assert_eq!(preview, None);
+    assert_eq!(reason.kind, "poison_clock_pressure");
+    assert_eq!(fact(&reason, "poison_added"), Some(2));
+    assert!(delta > 0.0 && delta < read);
+
+    let ((at_nine, _), _) = vessel_attack(9, 1, false, true);
+    assert_eq!(delta, at_nine);
+}
+
+/// Vorinclex, Monstrous Raider and Halving Season under `controller`'s control.
+fn halving_pair(scenario: &mut GameScenario, controller: PlayerId) -> ObjectId {
+    scenario.add_real_card(
+        controller,
+        "Halving Season",
+        Zone::Battlefield,
+        shared_integration_card_db(),
+    );
+    vorinclex(scenario, controller)
+}
+
+/// CR 616.1: Vorinclex and Halving Season both halve a counter their controller's opponent puts —
+/// the opponent itself for Prologue's each-opponent counter, the AI for its proliferate — so the
+/// preview stops for the order choice and the unread counter is pressure, not lethal.
+#[test]
+fn unread_direct_and_proliferate_deliveries_are_not_lethal() {
+    let standard = FormatConfig::standard;
+    let at_9 = [(OPPONENT, 9)];
+    type Place = fn(&mut GameScenario) -> ObjectId;
+    let rows: [(Place, Place); 2] = [
+        (prologue_to_phyresis, |s| halving_pair(s, AI)),
+        (steady_progress, |s| halving_pair(s, OPPONENT)),
+    ];
+    for (card, replacements) in rows {
+        let (lethal, lethal_reason) = cast_on(standard(), 2, &at_9, card);
+        assert_eq!(lethal_reason.kind, "poison_clock_lethal");
+        let (delta, reason) = cast_beside(standard(), 2, &at_9, card, replacements);
+        assert_eq!(reason.kind, "poison_clock_pressure");
+        assert_eq!(fact(&reason, "poison_added"), Some(1));
+        assert!(delta > 0.0 && delta < lethal);
     }
 }
 
