@@ -548,56 +548,6 @@ fn drowner_destroyed_in_response_still_shuffles_both_owners() {
     );
 }
 
-/// CR 701.24c + CR 400.3: a quantified typed filter ("each nonland permanent you
-/// control") can contain objects with different owners. Every affected owner's
-/// library is shuffled exactly once, not just the first parent-target owner.
-#[test]
-fn quantified_typed_owner_move_shuffles_each_owner_once() {
-    let mut scenario = GameScenario::new();
-    scenario.at_phase(Phase::PreCombatMain);
-    let spell = scenario
-        .add_spell_to_hand_from_oracle(
-            P0,
-            "Quantified Owner Shuffle",
-            false,
-            "Shuffle each nonland permanent you control into its owner's library.",
-        )
-        .id();
-    let p0_relic = scenario.add_artifact_from_oracle(P0, "P0 Relic", "").id();
-    let p1_relic = scenario
-        .add_artifact_from_oracle(P0, "P1-Owned Relic", "")
-        .id();
-    let mut runner = scenario.build();
-    runner.state_mut().objects.get_mut(&p1_relic).unwrap().owner = P1;
-    let outcome = runner.cast(spell).resolve();
-    let events = outcome.events();
-
-    assert_eq!(outcome.state().objects[&p0_relic].zone, Zone::Library);
-    assert_eq!(outcome.state().objects[&p1_relic].zone, Zone::Library);
-    assert!(
-        outcome.state().players[P0.0 as usize]
-            .library
-            .contains(&p0_relic),
-        "P0-owned permanent goes to P0's library"
-    );
-    assert!(
-        outcome.state().players[P1.0 as usize]
-            .library
-            .contains(&p1_relic),
-        "P1-owned permanent goes to P1's library"
-    );
-    assert_eq!(
-        shuffles_for(events, P0),
-        1,
-        "P0's library shuffles once: {events:?}"
-    );
-    assert_eq!(
-        shuffles_for(events, P1),
-        1,
-        "P1's library shuffles once: {events:?}"
-    );
-}
-
 /// CR 400.3 + CR 121.1: when the ability's source owner differs from its
 /// controller, the carried "then draws" belongs to the owner. P1 controls a
 /// P0-owned creature; activating its self-shuffle draw must draw for P0.
@@ -660,58 +610,4 @@ fn owner_carried_draw_uses_the_source_owner_not_the_activator() {
         "the activator does not draw the owner's card"
     );
     assert_eq!(shuffles_for(events, P0), 1, "{events:?}");
-}
-
-/// CR 701.24c + CR 400.3: Teferi, Temporal Pilgrim's −12 makes the announced
-/// opponent shuffle each nonland permanent they control into its owner's
-/// library. Mixed ownership still resolves each owner once; a land and a
-/// nonland controlled by the activator are not moved.
-#[test]
-fn teferi_minus_twelve_settles_each_owner_and_excludes_land() {
-    let mut scenario = GameScenario::new();
-    scenario.at_phase(Phase::PreCombatMain);
-    const TEFERI: &str = "Whenever you draw a card, put a loyalty counter on Teferi.\n0: Draw a card.\n−2: Create a 2/2 blue Spirit creature token with vigilance and \"Whenever you draw a card, put a +1/+1 counter on this token.\"\n−12: Target opponent chooses a permanent they control and returns it to its owner's hand. Then they shuffle each nonland permanent they control into its owner's library.";
-    let teferi = scenario
-        .add_planeswalker_from_oracle(P0, "Teferi, Temporal Pilgrim", "Teferi", 12, TEFERI)
-        .id();
-    let choice = scenario.add_creature(P1, "Chosen Permanent", 1, 1).id();
-    let p1_artifact = scenario.add_artifact_from_oracle(P1, "P1 Relic", "").id();
-    let p0_artifact = scenario
-        .add_artifact_from_oracle(P1, "P0-Owned Relic", "")
-        .id();
-    let p1_land = scenario.add_land_from_oracle(P1, "P1 Land", "").id();
-    let p0_permanent = scenario
-        .add_artifact_from_oracle(P0, "P0 Permanent", "")
-        .id();
-    let mut runner = scenario.build();
-    runner
-        .state_mut()
-        .objects
-        .get_mut(&p0_artifact)
-        .unwrap()
-        .owner = P0;
-
-    let outcome = runner
-        .activate(teferi, 2)
-        .target_player(P1)
-        .target_object(choice)
-        .resolve();
-    eprintln!("TEFERI_WAIT {:?}", outcome.final_waiting_for());
-    let events = outcome.events();
-
-    assert_eq!(outcome.state().objects[&choice].zone, Zone::Hand);
-    assert_eq!(outcome.state().objects[&p1_artifact].zone, Zone::Library);
-    assert_eq!(outcome.state().objects[&p0_artifact].zone, Zone::Library);
-    assert_eq!(
-        outcome.state().objects[&p1_land].zone,
-        Zone::Battlefield,
-        "the land is not a nonland permanent"
-    );
-    assert_eq!(
-        outcome.state().objects[&p0_permanent].zone,
-        Zone::Battlefield,
-        "the activator's own permanent is not controlled by the announced opponent"
-    );
-    assert_eq!(shuffles_for(events, P0), 1, "{events:?}");
-    assert_eq!(shuffles_for(events, P1), 1, "{events:?}");
 }

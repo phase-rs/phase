@@ -10671,18 +10671,19 @@ pub(super) fn parse_shuffle_ast(
             )
             .parse(lower)
             .is_ok();
-            return Some(if all {
-                ShuffleImperativeAst::TargetedChangeZoneToLibrary {
-                    target,
-                    origin: None,
-                    all: true,
-                    multi_target: None,
-                }
-            } else {
-                ShuffleImperativeAst::ChangeZoneToLibrary {
-                    target,
-                    owner_library,
-                }
+            // CR 701.24c + CR 400.6: a quantified typed phrase may leave an
+            // unbound remainder ("each card not put onto the battlefield this
+            // way" — Guess Who it Is!) or span owners whose population is not
+            // yet bound (Teferi, Temporal Pilgrim -12). Do not widen it to a
+            // battlefield-wide ChangeZoneAll; park the clause as unsupported.
+            if all {
+                return Some(ShuffleImperativeAst::Unimplemented {
+                    text: text.to_string(),
+                });
+            }
+            return Some(ShuffleImperativeAst::ChangeZoneToLibrary {
+                target,
+                owner_library,
             });
         }
     }
