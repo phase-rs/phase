@@ -2011,3 +2011,33 @@ fn an_opponent_owned_choice_withholds_the_lethal_read() {
         assert_eq!(reason.kind, kind, "{creatures} opposing creatures");
     }
 }
+
+/// CR 702.21a: The Serpent Society's "Ward—Get five poison counters." triggers when Infectious Bite
+/// targets it, so the counter is pressure; the same board with Grizzly Bears there is lethal.
+#[test]
+fn a_ward_trigger_on_a_target_withholds_the_lethal_read() {
+    for (warded, kind) in [
+        (true, "poison_clock_pressure"),
+        (false, "poison_clock_lethal"),
+    ] {
+        let poison = [(OPPONENT, 9), (AI, 5)];
+        let (runner, ids) = board(FormatConfig::standard(), 2, &poison, |s| {
+            grizzly_bears(s, AI);
+            if warded {
+                s.add_real_card(
+                    OPPONENT,
+                    "The Serpent Society",
+                    Zone::Battlefield,
+                    shared_integration_card_db(),
+                );
+            } else {
+                grizzly_bears(s, OPPONENT);
+            }
+            vec![s
+                .add_spell_to_hand_from_oracle(AI, "Infectious Bite", true, INFECTIOUS_BITE)
+                .id()]
+        });
+        let (_, reason) = verdict_on(runner.state(), &cast_candidate(ids[0]));
+        assert_eq!(reason.kind, kind, "warded {warded}");
+    }
+}

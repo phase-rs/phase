@@ -21112,7 +21112,8 @@ fn stamp_discovered_referent_onto_continuation(state: &mut GameState) {
 const PREVIEW_RESOLUTION_MAX_ANSWERS: usize = 64;
 
 /// CR 608.2c: the board after these instructions resolve in order on a copy, each prompt they open
-/// answered by `answer` from the copy; None when a prompt goes unanswered or the answers run out.
+/// answered by `answer` from the copy; None when a prompt goes unanswered, the answers run out, or
+/// announcing the targets triggers anything.
 pub fn preview_resolution(
     state: &GameState,
     abilities: &[ResolvedAbility],
@@ -21120,6 +21121,21 @@ pub fn preview_resolution(
 ) -> Option<GameState> {
     let mut preview = state.clone();
     let mut events = Vec::new();
+    // CR 601.2c + CR 603.2: a trigger on becoming a target (Ward) is not previewed, so it withholds.
+    for ability in abilities {
+        crate::game::casting::emit_targeting_events(
+            state,
+            &crate::game::ability_utils::declared_targets_in_chain(ability),
+            ability.source_id,
+            ability.controller,
+            None,
+            &mut events,
+        );
+    }
+    if !crate::game::triggers::collect_pending_triggers(&mut preview, &events).is_empty() {
+        return None;
+    }
+    events.clear();
     let mut answers = 0..PREVIEW_RESOLUTION_MAX_ANSWERS;
     for ability in abilities {
         let progress = resolve_ability_chain_step(&mut preview, ability, &mut events, 0).ok()?;

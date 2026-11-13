@@ -4726,7 +4726,7 @@ fn observe_creatures_exploited(state: &mut GameState, events: &[GameEvent]) {
     }
 }
 
-fn collect_pending_triggers(
+pub(crate) fn collect_pending_triggers(
     state: &mut GameState,
     events: &[GameEvent],
 ) -> Vec<PendingTriggerContext> {
