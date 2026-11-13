@@ -80582,23 +80582,22 @@ fn bare_choose_feeding_a_printed_target_through_the_chosen_object_keeps_stack_ti
         let def = parse_effect_chain(text, AbilityKind::Spell);
         let consumer = def.sub_ability.as_deref().expect("the consumer clause");
         assert!(
-            match (reads, consumer.effect.as_ref()) {
+            matches!(
+                (reads, consumer.effect.as_ref()),
                 (
                     "Fight",
                     Effect::Fight {
                         subject: TargetFilter::ParentTarget,
                         ..
-                    },
-                ) => true,
-                (
+                    }
+                ) | (
                     "ExchangeControl",
                     Effect::ExchangeControl {
                         target_a: TargetFilter::ParentTarget,
                         ..
-                    },
-                ) => true,
-                _ => false,
-            },
+                    }
+                )
+            ),
             "{text}: reach guard for the consumer reading the choice: {def:#?}"
         );
         assert_eq!(
