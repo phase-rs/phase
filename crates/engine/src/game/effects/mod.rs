@@ -5288,7 +5288,9 @@ fn settle_entries_at_boundary(
         return;
     }
     // CR 608.2c + CR 603.6a: every instruction before `next` has completed, so every entry
-    // recorded so far is a completed entry event, whether or not its observation is deferred.
+    // recorded so far is a completed entry event. It is marked complete only where it is also
+    // observed and collected (below): a mark never stands above an entry that is still held,
+    // which is what lets a restore tell a held entry from one already collected.
     // Not while a battlefield entry is still being made: a chain run inside that entry (a copy
     // or post-replacement rider) has boundaries of its own, and the instruction that put its
     // earlier co-entrants onto the battlefield has not completed. Nor between the seat legs of
@@ -5301,9 +5303,11 @@ fn settle_entries_at_boundary(
     // paused player-scope clause resume as such nodes whether or not a sidecar was installed
     // (a clause with no tail that reads its result has none), and their entries are one
     // simultaneous event with the seats that already acted.
+    let deferred = entry_observation_deferred(state, next, completed);
     if !crate::game::triggers::battlefield_entry_in_progress(state)
         && state.resolving_player_scope_tail.is_none()
         && !bound_to_a_player_by_an_instruction(next)
+        && !deferred
     {
         let ledger_len = state.zone_changes_this_turn.len();
         if ledger_len > completed_through {
@@ -5311,7 +5315,7 @@ fn settle_entries_at_boundary(
             instruction_completed = true;
         }
     }
-    if entry_observation_deferred(state, next, completed) {
+    if deferred {
         return;
     }
     crate::game::zones::settle_battlefield_entry_observations(state, events);
@@ -5330,6 +5334,24 @@ fn settle_entries_at_boundary(
     }
 }
 
+/// CR 603.6a + CR 603.2c: a top-level resolution begins after every earlier action has settled,
+/// so every entry already on the turn's ledger was collected. Marking them complete here keeps
+/// an earlier action's entries out of this resolution's entry cohorts, and lets a restore
+/// refuse a held entry that lies below a mark. Nothing is marked while an entry is being made
+/// (a chain run inside it) or while entries are still held.
+fn mark_entries_before_resolution(state: &mut GameState) {
+    if crate::game::triggers::battlefield_entry_in_progress(state)
+        || !state.unsettled_entry_batch_events.is_empty()
+        || state.resolving_player_scope_tail.is_some()
+    {
+        return;
+    }
+    let ledger_len = state.zone_changes_this_turn.len();
+    if ledger_len > state.completed_instruction_ledger_len() {
+        state.instruction_boundary_marks.push(ledger_len);
+    }
+}
+
 /// CR 608.2c + CR 603.6a: a repeated keyword action ("Populate X times", "Investigate twice",
 /// "Incubate 2 twice") is performed that many times in succession, each performance its own
 /// entry event, so the next occurrence is an instruction boundary: the entries of the one before
@@ -5338,12 +5360,20 @@ fn settle_entries_at_boundary(
 /// 1/1 red Elemental creature token" is one simultaneous creation) and is not split. Only the
 /// boundary between two performances is handled here: the last performance is not separated
 /// from a later entering instruction of the same resolution, which reaches the action's scan
-/// with it.
+/// with it, and a repeated action with an entering continuation step is not split at all.
 fn settle_entries_before_repeat_occurrence(
     state: &mut GameState,
     events: &[GameEvent],
     occurrence: &ResolvedAbility,
 ) {
+    // Fenced: an entering continuation step of the repeated action runs inside every iteration
+    // (`repeated_full_chain`), so its entry and the keyword action's are interleaved in one
+    // chain. Such a chain keeps the action's single scan, as before this boundary existed.
+    if occurrence.sub_ability.as_deref().is_some_and(|sub| {
+        sub.sub_link == SubAbilityLink::ContinuationStep && effect_enters_battlefield(&sub.effect)
+    }) {
+        return;
+    }
     if matches!(
         occurrence.effect,
         // CR 701.36a (populate), CR 701.16a (investigate), CR 701.53a (incubate),
@@ -21366,6 +21396,7 @@ fn resolve_ability_chain_with_root_result(
     // across unrelated ability resolutions.
     if depth == 0 {
         reset_top_level_resolution_state(state);
+        mark_entries_before_resolution(state);
         // CR 602.2b + CR 601.2h + CR 608.2h: counters removed to pay this
         // activation's cost are the preceding "this way" amount its instructions
         // read; a later producer re-stamps per CR 608.2c.
