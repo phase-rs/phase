@@ -59,6 +59,7 @@ mod announced_counter_recipient_set;
 mod announced_target_attachment_capture;
 mod announced_target_combat_unknown;
 mod announced_target_declared_slot_pairing;
+mod announced_target_recorded_leaf_restore;
 mod announced_target_set_placement;
 mod announced_target_stack_relationship_unknown;
 mod announced_target_token_capture;

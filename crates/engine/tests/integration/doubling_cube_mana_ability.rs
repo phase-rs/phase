@@ -265,6 +265,24 @@ fn doubling_cube_doubles_unrestricted_colorless() {
     }
     assert_eq!(count(&runner, ManaType::Colorless), 4, "reach: CCCC");
 
+    // CR 106.3 + CR 400.7: make the two producers' EPOCHS distinguishable in this
+    // fixture, so the pin assertions below discriminate on the epoch axis and not only
+    // on the source id. The Cube is dated to an epoch no other permanent in this fixture
+    // holds, so "pinned to the Cube's epoch" cannot be satisfied by a Temple epoch.
+    let temple_epoch = runner.state().objects[&temples[0]].incarnation;
+    let cube_epoch = temple_epoch + 1000;
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&cube)
+        .expect("the Cube row")
+        .incarnation = cube_epoch;
+    assert_ne!(cube, temples[0], "reach guard: two distinct producers");
+    assert_ne!(
+        cube_epoch, temple_epoch,
+        "reach guard: the two producers' epochs are distinguishable"
+    );
+
     let activation = cube_activation(&runner, cube);
     runner.act(activation).expect("Doubling Cube activates");
 
@@ -276,23 +294,49 @@ fn doubling_cube_doubles_unrestricted_colorless() {
     );
     assert_eq!(units.len(), 2, "{units:?}");
     assert!(units.iter().all(|unit| unit.restrictions.is_empty()));
-    // CR 106.3 + CR 400.7: the doubled units are produced BY the Cube's ability, so each
-    // names the Cube's producing epoch. This is what a restore admission reads; without the
-    // stamp the unit is unpinned and the boundary refuses the save.
-    // The doubled unit INHERITS the provenance of the mana it doubled (a Temple unit here),
-    // not the Cube's: doubling copies the pool unit, it does not produce new mana from the
-    // Cube. What must hold is that the copy carries that source's PRODUCING EPOCH rather
-    // than an absent or stale one — an unpinned doubled unit is the shape the restore
-    // admission refuses.
-    for unit in &units {
-        let source_epoch: u64 = runner.state().objects[&unit.source_id].incarnation;
-        assert_eq!(
-            unit.source_incarnation,
-            Some(source_epoch),
-            "the doubled unit is pinned to its source's producing epoch, not an absent or \
-             stale one: {unit:?}"
-        );
-    }
+    // CR 106.3 + CR 113.7 + CR 400.7: the pool now holds two units from two DIFFERENT
+    // producers, and the code records each one's own provenance. Pinning both producer
+    // pairs separately is what makes this assertion discriminate — the previous shape
+    // read the epoch back off `unit.source_id`, so it passed whichever object the unit
+    // named and proved nothing about which producer was recorded.
+    //
+    //  * the unit the ability ADDED names the CUBE — CR 113.7: the source of an ability
+    //    is the object that generated it — dated to the epoch its activation announced;
+    //  * the unit that SURVIVED paying the {3} still names the TEMPLE that produced it,
+    //    with the epoch it was produced at: doubling adds mana, it does not restamp the
+    //    mana already in the pool.
+    let added: Vec<&ManaUnit> = units.iter().filter(|unit| unit.source_id == cube).collect();
+    let surviving: Vec<&ManaUnit> = units.iter().filter(|unit| unit.source_id != cube).collect();
+    assert_eq!(
+        (added.len(), surviving.len()),
+        (1, 1),
+        "reach guard: one added unit and one surviving pool unit: {units:?}"
+    );
+    assert_eq!(
+        (added[0].source_id, added[0].source_incarnation),
+        (cube, Some(cube_epoch)),
+        "the NEW unit is produced by the CUBE at the epoch its activation announced: \
+         {units:?}"
+    );
+    assert!(
+        temples.contains(&surviving[0].source_id),
+        "the surviving unit still names the TEMPLE that produced it: {units:?}"
+    );
+    assert_eq!(
+        surviving[0].source_incarnation,
+        Some(temple_epoch),
+        "the surviving unit keeps the epoch it was produced at: {units:?}"
+    );
+    assert_ne!(
+        (surviving[0].source_id, surviving[0].source_incarnation),
+        (cube, Some(cube_epoch)),
+        "the surviving unit is NOT restamped to the Cube: {units:?}"
+    );
+    assert_ne!(
+        (added[0].source_id, added[0].source_incarnation),
+        (surviving[0].source_id, Some(temple_epoch)),
+        "the new unit does NOT inherit the provenance of the mana it doubled: {units:?}"
+    );
 }
 
 /// CR 106.3 + CR 400.7: the doubled units survive a save/restore AND still pay a cost

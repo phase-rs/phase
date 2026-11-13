@@ -220,6 +220,7 @@ mod swans_prevention_followup;
 mod swarm_combat_witness;
 mod swashbuckler_extraordinaire_declined_sacrifice_3179;
 mod swashbuckler_repro_3179_accept;
+mod switcheroo_paired_subject_restore;
 mod swords_life_equals_power_counters_2895;
 mod taigam_master_opportunist_exiles_cast_spell_749;
 mod taii_wakeen;

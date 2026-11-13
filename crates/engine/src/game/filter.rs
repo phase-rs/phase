@@ -8590,6 +8590,18 @@ fn epoch_answerable_property(prop: &FilterProp) -> bool {
         FilterProp::AttachedTo {
             to: AttachmentReferent::DeclaredTarget { .. },
         } => true,
+        // CR 400.7 + CR 601.2c: the entry turn lives on the live permanent row
+        // and no `LKISnapshot` captures it, so this leaf belongs to the epoch door
+        // — which states none — rather than to the record walk's fail-closed
+        // group. Its `false` refused an honest Cradle to Grave ("Destroy target
+        // nonblack creature that entered this turn") on restore.
+        FilterProp::EnteredThisTurn => true,
+        // CR 122.1: the counter set IS captured (`LKISnapshot::counters`), so the
+        // leaf is answered by the epoch and not by the ObjectId-keyed exit cache
+        // the record walk reads (which has no row for a target that never
+        // departed — a legal Heartless Act, "Destroy target creature with no
+        // counters on it", must not be refused).
+        FilterProp::Counters { .. } => true,
         FilterProp::AnyOf { props } => props.iter().any(epoch_answerable_property),
         FilterProp::Not { prop } => epoch_answerable_property(prop),
         _ => false,
@@ -8638,6 +8650,41 @@ fn epoch_property_answer(
         | FilterProp::BlockStatus { .. }
         | FilterProp::AttackingAlone
         | FilterProp::BlockingAlone => None,
+        // CR 400.7 + CR 601.2c + CR 608.2h: "entered this turn" is a property of
+        // the LIVE permanent row (`GameObject::entered_battlefield_turn`, compared
+        // against `state.turn_number`), and an announcement `LKISnapshot` captures
+        // no entry turn — the snapshot is a characteristics projection, and the
+        // turn a permanent entered is history the capture does not carry. NO epoch
+        // can state it, so the leaf answers UNKNOWN.
+        //
+        // The record walk's fail-closed `false` is the same defect a zeroed combat
+        // role was: it reports a fact the announcement never recorded as a FAILED
+        // predicate, and the restore guard
+        // ([`matches_target_filter_on_recorded_announcement`]) refuses an honest
+        // save on it. Cradle to Grave's "Destroy target nonblack creature that
+        // entered this turn." announced at a creature that really did enter this
+        // turn was refused as `SnapshotContradictsDeclaredFilter`.
+        FilterProp::EnteredThisTurn => None,
+        // CR 122.1 + CR 608.2h: the counter set is CAPTURED, so this leaf is
+        // answerable whenever an epoch exists — the announcement's own set for a
+        // CR 601.2c reading, the exit snapshot's set for a look-back. Answering it
+        // here keeps the three-valued door's answer identical to the two-valued
+        // walk's own epoch arm ([`zone_change_record_matches_property`]), which is
+        // the authority a filter carrying no other epoch leaf still reads.
+        FilterProp::Counters {
+            counters,
+            comparator,
+            count,
+        } => {
+            let selector = match counters {
+                CounterMatch::Any => None,
+                CounterMatch::OfType(counter_type) => Some(counter_type),
+            };
+            Some(comparator.evaluate(
+                counter_count_from_map(epoch.counters, selector),
+                resolve_filter_threshold(state, count, source),
+            ))
+        }
         // CR 115.9a + CR 115.9b + CR 115.9c: target relationships of the
         // subject. "that targets [X]" asks which targets the SUBJECT chose, and
         // "with a single target" asks how many it chose; neither is a

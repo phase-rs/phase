@@ -9065,6 +9065,33 @@ pub(crate) fn declared_slot_announcement_filter(
     if node.target_choice_timing != TargetChoiceTiming::Stack {
         return None;
     }
+    // CR 115.3 + CR 601.2c: a PAIRED-SUBJECT instruction declares TWO slots, and
+    // neither is the effect's generic `target`. "Exchange control of two target
+    // creatures" (Switcheroo) is `Effect::ExchangeControl`, whose operands live in
+    // `target_a`/`target_b`: `paired_subject_filters` is the shape authority and
+    // `paired_subject_slot_filters` is the slot authority (it drops a
+    // context-ref operand — Gilded Drake's "this creature" — which resolves
+    // without reserving an instance of the word "target"), and it is the SAME
+    // iterator `collect_target_slots_inner`'s paired arm and
+    // `assign_selected_slots_recursive`'s paired arm consume, so `index` names the
+    // operand that declared this position.
+    //
+    // Without this arm the recovery below reads `Effect::target_filter()`, which
+    // answers `None` for `ExchangeControl`, so BOTH declared slots reached the
+    // restore guard with NO filter and neither creature check ran: a save that
+    // kept a fact's id, zone and announcement pin while restating its captured
+    // types as a Land passed restore for either slot.
+    //
+    // Same length guard as the Fight and Attach arms: a DECLINED optional slot
+    // compacts `targets`, so a vector shorter than the declared operand list
+    // cannot say which role survived; that shape falls through to the
+    // single-filter reading below rather than guessing a role.
+    if paired_subject_filters(&node.effect).is_some() {
+        let declared: Vec<&TargetFilter> = paired_subject_slot_filters(&node.effect).collect();
+        if declared.len() == node.targets.len() {
+            return declared.get(index).map(|filter| (*filter).clone());
+        }
+    }
     // CR 701.14a + CR 601.2c: a two-fighter Fight declares TWO slots with two
     // DIFFERENT filters — "target creature you control fights target creature you
     // don't control" (Bushwhack) names the subject (the creature that fights) first
