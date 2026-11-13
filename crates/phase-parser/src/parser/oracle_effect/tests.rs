@@ -80658,6 +80658,22 @@ fn bare_choose_feeding_a_printed_target_through_the_chosen_object_keeps_stack_ti
         "{text}"
     );
 
+    // An intervening player target names no object (CR 109.1), so the walk
+    // reaches the earlier choice and withholds it. Synthetic: Guard Dogs' text
+    // with "Target player draws a card." interposed.
+    let text = "Choose a permanent you control. Target player draws a card. Prevent all combat damage target creature would deal this turn if it shares a color with that permanent.";
+    let def = parse_effect_chain(text, AbilityKind::Spell);
+    assert!(
+        std::iter::successors(Some(&def), |node| node.sub_ability.as_deref())
+            .any(|node| matches!(node.effect.as_ref(), Effect::Draw { .. })),
+        "{text}: reach guard for the interposed player draw: {def:#?}"
+    );
+    assert_eq!(
+        target_only_chain_timings(&def),
+        vec![TargetChoiceTiming::Stack],
+        "{text}: {def:#?}"
+    );
+
     // A compound continuation's choice is an antecedent too ("... and choose a
     // creature you control."), and keeps the `Stack` it lowered to before the
     // producer existed when the next sentence's printed target is rebound to it.

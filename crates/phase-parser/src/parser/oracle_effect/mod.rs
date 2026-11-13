@@ -29797,9 +29797,11 @@ fn node_object_antecedent(
     match effect {
         Effect::TargetOnly { .. } if bare_resolution_choice => Some(site),
         Effect::TargetOnly { .. } => Some(ObjectAntecedent::Other),
+        // CR 109.1: a player is not an object, so a player target ("Target player
+        // draws a card.") names no object and the walk passes over it.
         _ if effect
             .target_filter()
-            .is_some_and(|filter| !filter.is_context_ref()) =>
+            .is_some_and(|filter| !filter.is_context_ref() && !filter.denotes_player_target()) =>
         {
             Some(ObjectAntecedent::Other)
         }
