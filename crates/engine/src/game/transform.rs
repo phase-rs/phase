@@ -2,6 +2,7 @@ use crate::game::game_object::{GameObject, ObjectIncarnationRefExt};
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
 use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
+use crate::types::keywords::Keyword;
 use crate::types::object_data::BackFaceData;
 use crate::types::proposed_event::CopiedFaceUp;
 use crate::types::resolved_commands::{
@@ -32,20 +33,58 @@ impl PriorityTransformAnnouncement {
     }
 }
 
-/// CR 701.27 + CR 710.4 + CR 712.4c: Whether a battlefield permanent can
-/// transform rather than silently ignoring the instruction.
+/// CR 701.27a + CR 702.145b + CR 702.145e: why a permanent transforms. A daybound or
+/// nightbound permanent "can't transform except due to its" daybound or nightbound ability.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TransformCause {
+    /// CR 701.27a: a spell, ability, or player action instructs the transform.
+    Instruction,
+    /// CR 702.145b + CR 702.145c + CR 702.145e + CR 702.145f: the permanent's own daybound
+    /// or nightbound ability transforms it for the game's day/night designation.
+    DayNightDesignation,
+}
+
+/// What turns a battlefield permanent to its other face.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FaceSwap {
+    /// CR 701.27a: it transforms.
+    Transform(TransformCause),
+    /// CR 712.14a: it enters the battlefield transformed, which isn't transforming.
+    EnterBackFaceUp,
+}
+
+/// CR 701.27 + CR 710.4 + CR 712.4c + CR 702.145b + CR 702.145e: whether a battlefield
+/// permanent can transform rather than silently ignoring an ordinary instruction.
 pub(in crate::game) fn can_transform(state: &GameState, object_id: ObjectId) -> bool {
     let Some(object) = state.objects.get(&object_id) else {
         return false;
     };
     object.zone == Zone::Battlefield
         && object.back_face.is_some()
-        && !transform_instruction_is_noop(state, object_id)
+        && !transform_instruction_is_noop(
+            state,
+            object_id,
+            FaceSwap::Transform(TransformCause::Instruction),
+        )
+}
+
+/// CR 702.145b + CR 702.145e: daybound and nightbound each say "This permanent can't
+/// transform except due to its" own ability. CR 712.14a: entering transformed isn't a
+/// transform, so neither restricts it.
+fn designation_forbids(object: &GameObject, swap: FaceSwap) -> bool {
+    match swap {
+        FaceSwap::Transform(TransformCause::Instruction) => {
+            object.has_keyword(&Keyword::Daybound) || object.has_keyword(&Keyword::Nightbound)
+        }
+        FaceSwap::Transform(TransformCause::DayNightDesignation) | FaceSwap::EnterBackFaceUp => {
+            false
+        }
+    }
 }
 
 /// CR 701.27 + CR 710.4 + CR 712.4c: Whether a transform instruction is a
 /// silent no-op after its subject is known to be a battlefield permanent.
-fn transform_instruction_is_noop(state: &GameState, object_id: ObjectId) -> bool {
+fn transform_instruction_is_noop(state: &GameState, object_id: ObjectId, swap: FaceSwap) -> bool {
     let object = state
         .objects
         .get(&object_id)
@@ -58,6 +97,8 @@ fn transform_instruction_is_noop(state: &GameState, object_id: ObjectId) -> bool
         || object.flipped
         || crate::game::flip::is_flip_permanent(object)
         || !other_face_is_transform_destination(object)
+        // CR 702.145b + CR 702.145e: ordinary instructions cannot turn a designation-bound face.
+        || designation_forbids(object, swap)
 }
 
 /// CR 701.27a + CR 701.27c + CR 701.27d: whether `back_face` holds a face this
@@ -192,7 +233,7 @@ pub(in crate::game) fn priority_transform_announcements(
         .collect()
 }
 
-/// CR 701.27a: Transform a double-faced permanent — turn it to its other face.
+/// CR 701.27a: an ordinary transform instruction.
 ///
 /// Toggles `obj.transformed`, swaps current characteristics with back_face data,
 /// emits `GameEvent::Transformed`, and marks layers dirty.
@@ -203,16 +244,29 @@ pub fn transform_permanent(
     object_id: ObjectId,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EngineError> {
-    if !face_swap_subject(state, object_id)? {
+    transform_permanent_with_cause(state, object_id, TransformCause::Instruction, events)
+}
+
+/// CR 701.27a + CR 702.145b + CR 702.145e: transform for the supplied cause.
+pub fn transform_permanent_with_cause(
+    state: &mut GameState,
+    object_id: ObjectId,
+    cause: TransformCause,
+    events: &mut Vec<GameEvent>,
+) -> Result<(), EngineError> {
+    if !face_swap_subject(state, object_id, FaceSwap::Transform(cause))? {
         return Ok(());
     }
 
-    // CR 613.7g: a double-faced permanent receives a new timestamp when it
-    // transforms. All blocked/no-op early-returns above (off-battlefield,
-    // CantTransform, meld, no back face) precede this, so they draw no timestamp.
-    let ts = state.next_timestamp();
+    // CR 613.7g + CR 730.2i: a double-faced permanent receives a new timestamp each time it
+    // transforms; a merged permanent is not a double-faced permanent, so it keeps its
+    // timestamp, and its merge effect keeps the time the objects merged (CR 730.2a,
+    // `merge::rederive_merge_layer_effect`). The no-op returns above draw none either.
+    if stored_double_face(&state.objects[&object_id]).is_some() {
+        let ts = state.next_timestamp();
+        state.objects.get_mut(&object_id).unwrap().timestamp = ts;
+    }
     let obj = state.objects.get_mut(&object_id).unwrap();
-    obj.timestamp = ts;
     // CR 701.27f: Track successful transforms/conversions to ignore stale
     // self-transform instructions from abilities already on the stack.
     obj.transformation_count = obj.transformation_count.wrapping_add(1);
@@ -231,7 +285,7 @@ pub(crate) fn enter_back_face_up(
     state: &mut GameState,
     object_id: ObjectId,
 ) -> Result<(), EngineError> {
-    if !face_swap_subject(state, object_id)? {
+    if !face_swap_subject(state, object_id, FaceSwap::EnterBackFaceUp)? {
         return Ok(());
     }
     swap_displayed_face(state, object_id);
@@ -240,7 +294,11 @@ pub(crate) fn enter_back_face_up(
 
 /// Whether a battlefield permanent turns to its other face: `false` when a
 /// face-swap instruction is a silent no-op for it.
-fn face_swap_subject(state: &GameState, object_id: ObjectId) -> Result<bool, EngineError> {
+fn face_swap_subject(
+    state: &GameState,
+    object_id: ObjectId,
+    swap: FaceSwap,
+) -> Result<bool, EngineError> {
     let obj = state
         .objects
         .get(&object_id)
@@ -254,7 +312,7 @@ fn face_swap_subject(state: &GameState, object_id: ObjectId) -> Result<bool, Eng
 
     // A blocked, melded, or flip permanent ignores the instruction before a
     // meld result's intentionally absent back-face payload is inspected.
-    if transform_instruction_is_noop(state, object_id) {
+    if transform_instruction_is_noop(state, object_id, swap) {
         return Ok(false);
     }
     if obj.back_face.is_none() {
@@ -306,8 +364,9 @@ fn swap_displayed_face(state: &mut GameState, object_id: ObjectId) {
 
 /// CR 701.27a + CR 613.7g: Apply one exact already-resolved transform.
 ///
-/// This installs the recorded face swap, displayed-face flag, timestamp, and
-/// transformation count. It re-runs none of `transform_permanent`'s CR 701.27
+/// This installs the recorded face swap, displayed-face flag, transformation count, and
+/// the recorded timestamp: a new one for a double-faced permanent, the unchanged one for a
+/// merged permanent (CR 613.7g + CR 730.2i). It re-runs none of `transform_permanent`'s CR 701.27
 /// eligibility guards — those decided at resolve time, and a command only
 /// exists because the transform actually happened.
 pub fn apply_resolved_transform(
@@ -349,9 +408,9 @@ pub fn apply_resolved_transform(
     // CR 730.2i + CR 730.2a: replay derives the same merge values at its timestamp.
     crate::game::merge::rederive_merge_layer_effect(state, command.object.object_id);
 
-    // CR 613.7g: the transform drew this timestamp during the original
-    // execution, so replay installs it rather than drawing a fresh one — and
-    // must carry the allocator past it or a later draw reissues it.
+    // CR 613.7g + CR 730.2i: install the timestamp execution recorded (new for a
+    // double-faced permanent, unchanged for a merged one) rather than drawing one,
+    // and carry the allocator past it.
     state.adopt_replayed_timestamp(command.resulting_timestamp);
 
     crate::game::layers::mark_layers_full(state);
@@ -757,6 +816,76 @@ mod tests {
 
         let result = transform_permanent(&mut state, id, &mut events);
         assert!(result.is_err());
+        assert!(events.is_empty());
+    }
+
+    /// CR 702.145b + CR 702.145e + CR 712.14a: ordinary instructions are restricted,
+    /// while designation transforms and entry use their own paths.
+    #[test]
+    fn transform_cause_restricts_only_ordinary_transforms() {
+        use crate::types::ability::{StaticDefinition, TargetFilter};
+        use crate::types::statics::StaticMode;
+
+        let mut state = GameState::new_two_player(42);
+        let setup = |state: &mut GameState| {
+            let id = setup_dfc(state);
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.keywords = vec![Keyword::Daybound];
+            obj.base_keywords = vec![Keyword::Daybound];
+            obj.back_face.as_mut().unwrap().keywords = vec![Keyword::Nightbound];
+            id
+        };
+        let id = setup(&mut state);
+        let timestamp = state.objects[&id].timestamp;
+        let mut events = Vec::new();
+        assert!(!can_transform(&state, id));
+        transform_permanent(&mut state, id, &mut events).unwrap();
+        assert!(events.is_empty());
+        assert!(!state.objects[&id].transformed);
+        assert_eq!(state.objects[&id].timestamp, timestamp);
+
+        transform_permanent_with_cause(
+            &mut state,
+            id,
+            TransformCause::DayNightDesignation,
+            &mut events,
+        )
+        .unwrap();
+        assert_eq!(events.len(), 1);
+        assert!(matches!(events[0], GameEvent::Transformed { object_id } if object_id == id));
+        assert!(state.objects[&id].transformed);
+        assert!(state.objects[&id].has_keyword(&Keyword::Nightbound));
+        events.clear();
+        let timestamp = state.objects[&id].timestamp;
+        assert!(!can_transform(&state, id));
+        transform_permanent(&mut state, id, &mut events).unwrap();
+        assert!(events.is_empty());
+        assert!(state.objects[&id].transformed);
+        assert_eq!(state.objects[&id].timestamp, timestamp);
+
+        let blocked = setup(&mut state);
+        state
+            .objects
+            .get_mut(&blocked)
+            .unwrap()
+            .static_definitions
+            .push(
+                StaticDefinition::new(StaticMode::Other("CantTransform".to_string()))
+                    .affected(TargetFilter::SelfRef),
+            );
+        transform_permanent_with_cause(
+            &mut state,
+            blocked,
+            TransformCause::DayNightDesignation,
+            &mut events,
+        )
+        .unwrap();
+        assert!(events.is_empty());
+        assert!(!state.objects[&blocked].transformed);
+
+        let entering = setup(&mut state);
+        enter_back_face_up(&mut state, entering).unwrap();
+        assert!(state.objects[&entering].transformed);
         assert!(events.is_empty());
     }
 

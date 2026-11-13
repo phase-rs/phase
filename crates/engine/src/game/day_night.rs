@@ -25,6 +25,7 @@ pub(crate) fn face_disagrees_with(obj: &GameObject, designation: DayNight) -> bo
 /// disagrees with `designation` (`face_disagrees_with`). CR 701.27c + CR 712.9: a permanent that
 /// isn't a double-faced token or card is left as it is (`transform_permanent` refuses it).
 /// CR 702.26b + CR 702.26d: phased-out permanents neither exist nor are controlled.
+/// CR 702.145b + CR 702.145e: its own designation ability causes the transform.
 fn transform_disagreeing_permanents(
     state: &mut GameState,
     designation: DayNight,
@@ -41,7 +42,12 @@ fn transform_disagreeing_permanents(
         })
         .collect();
     for id in to_transform {
-        let _ = transform::transform_permanent(state, id, events);
+        let _ = transform::transform_permanent_with_cause(
+            state,
+            id,
+            transform::TransformCause::DayNightDesignation,
+            events,
+        );
     }
 }
 
@@ -56,6 +62,8 @@ fn transform_disagreeing_permanents(
 /// that collection, not inside the resolution; no printed "create a token that's a copy of … card"
 /// producer observes the token between the two. Its Transformed events are matched before the
 /// next SBA check (CR 603.10; `engine_priority`).
+/// The untap step also calls it right after phasing (`turns::execute_untap_with_choices`),
+/// so a permanent that phases in agrees before CR 502.3's untap decision.
 pub(crate) fn keep_faces_in_agreement(state: &mut GameState, events: &mut Vec<GameEvent>) {
     let Some(designation) = state.day_night else {
         return;
@@ -419,15 +427,20 @@ mod tests {
     /// CR 702.145f: a nightbound permanent back face up during the day transforms. DN2's printed
     /// shape is Baneblade Scoundrel turned to Baneclaw Marauder during the day by Moonmist
     /// ("Transform all Humans. Prevent all combat damage that would be dealt this turn by
-    /// creatures other than Werewolves and Wolves."); that board also passes through the
-    /// pre-existing CR 702.145b defect (Moonmist shouldn't transform it at all), so the synthetic
-    /// object isolates CR 702.145f.
+    /// creatures other than Werewolves and Wolves."). Moonmist can't transform it (CR 702.145b),
+    /// so the setup turns it through its own ability; the synthetic object isolates CR 702.145f.
     #[test]
     fn a_nightbound_permanent_back_face_up_during_the_day_transforms() {
         let mut state = GameState::new_two_player(42);
         let id = setup_daybound_creature(&mut state);
         let mut setup_events = Vec::new();
-        transform::transform_permanent(&mut state, id, &mut setup_events).unwrap();
+        transform::transform_permanent_with_cause(
+            &mut state,
+            id,
+            transform::TransformCause::DayNightDesignation,
+            &mut setup_events,
+        )
+        .unwrap();
         assert!(state.objects[&id].transformed, "precondition: back face up");
         assert!(state.objects[&id].has_keyword(&Keyword::Nightbound));
         state.day_night = Some(DayNight::Day);

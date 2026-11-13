@@ -2306,6 +2306,19 @@ pub fn execute_untap_with_choices(
         super::layers::prune_added_untap_step_casting_permissions(state, active);
     }
 
+    // CR 502.1 + CR 702.26c + CR 702.145c + CR 702.145f: a permanent that just phased in
+    // with a face that disagrees with day or night transforms immediately, not as a
+    // state-based action, so CR 502.3's untap decision below reads the face it turned to.
+    // CR 502.4 + CR 503.1a: its transform triggers wait for the upkeep, through this
+    // action's ordinary post-action trigger scan.
+    super::day_night::keep_faces_in_agreement(state, events);
+    // CR 613.1 + CR 613.4c + CR 122.1a: a transform writes the new face's printed values and
+    // marks layers dirty, so settle them before CR 502.3 reads power, color or type: a
+    // Brutal Cathar with a +1/+1 counter is 3/3 when Meekstone decides.
+    if state.layers_dirty.is_dirty() {
+        super::layers::flush_layers(state);
+    }
+
     // CR 502.3: Collect object IDs that have a CantUntap transient effect
     // (e.g., "doesn't untap during its controller's next untap step").
     // These permanents skip untapping this step.

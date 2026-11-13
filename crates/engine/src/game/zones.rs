@@ -2100,7 +2100,12 @@ pub(crate) fn move_to_zone_with_entry_flags(
                         let _ = super::transform::enter_back_face_up(state, object_id);
                     }
                     DayNight::Day => {
-                        let _ = super::transform::transform_permanent(state, object_id, events);
+                        let _ = super::transform::transform_permanent_with_cause(
+                            state,
+                            object_id,
+                            super::transform::TransformCause::DayNightDesignation,
+                            events,
+                        );
                     }
                 }
             }

@@ -50,6 +50,9 @@
 //! isn't put on the stack. CR 701.27a: only a double-faced token or card transforms, so a
 //! single-faced Room copy given daybound stays as it is.
 
+//! CR 702.145b + CR 702.145e: ordinary instructions cannot transform daybound or nightbound permanents.
+//! CR 613.7g + CR 730.2i: transforming merged permanents keep their timestamps.
+
 use engine::database::card_db::CardDatabase;
 use engine::game::combat::AttackTarget;
 use engine::game::derived_views::derive_views;
@@ -193,6 +196,16 @@ const CONNOISSEUR_ORACLE: &str =
 const GEMRAZER_ORACLE: &str = "Mutate {1}{G}{G} (If you cast this spell for its mutate cost, put it over or under target non-Human creature you own. They mutate into the creature on top plus all abilities from under it.)\nReach, trample\nWhenever this creature mutates, destroy target artifact or enchantment an opponent controls.";
 const SCOUNDREL_ORACLE: &str = "Whenever this creature becomes blocked, each creature blocking it gets -1/-1 until end of turn.\nDaybound (If a player casts no spells during their own turn, it becomes night next turn.)";
 const MARAUDER_ORACLE: &str = "Whenever this creature becomes blocked, each creature blocking it gets -1/-1 until end of turn.\nWhenever a creature blocking this creature dies, that creature's controller loses 1 life.\nNightbound (If a player casts at least two spells during their own turn, it becomes day next turn.)";
+const MEEKSTONE: &str = "Meekstone";
+const MEEKSTONE_ORACLE: &str =
+    "Creatures with power 3 or greater don't untap during their controllers' untap steps.";
+const REALITY_RIPPLE: &str = "Reality Ripple";
+const REALITY_RIPPLE_ORACLE: &str = "Target artifact, creature, or land phases out. (While it's phased out, it's treated as though it doesn't exist. It phases in before its controller untaps during their next untap step.)";
+const GATSTAF_SHEPHERD: &str = "Gatstaf Shepherd";
+const GATSTAF_SHEPHERD_ORACLE: &str =
+    "At the beginning of each upkeep, if no spells were cast last turn, transform this creature.";
+const GATSTAF_HOWLER: &str = "Gatstaf Howler";
+const GATSTAF_HOWLER_ORACLE: &str = "Intimidate (This creature can't be blocked except by artifact creatures and/or creatures that share a color with it.)\nAt the beginning of each upkeep, if a player cast two or more spells last turn, transform this creature.";
 const BRUTAL_CATHAR_ORACLE: &str = "Whenever this creature enters or transforms into Brutal Cathar, exile target creature an opponent controls until this creature leaves the battlefield.\nDaybound (If a player casts no spells during their own turn, it becomes night next turn.)";
 const MOONRAGE_BRUTE_ORACLE: &str = "First strike\nWard—Pay 3 life.\nNightbound (If a player casts at least two spells during their own turn, it becomes day next turn.)";
 const ELESH_NORN_ORACLE: &str = "Vigilance\nOther creatures you control get +2/+2.\nCreatures your opponents control get -2/-2.";
@@ -1519,6 +1532,19 @@ fn turn(runner: &mut GameRunner, grub: ObjectId, into: &str) {
         .expect("Grub must transform");
     settle(runner);
     assert_eq!(runner.state().objects[&grub].name, into);
+}
+
+/// Setup only: turns a daybound or nightbound permanent through its own ability (CR 702.145b/e).
+fn turn_by_designation(runner: &mut GameRunner, id: ObjectId, into: &str) {
+    engine::game::transform::transform_permanent_with_cause(
+        runner.state_mut(),
+        id,
+        engine::game::transform::TransformCause::DayNightDesignation,
+        &mut Vec::new(),
+    )
+    .expect("designation must transform");
+    settle(runner);
+    assert_eq!(runner.state().objects[&id].name, into);
 }
 
 /// Adds `n` mana of one type to P0's pool.
@@ -4349,6 +4375,17 @@ fn mutated_incubator<T>(
 fn a_mutated_pile_with_an_incubator_on_top_transforms() {
     let (mut runner, incubator, _, ()) = mutated_incubator(MergeSide::Bottom, |_, _| ());
     assert_eq!(runner.state().objects[&incubator].name, "Incubator");
+    let pile_ts = runner.state().objects[&incubator].timestamp;
+    let effect_id = runner.state().objects[&incubator]
+        .merge_layer_effect_id
+        .expect("merge effect");
+    let effect_ts = runner
+        .state()
+        .transient_continuous_effects
+        .iter()
+        .find(|effect| effect.id == effect_id)
+        .expect("live merge effect")
+        .timestamp;
     fund(&mut runner, ManaType::Colorless, 2);
     activate(&mut runner, incubator);
     assert!(
@@ -4383,6 +4420,19 @@ fn a_mutated_pile_with_an_incubator_on_top_transforms() {
         "CR 730.2i: the Incubator component is back face up"
     );
     assert_eq!(pile.merge_kind, Some(MergeKind::Mutate));
+    // CR 613.7g + CR 730.2i + CR 730.2a: neither the pile nor its merge effect gets a new timestamp.
+    assert_eq!(pile.timestamp, pile_ts);
+    assert_eq!(pile.merge_layer_effect_id, Some(effect_id));
+    assert_eq!(
+        runner
+            .state()
+            .transient_continuous_effects
+            .iter()
+            .find(|effect| effect.id == effect_id)
+            .expect("merge effect survives")
+            .timestamp,
+        effect_ts
+    );
     // CR 730.2a + CR 702.140e + CR 111.10i: the top component has turned,
     // while Gemrazer still supplies its abilities.
     assert_eq!(pile.name, "Phyrexian Token");
@@ -4416,10 +4466,25 @@ fn a_mutated_pile_with_an_incubator_on_top_transforms() {
             _ => None,
         })
         .expect("reach guard: the transform is journaled");
+    assert_eq!(command.resulting_timestamp, pile_ts);
     engine::game::transform::apply_resolved_transform(&mut replay, &command)
         .expect("the replay applies");
     evaluate_layers(&mut replay);
     assert_eq!(replay.objects[&incubator].name, "Phyrexian Token");
+    assert_eq!(replay.objects[&incubator].timestamp, pile_ts);
+    assert_eq!(
+        replay.objects[&incubator].merge_layer_effect_id,
+        Some(effect_id)
+    );
+    assert_eq!(
+        replay
+            .transient_continuous_effects
+            .iter()
+            .find(|effect| effect.id == effect_id)
+            .expect("replayed merge effect")
+            .timestamp,
+        effect_ts
+    );
 }
 
 /// CR 730.2i + CR 702.140e: a buried Incubator turns, and its front-face
@@ -4554,65 +4619,255 @@ fn a_later_copy_effect_applies_over_and_ends_apart_from_the_mutated_pile() {
         .any(|a| matches!(*a.effect, Effect::Transform { .. })));
 }
 
-/// CR 702.26b + CR 702.26d + CR 702.145e + CR 702.145f: nightbound waits while phased out, then
-/// agrees with day after the permanent phases in (CR 702.26c).
+/// Pays Moonrage Brute's ward through the public payment prompt and finishes the spell.
+fn cast_paying_ward(runner: &mut GameRunner, spell: ObjectId, target: ObjectId) {
+    runner.cast(spell).target_object(target).commit();
+    for _ in 0..12 {
+        match runner.state().waiting_for {
+            WaitingFor::UnlessPayment { .. } => {
+                runner
+                    .act(GameAction::PayUnlessCost { pay: true })
+                    .expect("pay ward");
+            }
+            WaitingFor::Priority { .. } if !runner.state().stack.is_empty() => {
+                runner.act(GameAction::PassPriority).expect("pass priority");
+            }
+            WaitingFor::Priority { .. } => return,
+            ref other => panic!("unexpected ward or spell prompt: {other:?}"),
+        }
+    }
+    panic!("ward and spell did not finish within twelve actions");
+}
+
+/// CR 502.1 + CR 702.145f: phased-in nightbound permanents immediately agree with day.
+/// CR 502.3 + CR 613.4c: Meekstone ("Creatures with power 3 or greater don't untap during
+/// their controllers' untap steps.") reads Brutal Cathar's settled power, including counters.
+/// Moonrage Brute has "Ward—Pay 3 life." CR 502.4 + CR 503.1a: the two Cathar transform
+/// triggers wait until upkeep, before its active player receives priority.
 #[test]
 fn a_phased_out_nightbound_permanent_does_not_transform_until_it_phases_in() {
-    let (mut runner, (celestus, marauder, slip)) = board(Phase::PreCombatMain, |scenario, db| {
-        assert_oracle(db, CELESTUS, CELESTUS_ORACLE);
-        assert_oracle(db, SCOUNDREL, SCOUNDREL_ORACLE);
-        assert_oracle(db, MARAUDER, MARAUDER_ORACLE);
-        assert_oracle(db, SLIP, SLIP_ORACLE);
+    let (
+        mut runner,
+        (celestus, marauder, cathar_a, cathar_b, slip, slip2, ripple, _meekstone, _bears),
+    ) = board(Phase::PreCombatMain, |scenario, db| {
+        for (name, oracle) in [
+            (CELESTUS, CELESTUS_ORACLE),
+            (SCOUNDREL, SCOUNDREL_ORACLE),
+            (MARAUDER, MARAUDER_ORACLE),
+            (SLIP, SLIP_ORACLE),
+            (BRUTAL_CATHAR, BRUTAL_CATHAR_ORACLE),
+            (MOONRAGE_BRUTE, MOONRAGE_BRUTE_ORACLE),
+            (MEEKSTONE, MEEKSTONE_ORACLE),
+            (REALITY_RIPPLE, REALITY_RIPPLE_ORACLE),
+        ] {
+            assert_oracle(db, name, oracle);
+        }
         (
             scenario.add_real_card(P0, CELESTUS, Zone::Battlefield, db),
             scenario.add_real_card(P1, SCOUNDREL, Zone::Battlefield, db),
+            scenario.add_real_card(P1, BRUTAL_CATHAR, Zone::Battlefield, db),
+            scenario.add_real_card(P1, BRUTAL_CATHAR, Zone::Battlefield, db),
             scenario.add_real_card(P0, SLIP, Zone::Hand, db),
+            scenario.add_real_card(P0, SLIP, Zone::Hand, db),
+            scenario.add_real_card(P0, REALITY_RIPPLE, Zone::Hand, db),
+            scenario.add_real_card(P0, MEEKSTONE, Zone::Battlefield, db),
+            scenario.add_real_card(P0, BEARS, Zone::Battlefield, db),
         )
     });
     runner.state_mut().day_night = Some(DayNight::Night);
-    turn(&mut runner, marauder, MARAUDER);
-    assert!(runner.state().objects[&marauder].transformed);
+    for (id, name) in [
+        (marauder, MARAUDER),
+        (cathar_a, MOONRAGE_BRUTE),
+        (cathar_b, MOONRAGE_BRUTE),
+    ] {
+        turn_by_designation(&mut runner, id, name);
+        runner.state_mut().objects.get_mut(&id).unwrap().tapped = true;
+    }
     fund(&mut runner, ManaType::Blue, 1);
     runner.cast(slip).target_object(marauder).resolve();
     settle(&mut runner);
-    assert!(runner.state().objects[&marauder].is_phased_out());
+    let life_before = runner.state().players[0].life;
+    fund(&mut runner, ManaType::Blue, 2);
+    cast_paying_ward(&mut runner, ripple, cathar_a);
+    fund(&mut runner, ManaType::Blue, 1);
+    cast_paying_ward(&mut runner, slip2, cathar_b);
+    settle(&mut runner);
+    assert_eq!(
+        runner.state().players[0].life,
+        life_before - 6,
+        "both wards were paid"
+    );
     assert_eq!(plus_counters(&runner, marauder), 1);
+    assert_eq!(plus_counters(&runner, cathar_a), 0);
+    assert_eq!(plus_counters(&runner, cathar_b), 1);
+    for id in [marauder, cathar_a, cathar_b] {
+        assert!(runner.state().objects[&id].is_phased_out());
+    }
     activate_celestus(&mut runner, celestus);
-    let obj = &runner.state().objects[&marauder];
-    assert!(obj.is_phased_out());
-    assert!(obj.transformed);
-    assert_eq!(obj.name, MARAUDER);
-
-    let mut phased_in = false;
+    for (id, name) in [
+        (marauder, MARAUDER),
+        (cathar_a, MOONRAGE_BRUTE),
+        (cathar_b, MOONRAGE_BRUTE),
+    ] {
+        let obj = &runner.state().objects[&id];
+        assert!(obj.is_phased_out());
+        assert!(obj.transformed);
+        assert_eq!(obj.name, name);
+    }
+    let ids = [marauder, cathar_a, cathar_b];
+    let mut phased_in = [false; 3];
     let events = pass_into_next_upkeep(&mut runner, |runner, events| {
-        phased_in |= events.iter().any(
-            |e| matches!(e, GameEvent::PermanentPhasedIn { object_id } if *object_id == marauder),
-        );
-        if !phased_in {
-            assert!(
-                runner.state().objects[&marauder].transformed,
-                "CR 702.26b: no checkpoint may turn the phased-out permanent"
+        for (index, id) in ids.iter().enumerate() {
+            phased_in[index] |= events.iter().any(
+                |e| matches!(e, GameEvent::PermanentPhasedIn { object_id } if object_id == id),
             );
+            if !phased_in[index] {
+                assert!(
+                    runner.state().objects[id].transformed,
+                    "CR 702.26b: no checkpoint may turn the phased-out permanent"
+                );
+            }
         }
     });
     assert_eq!(runner.state().day_night, Some(DayNight::Day));
     assert_eq!(runner.state().active_player, P1);
     assert_eq!(runner.state().phase, Phase::Upkeep);
-    let obj = &runner.state().objects[&marauder];
-    assert!(obj.is_phased_in());
-    assert!(!obj.transformed);
-    assert_eq!(obj.name, SCOUNDREL);
-    let phased_in_at = events
+    let upkeep_at = events
         .iter()
-        .position(
-            |e| matches!(e, GameEvent::PermanentPhasedIn { object_id } if *object_id == marauder),
+        .position(|e| {
+            matches!(
+                e,
+                GameEvent::PhaseChanged {
+                    phase: Phase::Upkeep,
+                    ..
+                }
+            )
+        })
+        .expect("entered upkeep");
+    for id in ids {
+        let obj = &runner.state().objects[&id];
+        assert!(obj.is_phased_in());
+        assert!(!obj.transformed);
+        let phased_in_at = events
+            .iter()
+            .position(
+                |e| matches!(e, GameEvent::PermanentPhasedIn { object_id } if *object_id == id),
+            )
+            .expect("phased in");
+        let transformed_at = events
+            .iter()
+            .position(|e| matches!(e, GameEvent::Transformed { object_id } if *object_id == id))
+            .expect("transformed");
+        assert!(phased_in_at < transformed_at && transformed_at < upkeep_at);
+        if id == cathar_a {
+            assert_eq!(obj.name, BRUTAL_CATHAR);
+            assert_eq!(obj.power, Some(2));
+            assert!(!obj.tapped);
+            let untapped_at = events
+                .iter()
+                .position(
+                    |e| matches!(e, GameEvent::PermanentUntapped { object_id } if *object_id == id),
+                )
+                .expect("counter-free Cathar untaps");
+            assert!(transformed_at < untapped_at && untapped_at < upkeep_at);
+        } else {
+            assert!(obj.tapped);
+            assert!(!events.iter().any(
+                |e| matches!(e, GameEvent::PermanentUntapped { object_id } if *object_id == id)
+            ));
+        }
+    }
+    assert_eq!(runner.state().objects[&marauder].name, SCOUNDREL);
+    assert_eq!(runner.state().objects[&marauder].power, Some(5));
+    assert_eq!(runner.state().objects[&cathar_b].name, BRUTAL_CATHAR);
+    assert_eq!(runner.state().objects[&cathar_b].power, Some(3));
+    let mut sources = order_prompt_sources(&runner, P1);
+    sources.sort();
+    let mut expected = vec![cathar_a, cathar_b];
+    expected.sort();
+    assert_eq!(sources, expected);
+}
+
+/// CR 702.145b: Moonmist transforms a non-daybound Human DFC but cannot transform Brutal Cathar.
+#[test]
+fn a_daylight_moonmist_does_not_transform_a_daybound_permanent() {
+    let (mut runner, (cathar, shepherd, bears, moonmist)) =
+        board(Phase::PreCombatMain, |scenario, db| {
+            for (name, oracle) in [
+                (BRUTAL_CATHAR, BRUTAL_CATHAR_ORACLE),
+                (MOONMIST, MOONMIST_ORACLE),
+                (GATSTAF_SHEPHERD, GATSTAF_SHEPHERD_ORACLE),
+                (GATSTAF_HOWLER, GATSTAF_HOWLER_ORACLE),
+            ] {
+                assert_oracle(db, name, oracle);
+            }
+            (
+                scenario.add_real_card(P0, BRUTAL_CATHAR, Zone::Battlefield, db),
+                scenario.add_real_card(P0, GATSTAF_SHEPHERD, Zone::Battlefield, db),
+                scenario.add_real_card(P1, BEARS, Zone::Battlefield, db),
+                scenario.add_real_card(P0, MOONMIST, Zone::Hand, db),
+            )
+        });
+    runner.state_mut().day_night = Some(DayNight::Day);
+    settle(&mut runner);
+    fund(&mut runner, ManaType::Green, 2);
+    runner.cast(moonmist).commit();
+    let mut events = Vec::new();
+    for _ in 0..2 {
+        events.extend(runner.act(GameAction::PassPriority).expect("pass").events);
+    }
+    assert_eq!(transformed_events(&events, cathar), 0);
+    assert!(!runner.state().objects[&cathar].transformed);
+    assert_eq!(runner.state().objects[&cathar].name, BRUTAL_CATHAR);
+    assert_eq!(transformed_events(&events, shepherd), 1);
+    assert_eq!(runner.state().objects[&shepherd].name, GATSTAF_HOWLER);
+    assert_eq!(runner.state().objects[&moonmist].zone, Zone::Graveyard);
+    assert_eq!(runner.state().objects[&bears].zone, Zone::Battlefield);
+    assert!(runner.state().stack.is_empty());
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { player: P0 }
+    ));
+}
+
+/// CR 702.145e: Waxing Moon grants trample but cannot transform a nightbound permanent.
+#[test]
+fn a_nightbound_permanent_ignores_waxing_moon() {
+    let (mut runner, (brute, waxing)) = board(Phase::PreCombatMain, |scenario, db| {
+        assert_oracle(db, BRUTAL_CATHAR, BRUTAL_CATHAR_ORACLE);
+        assert_oracle(db, MOONRAGE_BRUTE, MOONRAGE_BRUTE_ORACLE);
+        assert_oracle(db, WAXING_MOON, WAXING_MOON_ORACLE);
+        (
+            scenario.add_real_card(P0, BRUTAL_CATHAR, Zone::Battlefield, db),
+            scenario.add_real_card(P0, WAXING_MOON, Zone::Hand, db),
         )
-        .expect("reach guard: the permanent phased in");
-    let transformed_at = events
-        .iter()
-        .position(|e| matches!(e, GameEvent::Transformed { object_id } if *object_id == marauder))
-        .expect("the nightbound permanent transforms after phasing in");
-    assert!(phased_in_at < transformed_at);
+    });
+    runner.state_mut().day_night = Some(DayNight::Night);
+    turn_by_designation(&mut runner, brute, MOONRAGE_BRUTE);
+    fund(&mut runner, ManaType::Green, 2);
+    runner.cast(waxing).target_object(brute).commit();
+    let mut events = Vec::new();
+    for _ in 0..2 {
+        events.extend(runner.act(GameAction::PassPriority).expect("pass").events);
+    }
+    settle(&mut runner);
+    assert_eq!(transformed_events(&events, brute), 0);
+    let obj = &runner.state().objects[&brute];
+    assert_eq!(obj.name, MOONRAGE_BRUTE);
+    assert!(obj.transformed);
+    assert!(
+        obj.has_keyword(&Keyword::Trample),
+        "reach guard: Waxing Moon resolved"
+    );
+    assert_eq!(runner.state().objects[&waxing].zone, Zone::Graveyard);
+    assert!(runner.state().stack.is_empty());
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { player: P0 }
+    ));
+    assert!(runner
+        .act(GameAction::Transform { object_id: brute })
+        .is_err());
 }
 
 // ===== CR 702.145b/e: daybound and nightbound read the face that is up =====
@@ -5614,8 +5869,13 @@ fn feldon_tovolar_cult_board() -> (GameRunner, ObjectId, ObjectId, ObjectId) {
         .get_mut(&feldon)
         .expect("Feldon exists")
         .summoning_sick = false;
-    engine::game::transform::transform_permanent(runner.state_mut(), tovolar, &mut Vec::new())
-        .expect("Tovolar must transform");
+    engine::game::transform::transform_permanent_with_cause(
+        runner.state_mut(),
+        tovolar,
+        engine::game::transform::TransformCause::DayNightDesignation,
+        &mut Vec::new(),
+    )
+    .expect("Tovolar must transform");
     runner.state_mut().day_night = Some(DayNight::Night);
     settle(&mut runner);
     assert_eq!(
