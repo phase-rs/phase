@@ -2818,6 +2818,7 @@ fn fmt_characteristic_population(source: &CardTypeSetSource) -> String {
                         ThisWayCause::Returned => "returned",
                         ThisWayCause::Bounced => "bounced",
                         ThisWayCause::PutIntoGraveyard => "put into a graveyard",
+                        ThisWayCause::ControlGained => "gained control of",
                     };
                     format!("cards {verb} this way")
                 }

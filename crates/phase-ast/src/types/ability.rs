@@ -8133,14 +8133,16 @@ pub enum ThisWayCause {
     /// wider blast radius than adding one new leaf — out of scope for a
     /// single-card bug fix (issue #8159).
     PutIntoGraveyard,
+    /// CR 613.1b + CR 608.2c: the member's control changed to the recipient this way — only an actual controller change counts; a target the recipient already controlled is not "gained" (Coveted Falcon: "Draw a card for each one they gained control of this way.").
+    ControlGained,
 }
 
 impl ThisWayCause {
     /// The origin zone the producing transition must have departed, when the
     /// action determines one. `None` for destination-named actions (Exiled,
     /// Returned, Bounced, PutIntoGraveyard, OwnerLibraryShuffleSubject),
-    /// which arrive from anywhere, and for `Tapped`, which names no transition
-    /// at all (callers gate on [`Self::is_zone_transition`] first). The
+    /// which arrive from anywhere, and for `Tapped` and `ControlGained`, which
+    /// name no transition at all (callers gate on [`Self::is_zone_transition`] first). The
     /// origin-stamp site requires the
     /// member's latest zone-change record to agree; a mismatch means the
     /// record is not the producing transition and no origin is stamped.
@@ -8153,8 +8155,9 @@ impl ThisWayCause {
             // CR 701.9a: discard moves hand cards to the graveyard.
             ThisWayCause::Discarded => Some(Zone::Hand),
             // CR 701.26a: tapping is not a zone transition (see
-            // `is_zone_transition`), so it determines no departed zone.
-            ThisWayCause::Tapped => None,
+            // `is_zone_transition`), so it determines no departed zone; a
+            // control change, like a tap, is not a zone transition either.
+            ThisWayCause::Tapped | ThisWayCause::ControlGained => None,
             ThisWayCause::Exiled
             | ThisWayCause::Returned
             | ThisWayCause::Bounced
@@ -8164,13 +8167,13 @@ impl ThisWayCause {
     }
 
     /// CR 400.7 + CR 701.26a: does the producing action move the member between
-    /// zones? Every cause but `Tapped` names a zone-moving action; tapping
-    /// turns a permanent sideways where it is, so a tapped member's latest
-    /// zone-change record is an earlier, unrelated transition and must never be
+    /// zones? Every cause but `Tapped` and `ControlGained` names a zone-moving
+    /// action; tapping turns a permanent sideways where it is, so a tapped
+    /// member's latest zone-change record is an earlier, unrelated transition and must never be
     /// stamped as its producing origin.
     pub fn is_zone_transition(self) -> bool {
         match self {
-            ThisWayCause::Tapped => false,
+            ThisWayCause::Tapped | ThisWayCause::ControlGained => false,
             ThisWayCause::OwnerLibraryShuffleSubject
             | ThisWayCause::Discarded
             | ThisWayCause::Returned

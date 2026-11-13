@@ -99,8 +99,9 @@ fn akroan_horse_reach_gives_control_to_opponent() {
     assert_eq!(akroan(false), (false, true, P1));
 }
 
-/// Returns (Totem phased out, Totem has a control effect, Bears have a control effect).
-fn totem(phase: bool) -> (bool, bool, bool) {
+/// Returns (Totem phased out, Totem has a control effect, Bears have a control effect, the
+/// Totem's `ExchangeControl` resolved, `ControllerChanged` count).
+fn totem(phase: bool) -> (bool, bool, bool, bool, usize) {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     scenario.with_mana_pool(
@@ -145,22 +146,40 @@ fn totem(phase: bool) -> (bool, bool, bool) {
     if phase {
         phase_out(&mut runner, ripple, totem);
     }
-    runner.advance_until_stack_empty();
+    let mut events = Vec::new();
+    for _ in 0..10 {
+        if runner.state().stack.is_empty() {
+            break;
+        }
+        events.extend(runner.act(GameAction::PassPriority).unwrap().events);
+    }
+    assert!(runner.state().stack.is_empty());
     (
         runner.state().objects[&totem].is_phased_out(),
         has_control_effect(&runner, totem),
         has_control_effect(&runner, bears),
+        events.iter().any(|event| {
+            matches!(
+                event,
+                GameEvent::EffectResolved { kind: EffectKind::ExchangeControl, source_id, .. }
+                    if *source_id == totem
+            )
+        }),
+        events
+            .iter()
+            .filter(|event| matches!(event, GameEvent::ControllerChanged { .. }))
+            .count(),
     )
 }
 
 #[test]
 fn phased_out_avarice_totem_exchanges_nothing() {
-    assert_eq!(totem(true), (true, false, false));
+    assert_eq!(totem(true), (true, false, false, true, 0));
 }
 
 #[test]
 fn avarice_totem_reach_exchanges_control() {
-    assert_eq!(totem(false), (false, true, true));
+    assert_eq!(totem(false), (false, true, true, true, 2));
 }
 
 #[test]

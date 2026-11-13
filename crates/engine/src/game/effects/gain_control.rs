@@ -1435,7 +1435,8 @@ mod tests {
         assert!(!changed);
     }
 
-    /// CR 800.4b: a control effect for a player who has left the game installs nothing.
+    /// CR 800.4b + CR 701.12a: a control effect for a player who has left the game installs
+    /// nothing, and a simultaneous batch with such a member installs no member.
     #[test]
     fn control_effect_for_a_departed_player_installs_nothing() {
         let mut state = GameState::new(FormatConfig::free_for_all(), 3, 42);
@@ -1462,6 +1463,37 @@ mod tests {
         assert!(state.transient_continuous_effects.is_empty());
         assert!(install(&mut state, PlayerId(2)).is_some());
         assert_eq!(state.transient_continuous_effects.len(), 1);
+
+        let other = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Grizzly Bears".to_string(),
+            Zone::Battlefield,
+        );
+        let exchange = |state: &mut GameState, second_recipient: PlayerId| {
+            state.add_simultaneous_transient_continuous_effects(
+                ObjectId(100),
+                Duration::Permanent,
+                vec![
+                    (
+                        PlayerId(2),
+                        TargetFilter::SpecificObject { id: creature },
+                        vec![ContinuousModification::ChangeController],
+                    ),
+                    (
+                        second_recipient,
+                        TargetFilter::SpecificObject { id: other },
+                        vec![ContinuousModification::ChangeController],
+                    ),
+                ],
+            )
+        };
+
+        assert!(!exchange(&mut state, PlayerId(1)));
+        assert_eq!(state.transient_continuous_effects.len(), 1);
+        assert!(exchange(&mut state, PlayerId(0)));
+        assert_eq!(state.transient_continuous_effects.len(), 3);
     }
 
     /// CR 706.2 + CR 102.1 + CR 103.1 + CR 613.3: End-to-end resolution of
