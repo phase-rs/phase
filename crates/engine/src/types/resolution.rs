@@ -4509,6 +4509,32 @@ impl ResolutionStack {
         let mut direct_choice_count = 0;
         let mut buried_direct_choice = None;
         for (index, frame) in self.frames.iter().enumerate() {
+            // CR 603.2c: an owner with no linked component child above it has
+            // been handed everything it collected before a departure, so each
+            // such record names one of its own occurrences. (A linked child's
+            // owner is checked with the child, below.)
+            if let Some((group, _)) = Self::zone_change_owner(frame) {
+                let linked_child_above = self.frames.iter().nth(index + 1).is_some_and(|above| {
+                    matches!(above, ResolutionFrame::BatchDelivery(child)
+                    if child.component_delivery_parent.as_ref().is_some_and(|link| {
+                        link.parent_group_id == group.logical_group_id
+                    }))
+                });
+                let unknown = group.collected_before_departure.iter().any(|collected| {
+                    !group.all_origin_occurrences.iter().any(|occurrence| {
+                        crate::types::game_state::CollectedZoneChange::of(&occurrence.event)
+                            == Some(*collected)
+                    })
+                });
+                if !linked_child_above && unknown {
+                    return Err(ResolutionStackError::InvalidPayload {
+                        frame: FrameKind::BatchDelivery,
+                        message:
+                            "a zone-change owner records a departure it does not hold as collected"
+                                .into(),
+                    });
+                }
+            }
             if let ResolutionFrame::BatchDelivery(child) = frame {
                 if let Some(link) = &child.component_delivery_parent {
                     let owner = index

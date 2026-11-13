@@ -1263,6 +1263,8 @@ fn another_seat_concession_leaves_the_commander_prompt_and_its_owner_intact() {
             "{label}"
         );
 
+        // The owner's record of what it collected before P2 left survives a save.
+        save_and_restore(&mut runner);
         answer(&mut runner, answer_index);
         resolution_finished(runner.state());
         assert_eq!(
@@ -1437,6 +1439,184 @@ fn a_survivors_trigger_survives_its_source_leaving_with_another_seat() {
     }
 }
 
+/// CR 603.2c + CR 603.3a: the batched sibling of the row above. P0 controls
+/// P2's Nefarious Imp and P1's merged commander pile (two Turn Against); P0's
+/// Totally Lost moves the pile and Brokkos's CR 903.9b prompt parks the split.
+/// P2 concedes and the Imp leaves with its owner. After P1 answers, P0 has two
+/// Imp triggers: one for the merged permanent P0 controlled, latched on the
+/// owner before P2 left, and one for the Imp itself leaving the battlefield.
+#[test]
+fn a_survivors_batched_trigger_survives_its_source_leaving_with_another_seat() {
+    for answer_index in [0, 1] {
+        let db = shared_card_db().expect("integration card fixture must load");
+        let mut scenario = GameScenario::new_with_format(FormatConfig::commander(), 3, 7);
+        scenario.at_phase(Phase::PreCombatMain);
+        let (mender, brokkos) = add_pile(&mut scenario, P1);
+        let imp = scenario.add_real_card(P2, "Nefarious Imp", Zone::Battlefield, db);
+        let take_imp = scenario.add_real_card(P0, "Turn Against", Zone::Hand, db);
+        let take_pile = scenario.add_real_card(P0, "Turn Against", Zone::Hand, db);
+        let lost = scenario.add_real_card(P0, "Totally Lost", Zone::Hand, db);
+        scenario.with_library_top(P1, &["Library Card A"]);
+        let mut pool = mana(ManaType::Blue, 5);
+        pool.extend(mana(ManaType::Red, 10));
+        scenario.with_mana_pool(P0, pool);
+        let mut runner = scenario.build();
+        let pile = merge_pile(&mut runner, Pile::BrokkosUnderMender, mender, brokkos, true);
+        let label = format!("answer {answer_index}");
+        steal_for(&mut runner, P0, take_imp, imp);
+        steal_for(&mut runner, P0, take_pile, pile.survivor);
+
+        cast_until_resolved_or_asked(&mut runner, lost, &[pile.survivor]);
+        assert_commander_prompt(runner.state(), P1, pile.brokkos);
+        concede(&mut runner, P2);
+        assert_eq!(runner.state().objects[&imp].zone, Zone::Exile, "{label}");
+        assert_commander_prompt(runner.state(), P1, pile.brokkos);
+
+        answer(&mut runner, answer_index);
+        assert!(runner.state().resolution_stack.is_empty(), "{label}");
+        let imp_controllers: Vec<PlayerId> = waiting_triggers(runner.state())
+            .into_iter()
+            .filter(|(_, text)| text.contains("one or more permanents you control leave"))
+            .map(|(controller, _)| controller)
+            .collect();
+        assert_eq!(
+            imp_controllers,
+            vec![P0, P0],
+            "{label}: {:?}",
+            runner.state().waiting_for
+        );
+    }
+}
+
+/// Add `entry` to the `collected_before_departure` lists in a saved game: to
+/// those that already hold a record (`holding_a_record`), or to the empty ones.
+fn forge_collected_before_departure(
+    value: &mut serde_json::Value,
+    entry: &serde_json::Value,
+    holding_a_record: bool,
+) {
+    match value {
+        serde_json::Value::Object(map) => {
+            for (key, child) in map.iter_mut() {
+                if key == "collected_before_departure" {
+                    let list = child.as_array_mut().expect("the record is a list");
+                    if list.is_empty() != holding_a_record {
+                        list.push(entry.clone());
+                    }
+                } else {
+                    forge_collected_before_departure(child, entry, holding_a_record);
+                }
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                forge_collected_before_departure(item, entry, holding_a_record);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// CR 603.2c: a save whose owner claims to have collected, before a departure,
+/// a zone change neither it nor its component child holds is rejected, and so
+/// is a duplicated record; the untouched save loads. The save is taken at
+/// Brokkos's prompt after another seat conceded, when the owner holds one real
+/// record (Circuit Mender's departure).
+#[test]
+fn a_forged_record_of_departures_collected_before_a_player_left_is_rejected_on_load() {
+    let db = shared_card_db().expect("integration card fixture must load");
+    let mut scenario = GameScenario::new_with_format(FormatConfig::commander(), 3, 7);
+    scenario.at_phase(Phase::PreCombatMain);
+    let (mender, brokkos) = add_pile(&mut scenario, P1);
+    let lost = scenario.add_real_card(P0, "Totally Lost", Zone::Hand, db);
+    scenario.with_library_top(P1, &["Library Card A"]);
+    scenario.with_mana_pool(P0, mana(ManaType::Blue, 5));
+    let mut runner = scenario.build();
+    let pile = merge_pile(&mut runner, Pile::BrokkosUnderMender, mender, brokkos, true);
+    cast_until_resolved_or_asked(&mut runner, lost, &[pile.survivor]);
+    assert_commander_prompt(runner.state(), P1, pile.brokkos);
+    concede(&mut runner, P2);
+
+    let saved = serde_json::to_value(runner.state()).expect("the parked prompt serializes");
+    let real: Vec<serde_json::Value> = {
+        fn find(value: &serde_json::Value, found: &mut Vec<serde_json::Value>) {
+            match value {
+                serde_json::Value::Object(map) => {
+                    for (key, child) in map {
+                        if key == "collected_before_departure" {
+                            found.extend(child.as_array().cloned().unwrap_or_default());
+                        } else {
+                            find(child, found);
+                        }
+                    }
+                }
+                serde_json::Value::Array(items) => items.iter().for_each(|item| find(item, found)),
+                _ => {}
+            }
+        }
+        let mut found = Vec::new();
+        find(&saved, &mut found);
+        found
+    };
+    assert_eq!(
+        real.len(),
+        1,
+        "reach guard: the owner recorded Circuit Mender's departure: {real:?}"
+    );
+    // A restore rejects invalid frames with an error, and in a debug build its
+    // runtime invariant check panics first; either is a rejection.
+    let loads = |value: serde_json::Value| {
+        std::panic::catch_unwind(|| {
+            serde_json::from_value::<GameState>(value)
+                .ok()
+                .is_some_and(|state| state.resolution_stack.validate(&state.waiting_for).is_ok())
+        })
+        .unwrap_or(false)
+    };
+    assert!(loads(saved.clone()), "the untouched save loads");
+
+    let mut unknown = saved.clone();
+    let mut forged = real[0].clone();
+    forged["object_id"] = serde_json::json!(9_999);
+    forge_collected_before_departure(&mut unknown, &forged, true);
+    assert!(
+        !loads(unknown),
+        "a record naming a zone change nobody holds is rejected"
+    );
+
+    let mut duplicate = saved;
+    forge_collected_before_departure(&mut duplicate, &real[0], true);
+    assert!(!loads(duplicate), "a duplicated record is rejected");
+
+    // An owner with no component child: Totally Lost on an unmerged commander.
+    // Karn has not moved, so a record of Karn's move is not one of the owner's
+    // occurrences.
+    let mut scenario = GameScenario::new_with_format(FormatConfig::commander(), 3, 7);
+    scenario.at_phase(Phase::PreCombatMain);
+    let karn = scenario.add_real_card(P1, "Karn, Silver Golem", Zone::Battlefield, db);
+    let lost = scenario.add_real_card(P0, "Totally Lost", Zone::Hand, db);
+    scenario.with_mana_pool(P0, mana(ManaType::Blue, 5));
+    let mut runner = scenario.build();
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&karn)
+        .expect("commander exists")
+        .is_commander = true;
+    cast_until_resolved_or_asked(&mut runner, lost, &[karn]);
+    assert_commander_prompt(runner.state(), P1, karn);
+    let saved = serde_json::to_value(runner.state()).expect("the parked prompt serializes");
+    assert!(loads(saved.clone()), "the untouched unmerged save loads");
+    let mut forged_karn = real[0].clone();
+    forged_karn["object_id"] = serde_json::json!(karn.0);
+    let mut unlinked = saved;
+    forge_collected_before_departure(&mut unlinked, &forged_karn, false);
+    assert!(
+        !loads(unlinked),
+        "an owner with no component child cannot claim a move it has not made"
+    );
+}
+
 /// CR 603.10a + CR 603.3a + CR 800.4d: a second player leaves the same turn.
 /// In a four-player game P3 concedes first, so an earlier departure is already
 /// recorded this turn. P2 then steals P0's Extractor Demon, P0's Rebuking
@@ -1528,6 +1708,8 @@ fn another_seat_concession_leaves_a_parked_owner_iteration_intact() {
         assert_commander_prompt(runner.state(), P1, pile.brokkos);
         assert_eq!(runner.state().objects[&bystander].zone, Zone::Exile);
 
+        // The owner's record of what it collected before P2 left survives a save.
+        save_and_restore(&mut runner);
         let events = answer(&mut runner, answer_index);
         resolution_finished(runner.state());
         assert!(

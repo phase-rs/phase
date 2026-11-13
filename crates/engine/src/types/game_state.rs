@@ -4230,12 +4230,17 @@ impl LogicalZoneChangeGroup {
     /// owner left the game. These were captured before a paused delivery, so
     /// they must not remain an authority solely because the shared owner later
     /// completes for surviving members.
+    ///
+    /// CR 603.3a + CR 800.4d: a batched trigger latched under a surviving
+    /// controller is that player's ability for the departures this owner
+    /// already performed, even when its source leaves with its owner; only a
+    /// latch the leaver controlled is retired with them.
     pub fn retire_contexts_owned_by(&mut self, player: PlayerId) {
         let retained_latch = |latch: &LatchedBatchedTrigger| {
             !latch
                 .observations
                 .iter()
-                .any(|observation| observation.source_context.lki.owner == player)
+                .any(|observation| observation.source_context.lki.controller == player)
         };
         self.immediately_before_batched_triggers
             .retain(retained_latch);
