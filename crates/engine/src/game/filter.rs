@@ -10440,12 +10440,8 @@ fn matches_filter_prop(
                 // CR 303.4: Unattached Aura — no creature is "enchanted by" it.
                 false
             } else {
-                obj.attachments.iter().any(|att_id| {
-                    state
-                        .objects
-                        .get(att_id)
-                        .is_some_and(|att| att.card_types.subtypes.iter().any(|s| s == "Aura"))
-                })
+                phased_in_attachments(state, obj)
+                    .any(|att| att.card_types.subtypes.iter().any(|s| s == "Aura"))
             }
         }
         // CR 301.5 + CR 301.5f: Same reasoning as `EnchantedBy` — source-relative
@@ -10462,12 +10458,8 @@ fn matches_filter_prop(
                 // CR 301.5f: Unattached Equipment — no creature is "equipped by" it.
                 false
             } else {
-                obj.attachments.iter().any(|att_id| {
-                    state
-                        .objects
-                        .get(att_id)
-                        .is_some_and(|att| att.card_types.subtypes.iter().any(|s| s == "Equipment"))
-                })
+                phased_in_attachments(state, obj)
+                    .any(|att| att.card_types.subtypes.iter().any(|s| s == "Equipment"))
             }
         }
         // CR 301.5 + CR 303.4: Inverse of `EnchantedBy`/`EquippedBy` — matches
@@ -10548,16 +10540,8 @@ fn matches_filter_prop(
             kind,
             controller,
             exclude_source,
-        } => obj.attachments.iter().any(|att_id| {
-            if exclude_source.is_exclude() && *att_id == source.id {
-                return false;
-            }
-            let Some(att) = state.objects.get(att_id) else {
-                return false;
-            };
-            // CR 702.26b: a separately phased-out attachment does not exist
-            // for this live predicate, even though its attachment link remains.
-            if att.is_phased_out() {
+        } => phased_in_attachments(state, obj).any(|att| {
+            if exclude_source.is_exclude() && att.id == source.id {
                 return false;
             }
             let kind_matches = match kind {
@@ -10577,11 +10561,8 @@ fn matches_filter_prop(
         // object has at least one attachment whose subtype is in `kinds` and whose
         // controller satisfies the optional `ControllerRef`. Generalization of
         // `HasAttachment` to the "enchanted or equipped" compound-subject class.
-        FilterProp::HasAnyAttachmentOf { kinds, controller } => {
-            obj.attachments.iter().any(|att_id| {
-                let Some(att) = state.objects.get(att_id) else {
-                    return false;
-                };
+        FilterProp::HasAnyAttachmentOf { kinds, controller } => phased_in_attachments(state, obj)
+            .any(|att| {
                 let kind_matches = kinds.iter().any(|kind| match kind {
                     crate::types::ability::AttachmentKind::Aura => {
                         att.card_types.subtypes.iter().any(|s| s == "Aura")
@@ -10594,8 +10575,7 @@ fn matches_filter_prop(
                     return false;
                 }
                 attachment_controller_matches(controller.as_ref(), att.controller, state, source)
-            })
-        }
+            }),
         // CR 613.4c: In per-recipient layer contexts, "other" is relative to
         // the affected object. Outside those contexts, it remains source-relative.
         // A shared-quality reference scan binds the compared object as the
@@ -10768,10 +10748,7 @@ fn matches_filter_prop(
         // controlled by its controller (CR 303.4).
         FilterProp::Modified => {
             let has_counter = obj.counters.values().any(|&n| n > 0);
-            let has_qualifying_attachment = obj.attachments.iter().any(|att_id| {
-                let Some(att) = state.objects.get(att_id) else {
-                    return false;
-                };
+            let has_qualifying_attachment = phased_in_attachments(state, obj).any(|att| {
                 let is_equipment = att.card_types.subtypes.iter().any(|s| s == "Equipment");
                 if is_equipment {
                     // CR 301.5: Equipment attachment alone is sufficient — no
@@ -11774,6 +11751,17 @@ fn zone_change_record_matches_property(
         | FilterProp::InTrackedSet { .. }
         | FilterProp::Other { .. } => false,
     }
+}
+
+/// CR 702.26b: a phased-out attachment keeps its link but is treated as though it does not exist.
+pub(crate) fn phased_in_attachments<'a>(
+    state: &'a GameState,
+    host: &'a GameObject,
+) -> impl Iterator<Item = &'a GameObject> + 'a {
+    host.attachments
+        .iter()
+        .filter_map(|id| state.objects.get(id))
+        .filter(|att| !att.is_phased_out())
 }
 
 fn attachment_controller_matches(
