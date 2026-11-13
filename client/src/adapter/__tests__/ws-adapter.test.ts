@@ -6647,7 +6647,7 @@ describe("WebSocketAdapter — acquired socket ownership", () => {
       }
     });
 
-    it("fails an initial join whose bootstrap decode never settles on a socket that stays open", async () => {
+    it("ends an initial join's attachment at the decode deadline when its bootstrap decode never settles on a socket that stays open, and completes the join on its snapshot fallback", async () => {
       MockWebSocket.last = null;
       const codec = scriptedCodec();
       codec.decode.mockImplementationOnce(() => new Promise(() => undefined));
@@ -6674,7 +6674,13 @@ describe("WebSocketAdapter — acquired socket ownership", () => {
         // The socket's own decode deadline ends the attachment and its lease.
         await vi.waitFor(() => expect(socket.close).toHaveBeenCalled());
         expect(codec.close).toHaveBeenCalledOnce();
-        expect(init.value()).not.toMatchObject({ resolvedWith: undefined });
+        // The initialization is kept by its snapshot fallback, not settled yet.
+        expect(init.value()).toBe("never settled");
+        // The fallback attachment offers no codec and is answered in plain text.
+        const fallback = await snapshotOnlyHandshake("Reconnect", socket);
+        expect(offeredCodec(fallback)).toBe(false);
+        fallback.dispatchSynthetic("message", JSON.stringify(codecGameStarted(6, 6)));
+        await vi.waitFor(() => expect(init.value()).toEqual({ resolvedWith: undefined }));
       } finally {
         adapter.dispose();
       }
