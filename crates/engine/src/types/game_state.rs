@@ -53816,7 +53816,8 @@ mod tests {
         // The stamp kinds with a row reader, each on a carrier kind: the announced epoch of an
         // activation, the captured source incarnation of a delayed and of a pending trigger,
         // and a stale target pin on a stack trigger.
-        let cases: [(&str, AbilityCarrier, fn(&mut ResolvedAbility, ObjectId)); 4] = [
+        type Stamp = fn(&mut ResolvedAbility, ObjectId);
+        let cases: [(&str, AbilityCarrier, Stamp); 4] = [
             (
                 "announced epoch, stack activation",
                 AbilityCarrier::StackActivated,
