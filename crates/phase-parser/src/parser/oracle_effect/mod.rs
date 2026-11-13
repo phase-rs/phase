@@ -29516,11 +29516,21 @@ fn withhold_resolution_timing_beside_a_cast_time_choice(
 /// target state on it.
 fn clause_names_another_player(clause: &ClauseIr, ctx: &ParseContext) -> bool {
     clause.source.fragment().is_some_and(|fragment| {
-        subject::parse_leading_subject_application(
-            strip_leading_sequence_connector(fragment).trim(),
-            &mut ctx.clone_throwaway(),
+        // A leading condition ("If you do, ...", "When you do, ...", "If you control
+        // a Giant, ...") precedes the clause's own subject.
+        let lower = strip_leading_sequence_connector(fragment)
+            .trim()
+            .to_lowercase();
+        let body = preceded(
+            alt((tag::<_, _, OracleError<'_>>("if "), tag("when "))),
+            preceded(take_until(", "), tag(", ")),
         )
-        .is_some_and(|application| non_controller_subject_chooser(&application.affected).is_some())
+        .parse(lower.as_str())
+        .map_or(lower.as_str(), |(rest, _)| rest);
+        subject::parse_leading_subject_application(body.trim(), &mut ctx.clone_throwaway())
+            .is_some_and(|application| {
+                non_controller_subject_chooser(&application.affected).is_some()
+            })
     })
 }
 
@@ -29621,6 +29631,7 @@ fn withhold_resolution_timing_before_root_slot_readers(clauses: &mut [ClauseIr])
                 || clauses[position.0].prefix_delayed_condition.is_some());
         let (effect, condition) = node_at(clauses, position);
         effect_reads_announced_root_slots(&effect, condition.as_ref(), delayed, chain_prints_target)
+            || (position.1.is_none() && absorbed_rider_reads_announced_slot(&clauses[position.0]))
     }) else {
         return;
     };
@@ -29653,19 +29664,34 @@ fn withhold_resolution_timing_before_root_slot_readers(clauses: &mut [ClauseIr])
     }
 }
 
+/// Whether a rider the clause absorbed (the die-exile rider "If that creature would
+/// die this turn, exile it instead.", already bound to a declared slot) reads a
+/// declared slot of the chain.
+fn absorbed_rider_reads_announced_slot(clause: &ClauseIr) -> bool {
+    let ClauseDisposition::Absorb { rider, .. } = &clause.disposition else {
+        return false;
+    };
+    std::iter::successors(Some(rider.as_ref()), |node| node.sub_ability.as_deref())
+        .any(|node| effect_slot_filters(&node.effect).any(filter_reads_announced_slot))
+}
+
 /// The filters an effect reads objects through: its target, its mass population,
-/// and the selection filter of a choice into a tracked set (the Aura tail of "Tap
-/// target creature. Destroy up to two Auras attached to that creature.").
+/// the selection filter of a choice into a tracked set (the Aura tail of "Tap
+/// target creature. Destroy up to two Auras attached to that creature."), and the
+/// target of a target-bound replacement (the die-exile rider).
 fn effect_slot_filters(effect: &Effect) -> impl Iterator<Item = &TargetFilter> {
-    let selection = match effect {
+    let own_slot_filter = match effect {
         Effect::ChooseObjectsIntoTrackedSet { filter, .. } => Some(filter),
+        // The die-exile rider ("If that creature would die this turn, exile it
+        // instead") binds the creature through `ParentTargetSlot`.
+        Effect::AddTargetReplacement { target, .. } => Some(target),
         _ => None,
     };
     effect
         .target_filter()
         .into_iter()
         .chain(crate::types::ability::mass_population_target(effect))
-        .chain(selection)
+        .chain(own_slot_filter)
 }
 
 /// Whether a filter, at any depth, reads a declared slot of the chain: a

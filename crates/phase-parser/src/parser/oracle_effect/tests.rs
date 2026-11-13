@@ -80795,7 +80795,7 @@ fn bare_choose_in_another_zone_keeps_base_timing() {
 /// choice then stays announced because a later clause reads a declared slot or the
 /// announced pick. Synthetic Oracle: the Crush Underfoot damage plus an Aura tail,
 /// a keyword-anaphor condition ("If it has flying"), and the die-exile rider
-/// (Fiery Temper's shape).
+/// (Fiery Annihilation's shape).
 #[test]
 fn bare_choose_does_not_change_how_later_clauses_lower() {
     fn nodes(def: &AbilityDefinition) -> Vec<&AbilityDefinition> {
@@ -80807,6 +80807,9 @@ fn bare_choose_does_not_change_how_later_clauses_lower() {
         "Choose a creature you control. If it has flying, draw a card.",
         "Choose a creature you control. If it has flying, it gains haste until end of turn.",
         "Choose an artifact you control. This spell deals 5 damage to target creature. Exile up to one target Equipment attached to that creature. If that creature would die this turn, exile it instead.",
+        "Choose a creature you control. Exile target artifact. If that creature would die this turn, exile it instead.",
+        "Choose a creature you control. Destroy target artifact. If that creature would die this turn, exile it instead.",
+        "Choose a creature you control. Target player loses 2 life. If that creature would die this turn, exile it instead.",
     ] {
         let def = parse_effect_chain(text, AbilityKind::Spell);
         assert!(
@@ -80837,7 +80840,7 @@ fn bare_choose_does_not_change_how_later_clauses_lower() {
 /// choice announced, and a bare choice whose own filter reads an earlier object
 /// does not declare `Resolution`. The control is a later printed target that reads
 /// nothing. Synthetic Oracle; the nearest printed filter that reads a prior target
-/// is Daring Thief's "target creature that shares a creature type with it".
+/// is Daring Thief's "target permanent an opponent controls that shares a card type with it".
 #[test]
 fn bare_choose_reading_a_prior_object_keeps_base_timing() {
     for text in [
@@ -81007,6 +81010,10 @@ fn bare_choose_beside_a_cast_time_choice_keeps_base_timing() {
         "Choose a creature you control. Target opponent chooses a creature they control.",
         "Choose a creature you control, then target opponent chooses a creature you control.",
         "Target opponent chooses a creature you control, then you choose a creature you control.",
+        "Choose a creature you control. If you do, target opponent chooses a creature you control.",
+        "Choose a creature you control. When you do, target opponent chooses a creature you control.",
+        "Choose a creature you control. If you control a Giant, target opponent chooses a creature you control.",
+        "Choose a creature you control. If you do, target player chooses a creature you control.",
     ] {
         let def = parse_effect_chain(text, AbilityKind::Spell);
         assert_eq!(
