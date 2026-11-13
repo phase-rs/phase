@@ -163,10 +163,9 @@ const STRIPPING_P0: [Remover; 4] = [
 fn board() -> GameScenario {
     let mut scenario = GameScenario::new_n_player(2, 7);
     scenario.at_phase(Phase::PreCombatMain);
-    let library: Vec<String> = (0..12).map(|i| format!("Library Card {i}")).collect();
-    let names: Vec<&str> = library.iter().map(String::as_str).collect();
-    scenario.with_library_top(P0, &names);
-    scenario.with_library_top(P1, &names);
+    // Printed, textless cards keep draw witnesses independent of other abilities.
+    scenario.with_library_top(P0, &[BEARS_NAME; 24]);
+    scenario.with_library_top(P1, &[BEARS_NAME; 24]);
     scenario
 }
 
@@ -372,6 +371,7 @@ struct Answered {
     prompts: Vec<Prompt>,
     parked_created_ids: Vec<Option<Vec<ObjectId>>>,
     stack_trigger_sources: BTreeSet<ObjectId>,
+    max_stack_triggers: BTreeMap<ObjectId, usize>,
 }
 
 /// The engine's own save / undo / P2P restore pipeline (`PersistedGameState`'s trusted
@@ -462,8 +462,19 @@ fn drive_carried(
         prompts: Vec::new(),
         parked_created_ids: Vec::new(),
         stack_trigger_sources: BTreeSet::new(),
+        max_stack_triggers: BTreeMap::new(),
     };
     for _ in 0..64 {
+        let mut counts = BTreeMap::<ObjectId, usize>::new();
+        for entry in &runner.state().stack {
+            if matches!(entry.kind, StackEntryKind::TriggeredAbility { .. }) {
+                *counts.entry(entry.source_id).or_default() += 1;
+            }
+        }
+        for (source, count) in counts {
+            let maximum = answered.max_stack_triggers.entry(source).or_default();
+            *maximum = (*maximum).max(count);
+        }
         answered
             .stack_trigger_sources
             .extend(runner.state().stack.iter().filter_map(|entry| {
@@ -3083,4 +3094,236 @@ fn gargantuan_canker_token_linked_counter_order_live_and_restored() {
             "F3 token counter ordering",
         );
     }
+}
+
+// CR 614.12 + CR 608.2h: projected characteristics do not add the entrant to
+// the population counted before its entry replacement applies.
+fn banner_copy_self_count(carry: PauseCarry, resident: bool) -> RowOutcome {
+    let mut scenario = board();
+    scenario.add_enchantment_from_oracle(P1, "March of the Machines", "Each noncreature artifact is an artifact creature with power and toughness each equal to its mana value. (Equipment that's a creature can't equip a creature.)");
+    let adaptation = scenario.add_enchantment_from_oracle(P0, "Arcane Adaptation", "As this enchantment enters, choose a creature type.\nCreatures you control are the chosen type in addition to their other types. The same is true for creature spells you control and creature cards you own that aren't on the battlefield.").id();
+    // Both creature donors belong to P1. P0 controls no creatures except the
+    // optional resident Bear; Adaptation therefore cannot inflate that count.
+    let gargantuan = add_donor(&mut scenario, P1, GARGANTUAN_DONOR);
+    scenario.add_creature(P1, "Banner of Kinship", 0, 0).as_artifact()
+        .with_mana_cost(ManaCost::generic(5))
+        .from_oracle_text("As this artifact enters, choose a creature type. This artifact enters with a fellowship counter on it for each creature you control of the chosen type.\nCreatures you control of the chosen type get +1/+1 for each fellowship counter on this artifact.");
+    if resident {
+        scenario
+            .add_creature_from_oracle(P0, BEARS_NAME, 2, 2, GRIZZLY_BEARS)
+            .with_subtypes(vec!["Bear"]);
+    }
+    let spell = free_spell(&mut scenario, "Stolen Identity", false, STOLEN_IDENTITY);
+    let mut runner = scenario.build();
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&adaptation)
+        .unwrap()
+        .chosen_attributes
+        .push(ChosenAttribute::CreatureType("Bear".into()));
+    runner.state_mut().all_creature_types = vec!["Bear".into()];
+    engine::game::layers::mark_layers_full(runner.state_mut());
+    engine::game::layers::flush_layers(runner.state_mut());
+    runner.cast(spell).target_object(gargantuan).commit();
+    let answered = drive_carried(
+        &mut runner,
+        carry,
+        &Script {
+            copy_targets: vec![CopyPick::card("Banner of Kinship", P1)],
+            named: Some("Bear"),
+            ..Script::default()
+        },
+        |runner, prompt| {
+            if matches!(prompt, Prompt::Named { .. }) {
+                let residents = runner
+                    .state()
+                    .objects
+                    .values()
+                    .filter(|o| {
+                        o.is_phased_in_permanent()
+                            && !o.is_token
+                            && o.controller == P0
+                            && o.card_types.core_types.contains(&CoreType::Creature)
+                            && o.card_types.subtypes.contains(&"Bear".into())
+                    })
+                    .count();
+                assert_eq!(residents, usize::from(resident));
+            }
+        },
+    );
+    assert_eq!(named_prompts(&answered.prompts), vec![P0]);
+    assert_settled(&runner, "Banner copy");
+    let token = the_token(&runner, "Banner of Kinship");
+    assert!(runner.state().objects[&token]
+        .card_types
+        .subtypes
+        .contains(&"Bear".into()));
+    assert_eq!(
+        counters_of(&runner, token, &CounterType::Generic("fellowship".into())),
+        u32::from(resident),
+        "pre-entry Banner population excludes itself"
+    );
+    row_outcome(&runner, answered)
+}
+
+#[test]
+fn stolen_identity_gargantuan_copy_of_banner_does_not_count_itself() {
+    assert_restored_row_matches_live(
+        |carry| banner_copy_self_count(carry, false),
+        "Banner copy, no resident Bear",
+    );
+}
+
+#[test]
+fn stolen_identity_gargantuan_copy_of_banner_counts_a_resident_bear() {
+    assert_restored_row_matches_live(
+        |carry| banner_copy_self_count(carry, true),
+        "Banner copy, one resident Bear",
+    );
+}
+
+// CR 614.12a + CR 603.2d + CR 603.10: the payment's observation
+// board determines both observers and multiplicity before the group enters.
+fn minion_payment_trigger_doubling(
+    carry: PauseCarry,
+    synthetic: bool,
+    resident_throne: bool,
+) -> RowOutcome {
+    let mut scenario = board();
+    let vilis = scenario
+        .add_creature_from_oracle(P0, VILIS_NAME, 8, 8, VILIS)
+        .with_subtypes(vec!["Demon"])
+        .id();
+    let throne = add_donor(
+        &mut scenario,
+        if resident_throne { P0 } else { P1 },
+        THRONE_DONOR,
+    );
+    let minion = scenario
+        .add_creature_to_hand_from_oracle(P0, MINION_NAME, 0, 0, MINION_OF_THE_WASTES)
+        .with_mana_cost(ManaCost::generic(0))
+        .id();
+    if synthetic {
+        add_donor(&mut scenario, P1, GARGANTUAN_DONOR);
+    }
+    let spell = free_spell(&mut scenario, "Clone Legion", false, CLONE_LEGION);
+    let mut runner = scenario.build();
+    runner.state_mut().all_creature_types = vec!["Demon".into()];
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&throne)
+        .unwrap()
+        .chosen_attributes
+        .push(ChosenAttribute::CreatureType("Demon".into()));
+    // The first payment draws three (six with the resident Throne); measure
+    // the copied payment from its own prompt instead.
+    cast_minion_paying_three(&mut runner, minion);
+    if !synthetic {
+        let obj = runner.state_mut().objects.get_mut(&minion).unwrap();
+        obj.controller = P1;
+        obj.base_controller = Some(P1);
+    }
+    engine::game::layers::mark_layers_full(runner.state_mut());
+    engine::game::layers::flush_layers(runner.state_mut());
+    let hand = std::cell::Cell::new(None);
+    runner.cast(spell).target_player(P1).commit();
+    let answered = drive_carried(
+        &mut runner,
+        carry,
+        &Script {
+            copy_targets: if synthetic {
+                vec![CopyPick::card(MINION_NAME, P0)]
+            } else {
+                vec![]
+            },
+            named: Some("Demon"),
+            pays: vec![5],
+            ..Script::default()
+        },
+        |runner, prompt| {
+            if matches!(prompt, Prompt::PayAmount { .. }) {
+                let pending = runner.state().pending_replacement.as_ref().unwrap();
+                if synthetic {
+                    assert!(
+                        matches!(
+                            pending.proposed,
+                            ProposedEvent::ZoneChange {
+                                from: Zone::Battlefield,
+                                to: Zone::Battlefield,
+                                ..
+                            }
+                        ),
+                        "synthetic copy-surface payment park"
+                    );
+                } else {
+                    assert!(
+                        matches!(pending.proposed, ProposedEvent::TokenEntry { .. }),
+                        "direct token payment park"
+                    );
+                }
+                let id = if resident_throne {
+                    throne
+                } else {
+                    the_token(runner, THRONE_NAME)
+                };
+                assert_eq!(
+                    runner.state().objects[&id].zone,
+                    Zone::Battlefield,
+                    "Throne is physically present at payment"
+                );
+                assert!(runner.state().objects[&id]
+                    .chosen_attributes
+                    .contains(&ChosenAttribute::CreatureType("Demon".into())));
+                hand.set(Some(runner.state().players[0].hand.len()));
+            }
+        },
+    );
+    let multiplicity = if resident_throne { 2 } else { 1 };
+    assert_eq!(
+        answered.max_stack_triggers.get(&vilis),
+        Some(&multiplicity),
+        "Vilis trigger multiplicity"
+    );
+    assert_eq!(
+        runner.state().players[0].hand.len(),
+        hand.get().unwrap() + 5 * multiplicity,
+        "payment draws"
+    );
+    assert_eq!(runner.state().players[0].life, 12);
+    assert_settled(&runner, "Minion payment trigger doubling");
+    row_outcome(&runner, answered)
+}
+
+#[test]
+fn clone_legion_direct_minion_payment_is_not_doubled_by_a_co_entering_throne() {
+    assert_restored_row_matches_live(
+        |carry| minion_payment_trigger_doubling(carry, false, false),
+        "direct Minion payment, co-entering Throne",
+    );
+}
+
+#[test]
+fn clone_legion_direct_minion_payment_is_doubled_by_a_resident_throne() {
+    assert_restored_row_matches_live(
+        |carry| minion_payment_trigger_doubling(carry, false, true),
+        "direct Minion payment, resident Throne",
+    );
+}
+
+#[test]
+fn clone_legion_copied_minion_payment_is_not_doubled_by_a_co_entering_throne() {
+    assert_restored_row_matches_live(
+        |carry| minion_payment_trigger_doubling(carry, true, false),
+        "copied Minion payment, co-entering Throne",
+    );
+}
+
+#[test]
+fn clone_legion_copied_minion_payment_is_doubled_by_a_resident_throne() {
+    assert_restored_row_matches_live(
+        |carry| minion_payment_trigger_doubling(carry, true, true),
+        "copied Minion payment, resident Throne",
+    );
 }

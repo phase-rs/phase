@@ -7441,10 +7441,10 @@ fn collect_pending_triggers_with_collection(
     // alongside The Ring's emblem trigger rather than from object definitions.
     super::cipher::collect_combat_damage_recast_triggers(state, events, &mut pending);
 
-    // CR 603.2d: Trigger doubling — Panharmonicon-style effects.
-    // Scan battlefield for objects with StaticMode::Panharmonicon statics,
-    // then clone matching pending triggers.
-    apply_trigger_doubling(state, &mut pending);
+    // CR 614.12a + CR 603.2d + CR 603.10: trigger doubling observes
+    // the same board as trigger discovery, before entry for payments and live
+    // otherwise. Admission and occurrence accounting stay on the live session.
+    apply_trigger_doubling(observation.read(state), &mut pending);
     pending = filter_auto_inert_noop_triggers(state, pending);
 
     // CR 800.4d: a departing permanent's own leaves-the-battlefield abilities

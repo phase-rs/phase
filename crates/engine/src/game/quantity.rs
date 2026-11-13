@@ -5099,7 +5099,20 @@ fn resolve_ref(
                 &filter_ctx,
                 source_id,
             )
-            .len(),
+            .into_iter()
+            // CR 614.1c + CR 614.12 + CR 608.2h: an entry-counter
+            // quantity reads the population before entry, even when a copy
+            // answer has physically placed the projected entrant on the
+            // battlefield. Keep its characteristics available to source and
+            // chosen-attribute reads; exclude only its population membership.
+            .filter(|id| {
+                Some(*id) != ctx.entering
+                    || state
+                        .objects
+                        .get(id)
+                        .is_none_or(|obj| obj.zone != Zone::Battlefield)
+            })
+            .count(),
         ),
         // CR 201.2 + CR 603.4: Count of objects matching `filter`,
         // deduplicated by the listed `qualities`. Each object contributes a
