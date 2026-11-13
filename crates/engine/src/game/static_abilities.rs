@@ -21,6 +21,7 @@ use crate::types::statics::{
     CrewContributionKind, DefendingPlayerAnchorPolarity, ProhibitionScope, StaticMode,
     StaticModeKind,
 };
+use crate::types::zones::Zone;
 
 /// Handler function type for static ability modes.
 /// Receives the `StaticMode` variant the handler was registered under.
@@ -76,7 +77,9 @@ pub fn build_static_registry() -> HashMap<StaticMode, StaticAbilityHandler> {
     // CR 508.1c: The directional attack restriction is a passive rule-modifying
     // marker; enforcement lives in `combat.rs`'s attacker-declaration gate.
     registry.insert(StaticMode::AttackOnlyNeighbor, handle_rule_mod);
-    registry.insert(StaticMode::CantBeTargeted, handle_rule_mod);
+    // CR 702.18a / CR 702.11b / CR 109.5: CantBeTargeted is a data-carrying variant (`who`)
+    // — runtime enforcement is in targeting.rs::is_valid_target(). Coverage support is via is_data_carrying_static().
+    //
     // Note: CantBeCast is a data-carrying variant — runtime enforcement is in
     // casting.rs::is_blocked_by_cant_be_cast(). Coverage support is via is_data_carrying_static().
     //
@@ -426,6 +429,29 @@ pub(crate) fn prohibition_scope_matches_player(
     let Some(source_obj) = state.objects.get(&source_id) else {
         return false;
     };
+    prohibition_scope_matches_player_anchored(
+        scope,
+        player,
+        source_obj,
+        source_obj.controller,
+        state,
+    )
+}
+
+/// CR 109.5: [`prohibition_scope_matches_player`] with the static's controller
+/// supplied explicitly. "You"/"your" in a static ability refers to that
+/// ability's controller, which for a static granted onto another permanent
+/// (`AddStaticMode`, anchored via `StaticDefinition::source_controller`) is the
+/// granting source's controller, not the carrier's. `source_obj` is the object
+/// that carries the static; it still answers the attachment-relative
+/// `EnchantedCreatureController` scope.
+pub fn prohibition_scope_matches_player_anchored(
+    scope: &ProhibitionScope,
+    player: PlayerId,
+    source_obj: &crate::game::game_object::GameObject,
+    static_controller: PlayerId,
+    state: &GameState,
+) -> bool {
     match scope {
         // CR 102.2 / CR 102.3: "each opponent" is team-aware. In a multiplayer team
         // game (e.g. Two-Headed Giant) a player's opponents are only players NOT on
@@ -435,10 +461,10 @@ pub(crate) fn prohibition_scope_matches_player(
         // `is_opponent` reduces to `!=`, so 2-player and free-for-all behavior is
         // byte-identical. Mirrors the affected-filter fix in `static_filter_matches`.
         ProhibitionScope::Opponents => {
-            crate::game::players::is_opponent(state, source_obj.controller, player)
+            crate::game::players::is_opponent(state, static_controller, player)
         }
         ProhibitionScope::AllPlayers => true,
-        ProhibitionScope::Controller => player == source_obj.controller,
+        ProhibitionScope::Controller => player == static_controller,
         // CR 303.4e: For an Aura attached to an object ("enchanted creature's
         // controller"), the prohibition scopes to that object's current
         // controller. For an Aura attached directly to a player (CR 303.4 +
@@ -1128,6 +1154,58 @@ pub(crate) fn transient_grants_static_mode_to_object(
         }
     }
     false
+}
+
+/// CR 611.2c + CR 613.11 + CR 109.5: True iff a live resolution-created effect
+/// ("creatures you control can't be the targets of spells or abilities your
+/// opponents control this turn", "target creature can't be the target of ...")
+/// prohibits `source_controller` from targeting `obj`.
+///
+/// This is the transient arm of the targeting-prohibition authority: the rule is
+/// read DIRECTLY off the effect and is never grafted onto the object, so an
+/// ability-removal effect ("loses all abilities") cannot clear it. A filter-scoped
+/// `affected` is re-evaluated against the live board at every query (CR 611.2c: a
+/// rule-changing effect can affect objects that weren't affected when it began),
+/// and a recipient-bound effect lapses with its incarnation (CR 400.7, via
+/// `transient_effect_is_live`). "Your" in `who` is the effect's controller
+/// (CR 109.5), which a resolved spell or ability retains.
+pub(crate) fn transient_cant_be_targeted_prohibits(
+    state: &GameState,
+    obj: &crate::game::game_object::GameObject,
+    source_controller: PlayerId,
+) -> bool {
+    state.transient_continuous_effects.iter().any(|tce| {
+        let who = tce.modifications.iter().find_map(|m| match m {
+            ContinuousModification::AddStaticMode {
+                mode: StaticMode::CantBeTargeted { who },
+            } => Some(who),
+            _ => None,
+        });
+        let Some(who) = who else {
+            return false;
+        };
+        // CR 109.2: an unzoned card-type description ("creatures you control")
+        // means permanents on the battlefield, so a creature spell on the stack
+        // is outside the rule's scope. A filter naming its own zone, or a
+        // `SpecificObject` pin, is not restricted this way.
+        let in_scope = obj.zone == Zone::Battlefield
+            || !crate::game::filter::filter_denotes_battlefield_permanent(&tce.affected);
+        in_scope
+            && crate::game::layers::transient_effect_is_live(state, tce)
+            && matches_target_filter(
+                state,
+                obj.id,
+                &tce.affected,
+                &FilterContext::from_source_with_controller(tce.source_id, tce.controller),
+            )
+            && prohibition_scope_matches_player_anchored(
+                who,
+                source_controller,
+                obj,
+                tce.controller,
+                state,
+            )
+    })
 }
 
 /// CR 702.26a + CR 101.2 + CR 611.2b: True iff `object_id` currently has an
@@ -2225,7 +2303,7 @@ fn transient_grants_other_static_to_context(
     false
 }
 
-fn static_condition_matches_context(
+pub(crate) fn static_condition_matches_context(
     state: &GameState,
     source_id: ObjectId,
     controller: PlayerId,

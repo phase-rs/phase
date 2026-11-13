@@ -3530,7 +3530,7 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) -> u32 {
                 .map(|obj| obj.card_types.subtypes.iter().any(|s| s == "Aura"))
                 .unwrap_or(false);
             if is_aura {
-                let attached = match spell_targets.first() {
+                match spell_targets.first() {
                     // CR 608.3c + CR 608.2b: Object Aura — verify the target is
                     // still a legal host per the Aura's own zone-scoped enchant
                     // ability (`is_valid_attachment_target`, the single legality
@@ -3549,11 +3549,10 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) -> u32 {
                             state, entry.id, *target_id,
                         ) =>
                     {
-                        effects::attach::attach_to_reporting_change(state, entry.id, *target_id)
+                        effects::attach::attach_to_with_events(state, entry.id, *target_id, events);
                     }
                     Some(crate::types::ability::TargetRef::Object(_)) => {
                         // Target is no longer a legal host — SBA cleanup follows.
-                        false
                     }
                     // CR 608.3c + CR 702.5d: Player Aura (Curse cycle, Faith's
                     // Fetters-class). Validity check is "player still in game"
@@ -3561,29 +3560,15 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) -> u32 {
                     // `check_unattached_auras` (CR 303.4c) will detach + grave
                     // a Curse whose enchanted player has left the game.
                     Some(crate::types::ability::TargetRef::Player(player_id)) => {
-                        effects::attach::attach_to_player_reporting_change(
-                            state, entry.id, *player_id,
-                        )
+                        effects::attach::attach_to_player_with_events(
+                            state, entry.id, *player_id, events,
+                        );
                     }
                     None => {
                         // CR 303.4g: An Aura entering the battlefield with no
                         // legal target goes to its owner's graveyard. The SBA
                         // path catches this on the next pass.
-                        false
                     }
-                };
-                if attached {
-                    // CR 608.3c / CR 603.2e: an Aura spell resolves and becomes
-                    // attached — is an effect resolution — emit
-                    // `EffectResolved { kind: Attach }` so "whenever an Aura
-                    // becomes attached" triggers (e.g. Bramble Elemental) fire on
-                    // spell-resolution attach, not only on effect-resolver attach
-                    // via `deliver_attach`.
-                    events.push(GameEvent::EffectResolved {
-                        kind: EffectKind::Attach,
-                        source_id: entry.id,
-                        subject: state.capture_event_object_snapshot(entry.id).map(Box::new),
-                    });
                 }
             }
 
@@ -3995,14 +3980,12 @@ fn resolve_keyword_action(
                         && t.card_types.core_types.contains(&CoreType::Creature)
                 });
             if still_valid {
-                if let Some(old_target) =
-                    effects::attach::attach_to(state, equipment_id, target_creature_id)
-                {
-                    events.push(GameEvent::Unattached {
-                        attachment_id: equipment_id,
-                        old_target,
-                    });
-                }
+                effects::attach::attach_to_with_events(
+                    state,
+                    equipment_id,
+                    target_creature_id,
+                    events,
+                );
             }
             events.push(GameEvent::EffectResolved {
                 kind: EffectKind::Equip,

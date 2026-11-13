@@ -98417,3 +98417,39 @@ fn fused_subject_look_exile_preserves_or_rejects_the_complete_instruction() {
         "the public chain must retain the honest gap, not fall back to Dig: {unsupported:?}"
     );
 }
+
+/// CR 115.1 + CR 611.2c: a duration-scoped targeting prohibition naming a source
+/// kind or quality (Display of Dominance: "blue or black spells your opponents
+/// control") cannot be expressed by `CantBeTargeted { who }`, so the effect pipeline
+/// fails closed with an honest `Unimplemented` rather than a blanket restriction.
+#[test]
+fn source_qualified_cant_be_targeted_effect_fails_closed() {
+    for text in [
+        "Permanents you control can't be the targets of blue or black spells your opponents control this turn.",
+        "Target creature can't be the target of spells this turn.",
+    ] {
+        let def = parse_effect_chain(text, AbilityKind::Spell);
+        assert!(
+            ability_chain_has_unimplemented(&def),
+            "{text}: expected an honest Unimplemented, got {def:?}"
+        );
+        let rendered = format!("{def:?}");
+        assert!(
+            !rendered.contains("CantBeTargeted"),
+            "{text}: must not carry a blanket CantBeTargeted, got {rendered}"
+        );
+    }
+}
+
+/// CR 611.2c + CR 109.5: the unqualified opponents-only effect grant (Vines of
+/// Vastwood, Veilstone Amulet) still lowers to `CantBeTargeted { Opponents }`.
+#[test]
+fn unqualified_opponents_cant_be_targeted_effect_is_supported() {
+    let text = "Target creature can't be the target of spells or abilities your opponents control this turn.";
+    let def = parse_effect_chain(text, AbilityKind::Spell);
+    assert!(!ability_chain_has_unimplemented(&def), "{text}: {def:?}");
+    assert!(
+        format!("{def:?}").contains("CantBeTargeted"),
+        "{text}: expected CantBeTargeted, got {def:?}"
+    );
+}

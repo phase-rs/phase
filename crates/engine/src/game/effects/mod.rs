@@ -10384,7 +10384,7 @@ fn static_mode_reads_filter_population(
         | StaticMode::CantBecomeSuspected
         | StaticMode::MaxAttackersEachCombat { .. }
         | StaticMode::MaxBlockersEachCombat { .. }
-        | StaticMode::CantBeTargeted
+        | StaticMode::CantBeTargeted { .. }
         | StaticMode::CantBeCast { .. }
         | StaticMode::CantSearchLibrary { .. }
         | StaticMode::RestrictLibrarySearchToTop { .. }
@@ -34187,7 +34187,11 @@ mod tests {
         assert!(static_mode_names_no_referent(&StaticMode::MustBeBlocked {
             by: None
         }));
-        assert!(!static_mode_names_no_referent(&StaticMode::CantBeTargeted));
+        assert!(!static_mode_names_no_referent(
+            &StaticMode::CantBeTargeted {
+                who: crate::types::statics::ProhibitionScope::AllPlayers,
+            }
+        ));
     }
 
     /// CR 608.2c + CR 118.12: the declined-"if you do" audit reads each

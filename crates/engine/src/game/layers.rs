@@ -9373,13 +9373,19 @@ fn gather_transient_continuous_effects_with(
             // `iter_cast_free_permission_source_ids`, giving one grant two
             // sources. CR 701.15b: `Goaded` is likewise a designation, not
             // an ability on the recipient; combat reads the live TCE directly.
+            // CR 611.2c + CR 613.11: a resolved `CantBeTargeted` rule effect
+            // (Vines of Vastwood, Veilstone Amulet) is read directly off the TCE by
+            // `static_abilities::transient_cant_be_targeted_prohibits`, so it is
+            // not an ability on the recipient and "loses all abilities" cannot
+            // clear it.
             if matches!(
                 modification,
                 ContinuousModification::AddStaticMode {
                     mode: StaticMode::MayLookAtFaceDown
                         | StaticMode::ReduceAbilityCost { .. }
                         | StaticMode::CastFromHandFree { .. }
-                        | StaticMode::Goaded,
+                        | StaticMode::Goaded
+                        | StaticMode::CantBeTargeted { .. },
                 }
             ) {
                 continue;
@@ -10889,7 +10895,6 @@ fn static_mode_uses_chosen_color(mode: &crate::types::statics::StaticMode) -> bo
 ///
 /// Mirrors `static_mode_uses_chosen_color`.
 fn static_mode_needs_source_controller_anchor(mode: &crate::types::statics::StaticMode) -> bool {
-    use crate::types::statics::StaticMode;
     match mode {
         StaticMode::MustBeBlockedByAll {
             blockers: Some(filter),
@@ -31810,7 +31815,10 @@ mod tests {
             vec![StaticDefinition::new(StaticMode::IgnoreHexproof)].into();
         let b = make_creature(&mut state, "CantBeTargeted Source", 1, 1, PlayerId(0));
         state.objects.get_mut(&b).unwrap().static_definitions =
-            vec![StaticDefinition::new(StaticMode::CantBeTargeted)].into();
+            vec![StaticDefinition::new(StaticMode::CantBeTargeted {
+                who: crate::types::statics::ProhibitionScope::AllPlayers,
+            })]
+            .into();
         // Phased-out permanent carrying a Shroud static — CR 702.26b excludes it from
         // game_functioning_statics, so its kind must NOT appear in presence.
         let phased = make_creature(&mut state, "Phased Shroud Source", 1, 1, PlayerId(0));

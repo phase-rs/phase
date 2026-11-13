@@ -118,6 +118,7 @@ mod shelinda_yevon_acolyte_otherwise;
 mod shelob_repro_token;
 mod sheoldred_edict_multi_opponent_sac;
 mod sheriff_base_plus_additional_counters_runtime;
+mod shielding_plax_bramble_elemental;
 mod shiko_reflexive_copy_draw_1370;
 mod shilgengar_return_each_to_battlefield;
 mod shinryu_chosen_player_loses_game_9768;

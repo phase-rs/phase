@@ -35127,7 +35127,14 @@ fn trigger_veilstone_amulet_cant_be_targets() {
     );
     assert!(
         matches!(execute.effect.as_ref(), Effect::GenericEffect { .. }),
-        "expected GenericEffect (hexproof grant), got {:?}",
+        "expected GenericEffect (CantBeTargeted grant), got {:?}",
+        execute.effect
+    );
+    // CR 611.2c + CR 109.5: the opponents-scoped prohibition survives as a typed
+    // `CantBeTargeted { Opponents }` rule effect over the live "creatures you control" set.
+    assert!(
+        format!("{:?}", execute.effect).contains("CantBeTargeted"),
+        "expected a CantBeTargeted rule effect, got {:?}",
         execute.effect
     );
 }

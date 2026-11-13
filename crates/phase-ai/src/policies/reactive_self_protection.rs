@@ -125,15 +125,18 @@ mod tests {
     use super::super::self_protection_classify::THREAT_FLOOR;
     use super::*;
     use engine::ai_support::{ActionMetadata, AiDecisionContext, CandidateAction, TacticalClass};
+    use engine::game::scenario::GameScenario;
     use engine::game::zones::create_object;
     use engine::types::ability::{
         AbilityDefinition, AbilityKind, ContinuousModification, ControllerRef, Effect,
-        QuantityExpr, StaticDefinition, TargetFilter, TypedFilter,
+        QuantityExpr, ResolvedAbility, StaticDefinition, TargetFilter, TargetRef, TypedFilter,
     };
     use engine::types::card_type::CoreType;
-    use engine::types::game_state::WaitingFor;
+    use engine::types::game_state::{StackEntry, StackEntryKind, WaitingFor};
     use engine::types::identifiers::{CardId, ObjectId};
     use engine::types::keywords::Keyword;
+    use engine::types::mana::ManaCost;
+    use engine::types::phase::Phase;
     use engine::types::statics::StaticMode;
     use engine::types::zones::Zone;
     use std::sync::Arc;
@@ -448,9 +451,6 @@ mod tests {
 
     #[test]
     fn stack_targeting_ai_permanent_counts_as_threat() {
-        use engine::types::ability::{ResolvedAbility, TargetRef};
-        use engine::types::game_state::{StackEntry, StackEntryKind};
-
         let mut state = GameState::new_two_player(42);
         let ai_player = PlayerId(1);
         let opp = PlayerId(0);
@@ -726,9 +726,6 @@ mod tests {
 
     #[test]
     fn activation_self_protection_with_threat_allowed() {
-        use engine::types::ability::{ResolvedAbility, TargetRef};
-        use engine::types::game_state::{StackEntry, StackEntryKind};
-
         let mut state = GameState::new_two_player(42);
         let id = ai_object_with_activated(
             &mut state,
@@ -772,11 +769,117 @@ mod tests {
         }
     }
 
+    /// Aerie Mystics-style untargeted shroud on a creature that Vines of Vastwood
+    /// (cast by `vines_caster` through the production cast/resolve path, which
+    /// installs a transient "your opponents" restriction, never a grafted
+    /// ability) protects, against the opponent's (P1) Doom Blade. Returns the
+    /// activation verdict.
+    fn vines_restricted_shroud_activation_verdict(vines_caster: PlayerId) -> PolicyVerdict {
+        const VINES_OF_VASTWOOD: &str = "Kicker {G}\nTarget creature can't be the target of spells or abilities your opponents control this turn. If this spell was kicked, that creature gets +4/+4 until end of turn.";
+
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let id = scenario.add_creature(AI, "Self-Protector", 2, 2).id();
+        scenario.add_creature(AI, "Bystander Bear", 2, 2);
+        scenario.add_creature(AI, "Second Bystander", 2, 2);
+        let vines = scenario
+            .add_spell_to_hand(vines_caster, "Vines of Vastwood", true)
+            .with_mana_cost(ManaCost::generic(0))
+            .from_oracle_text(VINES_OF_VASTWOOD)
+            .id();
+        let mut runner = scenario.build();
+        {
+            let state = runner.state_mut();
+            state.active_player = vines_caster;
+            state.priority_player = vines_caster;
+            state.waiting_for = WaitingFor::Priority {
+                player: vines_caster,
+            };
+        }
+        runner.cast(vines).target_object(id).resolve();
+        assert!(
+            runner
+                .state()
+                .transient_continuous_effects
+                .iter()
+                .any(|tce| tce.controller == vines_caster
+                    && tce.modifications.iter().any(|m| matches!(
+                        m,
+                        ContinuousModification::AddStaticMode {
+                            mode: StaticMode::CantBeTargeted { .. }
+                        }
+                    ))),
+            "production Vines must install the transient restriction"
+        );
+
+        let mut state = runner.state().clone();
+        Arc::make_mut(&mut state.objects.get_mut(&id).unwrap().abilities).push(
+            AbilityDefinition::new(
+                AbilityKind::Activated,
+                grant_effect(Some(TargetFilter::SelfRef), None, Keyword::Shroud),
+            ),
+        );
+
+        let opp = PlayerId(1);
+        let spell_id = create_object(
+            &mut state,
+            CardId(99),
+            opp,
+            "Doom Blade".to_string(),
+            Zone::Stack,
+        );
+        let ability = ResolvedAbility::new(
+            Effect::Destroy {
+                target: TargetFilter::Any,
+                cant_regenerate: false,
+            },
+            vec![TargetRef::Object(id)],
+            spell_id,
+            opp,
+        );
+        state.stack.push_back(StackEntry {
+            id: spell_id,
+            source_id: spell_id,
+            controller: opp,
+            kind: StackEntryKind::Spell {
+                card_id: CardId(99),
+                ability: Some(Box::new(ability)),
+                casting_variant: Default::default(),
+                actual_mana_spent: 0,
+            },
+        });
+        activate_verdict(&state, id)
+    }
+
+    // CR 109.5 + CR 702.18a: Vines of Vastwood cast by the threat's controller
+    // anchors "your opponents" to that player, so it does not stop that
+    // player's Doom Blade; untargeted shroud still does (CR 608.2b).
+    #[test]
+    fn scoped_restriction_not_blocking_threat_controller_leaves_shroud_useful() {
+        match vines_restricted_shroud_activation_verdict(PlayerId(1)) {
+            PolicyVerdict::Score { reason, .. } => {
+                assert_eq!(reason.kind, "reactive_self_protection_exact_payoff");
+            }
+            PolicyVerdict::Reject { reason } => {
+                panic!("shroud is useful against an unrestricted threat: {reason:?}")
+            }
+        }
+    }
+
+    // Control: the restriction anchored to the AI itself names the threat's
+    // controller as an opponent, so the recipient is already protected.
+    #[test]
+    fn scoped_restriction_blocking_threat_controller_is_already_protected() {
+        match vines_restricted_shroud_activation_verdict(AI) {
+            PolicyVerdict::Reject { reason } => {
+                assert_eq!(reason.kind, "reactive_self_protection_no_payoff");
+            }
+            PolicyVerdict::Score { .. } => panic!("already protected; activation is redundant"),
+        }
+    }
+
     #[test]
     fn destruction_of_another_creature_does_not_justify_self_indestructible() {
-        use engine::types::ability::{ResolvedAbility, TargetRef};
-        use engine::types::game_state::{StackEntry, StackEntryKind};
-
         let mut state = GameState::new_two_player(42);
         let id = ai_object_with_activated(
             &mut state,
@@ -833,9 +936,6 @@ mod tests {
 
     #[test]
     fn lethal_damage_justifies_self_indestructible() {
-        use engine::types::ability::{ResolvedAbility, TargetRef};
-        use engine::types::game_state::{StackEntry, StackEntryKind};
-
         let mut state = GameState::new_two_player(42);
         let id = ai_object_with_activated(
             &mut state,
@@ -883,9 +983,6 @@ mod tests {
 
     #[test]
     fn nonlethal_damage_to_self_fails_open() {
-        use engine::types::ability::{ResolvedAbility, TargetRef};
-        use engine::types::game_state::{StackEntry, StackEntryKind};
-
         let mut state = GameState::new_two_player(42);
         let id = ai_object_with_activated(
             &mut state,

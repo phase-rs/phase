@@ -29937,6 +29937,64 @@ impl TargetFilter {
         }
     }
 
+    /// CR 109.2 + CR 109.2a: the conjunctive clauses of this filter that
+    /// POSITIVELY and explicitly name `zone`, each as a standalone filter.
+    ///
+    /// The filter is read in disjunctive normal form: `Or` alternatives are
+    /// expanded (through any `And` nesting) and each resulting clause is the `And`
+    /// of its leaves. A clause qualifies only if one of its own non-negated leaves
+    /// names `zone` (`InZone`, `InAnyZone`, or a zone-implying variant such as
+    /// `ExiledBySource` / `StackSpell`); a bare clause ("creatures") denotes
+    /// battlefield permanents and a `Not` supplies no zone (it excludes one).
+    /// Matching an off-battlefield object against only these clauses keeps the zone
+    /// constraint attached to the alternative that carries it, so a bare sibling
+    /// alternative can never admit a card in another zone.
+    ///
+    /// The single authority for "can this filter denote an object in a non-default
+    /// zone"; `extract_in_zone` reports one zone for the whole filter and cannot
+    /// answer that. Expansion is capped at `MAX_CLAUSES` (filters are tiny; the cap
+    /// only bounds pathological inputs).
+    pub fn clauses_naming_zone(&self, zone: crate::types::zones::Zone) -> Vec<TargetFilter> {
+        const MAX_CLAUSES: usize = 256;
+        fn expand(filter: &TargetFilter) -> Vec<Vec<&TargetFilter>> {
+            match filter {
+                TargetFilter::Or { filters } => filters.iter().flat_map(expand).collect(),
+                TargetFilter::And { filters } => {
+                    filters.iter().fold(vec![Vec::new()], |clauses, conjunct| {
+                        let alternatives = expand(conjunct);
+                        clauses
+                            .iter()
+                            .flat_map(|clause| {
+                                alternatives.iter().map(move |alt| {
+                                    let mut merged = clause.clone();
+                                    merged.extend(alt.iter().copied());
+                                    merged
+                                })
+                            })
+                            .take(MAX_CLAUSES)
+                            .collect()
+                    })
+                }
+                leaf => vec![vec![leaf]],
+            }
+        }
+        expand(self)
+            .into_iter()
+            .filter(|clause| {
+                clause.iter().any(|leaf| {
+                    !matches!(leaf, TargetFilter::Not { .. })
+                        && leaf.population_zones().contains(&zone)
+                })
+            })
+            .map(|clause| match clause.as_slice() {
+                [only] => (*only).clone(),
+                leaves => TargetFilter::And {
+                    filters: leaves.iter().map(|leaf| (*leaf).clone()).collect(),
+                },
+            })
+            .collect()
+    }
+
     /// CR 400.1: Returns the union of explicit zone constraints in this filter.
     /// Preserves the multi-zone semantics of `FilterProp::InAnyZone` (e.g.
     /// "search ... graveyard, hand, and library") that `extract_in_zone` collapses
@@ -46793,6 +46851,64 @@ mod tests {
             serde_json::to_string(&filter).unwrap(),
             r#"{"type":"StackAbility","controller":"You"}"#
         );
+    }
+
+    #[test]
+    fn clauses_naming_zone_attach_the_zone_to_the_positive_clause() {
+        use crate::types::zones::Zone;
+        let in_gy = |f: TypedFilter| {
+            TargetFilter::Typed(f.properties(vec![FilterProp::InZone {
+                zone: Zone::Graveyard,
+            }]))
+        };
+        let gy_land = in_gy(TypedFilter::land());
+        let bare = TargetFilter::Typed(TypedFilter::creature());
+        let you = TargetFilter::Typed(TypedFilter::permanent().controller(ControllerRef::You));
+        let any_zone =
+            TargetFilter::Typed(
+                TypedFilter::creature().properties(vec![FilterProp::InAnyZone {
+                    zones: vec![Zone::Exile, Zone::Hand],
+                }]),
+            );
+
+        // Top-level Or: only the zone-naming alternative survives.
+        let or = TargetFilter::Or {
+            filters: vec![bare.clone(), gy_land.clone(), any_zone.clone()],
+        };
+        assert_eq!(
+            or.clauses_naming_zone(Zone::Graveyard),
+            vec![gy_land.clone()]
+        );
+        assert_eq!(or.clauses_naming_zone(Zone::Hand), vec![any_zone.clone()]);
+        assert!(or.clauses_naming_zone(Zone::Library).is_empty());
+        assert!(bare.clauses_naming_zone(Zone::Graveyard).is_empty());
+
+        // And(Or(bare, gy_land), you): the zone stays on the land clause.
+        let nested = TargetFilter::And {
+            filters: vec![
+                TargetFilter::Or {
+                    filters: vec![bare.clone(), gy_land.clone()],
+                },
+                you.clone(),
+            ],
+        };
+        assert_eq!(
+            nested.clauses_naming_zone(Zone::Graveyard),
+            vec![TargetFilter::And {
+                filters: vec![gy_land.clone(), you.clone()]
+            }]
+        );
+
+        // A negated predicate never supplies the zone.
+        let negated = TargetFilter::And {
+            filters: vec![
+                bare.clone(),
+                TargetFilter::Not {
+                    filter: Box::new(gy_land),
+                },
+            ],
+        };
+        assert!(negated.clauses_naming_zone(Zone::Graveyard).is_empty());
     }
 
     // CR 109.2: a stack-spell/stack-ability filter denotes an object on the

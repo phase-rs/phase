@@ -837,6 +837,37 @@ fn is_enforceable_continuous_static(def: &StaticDefinition) -> bool {
             .is_some_and(StaticCondition::contains_unrecognized)
 }
 
+/// CR 109.2a + CR 115.1: the subject a targeting prohibition ("<subject> can't be
+/// the target of ...") binds to, typed by the shared rule-static subject parser.
+/// `None` when the text before the prohibition is not a subject that parser
+/// types, so callers never default an unread subject to the source.
+fn cant_be_targeted_subject(tp: &TextPair<'_>) -> Option<TargetFilter> {
+    let (before, _, _) = nom_primitives::scan_preceded(tp.lower, |i: &str| {
+        alt((
+            tag("can't be the target"),
+            tag("can’t be the target"),
+            tag("cannot be the target"),
+            tag("can't be targeted"),
+            tag("can’t be targeted"),
+            tag("cannot be targeted"),
+        ))
+        .parse(i)
+    })?;
+    let subject = tp.original.get(..before.len())?.trim();
+    super::shared::parse_rule_static_subject_filter(subject)
+}
+
+/// Inert, coverage-visible gap for a targeting prohibition the engine cannot
+/// model (source-qualified, or a subject no building block types). Never
+/// defaults `affected` to the source for an unread subject.
+fn cant_be_targeted_gap(subject: Option<TargetFilter>, original: &str) -> StaticDefinition {
+    match subject {
+        Some(filter) => super::evasion::source_qualified_cant_be_targeted_gap(filter, original),
+        None => StaticDefinition::new(StaticMode::Other(original.to_string()))
+            .description(original.to_string()),
+    }
+}
+
 pub(crate) fn parse_static_line_inner(
     text: &str,
     inverted: InvertedAsLongAs,
@@ -2854,28 +2885,42 @@ pub(crate) fn parse_static_line_inner(
         }
     }
 
-    // --- "~ can't be the target" or "~ can't be targeted" ---
-    // CR 702.18a / 702.11a: these descriptive phrasings ARE Shroud / Hexproof.
-    if let Some(scope) = crate::parser::oracle_keyword::classify_cant_be_targeted(tp.lower) {
-        return Some(match scope {
-            // CR 702.11a: "... your opponents control" — grant Hexproof so the
-            // permanent's own controller can still target it.
-            crate::parser::oracle_keyword::CantBeTargetedScope::OpponentsOnly => {
-                StaticDefinition::continuous()
-                    .affected(TargetFilter::SelfRef)
-                    .modifications(vec![ContinuousModification::AddKeyword {
-                        keyword: Keyword::Hexproof,
-                    }])
-                    .description(text.to_string())
-            }
-            // CR 702.18a: blanket — can't be targeted by any player. Enforced in
-            // `targeting.rs::can_target` via the object's active static definitions.
-            crate::parser::oracle_keyword::CantBeTargetedScope::AnyPlayer => {
-                StaticDefinition::new(StaticMode::CantBeTargeted)
-                    .affected(TargetFilter::SelfRef)
-                    .description(text.to_string())
-            }
-        });
+    // --- "<subject> can't be the target" or "<subject> can't be targeted" ---
+    // CR 109.2a + CR 115.1: the prohibition binds the subject it names, not the
+    // source: `affected` is the parsed subject (`~` / "this creature" -> SelfRef,
+    // "creatures you control" -> its typed filter). A subject no existing
+    // building block types (Tomik's two-zone "lands on the battlefield and land
+    // cards in graveyards") makes the line an explicit, inert coverage gap rather
+    // than a prohibition stamped on the source.
+    if nom_primitives::scan_contains(tp.lower, "be the target")
+        || nom_primitives::scan_contains(tp.lower, "be targeted")
+    {
+        let subject = cant_be_targeted_subject(&tp);
+        // CR 115.1: a source-kind / source-quality qualifier ("of spells", "of black
+        // or red spells your opponents control") is not expressible by
+        // `CantBeTargeted { who }`; fail closed rather than emit a blanket mode.
+        if crate::parser::oracle_keyword::is_source_qualified_cant_be_targeted(tp.lower) {
+            return Some(cant_be_targeted_gap(subject, &text));
+        }
+        // CR 702.18a / CR 702.11b / CR 109.5: Descriptive targeting prohibition.
+        if let Some(scope) = crate::parser::oracle_keyword::classify_cant_be_targeted(tp.lower) {
+            let Some(affected) = subject else {
+                return Some(cant_be_targeted_gap(None, &text));
+            };
+            let who = match scope {
+                crate::parser::oracle_keyword::CantBeTargetedScope::OpponentsOnly => {
+                    crate::types::statics::ProhibitionScope::Opponents
+                }
+                crate::parser::oracle_keyword::CantBeTargetedScope::AnyPlayer => {
+                    crate::types::statics::ProhibitionScope::AllPlayers
+                }
+            };
+            return Some(
+                StaticDefinition::new(StaticMode::CantBeTargeted { who })
+                    .affected(affected)
+                    .description(text.to_string()),
+            );
+        }
     }
 
     // --- "~ can't be sacrificed" (CR 701.21) ---
