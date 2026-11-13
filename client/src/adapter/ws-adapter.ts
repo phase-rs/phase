@@ -2540,9 +2540,6 @@ export class WebSocketAdapter implements EngineAdapter {
     // Set while an unconfirmed attachment waits for its setup receipt: a frame
     // the candidate receives then is the server's answer to that setup.
     let noteSetupAnswer: (() => void) | null = null;
-    // A confirmed candidate's buffer exceeded its budget before the buffering
-    // handler was replaced (see the handler): the continuation cuts it off.
-    let backlogOverflowed = false;
     const failUnwrittenSetup = (message: string) => {
       if (this.initialFallbackActive()) {
         this.failInitialFallback(initialFallbackFailure());
@@ -2633,22 +2630,15 @@ export class WebSocketAdapter implements EngineAdapter {
         const parsed = confirmation?.observe("game", event.data);
         if (parsed !== undefined) {
           parsedSetupFrames.set(event, parsed);
-          bufferBudget.waive(event.data);
           return;
         }
         // The buffer's own bound: the codec releases its receive charge once
         // this handler has the frame, and the text stays retained here until
         // the drain, so a peer that never settles the setup is cut off by size.
-        // It stays in force for as long as this buffering handler is installed:
-        // through the confirmation, the handoff callbacks and the drain.
+        if (confirmation !== null && confirmation.current !== null) return;
         if (bufferBudget.admit(event.data)) return;
-        if (confirmation !== null && confirmation.current === null) {
+        if (confirmation !== null) {
           confirmation.overflow();
-        } else if (confirmation !== null) {
-          // Past the confirmation the continuation owns the cutoff (it may not
-          // have resumed yet): the excess frame is not retained or replayed.
-          setupMessages?.pop();
-          backlogOverflowed = true;
         } else if (this.initialFallbackActive()) {
           this.failInitialFallback(initialFallbackFailure());
         } else {
@@ -2931,9 +2921,6 @@ export class WebSocketAdapter implements EngineAdapter {
       };
       // Disposal already retired the incumbent and every owned request.
       if (this.disposed) return;
-      // An over-budget backlog delivered right behind the positive bootstrap,
-      // before this continuation resumed, is the same overflow as before it.
-      if (unconfirmed === null && backlogOverflowed) unconfirmed = "overflow";
       if (unconfirmed !== null) {
         // Ownership of the seat is unknown: retire the incumbent (and settle
         // its requests); the candidate is retired by the `finally` below. A
@@ -3003,7 +2990,6 @@ export class WebSocketAdapter implements EngineAdapter {
         // its own reply, which must follow every already-admitted frame.
         for (let index = 0; index < messages.length; index++) {
           if (this.disposed || this.ws !== socket.ws || this.stateCodecPreparation !== preparation) return;
-          if (backlogOverflowed) break;
           // The buffered frames are the server's answers, which the merge base
           // delivered to the live socket handler. A throw there does not undo a
           // committed attachment: it is reported as an uncaught error (as a raw
@@ -3026,15 +3012,6 @@ export class WebSocketAdapter implements EngineAdapter {
         }
       }
       if (this.disposed || this.ws !== socket.ws || this.stateCodecPreparation !== preparation) return;
-      if (backlogOverflowed) {
-        // The budget was exceeded during the handoff callbacks or the drain, on
-        // the adopted socket: it is cut off as a transport loss, through the
-        // close owner, which settles its requests and hands the retry on.
-        const onClose = socket.ws.onclose as (() => void) | null;
-        closeSocket();
-        onClose?.();
-        return;
-      }
       setupMessages = null;
       socket.ws.onmessage = handleSocketMessage;
       retained = !this.disposed && this.ws === socket.ws

@@ -1278,9 +1278,6 @@ export class ServerDraftAdapter implements EngineAdapter {
       // Set while an unconfirmed attachment waits for its setup receipt: a
       // frame the candidate receives then is the server's answer to that setup.
       let noteSetupAnswer: (() => void) | null = null;
-      // A confirmed candidate's buffer exceeded its budget before the buffering
-      // handler was replaced (see the handler): the continuation cuts it off.
-      let backlogOverflowed = false;
       sourceSocket.onmessage = (event) => {
         setupMessages.push(event);
         if (noteSetupAnswer !== null) {
@@ -1298,22 +1295,15 @@ export class ServerDraftAdapter implements EngineAdapter {
         const parsed = confirmation?.observe("draft", event.data);
         if (parsed !== undefined) {
           parsedSetupFrames.set(event, parsed);
-          bufferBudget.waive(event.data);
           return;
         }
         // The buffer's own bound: the codec releases its receive charge once
         // this handler has the frame, and the text stays retained here until
         // the drain, so a peer that never settles the setup is cut off by size.
-        // It stays in force for as long as this buffering handler is installed:
-        // through the confirmation, the handoff callbacks and the drain.
+        if (confirmation !== null && confirmation.current !== null) return;
         if (bufferBudget.admit(event.data)) return;
-        if (confirmation !== null && confirmation.current === null) {
+        if (confirmation !== null) {
           confirmation.overflow();
-        } else if (confirmation !== null) {
-          // Past the confirmation the continuation owns the cutoff (it may not
-          // have resumed yet): the excess frame is not retained or replayed.
-          setupMessages.pop();
-          backlogOverflowed = true;
         } else if (this.unfinishedAttachment === attachment) {
           this.cancelAttachment(new AdapterError(
             "WS_CLOSED", "The server sent too much before the setup was confirmed", true,
@@ -1511,9 +1501,6 @@ export class ServerDraftAdapter implements EngineAdapter {
         }
         throw new AdapterError("WS_CLOSED", "Failed to send setup frame", true);
       }
-      // An over-budget backlog delivered right behind the confirming frame,
-      // before this continuation resumed, is the same overflow as before it.
-      if (unconfirmed === null && backlogOverflowed) unconfirmed = "overflow";
       if (unconfirmed !== null) {
         // Ownership of the seat is unknown: retire the incumbent (settling its
         // work) and the candidate. A close or an abort has already settled the
@@ -1593,7 +1580,6 @@ export class ServerDraftAdapter implements EngineAdapter {
       // replies are drained in wire order.
       for (let index = 0; index < setupMessages.length; index++) {
         if (!this.sockets.has(sourceSocket)) return;
-        if (backlogOverflowed) break;
         // The buffered frames are the server's answers, which the merge base
         // delivered to the live socket handler. A throw there, or a frame that
         // does not parse, does not undo a committed attachment: it is reported
@@ -1621,11 +1607,6 @@ export class ServerDraftAdapter implements EngineAdapter {
         }
       }
       if (!this.sockets.has(sourceSocket)) return;
-      if (backlogOverflowed) {
-        // The budget was exceeded during the handoff callbacks or the drain:
-        // the attachment fails and its candidate is retired (the catch below).
-        throw new AdapterError("WS_CLOSED", "The server sent too much during the attachment handoff", true);
-      }
       sourceSocket.onmessage = handleMessage;
       // Drained: release the admitted frames (and their parsed envelopes).
       setupMessages.length = 0;
