@@ -3619,6 +3619,12 @@ pub struct LatchedBatchedTrigger {
     pub definition_ref: TriggerDefinitionRef,
     pub definition: TriggerDefinition,
     pub observations: Vec<LatchedTriggerObservation>,
+    /// CR 603.10a + CR 800.4a: set when the source left the game with its owner
+    /// while the action was paused and a surviving player controlled it. The
+    /// ability triggered for the occurrences the action had completed by then,
+    /// and can trigger for nothing that happens after its source is gone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completed_occurrences_only: Option<Vec<CollectedZoneChange>>,
 }
 
 impl LatchedBatchedTrigger {
@@ -3635,7 +3641,17 @@ impl LatchedBatchedTrigger {
                 observation_time,
                 source_context,
             }],
+            completed_occurrences_only: None,
         }
+    }
+
+    /// Whether this latched ability can still trigger for `event`.
+    pub fn applies_to(&self, event: &GameEvent) -> bool {
+        self.completed_occurrences_only
+            .as_ref()
+            .is_none_or(|completed| {
+                CollectedZoneChange::of(event).is_some_and(|key| completed.contains(&key))
+            })
     }
 
     pub fn source_context_at(
@@ -4262,22 +4278,41 @@ impl LogicalZoneChangeGroup {
         player: PlayerId,
         held_by_child: &[CollectedZoneChange],
     ) {
-        let retained_latch = |latch: &LatchedBatchedTrigger| {
-            !latch
-                .observations
-                .iter()
-                .any(|observation| observation.source_context.lki.controller == player)
-        };
-        self.immediately_before_batched_triggers
-            .retain(retained_latch);
-        self.immediately_after_batched_triggers
-            .retain(retained_latch);
         let completed: Vec<CollectedZoneChange> = self
             .all_origin_occurrences
             .iter()
             .filter_map(|occurrence| CollectedZoneChange::of(&occurrence.event))
             .chain(held_by_child.iter().copied())
             .collect();
+        // CR 603.3a + CR 800.4d: a latch the leaver controlled is retired. One a
+        // survivor controlled whose source leaves with its owner keeps the
+        // occurrences already completed and can trigger for no later one.
+        let retained_latch = |latch: &mut LatchedBatchedTrigger| {
+            if latch
+                .observations
+                .iter()
+                .any(|observation| observation.source_context.lki.controller == player)
+            {
+                return false;
+            }
+            if latch
+                .observations
+                .iter()
+                .any(|observation| observation.source_context.lki.owner == player)
+            {
+                if completed.is_empty() {
+                    return false;
+                }
+                latch
+                    .completed_occurrences_only
+                    .get_or_insert_with(|| completed.clone());
+            }
+            true
+        };
+        self.immediately_before_batched_triggers
+            .retain_mut(retained_latch);
+        self.immediately_after_batched_triggers
+            .retain_mut(retained_latch);
         self.immediately_before_suppress_triggers
             .retain_mut(|suppress| {
                 if suppress.source_context.lki.owner != player {

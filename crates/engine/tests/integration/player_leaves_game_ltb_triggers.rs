@@ -1300,3 +1300,91 @@ fn a_loss_and_a_death_in_one_state_based_action_event_trigger_one_or_more_once()
     assert_eq!(triggers_from(&runner, imp), 1);
     assert!(runner.state().deferred_triggers.is_empty());
 }
+
+/// CR 603.10a + CR 800.4a: a departed observer cannot trigger for an event that
+/// happens after it left. P0 controls P2's Twilight Diviner ("Whenever one or
+/// more other creatures you control enter, if they entered or were cast from a
+/// graveyard, create a token that's a copy of one of them.") through Turn
+/// Against, controls Grizzly Bears, and has Phyrexian Metamorph as the only
+/// creature card in a graveyard. P0 casts Rise of the Dark Realms ("Put all
+/// creature cards from all graveyards onto the battlefield under your
+/// control."); the Metamorph's optional copy replacement pauses the move before
+/// anything has entered. P2 concedes at that prompt, and the Diviner leaves the
+/// game with its owner. P0 then has the Metamorph enter: nothing had entered
+/// while the Diviner was there, so the Diviner does not trigger.
+#[test]
+fn a_departed_observer_does_not_trigger_for_an_entry_after_it_left() {
+    let db = shared_card_db().expect("integration card fixture must load");
+    let mut scenario = GameScenario::new_n_player(3, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    let diviner = scenario.add_real_card(P2, "Twilight Diviner", Zone::Battlefield, db);
+    scenario.add_real_card(P0, "Grizzly Bears", Zone::Battlefield, db);
+    let metamorph = scenario.add_real_card(P0, "Phyrexian Metamorph", Zone::Graveyard, db);
+    let turn_against = scenario.add_real_card(P0, "Turn Against", Zone::Hand, db);
+    let rise = scenario.add_real_card(P0, "Rise of the Dark Realms", Zone::Hand, db);
+    let mut pool = red_mana(5);
+    pool.extend((0..9).map(|_| ManaUnit::new(ManaType::Black, ObjectId(0), false, vec![])));
+    scenario.with_mana_pool(P0, pool);
+    scenario.with_library_top(P0, &["Forest", "Forest", "Forest"]);
+    let mut runner = scenario.build();
+    runner.cast(turn_against).target_object(diviner).resolve();
+    assert_eq!(runner.state().objects[&diviner].controller, P0);
+
+    runner.cast(rise).commit();
+    for _ in 0..4 {
+        if !matches!(runner.state().waiting_for, WaitingFor::Priority { .. }) {
+            break;
+        }
+        runner
+            .act(GameAction::PassPriority)
+            .expect("priority passes while Rise of the Dark Realms resolves");
+    }
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::ReplacementChoice { player: P0, .. }
+        ),
+        "reach guard: the Metamorph's copy replacement pauses the move: {:?}",
+        runner.state().waiting_for
+    );
+    assert_eq!(zone(&runner, metamorph), Zone::Graveyard);
+
+    runner
+        .act(GameAction::Concede { player_id: P2 })
+        .expect("P2 concedes");
+    assert_eq!(zone(&runner, diviner), Zone::Exile);
+
+    for _ in 0..6 {
+        match runner.state().waiting_for.clone() {
+            WaitingFor::ReplacementChoice { .. } => {
+                runner
+                    .act(GameAction::ChooseReplacement { index: 0 })
+                    .expect("P0 has the Metamorph enter as a copy");
+            }
+            WaitingFor::CopyTargetChoice { valid_targets, .. } => {
+                runner
+                    .act(GameAction::ChooseTarget {
+                        target: Some(engine::types::ability::TargetRef::Object(valid_targets[0])),
+                    })
+                    .expect("P0 copies the Bears");
+            }
+            WaitingFor::Priority { .. } | WaitingFor::OrderTriggers { .. } => break,
+            other => panic!("unexpected prompt while the Metamorph enters: {other:?}"),
+        }
+    }
+    assert_eq!(zone(&runner, metamorph), Zone::Battlefield);
+    let queued = runner
+        .state()
+        .pending_trigger_order
+        .iter()
+        .flat_map(|order| order.groups.iter())
+        .flat_map(|group| group.triggers.iter())
+        .chain(runner.state().deferred_triggers.iter())
+        .filter(|context| context.pending.source_id == diviner)
+        .count();
+    assert_eq!(
+        queued + triggers_from(&runner, diviner),
+        0,
+        "the Diviner had left before anything entered"
+    );
+}

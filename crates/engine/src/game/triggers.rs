@@ -5154,6 +5154,11 @@ fn collect_latched_batched_zone_triggers(
         };
         let mut admitted = Vec::new();
         for event in all_events {
+            // CR 603.10a: a latch whose source left with its owner triggers only
+            // for the occurrences completed before that.
+            if !latched.applies_to(event) {
+                continue;
+            }
             let observation_time = trigger_observation_time(&latched.definition, event);
             let Some(source_context) = latched.source_context_at(observation_time) else {
                 continue;

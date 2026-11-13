@@ -505,6 +505,7 @@ pub(crate) fn move_merged_permanent_on_leave(
     )
 }
 
+#[allow(clippy::too_many_arguments)] // main's placement pair plus the announcing owner link.
 pub(crate) fn move_merged_permanent_for_parent(
     state: &mut GameState,
     merged_id: ObjectId,
