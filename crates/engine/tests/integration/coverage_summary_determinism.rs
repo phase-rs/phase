@@ -8,7 +8,6 @@ use flate2::read::GzDecoder;
 use serde::Serialize;
 
 fn load() -> CardDatabase {
-    // Regeneration requires scripts/gen-test-fixture.py and gzip -9 -n.
     CardDatabase::from_export_reader(GzDecoder::new(
         &include_bytes!("../fixtures/integration_cards.json.gz")[..],
     ))
