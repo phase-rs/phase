@@ -2317,6 +2317,20 @@ pub(crate) fn departed_draw_settles_with_parked_payment(
         })
 }
 
+/// CR 104.3a + CR 118.12: retire a parked unless payment whose reconciliation
+/// with a departure failed (`engine::reconcile_parked_unless_payment_after_departure`).
+/// Its replacement choice, the draw in flight and the owner go together, and
+/// the active player (or the next player still in the game, CR 800.4j) gets
+/// the priority window: the payment is neither completed nor failed, as a
+/// staged payment's failed recovery is retired
+/// (`payment_transaction::abandon_failed_recovery`).
+pub(crate) fn retire_unreconcilable_parked_unless_payment(state: &mut GameState) {
+    state.pending_replacement = None;
+    super::replacement::abandon_post_replacement_continuation(state);
+    state.pending_cost_move_resume = None;
+    set_active_priority(state);
+}
+
 /// CR 117.2e + CR 800.4a: whether a parked unless payment has lost the prompt
 /// it waited on: no replacement choice is parked for it. Under a Priority
 /// result that is a payment a departure interrupted (the choice left with its

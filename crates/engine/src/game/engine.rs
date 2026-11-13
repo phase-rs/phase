@@ -1972,6 +1972,36 @@ fn reconcile_parked_unless_payment_after_departure(
     {
         return Ok(false);
     }
+    // CR 104.3a + CR 118.12: the reconciliation is all or nothing. When it
+    // fails (a settled replacement's result the engine cannot represent, as
+    // Words of Worship's gain at the life limit once the departed player's
+    // competing effect is gone), nothing of it is kept, and the payment is
+    // retired on the departed board instead of being left parked on a prompt
+    // whose every answer fails the same way: the departure stands, and the
+    // game returns to a priority window a player can act in.
+    let departed = state.clone();
+    let published = result.events.len();
+    let moved = advance_parked_unless_payment_after_departure(state, result, scan_from);
+    if moved.is_err() || boundary_life_change_failure(state).is_some() {
+        tracing::debug!(
+            error = ?moved.err(),
+            "a parked unless payment could not be reconciled after a concession; it is retired"
+        );
+        *state = departed;
+        result.events.truncate(published);
+        engine_payment_choices::retire_unreconcilable_parked_unless_payment(state);
+        result.waiting_for = state.waiting_for.clone();
+        return Ok(true);
+    }
+    moved
+}
+
+/// The reconciliation proper; see [`reconcile_parked_unless_payment_after_departure`].
+fn advance_parked_unless_payment_after_departure(
+    state: &mut GameState,
+    result: &mut ActionResult,
+    scan_from: usize,
+) -> Result<bool, EngineError> {
     let stale_prompt = engine_payment_choices::draw_payment_is_parked(state)
         && state
             .pending_replacement
