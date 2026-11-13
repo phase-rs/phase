@@ -37,7 +37,8 @@ fn control_effect_controllers(runner: &GameRunner, id: ObjectId) -> Vec<PlayerId
 /// Bears owned by P3 under P1's base control are taken by P2 with Ray of Command; P1 optionally
 /// concedes; on the next turn P0 exchanges the Totem for the Bears. Returns (Totem control-effect
 /// controllers, Bears control-effect controllers, `ControllerChanged` count, the Totem's
-/// `ExchangeControl` resolved).
+/// `ExchangeControl` resolved). The Bears revert to the departed P1 only because expiring control
+/// effects do not yet exile them (CR 800.4c); once they do, this route closes.
 fn exchange_after_temporary_control(
     p1_concedes: bool,
 ) -> (Vec<PlayerId>, Vec<PlayerId>, usize, bool) {
