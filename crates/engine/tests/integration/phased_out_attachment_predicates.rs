@@ -22,7 +22,7 @@ const FIREBREATHING: &str =
 const BONESPLITTER: &str = "Equipped creature gets +2/+0.\nEquip {1}";
 const SYR_GWYN: &str = "Vigilance, menace\nWhenever an equipped creature you control attacks, you draw a card and you lose 1 life.\nEquipment you control have equip Knight {0}.";
 const HALVAR: &str = "Creatures you control that are enchanted or equipped have double strike.\nAt the beginning of each combat, you may attach target Aura or Equipment attached to a creature you control to target creature you control.";
-const ARTILLERY_ENTHUSIAST: &str = "Modified creatures you control have menace. (Equipment, Auras you control, and counters are modifications.)\nWhen Artillery Enthusiast enters, you may discard a card. If you do, seek a card with mana value equal to that card's mana value. (To seek a card, put one at random from your library into your hand.)";
+const ENVOY_OF_THE_ANCESTORS: &str = "Outlast {W} ({W}, {T}: Put a +1/+1 counter on this creature. Outlast only as a sorcery.)\nModified creatures you control have lifelink. (Equipment, Auras you control, and counters are modifications.)";
 const KOLL: &str = "Whenever another nontoken creature you control dies, if it was enchanted or equipped, return it to its owner's hand.\nCreature tokens you control that are enchanted or equipped get +1/+1.";
 
 fn add_firebreathing(scenario: &mut GameScenario, controller: PlayerId) -> ObjectId {
@@ -174,16 +174,16 @@ fn has_any_attachment_of_ignores_phased_out_aura() {
 
 #[test]
 fn modified_ignores_phased_out_aura() {
-    let enthusiast = |phased| {
+    let envoy = |phased| {
         enchanted_bears_has_keyword(
-            "Artillery Enthusiast",
-            ARTILLERY_ENTHUSIAST,
-            Keyword::Menace,
+            "Envoy of the Ancestors",
+            ENVOY_OF_THE_ANCESTORS,
+            Keyword::Lifelink,
             phased,
         )
     };
-    assert!(enthusiast(false));
-    assert!(!enthusiast(true));
+    assert!(envoy(false));
+    assert!(!envoy(true));
 }
 
 fn bolted_enchanted_bears_zone_under_koll(phased: bool) -> Zone {
