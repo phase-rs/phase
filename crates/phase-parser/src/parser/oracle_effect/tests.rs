@@ -47202,10 +47202,10 @@ fn teferi_minus_twelve_resolution_choice_is_explicitly_unsupported() {
         minus_twelve.effect
     );
     let mut node = Some(minus_twelve);
-    let mut unimplemented = 0;
+    let mut gaps: Vec<(&str, &str)> = Vec::new();
     while let Some(ability) = node {
-        if matches!(&*ability.effect, Effect::Unimplemented { .. }) {
-            unimplemented += 1;
+        if let Effect::Unimplemented { name, description } = &*ability.effect {
+            gaps.push((name.as_str(), description.as_deref().unwrap_or("")));
         }
         assert!(
             !matches!(
@@ -47217,10 +47217,20 @@ fn teferi_minus_twelve_resolution_choice_is_explicitly_unsupported() {
         );
         node = ability.sub_ability.as_deref();
     }
+    assert_eq!(gaps.len(), 2, "two clause-specific gaps: {gaps:?}");
+    assert_eq!(gaps[0].0, "target-opponent permanent choice");
     assert!(
-        unimplemented >= 2,
-        "both the choice and the following shuffle must stay explicit gaps: {:?}",
-        minus_twelve
+        gaps[0]
+            .1
+            .contains("chooses a permanent they control and returns it"),
+        "first gap names the choice-and-return: {gaps:?}"
+    );
+    assert_eq!(gaps[1].0, "shuffle");
+    assert!(
+        gaps[1]
+            .1
+            .contains("shuffle each nonland permanent they control"),
+        "second gap names the quantified shuffle: {gaps:?}"
     );
 }
 
