@@ -63,8 +63,12 @@ added_lines_for() {
 # error, when the match itself fails.
 added_lines_grep() {
     local nums
-    nums=$(set -o pipefail; printf '%s\n' "$1" | cut -f2- | sed 's/^/+/' | grep -nE -- "$2" | cut -d: -f1) \
-        || [ $? -eq 1 ] || { echo "ERROR: added-line match failed for ERE '$2'; no verdict." >&2; return 2; }
+    # Only grep's no-match status is expected; preserve failures in other stages.
+    nums=$(
+        set -o pipefail
+        printf '%s\n' "$1" | cut -f2- | sed 's/^/+/' |
+            { grep -nE -- "$2" || [ "$?" -eq 1 ]; } | cut -d: -f1
+    ) || { echo "ERROR: added-line match failed for ERE '$2'; no verdict." >&2; return 2; }
     [ -n "$nums" ] || return 0
     awk 'NR == FNR { want[$1]; next } FNR in want' <(printf '%s\n' "$nums") <(printf '%s\n' "$1")
 }

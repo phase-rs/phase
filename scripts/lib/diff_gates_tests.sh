@@ -82,6 +82,13 @@ run_gate() {
     OUT="$(cd "$FIXTURE" && "$BASH_BIN" "scripts/$GATE" "$BASE" 2>&1)"
     RC=$?
 }
+# Fail only the matcher preprocessor, before grep receives any input.
+run_gate_with_match_preprocessing_failure() {
+    put bin/sed '#!/bin/bash' \
+        'if [ "${1:-}" = "s/^/+/" ]; then exit 1; fi' 'exec /usr/bin/sed "$@"'
+    chmod +x "$FIXTURE/bin/sed"
+    PATH="$FIXTURE/bin:$PATH" run_gate
+}
 # $1 = label. Run after a planted violation is committed past BASE.
 expect_base_refused() {
     local real="$BASE"
@@ -260,6 +267,16 @@ run_gate
 expect_rc 'parser: an unannotated duplicate of an annotated line fails' 1
 expect_listed 'parser: only the unannotated duplicate is listed' "  crates/engine/src/parser/clause.rs:
     $P_FROZEN"
+parser_fixture
+put crates/engine/src/parser/clause.rs 'use super::*;' 'fn other() {}'
+commit_base
+put crates/engine/src/parser/clause.rs 'use super::*;' "$P_FROZEN" "$P_PLANTED" "$P_ALLOW" "$P_FROZEN" 'fn other() {}'
+commit 'plant a bare duplicate before an annotated duplicate'
+run_gate
+expect_rc 'parser: a bare copy before an annotated duplicate fails' 1
+expect_listed 'parser: neither first nor last duplicate supplies both exemptions' "  crates/engine/src/parser/clause.rs:
+    $P_FROZEN
+    $P_PLANTED"
 # Distinct texts above and below the annotation make its direction visible.
 parser_fixture
 put crates/engine/src/parser/clause.rs 'use super::*;' 'fn other() {}'
@@ -306,6 +323,14 @@ commit planted
 run_gate
 expect_rc 'parser: a failed pattern match fails the gate with no verdict' 2
 expect_out 'parser: the failed match is reported' 'added-line match failed'
+parser_fixture
+put crates/engine/src/parser/clause.rs 'use super::*;' 'fn other() {}'
+commit_base
+put crates/engine/src/parser/clause.rs 'use super::*;' "$P_PLANTED" 'fn other() {}'
+commit planted
+run_gate_with_match_preprocessing_failure
+expect_rc 'parser: a failed preprocessor fails the gate with no verdict' 2
+expect_out 'parser: the failed preprocessor is reported' 'added-line match failed'
 
 # --- check-engine-authorities.sh: family (A) -------------------------------
 # Sections (B0)-(D) are full-tree censuses of the real engine. Here they are
@@ -420,6 +445,16 @@ run_gate
 expect_rc 'authority: an unannotated duplicate of an annotated line fails' 1
 expect_listed 'authority: only the unannotated duplicate is listed' "  crates/engine/src/game/combat.rs:
     $A_FROZEN"
+authority_fixture
+put crates/engine/src/game/combat.rs 'use super::*;' 'fn other() {}'
+commit_base
+put crates/engine/src/game/combat.rs 'use super::*;' "$A_FROZEN" "$A_PLANTED" "$A_ALLOW" "$A_FROZEN" 'fn other() {}'
+commit 'plant a bare duplicate before an annotated duplicate'
+run_gate
+expect_rc 'authority: a bare copy before an annotated duplicate fails' 1
+expect_listed 'authority: neither first nor last duplicate supplies both exemptions' "  crates/engine/src/game/combat.rs:
+    $A_FROZEN
+    $A_PLANTED"
 # Distinct texts above and below the annotation make its direction visible.
 authority_fixture
 put crates/engine/src/game/combat.rs 'use super::*;' 'fn other() {}'
@@ -465,6 +500,14 @@ commit planted
 run_gate
 expect_rc 'authority: a failed pattern match fails the gate with no verdict' 2
 expect_out 'authority: the failed match is reported' 'added-line match failed'
+authority_fixture
+put crates/engine/src/game/combat.rs 'use super::*;' 'fn other() {}'
+commit_base
+put crates/engine/src/game/combat.rs 'use super::*;' "$A_PLANTED" 'fn other() {}'
+commit planted
+run_gate_with_match_preprocessing_failure
+expect_rc 'authority: a failed preprocessor fails the gate with no verdict' 2
+expect_out 'authority: the failed preprocessor is reported' 'added-line match failed'
 
 # --- check-test-card-data-load.sh -------------------------------------------
 C_FROZEN='    let db = CardDatabase::from_export(Path::new("../../client/public/card-data.json"));'
