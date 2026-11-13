@@ -23626,20 +23626,6 @@ mod stage2_injector_tests {
         );
     }
 
-    /// CR 732.2a + CR 732.2c: the FIXED-CYCLE caller on a take that COMMITS. Vito, Thorn of
-    /// the Dusk Rose and Exquisite Blood in a three-player game ([`committed_drain_take`]):
-    /// each life gain makes exactly one drain, so the cascade holds a constant depth and, with the pinned opponent far
-    /// from lethal, no seat leaves. The drive reaches the settle arm and returns `Recurred`
-    /// ("The game advances to the last proposed ending point").
-    ///
-    /// What the visit count shows, and what it does not: the 256 damage rows are INJECTED
-    /// history unrelated to the take, and the loop is life drain, so no retained carrier
-    /// holds a damage event. The bound is therefore zero, and it discriminates one thing:
-    /// a committed take must not rank or scan damage history nobody in the loop can read
-    /// (a strict boundary alone walks it). The counter is reset BEFORE the boundary is
-    /// built. A take whose own carrier reads a damage recipient pays one journal pass per
-    /// projection; that cost is measured by
-    /// `loop_relational_take_boundary_defers_history_through_first_settle`, not here.
     /// The committed take of the three-player drain rig, primed to a settle beat INSIDE the
     /// cascade: the printed Vito, Thorn of the Dusk Rose ("Whenever you gain life, target
     /// opponent loses that much life.") and Exquisite Blood ("Whenever an opponent loses life,
@@ -23739,6 +23725,20 @@ mod stage2_injector_tests {
         (committed, template, cap, dealer, recipient)
     }
 
+    /// CR 732.2a + CR 732.2c: the FIXED-CYCLE caller on a take that COMMITS. Vito, Thorn of
+    /// the Dusk Rose and Exquisite Blood in a three-player game ([`committed_drain_take`]):
+    /// each life gain makes exactly one drain, so the cascade holds a constant depth and, with
+    /// the pinned opponent far from lethal, no seat leaves. The drive reaches the settle arm and returns `Recurred`
+    /// ("The game advances to the last proposed ending point").
+    ///
+    /// What the visit count shows, and what it does not: the 256 damage rows are INJECTED
+    /// history unrelated to the take, and the loop is life drain, so no retained carrier
+    /// holds a damage event. The bound is therefore zero, and it discriminates one thing:
+    /// a committed take must not rank or scan damage history nobody in the loop can read
+    /// (a strict boundary alone walks it). The counter is reset BEFORE the boundary is
+    /// built. A take whose own carrier reads a damage recipient pays one journal pass per
+    /// projection; that cost is measured by
+    /// `loop_relational_take_boundary_defers_history_through_first_settle`, not here.
     #[test]
     fn drive_one_cycle_recurs_on_a_committed_take_without_reading_unrelated_damage_history() {
         use crate::types::game_state::LOOP_DAMAGE_JOURNAL_VISITS;

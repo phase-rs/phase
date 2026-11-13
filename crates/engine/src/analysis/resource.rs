@@ -5474,11 +5474,11 @@ fn stack_pin_liveness(state: &mut GameState) -> Vec<Vec<bool>> {
 /// that sacrificed itself to pay for its own ability, or a trigger whose source left, say) is
 /// the same position and is not refused.
 ///
-/// Stacks of the same depth are compared entry by entry from the bottom. Stacks of different
-/// depth (a growth cover's frames) are compared by the set of liveness patterns their entries
-/// hold, so a grown copy of an entry already present does not count as a difference, while an
-/// entry whose pins are live in one frame and superseded in the other, with no counterpart in
-/// the other frame, does.
+/// Stacks of the same depth are compared entry by entry from the bottom. For a growth cover's
+/// frames, whose stacks differ in depth, the prior stack's liveness patterns must embed in the
+/// current stack's, bottom up, with the extra entries growth of a pattern the prior stack
+/// already holds (the embedding `stack_covers` requires of the entries themselves); a pair that
+/// does not embed is refused.
 fn stack_pins_superseded_apart(prior: &mut GameState, current: &mut GameState) -> bool {
     let (prior, current) = (stack_pin_liveness(prior), stack_pin_liveness(current));
     let superseded = |frame: &[Vec<bool>]| frame.iter().flatten().any(|live| !live);
@@ -5488,8 +5488,12 @@ fn stack_pins_superseded_apart(prior: &mut GameState, current: &mut GameState) -
     if prior.len() == current.len() {
         return prior != current;
     }
-    let patterns = |frame: Vec<Vec<bool>>| frame.into_iter().collect::<BTreeSet<_>>();
-    patterns(prior) != patterns(current)
+    let mut remaining = current.iter();
+    let embeds = prior
+        .iter()
+        .all(|pattern| remaining.any(|candidate| candidate == pattern));
+    let grown_from_present = current.iter().all(|pattern| prior.contains(pattern));
+    !(embeds && grown_from_present)
 }
 
 /// A condition of [`loop_states_cover_modulo_fodder_growth`] that refused a frame pair, in the
@@ -10930,6 +10934,39 @@ mod tests {
         assert!(
             !stack_pins_superseded_apart(&mut stale_one, &mut stale_one_again),
             "reach guard: equal depth, the same superseded entry"
+        );
+    }
+
+    /// CR 400.7: the veto aligns frames of different depth by embedding, so a flip of one
+    /// entry's pins is refused even when another entry of the same pattern keeps the set of
+    /// patterns equal. Prior stack `[A live, B superseded]`, current `[A superseded, B live,
+    /// B' live]`: A acted before and would now do nothing.
+    #[test]
+    fn loop_stack_pin_veto_refuses_a_flip_hidden_by_a_grown_stack() {
+        let entry = |live: u64, pin: u64| {
+            pinned_frame(PinCarrier::FiredDestroy, live, pin).stack[0].clone()
+        };
+        let stack_of = |entries: [(u64, u64); 3], len: usize| {
+            let mut frame = pinned_frame(PinCarrier::FiredDestroy, 8, 8);
+            frame.stack.clear();
+            for (live, pin) in entries.into_iter().take(len) {
+                frame.stack.push_back(entry(live, pin));
+            }
+            frame
+        };
+        // The liveness of an entry is read against the one recipient the frame holds (live
+        // incarnation 8): a pin of 8 is live, a pin of 5 is superseded.
+        let mut prior = stack_of([(8, 8), (8, 5), (8, 5)], 2);
+        let mut flipped = stack_of([(8, 5), (8, 8), (8, 8)], 3);
+        assert!(
+            stack_pins_superseded_apart(&mut prior, &mut flipped),
+            "a live entry superseded and a superseded one live, hidden by a grown copy"
+        );
+        let mut prior = stack_of([(8, 8), (8, 5), (8, 5)], 2);
+        let mut grown = stack_of([(8, 8), (8, 5), (8, 5)], 3);
+        assert!(
+            !stack_pins_superseded_apart(&mut prior, &mut grown),
+            "reach guard: the same entries grown by a copy of a present pattern"
         );
     }
 

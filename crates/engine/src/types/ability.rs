@@ -4819,7 +4819,9 @@ impl ResolvedAbility {
     /// is the object the visitor ranks it against; on a node of another source
     /// it is erased with the rest of the provenance. A node an earlier pass
     /// already normalized (its source erased to the null object) keeps what that
-    /// pass kept, so normalizing twice is normalizing once.
+    /// pass kept, so normalizing twice is normalizing once. A node whose source is a
+    /// different object than the carrier's (an ability built for another source) loses
+    /// the stamp with the rest of its provenance.
     pub(crate) fn clear_source_provenance_for_loop_recursive(&mut self, carrier_source: ObjectId) {
         let kept = (self.source_id == carrier_source || self.source_id == ObjectId(0))
             .then_some(self.source_incarnation)
@@ -4859,9 +4861,11 @@ impl ResolvedAbility {
     ///
     /// - `trigger_source`, `trigger_definition_ref` and
     ///   `context.triggering_spell` are erased with `source_id` by
-    ///   `clear_source_provenance` (the source's liveness rides
-    ///   `source_incarnation`, which a trigger stamps from the same captured
-    ///   identity);
+    ///   `clear_source_provenance`. `trigger_source` holds the incarnation a
+    ///   trigger OBSERVED its source at (`identity.reference`); what survives is
+    ///   `source_incarnation`, which the stack push stamps from the live object,
+    ///   so a dies or leaves trigger whose source left is told apart from one
+    ///   whose source is live only by that stamp, not by the observed one;
     /// - the last-known-information snapshots and the creation lookback event
     ///   are walked by their own visitors
     ///   ([`Self::for_each_loop_lki_snapshot_mut`],
