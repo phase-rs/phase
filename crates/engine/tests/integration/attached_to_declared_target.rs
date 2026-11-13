@@ -41,7 +41,10 @@ use engine::types::ability::{
 use engine::types::actions::GameAction;
 use engine::types::events::GameEvent;
 use engine::types::game_state::CastPaymentMode;
-use engine::types::game_state::{PersistedGameState, PersistedRestoreFinalization, WaitingFor};
+use engine::types::game_state::{
+    ActivationTargetFact, AnnouncedTargetFactConflict, PersistedGameState, PersistedRestoreError,
+    PersistedRestoreFinalization, WaitingFor,
+};
 use engine::types::identifiers::ObjectId;
 use engine::types::interaction::{
     InteractionOpportunityResponse, InteractionPreviewRequest, InteractionPreviewStatus,
@@ -1032,6 +1035,182 @@ fn fiery_annihilation_rider_applies_to_any_death_this_turn_and_expires() {
         b.runner.state().objects[&b.victim].zone,
         Zone::Graveyard,
         "the rider expired with the turn"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The announced-target latch across a save/restore (CR 601.2c, CR 701.3a)
+// ---------------------------------------------------------------------------
+
+/// P1's 2/7 `victim` carries Equipment A, P1's `other` carries nothing; P0 holds
+/// Fiery Annihilation at a payable {1} and one Mountain. Manual payment is what
+/// parks the cast AFTER CR 601.2c has declared `[victim, Equipment A]` and
+/// BEFORE CR 601.2h pays — the window a save/restore has to survive.
+fn payable_fiery_board() -> (GameRunner, ObjectId, ObjectId, ObjectId, ObjectId) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let victim = scenario.add_creature(P1, "Victim", 2, 7).id();
+    let other = scenario.add_creature(P1, "Other", 2, 7).id();
+    let eq_a = equipment(&mut scenario, P1, "Equipment A");
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Fiery Annihilation", true, FIERY_ANNIHILATION)
+        .with_mana_cost(ManaCost::generic(1))
+        .id();
+    scenario.add_basic_land(P0, engine::types::mana::ManaColor::Red);
+    let mut runner = scenario.build();
+    attach::attach_to(runner.state_mut(), eq_a, victim);
+    (runner, spell, victim, eq_a, other)
+}
+
+/// CR 601.2c + CR 601.2h: cast `spell` naming `targets` in declaration order
+/// with manual payment, and assert the cast is parked waiting for that payment.
+fn park_cast_at_mana_payment(runner: &mut GameRunner, spell: ObjectId, targets: &[ObjectId]) {
+    let card_id = runner.state().objects[&spell].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: spell,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Manual,
+        })
+        .expect("cast");
+    for (slot, target) in targets.iter().enumerate() {
+        assert!(
+            matches!(
+                runner.state().waiting_for,
+                WaitingFor::TargetSelection { .. }
+            ),
+            "reach guard: slot {slot} must be open, got {:?}",
+            runner.state().waiting_for
+        );
+        runner
+            .act(GameAction::ChooseTarget {
+                target: Some(TargetRef::Object(*target)),
+            })
+            .unwrap_or_else(|e| panic!("slot {slot}: {target:?} must be admitted: {e:?}"));
+    }
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::ManaPayment { .. }),
+        "reach guard: parked for manual payment, got {:?}",
+        runner.state().waiting_for
+    );
+}
+
+/// [`restore`] that reports the refusal instead of panicking on it.
+fn try_restore(json: &str) -> Result<GameRunner, PersistedRestoreError> {
+    let state = serde_json::from_str::<PersistedGameState>(json)
+        .expect("persisted state decodes")
+        .prepare_for_restore(PersistedRestoreFinalization::DeferUntilRehydrated)?;
+    Ok(GameRunner::from_state(
+        state
+            .finalize_after_rehydration(|_| Ok(()))
+            .expect("restored state is publishable"),
+    ))
+}
+
+/// CR 601.2c + CR 701.3a + CR 608.2h: Fiery Annihilation's Equipment slot is
+/// narrowed to Equipment attached to the announced creature, so the announced
+/// cast carries a legal `[creature, Equipment]` declaration. A save taken
+/// while that cast waits for manual payment must restore unchanged and resume
+/// with the SAME two announced targets — the announcement is a recorded fact,
+/// and a fact the save does not state must not read as a failed predicate.
+#[test]
+fn fiery_annihilation_announced_equipment_target_survives_a_save_at_manual_payment() {
+    let (mut runner, spell, victim, eq_a, _other) = payable_fiery_board();
+    park_cast_at_mana_payment(&mut runner, spell, &[victim, eq_a]);
+
+    let save = persisted(&runner).to_string();
+    let mut restored = try_restore(&save).expect("the unchanged save restores");
+    assert!(
+        matches!(restored.state().waiting_for, WaitingFor::ManaPayment { .. }),
+        "the restored cast resumes at its own payment: {:?}",
+        restored.state().waiting_for
+    );
+    // The announcement survived: both declared slots still name the objects the
+    // caster chose, in declaration order.
+    let pending = restored
+        .state()
+        .pending_cast
+        .as_deref()
+        .expect("the restored cast is still parked");
+    let announced = engine::game::ability_utils::declared_targets_in_chain(&pending.ability);
+    assert_eq!(
+        announced,
+        vec![TargetRef::Object(victim), TargetRef::Object(eq_a)],
+        "the Equipment is still its announced target"
+    );
+    restored.act(GameAction::PassPriority).expect("pay");
+    restored.advance_until_stack_empty();
+    let state = restored.state();
+    assert_eq!(
+        state.objects[&eq_a].zone,
+        Zone::Exile,
+        "the announced Equipment target resolved"
+    );
+    assert_eq!(
+        state.objects[&victim].damage_marked, 5,
+        "the first sentence resolved through the restored cast too"
+    );
+}
+
+/// CR 601.2c + CR 115.1 + CR 701.3a: the discriminating twin. The untouched save
+/// above is admitted; the SAME save with the Equipment fact's recorded host
+/// repointed at a creature the declaration never named is refused, because the
+/// declaring slot requires the target to be attached to the announced creature.
+/// The unrecorded-fact allowance is therefore not a blanket acceptance: only an
+/// axis the payload does not state goes unchecked.
+#[test]
+fn fiery_annihilation_save_whose_recorded_host_contradicts_the_slot_is_refused() {
+    let (mut runner, spell, victim, eq_a, other) = payable_fiery_board();
+    park_cast_at_mana_payment(&mut runner, spell, &[victim, eq_a]);
+    try_restore(&persisted(&runner).to_string()).expect("the untouched save is admitted");
+
+    let mut forged = runner.state().clone();
+    let pending = forged
+        .pending_cast
+        .as_deref_mut()
+        .expect("the cast is parked");
+    let facts = pending
+        .committed_target_facts
+        .as_mut()
+        .expect("the latch is written");
+    let mut rewrote = false;
+    for fact in facts.iter_mut() {
+        if let ActivationTargetFact::Object {
+            id, attached_to, ..
+        } = fact
+        {
+            if *id == eq_a {
+                // Reach guard: the capture recorded the host the caster saw, so
+                // the refusal below is attributable to the forgery and not to a
+                // relation that was never captured.
+                assert_eq!(
+                    *attached_to,
+                    Some(AttachTarget::Object(victim)),
+                    "reach guard: the latch records the host the caster saw"
+                );
+                *attached_to = Some(AttachTarget::Object(other));
+                rewrote = true;
+            }
+        }
+    }
+    assert!(
+        rewrote,
+        "reach guard: the latch carries the Equipment's fact"
+    );
+    let json = serde_json::to_string(&PersistedGameState::capture(forged)).expect("serializes");
+    let refused = match try_restore(&json) {
+        Ok(_) => panic!("a recorded host the declaration never chose must be refused"),
+        Err(error) => error,
+    };
+    assert_eq!(
+        refused,
+        PersistedRestoreError::ContradictoryAnnouncedTargetFacts {
+            spell_object_id: spell,
+            reason: AnnouncedTargetFactConflict::SnapshotContradictsDeclaredFilter {
+                target: TargetRef::Object(eq_a),
+            },
+        }
     );
 }
 

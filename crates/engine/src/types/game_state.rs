@@ -1792,6 +1792,33 @@ pub enum ActivationTargetFact {
         /// `Known(false)`.
         #[serde(default, skip_serializing_if = "CapturedTokenBit::is_unknown")]
         token: CapturedTokenBit,
+        /// CR 601.2c + CR 301.5a + CR 701.3a: the object this target was
+        /// ATTACHED TO when it was announced — the OUTGOING half of the
+        /// attachment relation, captured with the commitment above.
+        ///
+        /// `LKISnapshot::attachments` states only the INCOMING half (what is
+        /// attached to the target), which is what an "enchanted permanent" slot
+        /// needs. The other direction is a target requirement of its own: Fiery
+        /// Annihilation's "Exile up to one target Equipment attached to that
+        /// creature" asks whether the CHOSEN object is attached to the object in
+        /// an earlier declared slot (CR 701.3a), and
+        /// `GameState::reject_contradictory_announced_target_facts` re-reads the
+        /// declaring slot's filter against this fact. Without the host the record
+        /// cannot answer that leaf at all, and a leaf the record cannot answer
+        /// must not be reported as a failed predicate.
+        ///
+        /// `None` is UNRECORDED, never "attached to nothing": a payload written
+        /// before this field existed states no relation, and this build omits the
+        /// field for a target that carried none, so the capture cannot tell the
+        /// two apart. The reader that refuses contradictions therefore answers
+        /// UNKNOWN for `None` (see `filter::epoch_property_answer`) instead of
+        /// reading silence as an unattachment witness. The cost is that a forged
+        /// payload may delete the field — the price of not refusing every save
+        /// written before it existed, and the same trade the combat-role leaves
+        /// make. `Some(host)` is never silent, and a host the declaration did not
+        /// name is refused.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        attached_to: Option<AttachTarget>,
     },
 }
 
@@ -19971,6 +19998,25 @@ impl GameState {
             // Sun-Crowned at five devotion, then a white permanent sacrificed for mana).
             // Refusing that drift would reject an honest save, which is the opposite of the
             // error this guard exists to catch.
+            //
+            // CR 601.2c + CR 115.1: the DECLARED-SLOT VIEW the filter evaluation reads to
+            // name the object a slot chose. A filter like "Exile up to one target Equipment
+            // attached to that creature" (Fiery Annihilation) compares the recorded target
+            // against the object announced for an EARLIER slot, and that comparison cannot be
+            // read off the fact's own snapshot — the snapshot is one target, the chain that
+            // numbered the slots is the cast. `declared_entries` IS that chain, read from the
+            // same walk the fact pairing above uses, so it is the authority for which object
+            // each slot named.
+            let declared_slot_view: Vec<Option<crate::game::targeting::DeclaredSlotBinding>> =
+                declared_entries
+                    .iter()
+                    .map(|entry| {
+                        Some(crate::game::targeting::DeclaredSlotBinding::Announced {
+                            target: entry.target.clone(),
+                            pin: entry.pin,
+                        })
+                    })
+                    .collect();
             for (slot, entry) in declared_entries.iter().enumerate() {
                 // CR 601.2c: the fact THIS slot produced, from the pairing above. A slot whose
                 // target the capture dropped has no fact to judge, and a first-match on
@@ -19985,6 +20031,7 @@ impl GameState {
                     lki,
                     zone,
                     token,
+                    attached_to,
                     ..
                 } = fact
                 else {
@@ -20022,14 +20069,17 @@ impl GameState {
                         recipient_id: None,
                         scoped_iteration_player: None,
                         triggering_object: None,
-                        declared_slot_view: None,
+                        declared_slot_view: Some(&declared_slot_view),
                         granting_object: None,
                     };
                     // CR 109.2a + CR 115.9: judge the filter against the RECORDED
-                    // ANNOUNCEMENT — the zone it was announced in and the token bit it then
-                    // held. Evaluating through the projection that omits both would refuse an
-                    // untouched save whose filter names a zone ("target creature card from a
-                    // graveyard") or reads a token leaf.
+                    // ANNOUNCEMENT — the zone it was announced in, the token bit it then
+                    // held, and the object it was then attached to. Evaluating through the
+                    // projection that omits them would refuse an untouched save whose filter
+                    // names a zone ("target creature card from a graveyard"), reads a token
+                    // leaf, or requires the target to be attached to an earlier slot's object
+                    // ("Exile up to one target Equipment attached to that creature" — Fiery
+                    // Annihilation).
                     //
                     // CR 508.1k + CR 601.2c: only a DEFINITE failure contradicts the
                     // declaration. The announcement records no combat role — an `LKISnapshot`
@@ -20044,11 +20094,14 @@ impl GameState {
                     if crate::game::filter::matches_target_filter_on_recorded_announcement(
                         state,
                         *id,
-                        lki,
+                        crate::game::filter::AnnouncedTargetRecord {
+                            lki,
+                            zone: zone.zone(),
+                            token: token.bit(),
+                            attached_to: *attached_to,
+                        },
                         filter,
                         &context,
-                        zone.zone(),
-                        token.bit(),
                     ) == Some(false)
                     {
                         return Err(PersistedRestoreError::ContradictoryAnnouncedTargetFacts {

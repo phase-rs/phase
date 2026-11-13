@@ -63231,6 +63231,7 @@ fn an_activation_journal_row_round_trips() {
                 token: crate::types::game_state::CapturedTokenBit::Known(
                     state.objects[&target].is_token,
                 ),
+                attached_to: None,
             },
         ],
     };
@@ -64805,11 +64806,14 @@ fn announced_target_fact_states_the_attachment_relation_the_caster_saw() {
         crate::game::filter::matches_target_filter_on_recorded_announcement(
             &state,
             enchanted,
-            enchanted_lki,
+            crate::game::filter::AnnouncedTargetRecord {
+                lki: enchanted_lki,
+                zone: enchanted_zone.zone(),
+                token: enchanted_token.bit(),
+                attached_to: None,
+            },
             &filter,
             &ctx,
-            enchanted_zone.zone(),
-            enchanted_token.bit(),
         ),
         Some(true),
         "CR 303.4b: the Aura-enchanted target satisfies 'enchanted permanent' on its own record"
@@ -64818,13 +64822,99 @@ fn announced_target_fact_states_the_attachment_relation_the_caster_saw() {
         crate::game::filter::matches_target_filter_on_recorded_announcement(
             &state,
             bare,
-            bare_lki,
+            crate::game::filter::AnnouncedTargetRecord {
+                lki: bare_lki,
+                zone: bare_zone.zone(),
+                token: bare_token.bit(),
+                attached_to: None,
+            },
             &filter,
             &ctx,
-            bare_zone.zone(),
-            bare_token.bit(),
         ),
         Some(false),
         "a recorded empty attachment set is a DEFINITE answer, not an unrecorded one"
+    );
+}
+
+/// CR 601.2c + CR 301.5a + CR 701.3a: the announcement also records the target's
+/// OUTGOING attachment relation — the object it was attached to — and a record
+/// answers a declared-slot attachment requirement from it. Fiery Annihilation's
+/// "Exile up to one target Equipment attached to that creature" is the printed
+/// shape; this test exercises the leaf, not that card.
+#[test]
+fn announced_target_fact_states_the_host_relation_a_declared_slot_requires() {
+    use crate::game::filter::{matches_target_filter_on_recorded_announcement, FilterContext};
+    use crate::game::game_object::AttachTarget;
+    use crate::game::targeting::DeclaredSlotBinding;
+    use crate::types::ability::{AttachmentReferent, FilterProp, TypedFilter};
+    use crate::types::game_state::ActivationTargetFact;
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let host = scenario.add_creature(P1, "Host", 2, 7).id();
+    let other = scenario.add_creature(P1, "Other", 2, 7).id();
+    let gear = scenario.add_creature(P1, "Gear", 0, 0).id();
+    let mut state = scenario.state;
+    attach_aura(&mut state, gear, host);
+
+    let facts = capture_target_facts(&state, &[TargetRef::Object(gear)]);
+    let ActivationTargetFact::Object {
+        lki,
+        zone,
+        token,
+        attached_to,
+        ..
+    } = &facts[0]
+    else {
+        panic!("reach: the announced target produced an object fact");
+    };
+    assert_eq!(
+        *attached_to,
+        Some(AttachTarget::Object(host)),
+        "CR 701.3a: the fact records the object the target was attached to"
+    );
+
+    // CR 601.2c: the leaf's requirement — the target is attached to the object
+    // announced for slot 0.
+    let filter = TargetFilter::Typed(TypedFilter {
+        type_filters: Vec::new(),
+        controller: None,
+        properties: vec![FilterProp::AttachedTo {
+            to: AttachmentReferent::DeclaredTarget { slot: 0 },
+        }],
+    });
+    let ask = |slot_object: ObjectId, recorded_host| {
+        let view = [Some(DeclaredSlotBinding::Announced {
+            target: TargetRef::Object(slot_object),
+            pin: None,
+        })];
+        let ctx = FilterContext::neutral().with_declared_slot_view(&view);
+        matches_target_filter_on_recorded_announcement(
+            &state,
+            gear,
+            crate::game::filter::AnnouncedTargetRecord {
+                lki,
+                zone: zone.zone(),
+                token: token.bit(),
+                attached_to: recorded_host,
+            },
+            &filter,
+            &ctx,
+        )
+    };
+    assert_eq!(
+        ask(host, *attached_to),
+        Some(true),
+        "the recorded host IS the object the slot named"
+    );
+    assert_eq!(
+        ask(other, *attached_to),
+        Some(false),
+        "a recorded host the slot does not name is a DEFINITE contradiction, not an unrecorded axis"
+    );
+    assert_eq!(
+        ask(host, None),
+        None,
+        "a payload that states no relation is UNRECORDED, so the guard has nothing to check"
     );
 }

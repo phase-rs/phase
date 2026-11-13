@@ -4895,9 +4895,22 @@ fn redact_target_facts(
     hidden_ids: &HashSet<ObjectId>,
 ) {
     for fact in facts.iter_mut() {
-        if let crate::types::game_state::ActivationTargetFact::Object { id, lki, .. } = fact {
+        if let crate::types::game_state::ActivationTargetFact::Object {
+            id,
+            lki,
+            attached_to,
+            ..
+        } = fact
+        {
             if hidden_ids.contains(id) {
                 redact_lki_snapshot(lki);
+                // The target's OUTGOING attachment relation is part of the same
+                // cast-time record the snapshot carries, and it names a permanent
+                // the hidden card was attached to. Blanked with the snapshot for
+                // the same reason: a hidden object's relations are as much its
+                // cast-time record as its characteristics are. (The `id` is the
+                // documented carve-out above and is left in place.)
+                *attached_to = None;
             }
         }
     }
@@ -5657,6 +5670,7 @@ mod tests {
             lki: Box::new(state.objects[&id].snapshot_public_characteristics()),
             zone: crate::types::game_state::AnnouncedTargetZone::Known(state.objects[&id].zone),
             token: crate::types::game_state::CapturedTokenBit::Known(state.objects[&id].is_token),
+            attached_to: None,
         };
 
         // (1) A fully-hidden cast naming a hidden target.
@@ -5726,6 +5740,7 @@ mod tests {
                 token: crate::types::game_state::CapturedTokenBit::Known(
                     state.objects[&hidden_target].is_token,
                 ),
+                attached_to: None,
             },
             "reach: the authoritative record still carries the hidden target's snapshot"
         );
@@ -11246,6 +11261,7 @@ mod tests {
                 token: crate::types::game_state::CapturedTokenBit::Known(
                     state.objects[&hidden].is_token,
                 ),
+                attached_to: None,
             },
         ]);
         state.pending_cast = Some(pending);

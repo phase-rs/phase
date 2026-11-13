@@ -2074,6 +2074,7 @@ fn build_all_direct_numeric_maps_state() -> GameState {
                     lki: Box::new(second_lki.clone()),
                     zone: AnnouncedTargetZone::Known(engine::types::zones::Zone::Battlefield),
                     token: CapturedTokenBit::Known(false),
+                    attached_to: None,
                 }],
             }]),
         ),
@@ -3437,6 +3438,7 @@ fn cast_record_targets_round_trip_and_stay_backward_compatible() {
                 }),
                 zone: AnnouncedTargetZone::Known(engine::types::zones::Zone::Battlefield),
                 token: CapturedTokenBit::Known(false),
+                attached_to: None,
             },
             // The player axis carries no snapshot at all.
             ActivationTargetFact::Player(PlayerId(1)),
@@ -3495,6 +3497,7 @@ fn cast_record_targets_round_trip_and_stay_backward_compatible() {
         lki: lki.clone(),
         zone: AnnouncedTargetZone::Known(engine::types::zones::Zone::Graveyard),
         token: CapturedTokenBit::Known(false),
+        attached_to: None,
     };
     let graveyard_json = serde_json::to_string(&graveyard_fact).expect("fact serializes");
     assert!(
@@ -3529,6 +3532,7 @@ fn cast_record_targets_round_trip_and_stay_backward_compatible() {
             lki: lki.clone(),
             zone: AnnouncedTargetZone::Known(engine::types::zones::Zone::Battlefield),
             token: CapturedTokenBit::Known(false),
+            attached_to: None,
         },
         "silence is a different value from a stated battlefield"
     );
@@ -3543,6 +3547,7 @@ fn cast_record_targets_round_trip_and_stay_backward_compatible() {
         lki: lki.clone(),
         zone: AnnouncedTargetZone::Known(engine::types::zones::Zone::Battlefield),
         token: CapturedTokenBit::Known(true),
+        attached_to: None,
     };
     let token_json = serde_json::to_string(&token_fact).expect("fact serializes");
     assert!(
@@ -3577,6 +3582,7 @@ fn cast_record_targets_round_trip_and_stay_backward_compatible() {
             lki: lki.clone(),
             zone: AnnouncedTargetZone::Known(engine::types::zones::Zone::Battlefield),
             token: CapturedTokenBit::Known(false),
+            attached_to: None,
         },
         "silence is a different value from a stated `false`"
     );

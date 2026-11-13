@@ -32,9 +32,9 @@ use crate::types::card_type::{CoreType, Supertype};
 use crate::types::counter::{CounterMatch, CounterType};
 use crate::types::events::EventObjectSnapshot;
 use crate::types::game_state::{
-    ActivationTargetFact, AnnouncedTargetZone, AttackDeclarationRecord, CapturedTokenBit,
-    CounterAddedRecord, DamageRecord, GameState, LKISnapshot, ManaSpentSourceSnapshot,
-    SpellCastRecord, StackEntryKind, TriggerSourceContext, ZoneChangeRecord,
+    ActivationTargetFact, AttackDeclarationRecord, CounterAddedRecord, DamageRecord, GameState,
+    LKISnapshot, ManaSpentSourceSnapshot, SpellCastRecord, StackEntryKind, TriggerSourceContext,
+    ZoneChangeRecord,
 };
 use crate::types::identifiers::{CardId, ObjectId, ObjectIncarnationRef, TriggeringObjectRef};
 use crate::types::keywords::Keyword;
@@ -2251,6 +2251,63 @@ fn attached_to_declared_slot(
         candidate,
         candidate_id,
     )
+}
+
+/// CR 601.2c + CR 115.1: the OBJECT a declared-target view binds to `slot`, if
+/// any. The view is indexed by declared-slot number, and a player target or an
+/// empty/illegal slot (`None`) binds no object.
+///
+/// Only the identity half of the view read. The live attachment arm
+/// ([`attached_to_declared_slot`]) needs more than that — it distinguishes an
+/// ELECTED target from an ANNOUNCED one and carries the announcement pin, because
+/// it compares the candidate against the object holding the id NOW — while a
+/// RECORD comparison needs only the id, since both sides of it are
+/// announcement-time statements.
+fn declared_slot_object(
+    view: &[Option<crate::game::targeting::DeclaredSlotBinding>],
+    slot: usize,
+) -> Option<ObjectId> {
+    match view.get(slot)?.as_ref()? {
+        crate::game::targeting::DeclaredSlotBinding::Announced {
+            target: TargetRef::Object(id),
+            ..
+        }
+        | crate::game::targeting::DeclaredSlotBinding::Elected(TargetRef::Object(id)) => Some(*id),
+        crate::game::targeting::DeclaredSlotBinding::Announced {
+            target: TargetRef::Player(_),
+            ..
+        }
+        | crate::game::targeting::DeclaredSlotBinding::Elected(TargetRef::Player(_)) => None,
+    }
+}
+
+/// CR 601.2c + CR 301.5a + CR 701.3a: the RECORD's answer to "was this object
+/// attached to the object announced for `slot`?".
+///
+/// Three-valued, because two independent captures have to line up before the
+/// question is answerable at all:
+///
+/// * `record.attached_to` is the OUTGOING attachment relation the record states.
+///   `None` is not "attached to nothing": a departure record taken before the
+///   relation was captured, or a projected announcement from a payload that
+///   predates the field, states no relation at all.
+/// * `source.declared_slot_view` is which object the slot named. A record is a
+///   projection of ONE permanent and never carries the chain that numbered the
+///   slot, so without the view the record cannot say what it is being compared
+///   against.
+///
+/// `None` therefore means "not answerable from this record", and only the caller
+/// decides whether that is a contradiction — `epoch_property_answer` reports it as
+/// UNRECORDED, while the two-valued record walk collapses it to "does not hold",
+/// which is exactly what it answered before either capture existed.
+fn recorded_attachment_host_answer(
+    record: &ZoneChangeRecord,
+    source: &SourceContext<'_>,
+    slot: usize,
+) -> Option<bool> {
+    let host = record.attached_to?;
+    let referent = declared_slot_object(source.declared_slot_view?, slot)?;
+    Some(host.as_object() == Some(referent))
 }
 
 /// CR 701.3a + CR 603.7c + CR 608.2h: `FilterProp::AttachedTo { to: Host { filter } }`
@@ -6229,12 +6286,14 @@ pub fn matches_target_filter_on_damage_record_source(
 /// same question: did the object have the requested characteristics at the last
 /// moment it existed in the relevant public zone?
 /// CR 109.2a + CR 115.9: evaluate a target filter against a RECORDED ANNOUNCEMENT — the
-/// snapshot plus the zone and token bit that announcement itself captured.
+/// snapshot plus the zone, token bit and outgoing attachment relation that announcement
+/// itself captured.
 ///
-/// [`matches_target_filter_on_lki_snapshot`] projects neither of those, so a filter naming
-/// a zone ("target creature card from a graveyard") or reading a token leaf is judged
-/// against silence and refuses an honest record. The announcement that produced the fact
-/// stated both, so they are the projection a restore boundary must use.
+/// [`matches_target_filter_on_lki_snapshot`] projects none of those, so a filter naming
+/// a zone ("target creature card from a graveyard"), reading a token leaf, or asking what
+/// the target was attached to is judged against silence and refuses an honest record. The
+/// announcement that produced the fact stated all three, so they are the projection a
+/// restore boundary must use.
 ///
 /// Three-valued, because the answer belongs to the reader (the same contract as
 /// [`zone_change_filter_answer_with_epoch`]). `Some(true)` / `Some(false)` are the
@@ -6243,33 +6302,61 @@ pub fn matches_target_filter_on_damage_record_source(
 /// unrecorded axes are combat role — an `LKISnapshot` snapshots no attacking/blocking
 /// state (CR 508.1k, CR 509.1g), and the projected record's zeroed
 /// `ZoneChangeCombatStatus` is the record type's required value rather than an
-/// observation — and the subject's TARGET RELATIONSHIPS (CR 115.9a/b/c): what the
+/// observation — the subject's TARGET RELATIONSHIPS (CR 115.9a/b/c): what the
 /// announced target itself targeted, and how many, is a fact of ITS announcement,
 /// which neither the `LKISnapshot` nor the projected `ZoneChangeRecord` carries. A
 /// reader asking "does this filter hold?" collapses `None` to no match; the restore
 /// guard (`PersistedGameState`'s announced-target check) refuses only a definite
 /// `Some(false)`, because a missing recorded fact is not a failed predicate.
+/// CR 115.9 + CR 601.2c: the announcement-time facts a committed target's record
+/// states, as ONE value.
+///
+/// The snapshot alone cannot answer the declaring slot's filter: the zone the
+/// target was announced in (CR 109.2), the token bit it then held (CR 111.1,
+/// CR 115.9) and the object it was then attached to (CR 301.5a, CR 701.3a) are
+/// captured BESIDE it, and each one turns a silence into a definite answer. They
+/// travel together because they are one statement about one announcement — a
+/// call site that supplies one of them from somewhere else is describing a
+/// different moment, which is the defect each of them exists to prevent.
+#[derive(Clone, Copy)]
+pub struct AnnouncedTargetRecord<'a> {
+    /// The target's public characteristics as they were when it was committed.
+    pub lki: &'a LKISnapshot,
+    /// CR 601.2c + CR 109.2: the zone the target occupied at announcement.
+    pub zone: Option<Zone>,
+    /// CR 111.1 + CR 115.9 + CR 730.2c + CR 730.2d: the token bit it held then.
+    pub token: Option<bool>,
+    /// CR 601.2c + CR 301.5a + CR 701.3a: the object it was attached to then.
+    /// `None` states no relation — never "attached to nothing".
+    pub attached_to: Option<crate::game::game_object::AttachTarget>,
+}
+
+impl AnnouncedTargetRecord<'_> {
+    fn projection(self) -> LkiProjection {
+        LkiProjection {
+            entered_incarnation: None,
+            captured_incarnation: None,
+            snapshot_zone: self.zone,
+            captured_token: self.token,
+            recorded_host: self.attached_to,
+        }
+    }
+}
+
 pub fn matches_target_filter_on_recorded_announcement(
     state: &GameState,
     object_id: ObjectId,
-    lki: &LKISnapshot,
+    record: AnnouncedTargetRecord<'_>,
     filter: &TargetFilter,
     ctx: &FilterContext<'_>,
-    announced_zone: Option<Zone>,
-    captured_token: Option<bool>,
 ) -> Option<bool> {
     lki_snapshot_filter_answer(
         state,
         object_id,
-        lki,
+        record.lki,
         filter,
         ctx,
-        LkiProjection {
-            entered_incarnation: None,
-            captured_incarnation: None,
-            snapshot_zone: announced_zone,
-            captured_token,
-        },
+        record.projection(),
     )
 }
 
@@ -6291,6 +6378,7 @@ pub fn matches_target_filter_on_lki_snapshot(
             captured_incarnation: None,
             snapshot_zone: None,
             captured_token: None,
+            recorded_host: None,
         },
     )
 }
@@ -6316,31 +6404,30 @@ pub fn matches_target_filter_on_lki_snapshot(
 /// cannot hold on an unstated zone rather than assuming the battlefield.
 /// `PersistedRestoreError::UnknownActivationTargetZone` refuses such a save, so
 /// only an in-memory carrier ever reaches this arm.
+///
+/// The announcement's facts travel as one [`AnnouncedTargetRecord`], exactly as
+/// the three-valued door takes them: the zone, the token bit and the outgoing
+/// host relation are one statement about one announcement.
 pub(crate) fn matches_target_filter_on_announced_lki(
     state: &GameState,
     object_id: ObjectId,
-    lki: &LKISnapshot,
-    zone: AnnouncedTargetZone,
-    token: CapturedTokenBit,
+    record: AnnouncedTargetRecord<'_>,
     filter: &TargetFilter,
     ctx: &FilterContext<'_>,
 ) -> bool {
+    // CR 111.1 + CR 115.9 + CR 730.2c + CR 730.2d: a committed target is read as
+    // it was WHEN IT WAS SELECTED, and the announcement's own captures are that
+    // reading's answers. `None` on any axis (a record that states no zone, bit or
+    // host) leaves its leaf UNKNOWN rather than reconstructed, and this
+    // two-valued door then answers "does not hold" exactly as it did before that
+    // axis was captured.
     matches_target_filter_on_lki_snapshot_with_incarnation(
         state,
         object_id,
-        lki,
+        record.lki,
         filter,
         ctx,
-        LkiProjection {
-            entered_incarnation: None,
-            captured_incarnation: None,
-            snapshot_zone: zone.zone(),
-            // CR 111.1 + CR 115.9 + CR 730.2c + CR 730.2d: a committed target is
-            // read as it was WHEN IT WAS SELECTED, and the announcement's own
-            // token capture is that reading's answer. `None` (a record that states
-            // no bit) leaves the leaf UNKNOWN rather than reconstructed.
-            captured_token: token.bit(),
-        },
+        record.projection(),
     )
 }
 
@@ -6406,7 +6493,19 @@ pub(crate) fn declared_target_fact_matches(
             lki,
             zone,
             token,
-        } => matches_target_filter_on_announced_lki(state, *id, lki, *zone, *token, filter, ctx),
+            attached_to,
+        } => matches_target_filter_on_announced_lki(
+            state,
+            *id,
+            AnnouncedTargetRecord {
+                lki,
+                zone: zone.zone(),
+                token: token.bit(),
+                attached_to: *attached_to,
+            },
+            filter,
+            ctx,
+        ),
         // CR 115.9b: a targeted player is still in the game unless they left it;
         // the player axis has no snapshot to read.
         ActivationTargetFact::Player(player) => player_matches_target_filter_in_state(
@@ -6465,6 +6564,7 @@ pub fn matches_target_filter_on_departed_battlefield_lki(
             // NAME the epoch uses
             // [`matches_target_filter_on_departed_lki_at_incarnation`] instead.
             captured_token: cached_departed_token(state, object_id),
+            recorded_host: None,
         },
     )
 }
@@ -6544,6 +6644,7 @@ pub(crate) fn matches_target_filter_on_stated_lki(
             captured_incarnation: None,
             snapshot_zone,
             captured_token,
+            recorded_host: None,
         },
     )
 }
@@ -6586,6 +6687,7 @@ pub(crate) fn matches_target_filter_on_departed_lki_at_incarnation(
             // CR 111.1 + CR 608.2h: the bit comes from the departure capture the
             // stated incarnation wrote, not from a caller-supplied value.
             captured_token: None,
+            recorded_host: None,
         },
     )
 }
@@ -6759,12 +6861,21 @@ pub(crate) fn source_incarnation_matches_filter(
 /// epoch, when it states one. It is the authority whenever it exists: a CR 115.9
 /// selection-time reading is the announced record's captured answer, and a
 /// zone-change record states the bit for the departure it records.
+///
+/// `recorded_host` is the OUTGOING attachment relation the caller's capture
+/// STATES for this epoch (CR 601.2c + CR 301.5a + CR 701.3a) — the object the
+/// target was attached to when the record was taken. `None` means the capture
+/// states no relation: a departure snapshot that recorded none, or a payload
+/// written before the announcement fact carried the field. It is never read as
+/// "attached to nothing", because that is a claim about the record's subject
+/// which silence does not make.
 #[derive(Clone, Copy)]
 struct LkiProjection {
     entered_incarnation: Option<u64>,
     captured_incarnation: Option<u64>,
     snapshot_zone: Option<Zone>,
     captured_token: Option<bool>,
+    recorded_host: Option<crate::game::game_object::AttachTarget>,
 }
 
 /// The two-valued door over [`lki_snapshot_filter_answer`]: the caller asked
@@ -6801,6 +6912,7 @@ fn lki_snapshot_filter_answer(
         captured_incarnation,
         snapshot_zone,
         captured_token,
+        recorded_host,
     } = projection;
     let record = ZoneChangeRecord {
         object_id,
@@ -6848,7 +6960,14 @@ fn lki_snapshot_filter_answer(
         // current-pairing arms fail closed regardless.
         block_pairs: Vec::new(),
         co_departed: Vec::new(),
-        attached_to: None,
+        // CR 601.2c + CR 301.5a + CR 701.3a: the OUTGOING attachment relation as
+        // the announcement captured it. This is the axis a declared-slot
+        // attachment requirement is read on ("Exile up to one target Equipment
+        // attached to that creature"), and it is the ANNOUNCEMENT's statement, not
+        // the live board's — the object that holds this storage id now may be a
+        // different object (CR 400.7), and even the same one may have been
+        // unattached by the cost the cast is still paying.
+        attached_to: recorded_host,
         entered_incarnation,
         turn_zone_change_index: 0,
         recorded_turn_number: 0,
@@ -7215,6 +7334,7 @@ pub fn matches_zone_change_event_object_filter(
                     // A departed battlefield subject is a look-back over the
                     // snapshot the record holds, not a selection-time reading.
                     captured_token: None,
+                    recorded_host: None,
                 },
             )
         } else {
@@ -8332,7 +8452,7 @@ fn zone_change_filter_answer_with_epoch(
         // one of the capture's own; a filter with none of them keeps the
         // one-pass record walk below.
         TargetFilter::Typed(typed) if typed.properties.iter().any(epoch_answerable_property) => {
-            let source_ctx = source_context_from_filter(
+            let mut source_ctx = source_context_from_filter(
                 state,
                 ctx.source_id,
                 ctx.source_controller,
@@ -8342,6 +8462,10 @@ fn zone_change_filter_answer_with_epoch(
                 ctx.triggering_object,
                 ctx.granting_object,
             );
+            // CR 601.2c + CR 608.2b: the same declared-target view the live-object
+            // door threads through, so a declared-slot attachment leaf can name
+            // the object its slot chose (see `epoch_property_answer`).
+            source_ctx.declared_slot_view = ctx.declared_slot_view;
             // CR 205.1 + CR 115.9: the property axis and the REMAINING axes
             // (types, controller) are one conjunction, and each is answered the
             // way its own evidence allows. The property axis is answered
@@ -8445,6 +8569,18 @@ fn epoch_answerable_property(prop: &FilterProp) -> bool {
         | FilterProp::Targets { .. }
         | FilterProp::TargetsOnly { .. }
         | FilterProp::HasSingleTarget => true,
+        // CR 601.2c + CR 301.5a + CR 701.3a: the outgoing attachment relation of
+        // an announced target. An `LKISnapshot` states only the INCOMING half
+        // (`attachments`), so the record walk's fail-closed answer would report
+        // "not attached to the declared slot's object" as a fact it never
+        // observed — the defect that refused a legal Fiery Annihilation ("Exile
+        // up to one target Equipment attached to that creature") parked at manual
+        // payment. The fact's own capture carries the relation, so the leaf is
+        // answered from the projection and only falls back to UNKNOWN when the
+        // payload predates that capture.
+        FilterProp::AttachedTo {
+            to: AttachmentReferent::DeclaredTarget { .. },
+        } => true,
         FilterProp::AnyOf { props } => props.iter().any(epoch_answerable_property),
         FilterProp::Not { prop } => epoch_answerable_property(prop),
         _ => false,
@@ -8508,6 +8644,29 @@ fn epoch_property_answer(
         FilterProp::Targets { .. }
         | FilterProp::TargetsOnly { .. }
         | FilterProp::HasSingleTarget => None,
+        // CR 601.2c + CR 301.5a + CR 701.3a: was this target ATTACHED to the
+        // object announced for `slot`? Two independent captures have to line up
+        // before it is answerable at all, so the record can be in three states:
+        //
+        // * it states a host AND the caller says which object the slot named —
+        //   compare the two. This is the definite half, and it is what refuses a
+        //   save whose recorded relation names something the declaration never
+        //   chose.
+        // * it states no host — UNKNOWN. Silence is not an unattachment witness: a
+        //   payload written before the fact carried the field states no relation
+        //   at all, and this build omits the field for a target that carried none,
+        //   so an honest save is not refused on an axis it never recorded.
+        // * the caller states no declared-slot view — UNKNOWN too: the record is a
+        //   projection of ONE target and never carries the chain that numbered the
+        //   slot, so it cannot say what it is being compared against.
+        //
+        // The projection is read as recorded and never re-derived: the object
+        // holding that storage id now may be a different object (CR 400.7), and
+        // the cost the cast is still paying may have unattached it since
+        // (CR 701.3d) — neither is a fact about the announcement.
+        FilterProp::AttachedTo {
+            to: AttachmentReferent::DeclaredTarget { slot },
+        } => recorded_attachment_host_answer(record, source, *slot),
         // Every other leaf is a definite answer from the capture.
         _ => Some(zone_change_record_matches_property(
             prop,
@@ -8614,6 +8773,15 @@ fn zone_change_filter_inner_with_epoch(
             // against `ParentTarget`) reads the same target. Every other
             // context leaves it `None`.
             source_ctx.ability_targets = ctx.ability_targets;
+            // CR 601.2c + CR 608.2b: the declared-target view reaches the
+            // record-side door exactly as it reaches the live-object door
+            // (`filter_inner_for_object`). The `AttachedTo { to:
+            // DeclaredTarget }` leaf is answered from the RECORD only when the
+            // caller also says which object the slot named — the record is a
+            // projection of one target and never carries its own chain — so the
+            // view is what lets the CR 601.2c restore guard read that relation
+            // instead of reporting silence as a failed predicate.
+            source_ctx.declared_slot_view = ctx.declared_slot_view;
 
             // CR 400.1 + CR 109.4: a zone without controllers answers the controller axis
             // for every seat reading the same container, like the live-object door.
@@ -12832,7 +13000,6 @@ fn zone_change_record_matches_property(
         | FilterProp::AttachedTo { to: AttachmentReferent::Source }
         | FilterProp::AttachedTo { to: AttachmentReferent::Recipient }
         | FilterProp::AttachedTo { to: AttachmentReferent::Player { .. } }
-        | FilterProp::AttachedTo { to: AttachmentReferent::DeclaredTarget { .. } }
         // CR 701.3a: a zone-change snapshot carries no host relation, exactly as
         // it carries none for the four referents above. Fail closed.
         | FilterProp::AttachedTo {
@@ -12845,6 +13012,21 @@ fn zone_change_record_matches_property(
         // CR 201.2: Name-matches-any-permanent is a live-battlefield predicate
         // — a zone-change snapshot cannot represent it. Fail closed.
         | FilterProp::NameMatchesAnyPermanent { .. } => false,
+
+        // CR 601.2c + CR 301.5a + CR 701.3a: the ONE attachment referent a record
+        // CAN answer, because it is a relation TO a declared slot rather than to
+        // the record's own source. `ZoneChangeRecord::attached_to` states the
+        // subject's host at the recorded moment, and the caller's declared-slot
+        // view supplies the object that slot named
+        // ([`recorded_attachment_host_answer`]); with either half missing the
+        // answer is "does not hold", exactly what this walk answered before the
+        // relation was captured. The three-valued door
+        // ([`epoch_property_answer`]) reaches this leaf first and reports a
+        // missing half as UNRECORDED rather than as a failed predicate, so the
+        // restore guard is never refused on an axis its payload never stated.
+        FilterProp::AttachedTo {
+            to: AttachmentReferent::DeclaredTarget { slot },
+        } => recorded_attachment_host_answer(record, source, *slot).is_some_and(|holds| holds),
 
         // Disjunctive composite: recurse into inner props under the same record.
         FilterProp::AnyOf { props } => props.iter().any(|p| {
@@ -14154,8 +14336,8 @@ mod tests {
     use crate::types::events::GameEvent;
     use crate::types::format::FormatConfig;
     use crate::types::game_state::{
-        AttachmentSnapshot, ExileLink, ExileLinkKind, LKISnapshot, StackEntry, StackEntryKind,
-        ZoneChangeRecord,
+        AnnouncedTargetZone, AttachmentSnapshot, CapturedTokenBit, ExileLink, ExileLinkKind,
+        LKISnapshot, StackEntry, StackEntryKind, ZoneChangeRecord,
     };
     use crate::types::identifiers::{CardId, ObjectId, ObjectIncarnationRef};
     use crate::types::keywords::Keyword;
@@ -24600,6 +24782,7 @@ mod tests {
                     captured_incarnation: None,
                     snapshot_zone: None,
                     captured_token: None,
+                    recorded_host: None,
                 },
             ),
             "the original triggering incarnation is not another object"
@@ -24616,6 +24799,7 @@ mod tests {
                     captured_incarnation: None,
                     snapshot_zone: None,
                     captured_token: None,
+                    recorded_host: None,
                 },
             ),
             "a later incarnation at the same storage id is another object"
@@ -25042,6 +25226,7 @@ mod tests {
             lki: Box::new(selected),
             zone: AnnouncedTargetZone::Known(Zone::Battlefield),
             token: crate::types::game_state::CapturedTokenBit::Unknown,
+            attached_to: None,
         };
         let history = |prop: FilterProp| {
             declared_target_facts_match(
@@ -25105,11 +25290,14 @@ mod tests {
             super::matches_target_filter_on_recorded_announcement(
                 &state,
                 target,
-                lki,
+                super::AnnouncedTargetRecord {
+                    lki,
+                    zone: Some(Zone::Battlefield),
+                    token: Some(false),
+                    attached_to: None,
+                },
                 filter,
                 &ctx,
-                Some(Zone::Battlefield),
-                Some(false),
             )
         };
         let lki = epoch_snapshot(&[], false);
@@ -25201,11 +25389,14 @@ mod tests {
             super::matches_target_filter_on_recorded_announcement(
                 &state,
                 target,
-                &lki,
+                super::AnnouncedTargetRecord {
+                    lki: &lki,
+                    zone: Some(zone),
+                    token: Some(false),
+                    attached_to: None,
+                },
                 filter,
                 &ctx,
-                Some(zone),
-                Some(false),
             )
         };
         let ability = || TargetFilter::StackAbility {
@@ -25275,11 +25466,14 @@ mod tests {
             super::matches_target_filter_on_recorded_announcement(
                 &state,
                 target,
-                &lki,
+                super::AnnouncedTargetRecord {
+                    lki: &lki,
+                    zone: Some(zone),
+                    token: Some(false),
+                    attached_to: None,
+                },
                 filter,
                 &ctx,
-                Some(zone),
-                Some(false),
             )
         };
         let permanent_you_control = || TargetFilter::Typed(TypedFilter::creature());
@@ -25394,6 +25588,7 @@ mod tests {
             lki: Box::new(selected),
             zone: AnnouncedTargetZone::Known(Zone::Battlefield),
             token: crate::types::game_state::CapturedTokenBit::Unknown,
+            attached_to: None,
         };
         let history = |filter: TargetFilter| {
             declared_target_facts_match(&state, std::slice::from_ref(&fact), &filter, &ctx)
@@ -25474,6 +25669,7 @@ mod tests {
             lki: Box::new(epoch_snapshot(&[], false)),
             zone: AnnouncedTargetZone::Known(Zone::Battlefield),
             token: crate::types::game_state::CapturedTokenBit::Unknown,
+            attached_to: None,
         };
         assert!(
             !declared_target_facts_match(
@@ -25500,6 +25696,7 @@ mod tests {
             lki: Box::new(epoch_snapshot(&[], false)),
             zone: AnnouncedTargetZone::Known(Zone::Battlefield),
             token: crate::types::game_state::CapturedTokenBit::Known(true),
+            attached_to: None,
         };
         assert!(
             declared_target_facts_match(
@@ -25520,6 +25717,7 @@ mod tests {
             lki: Box::new(epoch_snapshot(&[], false)),
             zone: AnnouncedTargetZone::Known(Zone::Battlefield),
             token: crate::types::game_state::CapturedTokenBit::Unknown,
+            attached_to: None,
         };
         assert!(
             !declared_target_facts_match(
@@ -25547,6 +25745,7 @@ mod tests {
             lki: Box::new(epoch_snapshot(&[], false)),
             zone: AnnouncedTargetZone::Known(Zone::Graveyard),
             token: crate::types::game_state::CapturedTokenBit::Unknown,
+            attached_to: None,
         };
         assert!(!declared_target_facts_match(
             &state,
@@ -25879,6 +26078,7 @@ mod tests {
             lki: Box::new(epoch_snapshot(&[], false)),
             zone: AnnouncedTargetZone::Known(Zone::Battlefield),
             token: crate::types::game_state::CapturedTokenBit::Unknown,
+            attached_to: None,
         };
         assert!(
             !declared_target_facts_match(
@@ -26028,6 +26228,7 @@ mod tests {
             lki: Box::new(named_epoch_snapshot("Soldier Token")),
             zone: AnnouncedTargetZone::Known(Zone::Battlefield),
             token: CapturedTokenBit::Known(true),
+            attached_to: None,
         };
 
         // Gemrazer mutates ON TOP: same ObjectId (CR 730.2c), nontoken from now
@@ -26063,6 +26264,7 @@ mod tests {
             lki: Box::new(named_epoch_snapshot("Gemrazer")),
             zone: AnnouncedTargetZone::Known(Zone::Battlefield),
             token: CapturedTokenBit::Known(false),
+            attached_to: None,
         };
         assert!(
             !matches(&after, prop_filter(FilterProp::Token)),
@@ -26090,6 +26292,7 @@ mod tests {
             lki: Box::new(named_epoch_snapshot("Gemrazer")),
             zone: AnnouncedTargetZone::Known(Zone::Battlefield),
             token: CapturedTokenBit::Unknown,
+            attached_to: None,
         };
         assert!(
             !matches(&unstated, prop_filter(FilterProp::Token))
@@ -26169,6 +26372,7 @@ mod tests {
             lki: Box::new(named_epoch_snapshot("Gemrazer")),
             zone: AnnouncedTargetZone::Known(Zone::Battlefield),
             token: crate::types::game_state::CapturedTokenBit::Unknown,
+            attached_to: None,
         };
         let matches = |filter: TargetFilter| {
             declared_target_facts_match(&state, std::slice::from_ref(&selected), &filter, &ctx)
@@ -26253,6 +26457,7 @@ mod tests {
                 lki: Box::new(named_epoch_snapshot("Gemrazer")),
                 zone: AnnouncedTargetZone::Known(Zone::Battlefield),
                 token,
+                attached_to: None,
             };
             declared_target_facts_match(&state, std::slice::from_ref(&fact), &filter, &ctx)
         };
@@ -26333,6 +26538,7 @@ mod tests {
             lki: Box::new(named_epoch_snapshot("Soldier Token")),
             zone: AnnouncedTargetZone::Known(Zone::Battlefield),
             token: CapturedTokenBit::Known(true),
+            attached_to: None,
         };
         // CR 514.2: the cleanup step ends "this turn" state — the journal the
         // derivation reads is one of them (`turns.rs`).
@@ -26399,6 +26605,7 @@ mod tests {
             lki: Box::new(named_epoch_snapshot("Bear")),
             zone: AnnouncedTargetZone::Known(Zone::Battlefield),
             token: CapturedTokenBit::Known(false),
+            attached_to: None,
         };
         let matches = |filter: TargetFilter| {
             declared_target_facts_match(&state, std::slice::from_ref(&fact), &filter, &ctx)
@@ -26436,6 +26643,7 @@ mod tests {
                 lki: Box::new(epoch_snapshot(&[], false)),
                 zone: AnnouncedTargetZone::Known(zone),
                 token: crate::types::game_state::CapturedTokenBit::Unknown,
+                attached_to: None,
             };
             declared_target_facts_match(&state, std::slice::from_ref(&fact), &filter, &ctx)
         };
@@ -26488,6 +26696,7 @@ mod tests {
             lki: Box::new(epoch_snapshot(&[], false)),
             zone: AnnouncedTargetZone::Known(Zone::Battlefield),
             token: crate::types::game_state::CapturedTokenBit::Unknown,
+            attached_to: None,
         };
         let matches = |filter: TargetFilter| {
             declared_target_facts_match(&state, std::slice::from_ref(&fact), &filter, &ctx)

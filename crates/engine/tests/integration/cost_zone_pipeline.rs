@@ -11764,6 +11764,7 @@ fn forged_target_fact(
         // the object's real one, not `Unknown`, so the restored-payload gate cannot be what
         // refuses it. The guard under test reads the id list, not the bit.
         token: engine::types::game_state::CapturedTokenBit::Known(object.is_token),
+        attached_to: None,
     }
 }
 

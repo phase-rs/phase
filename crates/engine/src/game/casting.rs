@@ -32167,7 +32167,9 @@ pub(crate) fn record_activation_announcement(
 /// characteristics as they were at commitment — including the attachment relation
 /// that may be the whole reason it was legal ([`capture_announced_target_lki`]) —
 /// together with the zone it occupied then (CR 109.2 needs the zone to read a bare
-/// type description as a battlefield permanent). An id absent from `state.objects`
+/// type description as a battlefield permanent) and the object it was attached to
+/// then (the OUTGOING half of the relation, which a declared-slot attachment
+/// requirement is read against). An id absent from `state.objects`
 /// (a target that has ceased — only reachable for a token) is dropped: a fact that
 /// cannot be snapshotted is not invented. CR 115.9b's "a departed target is
 /// ignored" rule belongs to the live reader in
@@ -32195,6 +32197,15 @@ pub(crate) fn capture_target_facts(
                         // bit on the same object with no zone change to record,
                         // and the zone-change journal is turn-scoped.
                         token: crate::types::game_state::CapturedTokenBit::Known(obj.is_token),
+                        // CR 601.2c + CR 301.5a + CR 701.3a: the OUTGOING
+                        // attachment relation. `LKISnapshot::attachments` records
+                        // only what is attached TO this object, which leaves a
+                        // slot that requires the target to be attached ("target
+                        // Equipment attached to that creature") with no record of
+                        // the very relation that admitted it. Captured from the
+                        // live object here, at the one moment the announcement is
+                        // still in hand.
+                        attached_to: obj.attached_to,
                     })
             }
         })

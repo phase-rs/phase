@@ -1,0 +1,7 @@
+{
+  "surfaces": [
+    "full",
+    "wire"
+  ],
+  "reason": "CR 601.2c + CR 301.5a + CR 701.3a: ActivationTargetFact::Object gains attached_to (Option<AttachTarget>), the object the target was ATTACHED TO when it was announced — the OUTGOING half of the attachment relation, which no LKISnapshot states (its attachments field records only what is attached TO the target). It serializes inside every pending cast's committed-target latch and every completed activation/cast record carried by GameState. The field is optional, defaulted, and omitted when the target carried no host, so a peer without it decodes the rest of the fact unchanged and cannot fail on its absence; what it loses is the restore chokepoint's ability to judge a declared-slot attachment requirement (\"Exile up to one target Equipment attached to that creature\" — Fiery Annihilation, and the rest of the Light of Judgment class) from the recorded announcement, so a latch whose recorded host contradicts its own declaration is admitted instead of refused. A peer reading a new payload ignores the field and keeps the legacy behaviour: the relation reads as unrecorded, never as 'attached to nothing'. Lobby, draft and directory surfaces are unchanged."
+}
