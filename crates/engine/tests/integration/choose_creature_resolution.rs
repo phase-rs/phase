@@ -3111,3 +3111,251 @@ fn final_showdown_choice_binds_the_casters_only_creature_when_the_thief_concedes
     assert!(runner.state().active_ability_continuation_frame().is_none());
     assert_resolution_settled(&runner, "Final Showdown after the thief conceded");
 }
+
+const SOULHERDER: &str = "Whenever a creature is exiled from the battlefield, put a +1/+1 counter on this creature.\nAt the beginning of your end step, you may exile another target creature you control, then return that card to the battlefield under its owner's control.";
+
+/// Answers every scry prompt by keeping the card on top and passes priority
+/// until the stack is empty.
+fn finish_through_scry(runner: &mut GameRunner) {
+    for _ in 0..12 {
+        match runner.state().waiting_for.clone() {
+            WaitingFor::Priority { .. } if runner.state().stack.is_empty() => return,
+            WaitingFor::Priority { .. } => runner.act(GameAction::PassPriority),
+            WaitingFor::ScryChoice { cards, .. } => runner.act(GameAction::SelectCards { cards }),
+            other => panic!("unexpected prompt: {other:?}"),
+        }
+        .expect("the action is accepted");
+    }
+    panic!("the resolution did not finish");
+}
+
+fn plus_one_counters(runner: &GameRunner, id: ObjectId) -> u32 {
+    runner.state().objects[&id]
+        .counters
+        .get(&CounterType::Plus1Plus1)
+        .copied()
+        .unwrap_or(0)
+}
+
+/// CR 603.2c: an ability triggers once per occurrence. SYNTHETIC spell text (no
+/// printed card has this chain; the nearest printed bare choice with an
+/// independent continuation is Final Showdown): "Choose a creature you control.
+/// Exile target creature. Scry 1." The exile queues Soulherder's trigger through
+/// the zone change's own collection; the scry then pauses the instructions the
+/// answered choice resumed. Retaining that span's triggers must not collect the
+/// exile a second time.
+#[test]
+fn zone_change_observer_triggers_once_when_the_answered_choice_pauses_again() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let soulherder = scenario
+        .add_creature_from_oracle(P0, "Soulherder", 1, 1, SOULHERDER)
+        .id();
+    let other = scenario.add_creature(P0, "Other own creature", 2, 2).id();
+    let victim = scenario.add_creature(P1, "P1 creature", 2, 2).id();
+    scenario.add_basic_land(P0, ManaColor::White);
+    scenario.add_card_to_library_top(P0, "Library card");
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(
+            P0,
+            "Synthetic choose, exile, scry",
+            false,
+            "Choose a creature you control. Exile target creature. Scry 1.",
+        )
+        .with_mana_cost(parse_mtgjson_mana_cost("{W}"))
+        .id();
+    let mut runner = scenario.build();
+    let card_id = runner.state().objects[&spell].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: spell,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .unwrap();
+    runner
+        .act(GameAction::ChooseTarget {
+            target: Some(TargetRef::Object(victim)),
+        })
+        .expect("the exile target is announced at cast");
+    pass_priority_to_prompt(&mut runner, "the creature choice");
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::ChooseFromZoneChoice { .. }
+        ),
+        "reach guard: the resolution choice is open: {:?}",
+        runner.state().waiting_for
+    );
+    runner
+        .act(GameAction::SelectCards { cards: vec![other] })
+        .unwrap();
+    assert_eq!(runner.state().objects[&victim].zone, Zone::Exile);
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::ScryChoice { .. }),
+        "reach guard: the scry is the second pause: {:?}",
+        runner.state().waiting_for
+    );
+    finish_through_scry(&mut runner);
+    assert_eq!(
+        plus_one_counters(&runner, soulherder),
+        1,
+        "Soulherder triggered exactly once for the one exile"
+    );
+}
+
+/// The departure sibling, with and without the second pause. Same SYNTHETIC
+/// text (and its prefix without the scry). P0's choice is between its own
+/// creature and one borrowed from P1; P1 concedes, the choice settles on the
+/// remaining creature, and the resumed instructions exile P2's creature.
+/// Soulherder (P2's) must trigger exactly once.
+#[test]
+fn zone_change_observer_triggers_once_when_a_concession_resumes_the_choice() {
+    for text in [
+        "Choose a creature you control. Exile target creature. Scry 1.",
+        "Choose a creature you control. Exile target creature.",
+    ] {
+        let mut scenario = GameScenario::new_n_player(3, 7);
+        scenario.at_phase(Phase::PreCombatMain);
+        scenario.add_creature(P0, "Own creature", 2, 2);
+        scenario
+            .add_creature(P1, "Borrowed creature", 3, 3)
+            .controlled_by(P0);
+        let soulherder = scenario
+            .add_creature_from_oracle(P2, "Soulherder", 1, 1, SOULHERDER)
+            .id();
+        let victim = scenario.add_creature(P2, "P2 creature", 2, 2).id();
+        scenario.add_basic_land(P0, ManaColor::White);
+        scenario.add_card_to_library_top(P0, "Library card");
+        let spell = scenario
+            .add_spell_to_hand_from_oracle(P0, "Synthetic choose, exile", false, text)
+            .with_mana_cost(parse_mtgjson_mana_cost("{W}"))
+            .id();
+        let mut runner = scenario.build();
+        let card_id = runner.state().objects[&spell].card_id;
+        runner
+            .act(GameAction::CastSpell {
+                object_id: spell,
+                card_id,
+                targets: vec![],
+                payment_mode: CastPaymentMode::Auto,
+            })
+            .unwrap();
+        runner
+            .act(GameAction::ChooseTarget {
+                target: Some(TargetRef::Object(victim)),
+            })
+            .expect("the exile target is announced at cast");
+        pass_priority_to_prompt(&mut runner, "the creature choice");
+        let WaitingFor::ChooseFromZoneChoice { cards, .. } = &runner.state().waiting_for else {
+            panic!(
+                "reach guard: the resolution choice is open: {:?}",
+                runner.state().waiting_for
+            );
+        };
+        assert_eq!(
+            cards.len(),
+            2,
+            "reach guard: two candidates before the concession"
+        );
+        runner.act(GameAction::Concede { player_id: P1 }).unwrap();
+        assert_eq!(
+            runner.state().objects[&victim].zone,
+            Zone::Exile,
+            "{text}: the concession settled the choice and the exile happened"
+        );
+        finish_through_scry(&mut runner);
+        assert_eq!(
+            plus_one_counters(&runner, soulherder),
+            1,
+            "{text}: Soulherder triggered exactly once for the one exile"
+        );
+    }
+}
+
+/// CR 601.2c: a printed target whose filter binds a prior target ("... that
+/// shares a creature type with that creature") is enumerated against the first
+/// object slot declared before it. SYNTHETIC spell text (the printed
+/// filter-class analogue is Daring Thief): "Choose a creature you control. Tap
+/// target artifact. Exile target creature that shares a creature type with that
+/// creature." With the artifact target in between, the creature choice must
+/// still be announced as the spell is cast, so the dependent target's pool is
+/// the creatures sharing a type with the chosen creature, as on the merge base,
+/// and not with the artifact.
+#[test]
+fn first_slot_filter_past_another_target_reads_the_announced_creature() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let chosen = scenario
+        .add_creature(P0, "Own Elf", 2, 2)
+        .with_subtypes(vec!["Elf"])
+        .id();
+    let elf = scenario
+        .add_creature(P1, "Opposing Elf", 2, 2)
+        .with_subtypes(vec!["Elf"])
+        .id();
+    scenario
+        .add_creature(P1, "Opposing Goblin", 2, 2)
+        .with_subtypes(vec!["Goblin"]);
+    let artifact = scenario
+        .add_artifact_from_oracle(P1, "Opposing artifact", "")
+        .id();
+    scenario.add_basic_land(P0, ManaColor::White);
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(
+            P0,
+            "Synthetic choose, tap, exile kin",
+            false,
+            "Choose a creature you control. Tap target artifact. Exile target creature that shares a creature type with that creature.",
+        )
+        .with_mana_cost(parse_mtgjson_mana_cost("{W}"))
+        .id();
+    let mut runner = scenario.build();
+    // `GameScenario` leaves the creature-type catalog empty; shared creature
+    // types are read through it.
+    runner.state_mut().all_creature_types = vec!["Elf".into(), "Goblin".into()];
+    let card_id = runner.state().objects[&spell].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: spell,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("the spell is castable");
+    let legal = |runner: &GameRunner| -> HashSet<TargetRef> {
+        let WaitingFor::TargetSelection { selection, .. } = &runner.state().waiting_for else {
+            panic!(
+                "expected a cast-time announcement: {:?}",
+                runner.state().waiting_for
+            );
+        };
+        selection.current_legal_targets.iter().cloned().collect()
+    };
+    assert_eq!(
+        legal(&runner),
+        HashSet::from([TargetRef::Object(chosen)]),
+        "the creature choice is announced first, among P0's creatures"
+    );
+    runner
+        .act(GameAction::ChooseTarget {
+            target: Some(TargetRef::Object(chosen)),
+        })
+        .unwrap();
+    assert_eq!(
+        legal(&runner),
+        HashSet::from([TargetRef::Object(artifact)]),
+        "reach guard: the artifact target sits between the choice and its reader"
+    );
+    runner
+        .act(GameAction::ChooseTarget {
+            target: Some(TargetRef::Object(artifact)),
+        })
+        .unwrap();
+    assert_eq!(
+        legal(&runner),
+        HashSet::from([TargetRef::Object(chosen), TargetRef::Object(elf)]),
+        "the dependent pool is the creatures sharing a type with the chosen Elf"
+    );
+}

@@ -100138,3 +100138,48 @@ fn fused_subject_look_exile_preserves_or_rejects_the_complete_instruction() {
         "the public chain must retain the honest gap, not fall back to Dig: {unsupported:?}"
     );
 }
+
+/// CR 601.2c: a printed target whose filter binds a prior target is enumerated
+/// against the first object slot declared before it. SYNTHETIC texts (the printed
+/// filter-class analogue is Daring Thief, "target permanent an opponent controls
+/// that shares a card type with it"). With an announced object target between the
+/// bare choice and the dependent target, the choice must stay announced, as on
+/// the merge base; an unrelated later target leaves the choice at resolution.
+#[test]
+fn bare_choose_read_by_a_first_slot_filter_past_another_target_keeps_stack_timing() {
+    for (text, expected) in [
+        (
+            "Choose a creature you control. Tap target artifact. Exile target creature that shares a creature type with that creature.",
+            TargetChoiceTiming::Stack,
+        ),
+        (
+            "Choose a creature you control. Tap target artifact. Exile target creature that shares a creature type with it.",
+            TargetChoiceTiming::Stack,
+        ),
+        // Control: the later targets read nothing earlier.
+        (
+            "Choose a creature you control. Tap target artifact. Exile target creature.",
+            TargetChoiceTiming::Resolution,
+        ),
+    ] {
+        let def = parse_effect_chain(text, AbilityKind::Spell);
+        let reads_prior_target = std::iter::successors(Some(&def), |node| {
+            node.sub_ability.as_deref()
+        })
+        .any(|node| {
+            node.effect
+                .target_filter()
+                .is_some_and(crate::types::ability::target_filter_binds_prior_target)
+        });
+        assert_eq!(
+            reads_prior_target,
+            expected == TargetChoiceTiming::Stack,
+            "{text}: reach guard on the dependent filter: {def:#?}"
+        );
+        assert_eq!(
+            target_only_chain_timings(&def),
+            vec![expected],
+            "{text}: {def:#?}"
+        );
+    }
+}

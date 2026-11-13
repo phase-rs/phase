@@ -450,9 +450,8 @@ pub(crate) fn settle_resolution_object_choice_after_departure(
     let base = events.len();
     resume_with_error_propagation(state, events)?;
     // CR 603.2: collect the resumed instructions' observers ("whenever a creature
-    // dies") through the authority the answered route uses.
-    let end = events.len();
-    if let Some(outcome) = batch_or_drain_observer_triggers(state, events, base, end, false) {
+    // dies").
+    if let Some(outcome) = collect_resumed_span_observer_triggers(state, events, base) {
         adopt_departure_choice_outcome(state, events, outcome);
     }
     // CR 603.7: and the delayed triggers watching those events ("When that
@@ -474,8 +473,47 @@ fn retain_triggers_of_resumed_span(
     events: &mut Vec<GameEvent>,
     start: usize,
 ) {
-    defer_observer_triggers_for_paused_choice(state, events, start);
+    super::triggers::park_observer_triggers_if_paused(state, events, start);
     retain_delayed_triggers_of_resumed_span(state, events, start);
+}
+
+/// CR 603.2 + CR 603.2c: collect the ordinary observers of `events[start..]`,
+/// the span the instructions resumed by a departure produced. The span is a
+/// whole continuation drain, not one owner's completion slice: a `ChangeZone`
+/// in it has already queued its own observers, so the shared ownership
+/// authority drops the occurrences already collected. Returns the outcome to
+/// adopt when the resolution settled, `None` when it paused again.
+fn collect_resumed_span_observer_triggers(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+    start: usize,
+) -> Option<ResolutionChoiceOutcome> {
+    if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+        super::triggers::park_observer_triggers_if_paused(state, events, start);
+        return None;
+    }
+    // CR 601.2h + CR 603.3: a live announcement takes custody of the span it owns.
+    let owned = super::announcement_triggers::take_inline_trigger_span(state, events, start);
+    let announced = owned.is_empty() && owned.end < events.len();
+    let trigger_events: Vec<GameEvent> =
+        super::triggers::filter_already_collected_trigger_events_from(
+            state,
+            &events[..owned.end],
+            start,
+            &state.consumed_before_priority_trigger_events,
+        )
+        .into_iter()
+        .filter(|event| !matches!(event, GameEvent::PhaseChanged { .. }))
+        .collect();
+    super::triggers::collect_triggers_into_deferred(state, &trigger_events);
+    if announced {
+        return Some(ResolutionChoiceOutcome::WaitingFor(
+            state.waiting_for.clone(),
+        ));
+    }
+    Some(ResolutionChoiceOutcome::WaitingForWithInlineTriggers(
+        state.waiting_for.clone(),
+    ))
 }
 
 /// CR 603.7: the delayed half of [`retain_triggers_of_resumed_span`], through

@@ -29722,8 +29722,14 @@ fn effect_reads_announced_root_slots(
     // `AttachedTo DeclaredTarget`) numbers the slots declared as the spell is cast,
     // and a keyword-anaphor condition ("If it has flying") reads the announced
     // pick: both lower, as before the producer existed, against a choice that is
-    // announced.
+    // announced. So does a filter that binds a prior target ("Exile target creature
+    // that shares a creature type with that creature"): the engine enumerates it
+    // against the FIRST object slot declared before it (CR 601.2c), not the
+    // nearest object named, so an announced target in between ("Tap target
+    // artifact.") must not leave the choice unannounced and that slot the
+    // artifact's.
     if effect_slot_filters(effect).any(filter_reads_announced_slot)
+        || effect_slot_filters(effect).any(filter_reads_earlier_object)
         || matches!(
             condition,
             Some(AbilityCondition::TargetMatchesFilter {
