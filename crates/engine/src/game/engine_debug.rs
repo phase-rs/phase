@@ -1134,6 +1134,7 @@ fn enter_battlefield_with_etb(
         enter_tapped: Default::default(),
         enters_attacking: false,
         enter_with_counters: vec![],
+        enter_with_grants: vec![],
         controller_override: None,
         enter_transformed: false,
         face_down_profile: None,

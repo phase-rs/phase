@@ -25,9 +25,12 @@ pub fn resolve_log_entries(
     before: &GameState,
     after: &GameState,
 ) -> Vec<GameLogEntry> {
-    let has_game_start = events
-        .iter()
-        .any(|event| matches!(event, GameEvent::GameStarted));
+    let has_game_start = events.iter().any(|event| {
+        matches!(
+            event,
+            GameEvent::GameStarted | GameEvent::StartingPlayerContest { .. }
+        )
+    });
     let mut cursor = if has_game_start {
         LogCursor::pregame()
     } else {
@@ -333,7 +336,9 @@ impl LogCursor {
 
     fn apply(&mut self, event: &GameEvent) {
         match event {
-            GameEvent::GameStarted => *self = Self::pregame(),
+            GameEvent::GameStarted | GameEvent::StartingPlayerContest { .. } => {
+                *self = Self::pregame()
+            }
             GameEvent::TurnStarted { turn_number, .. } => {
                 self.turn = *turn_number;
                 self.phase = Phase::Untap;
@@ -1886,7 +1891,7 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
         // round-by-round detail lives in the structured event for the UI.
         GameEvent::StartingPlayerContest { winner, .. } => vec![
             player_seg(state, *winner),
-            text(" wins the roll to take the first turn"),
+            text(" wins the roll and chooses who takes the first turn"),
         ],
 
         GameEvent::GameOver { winner } => match winner {
@@ -2388,10 +2393,12 @@ mod tests {
 
     use super::*;
     use crate::game::engine::{
-        start_game, start_game_skip_mulligan, start_game_with_starting_player,
+        apply, start_game, start_game_skip_mulligan, start_game_with_starting_player,
     };
     use crate::game::zones::create_object;
+    use crate::types::actions::GameAction;
     use crate::types::game_state::StackEntryKind;
+    use crate::types::game_state::WaitingFor;
     use crate::types::identifiers::CardId;
     use crate::types::resolved_commands::RulesExecutionNodeRef;
 
@@ -3482,28 +3489,53 @@ mod tests {
     }
 
     #[test]
-    fn start_game_log_entries_reset_hostile_context_before_turn_one() {
+    fn start_game_log_entries_reset_hostile_context_at_the_choice() {
         let mut state = GameState::new_two_player(42);
         state.turn_number = 99;
         state.phase = Phase::End;
 
         let result = start_game(&mut state);
 
+        // CR 103.1: the start batch is the contest alone; it resets the log
+        // cursor like a game-start batch despite the hostile turn-99 context.
         assert!(matches!(
             result.events.as_slice(),
+            [GameEvent::StartingPlayerContest { .. }]
+        ));
+        assert_eq!(result.log_entries[0].turn, 0);
+        assert_eq!(result.log_entries[0].phase, Phase::Untap);
+        assert_eq!(
+            result.log_entries[0].segments.last(),
+            Some(&LogSegment::Text(
+                " wins the roll and chooses who takes the first turn".to_string()
+            ))
+        );
+
+        let WaitingFor::ChooseStartingPlayer {
+            player: chooser, ..
+        } = state.waiting_for
+        else {
+            panic!("the start rests at the CR 103.1 choice");
+        };
+        let answer = apply(
+            &mut state,
+            chooser,
+            GameAction::ChooseStartingPlayer { player: chooser },
+        )
+        .expect("the chooser elects to play first");
+
+        assert!(matches!(
+            answer.events.as_slice(),
             [
-                GameEvent::StartingPlayerContest { .. },
                 GameEvent::GameStarted,
                 GameEvent::TurnStarted { turn_number: 1, .. },
                 ..
             ]
         ));
-        assert_eq!(result.log_entries[0].turn, 0);
-        assert_eq!(result.log_entries[0].phase, Phase::Untap);
-        assert_eq!(result.log_entries[1].turn, 0);
-        assert_eq!(result.log_entries[1].phase, Phase::Untap);
-        assert_eq!(result.log_entries[2].turn, 1);
-        assert_eq!(result.log_entries[2].phase, Phase::Untap);
+        assert_eq!(answer.log_entries[0].turn, 0);
+        assert_eq!(answer.log_entries[0].phase, Phase::Untap);
+        assert_eq!(answer.log_entries[1].turn, 1);
+        assert_eq!(answer.log_entries[1].phase, Phase::Untap);
     }
 
     #[test]

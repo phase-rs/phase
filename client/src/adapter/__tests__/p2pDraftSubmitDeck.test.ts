@@ -49,6 +49,7 @@ type PrivateHost = {
   handleGuestMessage: (seat: number, message: unknown) => Promise<void>;
   dispatchMatchLaunch: (pairing: PairingView, view: DraftPlayerView) => Promise<void>;
   persistSessionStrict: () => Promise<void>;
+  broadcastViews: () => Promise<void>;
   matchLaunches: Map<string, Map<number, DraftMatchLaunch>>;
 };
 
@@ -400,5 +401,118 @@ describe("P2P deck-submission channel", () => {
       submissionId: "submission-1",
       submissionDisposition: "Rejected",
     });
+  });
+
+  /**
+   * V7. MTR 7.3: a Casual pod may revise a deck between rounds. Every seat has
+   * already submitted, so the all-submitted branch of
+   * `publishAcceptedDeckSubmission` fires at `RoundComplete`; that revision
+   * must republish the pod and never generate the next round's pairings —
+   * round advancement stays the host's `AdvanceRound`.
+   *
+   * REVERT-PROBE: fold `case "RoundComplete":` back into the
+   * `generatePairingsInner()` group and `adapter.generatePairings` is called
+   * and `pairingsGenerated` is emitted.
+   */
+  it("republishes a between-rounds revision without generating pairings", async () => {
+    const host = newHost("Premier");
+    const privateHost = asPrivate(host);
+    privateHost.draftStarted = true;
+    privateHost.paused = false;
+    privateHost.persistSessionStrict = vi.fn(async () => {});
+    privateHost.broadcastViews = vi.fn(async () => {});
+    const roundCompleteView = {
+      status: "RoundComplete",
+      current_round: 1,
+      pairings: [],
+      seats: [0, 1, 2, 3].map(() => ({ has_submitted_deck: true, is_bot: false })),
+    };
+    privateHost.adapter = stubAdapter({
+      submitDeckForSeat: vi.fn(async () => roundCompleteView),
+      getViewForSeat: vi.fn(async () => roundCompleteView),
+      generatePairings: vi.fn(async () => ({ ...roundCompleteView, status: "MatchInProgress", current_round: 2 })),
+    });
+    const events: string[] = [];
+    host.onEvent((event) => events.push(event.type));
+    seatGuestSession(privateHost, 2);
+
+    await privateHost.handleGuestMessage(2, {
+      type: "draft_submit_deck",
+      submissionId: "revision-1",
+      mainDeck: ["Island"],
+      commanders: [],
+    });
+
+    // Reach guard: the revision reached `publishAcceptedDeckSubmission`.
+    expect(events).toContain("deckSubmitted");
+    expect(events).toContain("allDecksSubmitted");
+    expect(privateHost.broadcastViews).toHaveBeenCalled();
+    expect(privateHost.adapter.generatePairings).not.toHaveBeenCalled();
+    expect(events).not.toContain("pairingsGenerated");
+  });
+
+  /**
+   * V7b. A host revert to an earlier composition (A -> B -> A) is a new
+   * submission and must reach the reducer. The stubbed adapter decides
+   * admission, so the host-side behavior is policy-independent and the
+   * helper's `"Competitive"` policy is left as is.
+   *
+   * REVERT-PROBE: restore `submitHostDeck`'s "any prior seat-0 receipt with a
+   * matching fingerprint" lookup and the third submission replays A's receipt:
+   * `submitDeckForSeat` is called twice, and `submitted_decks[0]` stays B.
+   */
+  it("submits a host revert to an earlier deck rather than replaying its receipt", async () => {
+    const host = newHost("Premier");
+    const privateHost = asPrivate(host);
+    privateHost.draftStarted = true;
+    privateHost.paused = false;
+    privateHost.persistSessionStrict = vi.fn(async () => {});
+    privateHost.broadcastViews = vi.fn(async () => {});
+    const roundCompleteView = {
+      status: "RoundComplete",
+      seats: [0, 1, 2, 3].map(() => ({ has_submitted_deck: true, is_bot: false })),
+    };
+    privateHost.adapter = stubAdapter({
+      submitDeckForSeat: vi.fn(async () => roundCompleteView),
+      getViewForSeat: vi.fn(async () => roundCompleteView),
+    });
+    const deckA = Array<string>(40).fill("Plains");
+    const deckB = Array<string>(40).fill("Island");
+
+    await host.submitHostDeck(deckA, []);
+    await host.submitHostDeck(deckB, []);
+    await host.submitHostDeck(deckA, []);
+
+    expect(privateHost.adapter.submitDeckForSeat).toHaveBeenCalledTimes(3);
+    expect(privateHost.adapter.submitDeckForSeat).toHaveBeenLastCalledWith(0, deckA, []);
+  });
+
+  /**
+   * V7b sibling (preservation). An immediate retry of the LATEST accepted
+   * submission still replays its receipt and never reaches the reducer twice.
+   */
+  it("replays the receipt for a retry of the host's latest submission", async () => {
+    const host = newHost("Premier");
+    const privateHost = asPrivate(host);
+    privateHost.draftStarted = true;
+    privateHost.paused = false;
+    privateHost.persistSessionStrict = vi.fn(async () => {});
+    privateHost.broadcastViews = vi.fn(async () => {});
+    const roundCompleteView = {
+      status: "RoundComplete",
+      seats: [0, 1, 2, 3].map(() => ({ has_submitted_deck: true, is_bot: false })),
+    };
+    privateHost.adapter = stubAdapter({
+      submitDeckForSeat: vi.fn(async () => roundCompleteView),
+      getViewForSeat: vi.fn(async () => roundCompleteView),
+    });
+    const deckA = Array<string>(40).fill("Plains");
+
+    await host.submitHostDeck(deckA, []);
+    // Reach guard: the first submission carried A to the reducer.
+    expect(privateHost.adapter.submitDeckForSeat).toHaveBeenCalledWith(0, deckA, []);
+    await host.submitHostDeck(deckA, []);
+
+    expect(privateHost.adapter.submitDeckForSeat).toHaveBeenCalledOnce();
   });
 });
