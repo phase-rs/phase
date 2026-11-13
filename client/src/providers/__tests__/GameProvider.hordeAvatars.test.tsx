@@ -334,4 +334,57 @@ describe("GameProvider Horde seat identities", () => {
     expect(portrait).toHaveAttribute("src", BOSS_AVATAR_URL);
     expect(portrait.getAttribute("src")).not.toContain("api.scryfall.com");
   });
+
+  it("leaves the Horde seat on the initial tile when the sidecar misses", async () => {
+    fetchTokenImageAssetByRef.mockResolvedValue(null);
+    const gameId = "horde-avatars-sidecar-miss";
+    render(
+      <GameProvider gameId={gameId} mode="ai" playerCount={2}>
+        <div />
+      </GameProvider>,
+    );
+
+    act(() => {
+      useGameStore.setState({
+        gameId,
+        gameState: {
+          ...buildGameState({ players: buildPlayers([{ id: 0 }, { id: 1 }]) }),
+          format_config: buildFormatConfig({
+            format: "Horde",
+            horde_ruleset: TURTLE_TEAMUP_RULESET,
+          }),
+          horde_seats: [1],
+          command_zone: [100],
+          objects: {
+            100: {
+              name: "Shredder, Foot Clan Overlord",
+              owner: 1,
+              is_horde_deck_token: true,
+              token_image_ref: {
+                preset_id: "shredder-preset",
+                scryfall_id: BOSS_PRINTING_ID,
+                scryfall_oracle_id: "shredder-oracle",
+              },
+            },
+          },
+        } as never,
+      });
+    });
+
+    expect(useMultiplayerStore.getState().playerNames).toEqual(
+      new Map([[0, "Leonardo"], [1, "Shredder"]]),
+    );
+    // waitFor polls on real timers, so once it observes the kickoff the
+    // whole microtask merge chain has drained: a phantom write would have
+    // landed by the time the absence below is read.
+    await waitFor(() => {
+      expect(fetchTokenImageAssetByRef).toHaveBeenCalledWith(
+        expect.objectContaining({ scryfall_id: BOSS_PRINTING_ID }),
+        "art_crop",
+      );
+    });
+    expect(useMultiplayerStore.getState().playerAvatars).toEqual(new Map([
+      [0, { kind: "card", cardName: "Leonardo, Sewer Samurai" }],
+    ]));
+  });
 });
