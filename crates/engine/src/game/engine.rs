@@ -1513,7 +1513,12 @@ fn apply_action_boundary_core(
     // the active search itself remains the sole authority during the prompt.
     state.clear_completed_hidden_search_audiences();
     // CR 732.2b: before the snapshot, so a refused answer keeps the verdict its take reached.
-    if !authorize_actor || check_actor_authorization(state, authenticated_actor, &action).is_ok() {
+    if matches!(
+        &action,
+        GameAction::DeclareShortcut { .. } | GameAction::RespondToShortcut { .. }
+    ) && (!authorize_actor
+        || check_actor_authorization(state, authenticated_actor, &action).is_ok())
+    {
         record_answer_receipt(state, &action);
     }
     // Taken once per action, so every field a replayed cycle grows must be a structurally shared
