@@ -18184,6 +18184,12 @@ fn resolve_context_player(
             return player;
         }
     }
+    // CR 400.3 + CR 109.5: a source-owner anaphor resolves to the exact
+    // source incarnation's owner (live, then LKI). Draw and the reveal path
+    // share this authority; other context arms remain unchanged.
+    if matches!(target_filter, TargetFilter::Owner) {
+        return source_owner(state, ability).unwrap_or(ability.controller);
+    }
     // CR 108.3 + CR 508.1d: `AffectedObjectOwner` is deliberately unresolved
     // here. It names no one player — only `force_attack::resolve`'s per-member
     // graft consumes it, before this resolver could ever see it. If this

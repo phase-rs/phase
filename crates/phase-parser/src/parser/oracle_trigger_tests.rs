@@ -43312,14 +43312,75 @@ fn fblthp_full_oracle_keeps_the_damage_received_trigger() {
         &["Creature".to_string()],
         &["Homunculus".to_string()],
     );
+    let trigger = parsed
+        .triggers
+        .iter()
+        .find(|trigger| trigger.mode == TriggerMode::DamageReceived)
+        .unwrap_or_else(|| {
+            panic!(
+                "the full Oracle parse must keep the trigger: {:#?} warnings={:#?}",
+                parsed.triggers, parsed.parse_warnings
+            )
+        });
     assert!(
-        parsed
-            .triggers
+        trigger.batched,
+        "CR 603.2c: one or more opponents is one batched trigger"
+    );
+    assert_eq!(trigger.damage_kind, DamageKindFilter::CombatOnly);
+    assert_eq!(trigger.valid_card, None);
+    assert_eq!(
+        trigger.valid_target,
+        Some(TargetFilter::Typed(
+            TypedFilter::default().controller(ControllerRef::Opponent)
+        )),
+        "the recipient is opponent-scoped, not a card filter"
+    );
+    assert_eq!(
+        trigger.condition,
+        Some(event_time(TriggerCondition::DuringPlayersTurn {
+            player: PlayerFilter::Controller,
+        })),
+        "the during-your-turn window is the trigger event time"
+    );
+    let body = trigger.execute.as_ref().expect("Fblthp body");
+    assert!(
+        !has_unimplemented(body),
+        "Fblthp body must stay fully parsed: {body:?}"
+    );
+    fn body_effects(def: &AbilityDefinition) -> Vec<&Effect> {
+        let mut out = vec![def.effect.as_ref()];
+        if let Some(sub) = def.sub_ability.as_deref() {
+            out.extend(body_effects(sub));
+        }
+        out
+    }
+    fn has_shuffle_target(def: &AbilityDefinition, target: &TargetFilter) -> bool {
+        matches!(&*def.effect, Effect::Shuffle { target: actual } if actual == target)
+            || def
+                .sub_ability
+                .as_deref()
+                .is_some_and(|sub| has_shuffle_target(sub, target))
+    }
+    let effects = body_effects(body);
+    assert!(
+        effects
             .iter()
-            .any(|trigger| trigger.mode == TriggerMode::DamageReceived),
-        "the full Oracle parse must keep the trigger: {:#?} warnings={:#?}",
-        parsed.triggers,
-        parsed.parse_warnings
+            .any(|effect| matches!(effect, Effect::Draw { .. })),
+        "the full Oracle body keeps draw: {body:?}"
+    );
+    assert!(
+        effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::Shuffle { .. })),
+        "the full Oracle body keeps the owner shuffle: {body:?}"
+    );
+    assert!(
+        has_shuffle_target(body, &TargetFilter::Owner),
+        "the terminal shuffle binds the source owner: {body:?}"
+    );
+    assert!(
+        !has_shuffle_target(body, &TargetFilter::ParentTargetOwner),
+        "the source self-move does not use the parent-target owner: {body:?}"
     );
 }
 
