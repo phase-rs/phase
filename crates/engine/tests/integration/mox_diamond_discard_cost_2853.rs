@@ -1106,6 +1106,78 @@ fn mox_diamond_waits_for_the_discarded_lands_replacement_order() {
     assert_settled(state);
 }
 
+/// CR 800.4a + CR 400.7: the player whose Mox Diamond is entering concedes at the discarded land's
+/// replacement-ordering prompt. Mox Diamond and the Forest leave the game with their owner, and the
+/// accepted entry payment parked behind that prompt leaves with them: nothing resumes the entry, and
+/// the game goes on for the two players left.
+#[test]
+fn mox_diamond_owner_conceding_at_the_lands_replacement_order_ends_the_entry() {
+    let mut scenario = GameScenario::new_n_player(3, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    let mox = scenario
+        .add_creature_to_hand(P0, "Mox Diamond", 0, 0)
+        .as_artifact()
+        .from_oracle_text(MOX_DIAMOND_ORACLE)
+        .id();
+    let forest = scenario.add_land_to_hand(P0, "Forest").id();
+    scenario.add_enchantment_from_oracle(P1, "Rest in Peace", REST_IN_PEACE_ORACLE);
+    scenario.add_enchantment_from_oracle(P1, "Leyline of the Void", LEYLINE_OF_THE_VOID_ORACLE);
+    let mut runner = scenario.build();
+
+    let mut events = runner.cast(mox).resolve().events().to_vec();
+    choose_replacement(&mut runner, 0, &mut events);
+    assert!(
+        matches!(
+            runner.state().pending_cost_move_resume,
+            Some(PendingCostMoveResume::ReplacementMayCostInnerChoice { .. })
+        ),
+        "reach: the accepted entry payment waits behind the land's ordering prompt"
+    );
+
+    let conceded = engine::game::engine::apply(
+        runner.state_mut(),
+        P0,
+        GameAction::Concede { player_id: P0 },
+    )
+    .expect("a player can concede at any time");
+    events.extend(conceded.events);
+
+    assert!(
+        runner.state().pending_cost_move_resume.is_none(),
+        "the entry payment left with its entry, got {:?}",
+        runner.state().pending_cost_move_resume
+    );
+    assert!(runner.state().pending_replacement.is_none());
+    for _ in 0..2 {
+        let WaitingFor::Priority { player } = runner.state().waiting_for.clone() else {
+            panic!(
+                "the two players left hold priority, got {:?}",
+                runner.state().waiting_for
+            );
+        };
+        let passed =
+            engine::game::engine::apply(runner.state_mut(), player, GameAction::PassPriority)
+                .expect("a surviving player's action succeeds");
+        events.extend(passed.events);
+    }
+    assert_eq!(
+        moves_of(&events, mox, Zone::Battlefield),
+        0,
+        "no entry after the departure"
+    );
+    for id in [mox, forest] {
+        assert!(
+            runner
+                .state()
+                .objects
+                .get(&id)
+                .is_none_or(|object| object.zone != Zone::Battlefield),
+            "the departed player's card is not on the battlefield"
+        );
+    }
+    assert!(runner.state().pending_cost_move_resume.is_none());
+}
+
 /// The draw leg's replacement in an entry-ordering row: which replacer, and the answer to its prompt.
 #[derive(Clone, Copy, Debug)]
 enum DrawLegAnswer {

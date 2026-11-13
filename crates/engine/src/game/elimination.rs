@@ -256,6 +256,13 @@ pub(crate) fn eliminate_players(
         state,
         &leaving_set,
     );
+    // CR 800.4a + CR 400.7: so does an accepted entry payment parked behind a
+    // leg's replacement choice, with the player who accepted it or the owner
+    // of the entering object.
+    super::engine_payment_choices::retire_parked_entry_payment_of_departing_players(
+        state,
+        &leaving_set,
+    );
 
     // CR 800.4a: elimination can remove frozen stack entries and a session's
     // canonical representative. Restore the pre-overlay preferences before

@@ -2296,6 +2296,41 @@ pub(crate) fn retire_parked_unless_payment_of_departing_players(
     }
 }
 
+/// CR 800.4a + CR 400.7: an accepted entry `MayCost` parked behind a
+/// replacement choice of one of its legs
+/// ([`PendingCostMoveResume::ReplacementMayCostInnerChoice`], or
+/// [`PendingCostMoveResume::ReplacementMayCost`] holding the outer
+/// replacement) leaves with the entry it would finish. When the player who
+/// accepted it or the owner of the entering object leaves the game, the object
+/// leaves with them and its entry event is over; the retained outer
+/// replacement must not be restored and answered on the board they left (Mox
+/// Diamond entering after its owner conceded at the discarded land's
+/// replacement order).
+pub(crate) fn retire_parked_entry_payment_of_departing_players(
+    state: &mut GameState,
+    leaving: &std::collections::HashSet<PlayerId>,
+) {
+    let outer = match &state.pending_cost_move_resume {
+        Some(PendingCostMoveResume::ReplacementMayCostInnerChoice { outer_replacement }) => {
+            outer_replacement
+        }
+        Some(PendingCostMoveResume::ReplacementMayCost {
+            outer_replacement: Some(outer_replacement),
+            ..
+        }) => outer_replacement,
+        _ => return,
+    };
+    let payer = super::replacement::pending_replacement_chooser(state, outer);
+    let owner = outer
+        .proposed
+        .affected_object_id()
+        .and_then(|id| state.objects.get(&id))
+        .map(|object| object.owner);
+    if leaving.contains(&payer) || owner.is_some_and(|owner| leaving.contains(&owner)) {
+        state.pending_cost_move_resume = None;
+    }
+}
+
 /// CR 800.4a + CR 121.6b: whether the replacement choice parked under a
 /// surviving draw unless payment is a draw by a player now leaving: a
 /// substitute draw (Notion Thief) interrupted on the leaver's own choice.
@@ -2317,8 +2352,9 @@ pub(crate) fn departed_draw_settles_with_parked_payment(
         })
 }
 
-/// CR 104.3a + CR 118.12: retire a parked unless payment whose reconciliation
-/// with a departure failed (`engine::reconcile_parked_unless_payment_after_departure`).
+/// CR 104.3a + CR 118.12: retire a parked unless payment that a published
+/// departure leaves unreconciled, because the concession's follow-up failed
+/// (`engine::reject_or_publish_departure`).
 /// Its replacement choice, the draw in flight and the owner go together, and
 /// the active player (or the next player still in the game, CR 800.4j) gets
 /// the priority window: the payment is neither completed nor failed, as a
