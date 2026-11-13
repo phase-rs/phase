@@ -4810,7 +4810,7 @@ pub(crate) fn collect_logical_zone_trigger_segment(
                             && record.from_zone == *from
                             && record.to_zone == *to
                     })
-                    .last()
+                    .next_back()
                     .is_some_and(|(index, _)| index < boundary)
             }),
         _ => false,
@@ -4821,7 +4821,7 @@ pub(crate) fn collect_logical_zone_trigger_segment(
             .iter()
             .chain(context.pending.trigger_event.iter())
             .peekable();
-        if events.peek().is_none() || !events.all(|event| performed_before_departure(event)) {
+        if events.peek().is_none() || !events.all(&performed_before_departure) {
             continue;
         }
         let source = state
