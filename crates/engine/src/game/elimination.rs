@@ -2598,6 +2598,7 @@ mod tests {
             moved_count: None,
             face_down_profile: None,
             library_placement: None,
+            library_shuffle: crate::types::ability::LibraryShuffleMode::PerObject,
             enter_attached_to: None,
             effect_kind: EffectKind::ChangeZone,
         }
@@ -2662,6 +2663,7 @@ mod tests {
                     attach_to: None,
                     performed_by: None,
                     library_placement: None,
+                    library_shuffle: crate::types::ability::LibraryShuffleMode::PerObject,
                     exile_duration: None,
                     exile_controller: None,
                     exile_tracking: crate::types::game_state::ZoneDeliveryExileTracking::None,
@@ -2682,6 +2684,7 @@ mod tests {
                     attach_to: None,
                     performed_by: None,
                     library_placement: None,
+                    library_shuffle: crate::types::ability::LibraryShuffleMode::PerObject,
                     exile_duration: None,
                     exile_controller: None,
                     exile_tracking: crate::types::game_state::ZoneDeliveryExileTracking::None,
