@@ -4993,6 +4993,42 @@ fn declared_roles_for_node(
         .collect()
 }
 
+/// CR 608.2b + CR 601.2c: whether any definition below `root` (sub, else and
+/// mode nodes, recursively) announces a target of its own: an object or player
+/// role, a declared payer, or any optional, multi-target or distributed slot.
+///
+/// A root gated on its own target's controller must be the only announcer of
+/// its chain. When the root's target becomes illegal while a later
+/// instruction's target stays legal, the ability still resolves, but the
+/// engine does not keep the illegal head slot: the gate then reads no
+/// controller, counts zero and can turn true. Until the resolver keeps that
+/// slot, the combination is declined.
+pub(super) fn chain_announces_target_below(root: &AbilityDefinition) -> bool {
+    fn children(definition: &AbilityDefinition) -> impl Iterator<Item = &AbilityDefinition> {
+        definition
+            .sub_ability
+            .as_deref()
+            .into_iter()
+            .chain(definition.else_ability.as_deref())
+            .chain(definition.mode_abilities.iter())
+    }
+    let mut pending: Vec<&AbilityDefinition> = children(root).collect();
+    while let Some(definition) = pending.pop() {
+        if definition.multi_target.is_some()
+            || definition.distribute.is_some()
+            || definition.optional_targeting
+            || definition.target_chooser.is_some()
+            || enumeration_returns_early(&definition.effect)
+            || !declared_roles_for_node(&definition.effect, definition.unless_pay.as_ref())
+                .is_empty()
+        {
+            return true;
+        }
+        pending.extend(children(definition));
+    }
+    false
+}
+
 /// CR 601.2c + CR 609.7: a node whose enumeration returns early. The source-scoped
 /// damage prevention branch of the phase-ast enumerator returns before the
 /// companion-player and quantity branches that the engine's slot builder falls
@@ -12956,6 +12992,78 @@ mod tests {
         );
         for def in std::iter::once(&gated).chain(sub_chain(&gated)) {
             assert_eq!(def.condition, None, "{:?}", def.effect);
+        }
+    }
+
+    /// CR 608.2b + CR 608.2c: a gated root followed by an instruction that
+    /// announces its own target is an explicit gap. If the root's target became
+    /// illegal while the later target stayed legal, the ability would still
+    /// resolve, the engine would not keep the illegal head slot, and the gate
+    /// would read no controller (a count of zero). Rows: Skulking Killer's
+    /// printed instruction and suffix, as a spell, followed by Shatter's
+    /// printed "Destroy target artifact." (object target), a synthetic "Up to
+    /// one target creature gets +1/+1 until end of turn." (optional target), a
+    /// synthetic "Target player draws a card." (player target; nearest printed
+    /// analogue for all three: Run Away Together's two separately resolved
+    /// targets), and the same Shatter tail on Skulking Killer's printed trigger.
+    /// Reach guards: the same head followed by an untargeted "Draw a card."
+    /// binds, and each tail announces a target below the head.
+    #[test]
+    fn target_controller_suffix_with_a_separately_targeted_tail_is_an_explicit_gap() {
+        let gated = "target creature an opponent controls gets -2/-2 until end of turn if that \
+                     opponent controls no other creatures.";
+        let spell = format!("T{}", &gated[1..]);
+        let trigger = format!("When this creature enters, {gated}");
+        let roots = |text: &str, types: &str| {
+            let parsed = parse_oracle_text(text, "Synthetic", &[], &[types.to_owned()], &[]);
+            let root = match (parsed.abilities.as_slice(), parsed.triggers.as_slice()) {
+                ([ability], []) => ability.clone(),
+                ([], [trigger]) => trigger.execute.as_deref().expect("trigger body").clone(),
+                _ => panic!("{text}: expected one ability or trigger: {parsed:?}"),
+            };
+            (root, parsed.parse_warnings)
+        };
+        for (head, types) in [(&spell, "Instant"), (&trigger, "Creature")] {
+            let (bound, warnings) = roots(&format!("{head} Draw a card."), types);
+            assert!(warnings.is_empty(), "reach guard: {warnings:?}");
+            assert!(
+                bound.condition.is_some(),
+                "reach guard: an untargeted tail binds"
+            );
+            assert!(!chain_announces_target_below(&bound), "reach guard");
+        }
+        for (head, types, tail) in [
+            (&spell, "Instant", "Destroy target artifact."),
+            (
+                &spell,
+                "Instant",
+                "Up to one target creature gets +1/+1 until end of turn.",
+            ),
+            (&spell, "Instant", "Target player draws a card."),
+            (&trigger, "Creature", "Destroy target artifact."),
+        ] {
+            let text = format!("{head} {tail}");
+            let (root, warnings) = roots(&text, types);
+            assert!(
+                chain_announces_target_below(&root),
+                "reach guard: {text}: the tail announces its own target: {root:?}"
+            );
+            assert_eq!(root.condition, None, "{text}");
+            for def in sub_chain(&root) {
+                assert_eq!(def.condition, None, "{text}: {:?}", def.effect);
+            }
+            assert!(
+                root.effect
+                    .unimplemented_description()
+                    .is_some_and(|fragment| {
+                        nom_primitives::scan_contains(
+                            fragment,
+                            "that opponent controls no other creatures",
+                        )
+                    }),
+                "{text}: the gated instruction must be an explicit gap: {:?} {warnings:?}",
+                root.effect
+            );
         }
     }
 

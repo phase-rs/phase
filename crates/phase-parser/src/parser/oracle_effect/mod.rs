@@ -51503,6 +51503,10 @@ fn parse_effect_chain_ir_body(
 ///   condition-false path of `resolve_chain_body`), and the rest of the chain
 ///   is reached through it. A sub the engine would also run for another reason
 ///   (a released or replicated gate) is declined conservatively.
+/// - nothing below the root announces a target of its own (CR 608.2b): were
+///   the root's target illegal while a later target stayed legal, the engine
+///   would not keep the illegal head slot and the gate would read no
+///   controller (`conditions::chain_announces_target_below`).
 ///
 /// Otherwise the gated clause becomes an explicit gap.
 fn keep_own_target_gate_readable(ir: &mut EffectChainIr, gate: Option<&AbilityCondition>) {
@@ -51527,6 +51531,7 @@ fn keep_own_target_gate_readable(ir: &mut EffectChainIr, gate: Option<&AbilityCo
             && assembled.sub_ability.as_deref().is_none_or(|next| {
                 next.sub_link == SubAbilityLink::SequentialSibling && next.condition.is_none()
             })
+            && !conditions::chain_announces_target_below(&assembled)
     };
     if !readable {
         if let Some(root) = ir.clauses.first_mut() {
