@@ -3929,9 +3929,15 @@ struct BatchEntry {
 /// Known gaps: the reader reads the batch it is given. An entrant whose own
 /// entry occurrence is absent from that batch has no boundary there: the
 /// occurrence was claimed by its owner, captured for a mid-entry choice, or
-/// removed as a queued witness. A co-entrant delivered in another segment or
-/// action (a member resumed after a pause, or one delivered before it) is not
-/// observed.
+/// removed as a queued witness (Living Death returning Carmen, Cruel
+/// Skymarcher beside Impact Tremors, "Whenever a creature you control enters,
+/// this enchantment deals 1 damage to each opponent.": Tremors witnesses
+/// Carmen's entry at the owner, so Carmen reads the earlier sacrifice of
+/// Grizzly Bears). A co-entrant delivered in another segment or action (a
+/// member resumed after a pause, or one delivered before it) is not observed
+/// (Living Death returning Hill Giant, then Famished Worldsire, whose devour
+/// choice pauses the group, then Soul Warden, "Whenever another creature
+/// enters, you gain 1 life.": Soul Warden misses Hill Giant's entry).
 fn battlefield_entry_observation_indices(events: &[GameEvent]) -> BattlefieldEntryObservations {
     let entries: Vec<BatchEntry> = events
         .iter()
