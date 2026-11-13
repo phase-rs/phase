@@ -3517,7 +3517,7 @@ mod feldon_tokens {
             BLACK_MARKET_CONNECTIONS,
         );
         scenario
-            .add_creature_from_oracle(P0, "Righteous Valkyrie", 4, 4, RIGHTEOUS_VALKYRIE)
+            .add_creature_from_oracle(P0, "Righteous Valkyrie", 2, 4, RIGHTEOUS_VALKYRIE)
             .with_subtypes(vec!["Angel", "Cleric"]);
         scenario.add_enchantment_from_oracle(P0, "Where Ancients Tread", WHERE_ANCIENTS_TREAD);
         let mut runner = scenario.build();
