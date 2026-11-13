@@ -1275,8 +1275,12 @@ export class ServerDraftAdapter implements EngineAdapter {
       // drain dispatches them without materializing the frame a second time.
       const parsedSetupFrames = new WeakMap<object, SetupFrameMessage>();
       const bufferBudget = new SetupBufferBudget();
+      // Set while an unconfirmed attachment waits for its setup receipt: a
+      // frame the candidate receives then is the server's answer to that setup.
+      let noteSetupAnswer: (() => void) | null = null;
       sourceSocket.onmessage = (event) => {
         setupMessages.push(event);
+        noteSetupAnswer?.();
         // The positive bootstrap or the server's `DraftActionRejected` answer
         // adopts (the seat may already be this candidate's); an `Error` ends
         // the interval.
@@ -1401,6 +1405,7 @@ export class ServerDraftAdapter implements EngineAdapter {
             sourceSocket instanceof StateCodecSocket ? sourceSocket.decodeInFlight : null
           ));
         }
+        const framesBeforeWrite = setupMessages.length;
         const write = writeSetupFrame(
           sourceSocket, setupFrame, attachment.controller.signal, (frame, target) => this.send(frame, target),
         );
@@ -1412,6 +1417,18 @@ export class ServerDraftAdapter implements EngineAdapter {
           const candidate = socket!;
           const onAbort = () => this.abandonCandidate(candidate, bootstrap);
           attachment.controller.signal.addEventListener("abort", onAbort, { once: true });
+          // The transport's send may itself have cancelled the attachment
+          // (disposal or supersession inside the receipt callback), before the
+          // listener above existed: an aborted signal fires no later event.
+          if (attachment.controller.signal.aborted) onAbort();
+          // After the handshake the server speaks on this socket only in answer
+          // to the setup, so a frame received since the write proves it has the
+          // frame: the receipt, which the transport may still hold, is then not
+          // waited for, as on a confirmed reattach.
+          const answered = new Promise<true>((resolve) => {
+            if (setupMessages.length > framesBeforeWrite) resolve(true);
+            else noteSetupAnswer = () => resolve(true);
+          });
           try {
             // The receipt belongs to the transport and may never settle on a
             // socket that stays open: past the bound the frame counts as unsent
@@ -1419,8 +1436,11 @@ export class ServerDraftAdapter implements EngineAdapter {
             // (A transport without a receipt wrote synchronously: nothing to bound.)
             written = sourceSocket.sendReceipt === undefined
               ? await write
-              : await settledWithin(write, SETUP_CONFIRMATION_TIMEOUT_MS, false);
+              : await Promise.race([
+                settledWithin(write, SETUP_CONFIRMATION_TIMEOUT_MS, false), answered,
+              ]);
           } finally {
+            noteSetupAnswer = null;
             attachment.controller.signal.removeEventListener("abort", onAbort);
           }
         } else {

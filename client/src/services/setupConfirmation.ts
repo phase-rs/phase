@@ -27,14 +27,18 @@ export type SetupConfirmationOutcome =
   | "overflow";
 
 /**
- * Resolves when `signal` aborts; stays pending if it never does. A signal that
- * already aborted never resolves it, because the write's own signal check covers
- * that case. Adapters race it against a pending setup write so a cancelled
+ * Resolves when `signal` aborts, at once if it already has; stays pending if it
+ * never does. Adapters race it against a pending setup write so a cancelled
  * private candidate is retired at once instead of when the encoder answers.
+ * The already-aborted case matters: the transport's send can cancel the
+ * attachment synchronously, before this is called, and still return a pending
+ * receipt. (A write refused for a signal aborted before it resolves at once
+ * and is listed first in those races, so it still wins.)
  */
 export function whenAborted(signal: AbortSignal): Promise<"abort"> {
   return new Promise<"abort">((resolve) => {
-    if (!signal.aborted) signal.addEventListener("abort", () => resolve("abort"), { once: true });
+    if (signal.aborted) resolve("abort");
+    else signal.addEventListener("abort", () => resolve("abort"), { once: true });
   });
 }
 

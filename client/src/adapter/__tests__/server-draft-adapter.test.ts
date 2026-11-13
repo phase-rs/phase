@@ -5216,6 +5216,88 @@ describe("ServerDraftAdapter — negotiated StateCodecV1", () => {
       }
     });
 
+    it.each(["create", "join"] as const)(
+      "completes an initial %s on the server's answer while its setup receipt is still held",
+      async (kind) => {
+        vi.useFakeTimers();
+        const session = draftCodecSession(decodeEnvelope);
+        const { adapter, provider } = await startCodecDraft(session.session);
+        const first = draftCodecSession(decodeEnvelope);
+        provider.mockResolvedValueOnce(first.session);
+        const started = watch(kind === "create"
+          ? adapter.createDraft({
+            displayName: "Contender", setCodes: ["TST"], kind: "Premier", public: false,
+            tournamentFormat: "Swiss", podPolicy: "Competitive", podSize: 8,
+          })
+          : adapter.joinDraft("DRAFT1", "Contender"));
+        await drainArt();
+        const candidate = MockWebSocket.last!;
+        candidate.sendReceipt = vi.fn(() => new Promise<void>(() => undefined));
+        try {
+          candidate.dispatchSynthetic("message", CODEC_SERVER_HELLO);
+          await vi.waitFor(() => expect(candidate.sendReceipt).toHaveBeenCalledOnce());
+          // The server's answer proves it has the frame; the receipt never settles.
+          if (kind === "create") {
+            receive(candidate, "DraftCreated", { draft_code: "DRAFT1", player_token: "draft-token", seat_index: 0 });
+          } else {
+            receive(candidate, "DraftJoined", {
+              draft_code: "DRAFT1", player_token: "draft-token", seat_index: 1, view: createMockDraftView(),
+            });
+          }
+          await vi.waitFor(() => expect(started.value()).not.toBe("never settled"));
+          expect(started.value()).not.toMatchObject({ code: expect.anything() });
+          // Nothing is left waiting on the receipt: the bound passes quietly.
+          await vi.advanceTimersByTimeAsync(SETUP_CONFIRMATION_TIMEOUT_MS + 1000);
+          expect(candidate.close).not.toHaveBeenCalled();
+          expect(first.close).not.toHaveBeenCalled();
+        } finally {
+          adapter.dispose();
+          vi.useRealTimers();
+        }
+      },
+    );
+
+    it.each(["create", "reattach"] as const)(
+      "retires a %s candidate and its lease at once when a superseding create lands inside the transport's setup send",
+      async (kind) => {
+        vi.useFakeTimers();
+        const session = draftCodecSession(decodeEnvelope);
+        const { adapter, ws, provider } = await startCodecDraft(session.session);
+        const settings: Parameters<typeof adapter.createDraft>[0] = {
+          displayName: "Contender", setCodes: ["TST"], kind: "Premier", public: false,
+          tournamentFormat: "Swiss", podPolicy: "Competitive", podSize: 8,
+        };
+        if (kind === "reattach") {
+          const events: unknown[] = [];
+          adapter.onEvent((event) => events.push(event));
+          await enterCodecMatch(ws, events);
+        }
+        const first = draftCodecSession(decodeEnvelope);
+        provider.mockResolvedValueOnce(first.session);
+        void (kind === "create" ? adapter.createDraft(settings) : adapter.reconnectDraft()).catch(() => undefined);
+        await drainArt();
+        const candidate = MockWebSocket.last!;
+        // The receipt callback supersedes synchronously, then returns a receipt
+        // that never settles.
+        candidate.sendReceipt = vi.fn(() => {
+          provider.mockResolvedValueOnce(draftCodecSession(decodeEnvelope).session);
+          void adapter.createDraft(settings).catch(() => undefined);
+          return new Promise<void>(() => undefined);
+        });
+        try {
+          candidate.dispatchSynthetic("message", CODEC_SERVER_HELLO);
+          await vi.waitFor(() => expect(candidate.sendReceipt).toHaveBeenCalledOnce());
+          await drainArt();
+          // Before the receipt or any deadline: candidate closed, lease released once.
+          expect(candidate.close).toHaveBeenCalled();
+          expect(first.close).toHaveBeenCalledOnce();
+        } finally {
+          adapter.dispose();
+          vi.useRealTimers();
+        }
+      },
+    );
+
     it("fails a create at the bound when its setup receipt never settles on a socket that stays open", async () => {
       vi.useFakeTimers();
       const session = draftCodecSession(decodeEnvelope);

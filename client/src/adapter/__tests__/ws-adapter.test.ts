@@ -7456,6 +7456,84 @@ describe("WebSocketAdapter — acquired socket ownership", () => {
       }
     });
 
+    it.each(["join", "spectate"] as const)(
+      "completes an initial %s on the server's answer while its setup receipt is still held",
+      async (mode) => {
+        MockWebSocket.last = null;
+        const codec = scriptedCodec();
+        const adapter = new WebSocketAdapter(
+          "wss://localhost:9374/ws", mode, { main_deck: [], sideboard: [] }, "GAME01",
+          undefined, undefined, undefined,
+          { stateCodecSessionProvider: () => Promise.resolve(codec.session) },
+        );
+        const init = observe(adapter.initialize());
+        await vi.waitFor(() => expect(MockWebSocket.last).not.toBeNull());
+        const candidate = latestSocket();
+        candidate.sendReceipt = vi.fn(() => new Promise<void>(() => undefined));
+        try {
+          candidate.dispatchSynthetic("message", CODEC_SESSION_HELLO);
+          await vi.waitFor(() => expect(candidate.sendReceipt).toHaveBeenCalledOnce());
+          // The server's answer proves it has the frame; the receipt never settles.
+          candidate.dispatchSynthetic("message", JSON.stringify(codecGameStarted(6, 6)));
+          await vi.waitFor(() => expect(init.value()).toEqual({ resolvedWith: undefined }));
+          expect((await adapter.getSnapshot()).state.turn_number).toBe(6);
+          expect(candidate.close).not.toHaveBeenCalled();
+          // Nothing is left waiting on the receipt: the bound passes quietly.
+          await vi.advanceTimersByTimeAsync(SETUP_CONFIRMATION_TIMEOUT_MS + 1000);
+          expect(candidate.close).not.toHaveBeenCalled();
+          expect(codec.close).not.toHaveBeenCalled();
+        } finally {
+          adapter.dispose();
+        }
+      },
+    );
+
+    it("retires an initial join's candidate and its lease at once when disposal lands inside the transport's setup send", async () => {
+      MockWebSocket.last = null;
+      const codec = scriptedCodec();
+      const adapter = new WebSocketAdapter(
+        "wss://localhost:9374/ws", "join", { main_deck: [], sideboard: [] }, "GAME01",
+        undefined, undefined, undefined,
+        { stateCodecSessionProvider: () => Promise.resolve(codec.session) },
+      );
+      const init = observe(adapter.initialize());
+      await vi.waitFor(() => expect(MockWebSocket.last).not.toBeNull());
+      const candidate = latestSocket();
+      // The receipt callback disposes synchronously, then returns a receipt
+      // that never settles.
+      candidate.sendReceipt = vi.fn(() => {
+        adapter.dispose();
+        return new Promise<void>(() => undefined);
+      });
+      candidate.dispatchSynthetic("message", CODEC_SESSION_HELLO);
+      await vi.waitFor(() => expect(candidate.sendReceipt).toHaveBeenCalledOnce());
+      await vi.advanceTimersByTimeAsync(0);
+      // Before the receipt or any deadline: candidate closed, lease released once.
+      expect(candidate.close).toHaveBeenCalled();
+      expect(codec.close).toHaveBeenCalledOnce();
+      expect(init.value()).not.toBe("never settled");
+      expect(init.value()).not.toEqual({ resolvedWith: undefined });
+    });
+
+    it("retires a reconnect candidate and its lease at once when disposal lands inside the transport's setup send", async () => {
+      const codec = scriptedCodec();
+      const provider = vi.fn(() => Promise.resolve(codec.session));
+      const { adapter, raw } = await establishCodecAdapter(provider);
+      expect(adapter.tryReconnect(session() as never)).toBe(true);
+      await vi.waitFor(() => expect(MockWebSocket.last).not.toBe(raw));
+      const candidate = latestSocket();
+      const closesBefore = codec.close.mock.calls.length;
+      candidate.sendReceipt = vi.fn(() => {
+        adapter.dispose();
+        return new Promise<void>(() => undefined);
+      });
+      candidate.dispatchSynthetic("message", CODEC_SESSION_HELLO);
+      await vi.waitFor(() => expect(candidate.sendReceipt).toHaveBeenCalledOnce());
+      await vi.advanceTimersByTimeAsync(0);
+      expect(candidate.close).toHaveBeenCalled();
+      expect(codec.close.mock.calls.length).toBeGreaterThan(closesBefore);
+    });
+
     it("fails an initial join at the bound when its setup receipt never settles on a socket that stays open", async () => {
       MockWebSocket.last = null;
       const codec = scriptedCodec();

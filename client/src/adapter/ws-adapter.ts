@@ -2537,6 +2537,9 @@ export class WebSocketAdapter implements EngineAdapter {
     // at once, not when the held write answers.
     let writePending = false;
     let closedDuringWrite = false;
+    // Set while an unconfirmed attachment waits for its setup receipt: a frame
+    // the candidate receives then is the server's answer to that setup.
+    let noteSetupAnswer: (() => void) | null = null;
     const failUnwrittenSetup = (message: string) => {
       if (this.initialFallbackActive()) {
         this.failInitialFallback(initialFallbackFailure());
@@ -2614,6 +2617,7 @@ export class WebSocketAdapter implements EngineAdapter {
       const bufferBudget = new SetupBufferBudget();
       socket.ws.onmessage = (event) => {
         (setupMessages ??= []).push(event);
+        noteSetupAnswer?.();
         // Only the positive bootstrap adopts; a refusal ends the interval.
         const parsed = confirmation?.observe("game", event.data);
         if (parsed !== undefined) {
@@ -2773,6 +2777,8 @@ export class WebSocketAdapter implements EngineAdapter {
             transport instanceof StateCodecSocket ? transport.decodeInFlight : null
           ));
         }
+        const bufferedFrames = () => (setupMessages as MessageEvent<string>[] | null)?.length ?? 0;
+        const framesBeforeWrite = bufferedFrames();
         const write = writeSetupFrame(
           socket.ws, setupFrame, preparation.signal, (frame, target) => this.send(frame, target),
         );
@@ -2786,6 +2792,18 @@ export class WebSocketAdapter implements EngineAdapter {
             retireSocket();
           };
           preparation.signal.addEventListener("abort", onAbort, { once: true });
+          // The transport's send may itself have cancelled the attachment
+          // (disposal or supersession inside the receipt callback), before the
+          // listener above existed: an aborted signal fires no later event.
+          if (preparation.signal.aborted) onAbort();
+          // After the handshake the server speaks on this socket only in answer
+          // to the setup, so a frame received since the write proves it has the
+          // frame: the receipt, which the transport may still hold, is then not
+          // waited for, as on a confirmed reconnect.
+          const answered = new Promise<true>((resolve) => {
+            if (bufferedFrames() > framesBeforeWrite) resolve(true);
+            else noteSetupAnswer = () => resolve(true);
+          });
           writePending = true;
           try {
             // The receipt belongs to the transport and may never settle on a
@@ -2794,9 +2812,12 @@ export class WebSocketAdapter implements EngineAdapter {
             // (A transport without a receipt wrote synchronously: nothing to bound.)
             written = socket.ws.sendReceipt === undefined
               ? await write
-              : await settledWithin(write, SETUP_CONFIRMATION_TIMEOUT_MS, false);
+              : await Promise.race([
+                settledWithin(write, SETUP_CONFIRMATION_TIMEOUT_MS, false), answered,
+              ]);
           } finally {
             writePending = false;
+            noteSetupAnswer = null;
             preparation.signal.removeEventListener("abort", onAbort);
           }
         } else {
