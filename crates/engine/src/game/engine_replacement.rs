@@ -3588,6 +3588,38 @@ pub(crate) fn resume_copy_target_choice_entry(
     }
 }
 
+/// CR 614.12a + CR 608.2c: every entry-choice pause retains the caller's
+/// committed-entry emission and remaining batch until the answer settles.
+fn park_copy_entry_post_actions(
+    state: &mut GameState,
+    source_id: ObjectId,
+    post_actions: Vec<PendingCounterPostAction>,
+) {
+    if post_actions.is_empty() {
+        return;
+    }
+    // A prior batch continuation can leave an empty carrier while its next
+    // entrant waits on the copy choice. Reuse that carrier, so it cannot hide
+    // the CopyToken owner when this entrant publishes its completed ledger.
+    let has_empty_carrier = state.active_counter_additions().is_some_and(|queue| {
+        queue.remaining.is_empty()
+            && queue
+                .completion
+                .as_ref()
+                .is_some_and(|completion| completion.is_noop())
+    });
+    if has_empty_carrier {
+        super::effects::counters::append_pending_counter_post_actions(state, post_actions);
+    } else {
+        super::effects::counters::stash_pending_counter_post_actions(
+            state,
+            crate::types::ability::EffectKind::CopyTokenOf,
+            source_id,
+            post_actions,
+        );
+    }
+}
+
 fn finish_copy_target_choice_entry_after_counters(
     state: &mut GameState,
     source_id: ObjectId,
@@ -3612,6 +3644,7 @@ fn finish_copy_target_choice_entry_after_counters(
             HashSet::new(),
             events,
         ) {
+            park_copy_entry_post_actions(state, source_id, counter_pause_post_actions);
             return Ok(Some(waiting_for));
         }
     }
@@ -3631,14 +3664,7 @@ fn finish_copy_target_choice_entry_after_counters(
         // `resume_pending_continuation_if_priority` when the payment is answered).
         // Empty-guarded so the single-token path (which passes nothing) acquires
         // no spurious pending-counter frame.
-        if !counter_pause_post_actions.is_empty() {
-            super::effects::counters::stash_pending_counter_post_actions(
-                state,
-                crate::types::ability::EffectKind::CopyTokenOf,
-                source_id,
-                counter_pause_post_actions,
-            );
-        }
+        park_copy_entry_post_actions(state, source_id, counter_pause_post_actions);
         return Ok(Some(waiting_for));
     }
     // CR 400.7 + CR 403.3 + CR 614.12a: the copy is realized and every mandatory as-enters
@@ -3748,14 +3774,7 @@ fn finish_copy_target_choice_entry_after_counters(
             // in the list is idempotent (`flush_pending_token_battlefield_entry`
             // above already realized the parked entry), so re-running it after the
             // host choice is a no-op rather than a double emit.
-            if !counter_pause_post_actions.is_empty() {
-                super::effects::counters::stash_pending_counter_post_actions(
-                    state,
-                    crate::types::ability::EffectKind::CopyTokenOf,
-                    source_id,
-                    counter_pause_post_actions,
-                );
-            }
+            park_copy_entry_post_actions(state, source_id, counter_pause_post_actions);
             state.waiting_for = WaitingFor::ReturnAsAuraTarget {
                 player: controller,
                 source_id,
