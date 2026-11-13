@@ -6,8 +6,9 @@
 //! the scored route (below `LARGE_BOARD_FAST_PRIORITY_BATTLEFIELD_OBJECTS`, 128,
 //! in `search.rs`): compare their `min` ratio with the same bench on the parent
 //! commit, and a higher ratio flags repeated board-dependent work. N = 1000 and
-//! 2000 run the large-board fast route: their `min` ratio reads about 2x for
-//! work linear in the board and about 4x for quadratic.
+//! 2000 run the large-board fast route: compare their `min` ratio with the
+//! parent commit's the same way; a ratio moving toward 4x rather than 2x points
+//! at quadratic work.
 //!
 //! Build/run (measurement mode: node-bounded, no wall-clock cap, so the time
 //! reflects the work rather than the search deadline):
