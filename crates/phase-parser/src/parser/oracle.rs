@@ -5980,9 +5980,9 @@ fn parse_normalized_oracle_ir(
     // - fuse (CR 702.102d): the right half follows the left half;
     // - splice (CR 702.47a): the card's text is added to another spell;
     // - gift (CR 702.174j for a spell: the gift effect happens first): the
-    //   engine wraps the card's first ability, of any kind, under a
-    //   `GiftDelivery` root (`synthesize_gift`, an engine behaviour rather than
-    //   a rule). It keys on the MTGJSON gift keyword, and the keyword router
+    //   engine wraps the card's first ability, a spell or an activated ability
+    //   (triggers are kept apart in `face.triggers`), under a `GiftDelivery`
+    //   root (`synthesize_gift`, an engine behaviour rather than a rule). It keys on the MTGJSON gift keyword, and the keyword router
     //   cannot type every printed gift line ("Gift an Octopus", "Gift a Rhystic
     //   Study"), so a gift card is read from either source;
     // - overload (CR 702.96b): the overloaded spell requires no targets;
@@ -6036,10 +6036,10 @@ fn parse_normalized_oracle_ir(
     } else {
         ResolvedChainRoot::Proven
     };
-    // The engine wraps a gift card's FIRST ability, of any kind, under a
-    // `GiftDelivery` root (`synthesize_gift`), so a gift card's activated
-    // ability is no resolved root either. The other rewrites above touch only
-    // the spell ability.
+    // The engine wraps a gift card's FIRST ability, a spell or an activated
+    // ability, under a `GiftDelivery` root (`synthesize_gift`), so a gift
+    // card's activated ability is no resolved root either. The other rewrites
+    // above touch only the spell ability.
     ctx.activated_chain_root = if gift_card {
         ResolvedChainRoot::Unproven
     } else {

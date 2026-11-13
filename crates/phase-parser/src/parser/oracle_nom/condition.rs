@@ -4841,7 +4841,7 @@ fn property_only_permanent_slot(filter: &TargetFilter) -> bool {
         if tf.type_filters.is_empty() && !tf.properties.is_empty())
 }
 
-/// CR 109.2b: a stack object (spell or ability) is never a battlefield
+/// CR 110.1 + CR 109.2: a stack object (spell or ability) is never a battlefield
 /// permanent. Checked across the whole slot so a typed spell leg cannot make
 /// an `And` look like a permanent.
 fn slot_is_stack_object(filter: &TargetFilter) -> bool {

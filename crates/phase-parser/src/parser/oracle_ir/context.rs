@@ -418,8 +418,9 @@ pub enum ResolvedChainRoot {
     /// ability's effect on a card without a gift keyword, the spell line of a
     /// card whose only non-keyword line it is and whose spell is not rewritten
     /// at cast). A gift card is excluded for activated abilities too: the
-    /// engine wraps its first ability of any kind under a `GiftDelivery` root
-    /// (`synthesize_gift`; Starforged Sword's synthesized Equip sits under it).
+    /// engine wraps its first spell or activated ability under a `GiftDelivery`
+    /// root (`synthesize_gift`; Starforged Sword's synthesized Equip sits under
+    /// it).
     Proven,
 }
 
@@ -950,8 +951,8 @@ pub struct ParseContext {
     /// CR 608.2c: the card-level proof for the effects of this card's activated
     /// abilities ([`ResolvedChainRoot`]), set once by the pipeline from the
     /// card's gift keyword (MTGJSON or printed line) and read by the
-    /// activated-ability entry point. `Unproven` by default, so a context built elsewhere proves
-    /// nothing. Never serialized.
+    /// activated-ability entry point. `Unproven` by default, so a context
+    /// built elsewhere proves nothing. Never serialized.
     pub activated_chain_root: ResolvedChainRoot,
     /// CR 608.2c + CR 400.7: Source zone of the tracked set that a downstream
     /// "put those cards / put them onto the battlefield" anaphor (a

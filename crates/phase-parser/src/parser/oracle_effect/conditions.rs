@@ -11332,7 +11332,7 @@ mod tests {
         assert!(cond.is_some(), "a battlefield token has a controller");
     }
 
-    /// CR 115.1 + CR 109.2b: the named-permanent branch proves the whole
+    /// CR 115.1 + CR 109.2 + CR 109.2b: the named-permanent branch proves the whole
     /// slot is a battlefield permanent; a typed creature SPELL does not.
     /// Synthetic: Disenchant's, Kraul Whipcracker's and Essence Scatter's
     /// printed instructions under Unified Will's comparison with a "that
@@ -11358,7 +11358,7 @@ mod tests {
         assert!(cond.is_none(), "a creature spell is not a permanent");
     }
 
-    /// CR 109.2b: "that creature's controller" cannot name a creature spell
+    /// CR 109.2 + CR 109.2b: "that creature's controller" cannot name a creature spell
     /// on the stack; only the spell noun can. Synthetic: Essence Scatter's
     /// printed instruction under Unified Will's comparison with a "that
     /// creature's" referent (nearest printed card: Unified Will).
@@ -12777,8 +12777,8 @@ mod tests {
         }
     }
 
-    /// CR 608.2c: the engine wraps a gift card's first ability, of any kind,
-    /// under a `GiftDelivery` root (`synthesize_gift`, an engine behaviour; for
+    /// CR 608.2c: the engine wraps a gift card's first spell or activated
+    /// ability under a `GiftDelivery` root (`synthesize_gift`, an engine behaviour; for
     /// a spell the gift effect happens first, CR 702.174j; Starforged Sword's
     /// synthesized Equip sits under it), so an activated ability's effect on a
     /// gift card is no resolved root and its suffix is an explicit gap. The
