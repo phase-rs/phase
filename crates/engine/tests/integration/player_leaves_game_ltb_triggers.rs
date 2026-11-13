@@ -1043,7 +1043,7 @@ fn concession_after_stealing_an_observer_retires_the_stolen_observers_trigger_by
     assert_stolen_observer_retired(Loss::Concede);
 }
 
-/// CR 104.4a + CR 603.10a: P1 and P2 lose at once in a four-player game, each
+/// CR 704.3 + CR 603.10a: P1 and P2 lose at once in a four-player game, each
 /// owning a bear; P2 holds the stolen Demon. One state-based-action event takes
 /// both players out, so both bears leave together: P0's Demon sees each bear
 /// once, and the stolen Demon triggers for neither.
@@ -1145,5 +1145,63 @@ fn combat_damage_loss_after_stealing_an_observer_retires_the_stolen_observers_tr
         triggers_from(&runner, stolen_demon),
         0,
         "CR 603.10a + CR 800.4d: the stolen Demon's trigger was P1's"
+    );
+}
+
+/// CR 704.5a + CR 603.3 + CR 117.5: a loss applied at a prompt that leaves no
+/// resolution to resume. P1 is at 1 life, owns a Grizzly Bears, and casts Ad
+/// Nauseam; the revealed card costs P1 2 life and Ad Nauseam asks whether to
+/// repeat. P1 has lost, so the loss is applied at that prompt, and the spell
+/// leaves with its controller. The ability the departure triggered, P0's Super
+/// Shredder seeing the Bears leave the game, is on the stack before any player
+/// has priority, and nothing is left waiting.
+#[test]
+fn losing_at_a_prompt_with_nothing_to_resume_puts_the_departure_triggers_on_the_stack() {
+    let db = shared_card_db().expect("integration card fixture must load");
+    let mut scenario = GameScenario::new_n_player(3, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    let shredder = scenario.add_real_card(P0, "Super Shredder", Zone::Battlefield, db);
+    let bears = scenario.add_real_card(P1, "Grizzly Bears", Zone::Battlefield, db);
+    scenario.add_real_card(P1, "Grizzly Bears", Zone::Library, db);
+    let nauseam = scenario.add_real_card(P1, "Ad Nauseam", Zone::Hand, db);
+    scenario.with_mana_pool(
+        P1,
+        (0..5)
+            .map(|_| ManaUnit::new(ManaType::Black, ObjectId(0), false, vec![]))
+            .collect(),
+    );
+    scenario.with_life(P1, 1);
+    let mut runner = scenario.build();
+    runner
+        .act(GameAction::PassPriority)
+        .expect("priority passes to P1");
+    runner.cast(nauseam).commit();
+    for _ in 0..3 {
+        if runner.state().players[1].is_eliminated {
+            break;
+        }
+        runner
+            .act(GameAction::PassPriority)
+            .expect("priority passes while Ad Nauseam resolves");
+    }
+    assert!(
+        runner.state().players[1].is_eliminated,
+        "CR 704.5a: P1 lost at Ad Nauseam's repeat prompt: {:?}",
+        runner.state().waiting_for
+    );
+    assert_eq!(zone(&runner, bears), Zone::Exile);
+    assert!(
+        runner.state().deferred_triggers.is_empty(),
+        "the departure's triggers are not left waiting"
+    );
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+    assert_eq!(
+        triggers_from(&runner, shredder),
+        1,
+        "CR 603.6c: Super Shredder saw the Bears leave the game, once, and its ability is on \
+         the stack"
     );
 }

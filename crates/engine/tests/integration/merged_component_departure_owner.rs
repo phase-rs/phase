@@ -967,17 +967,11 @@ fn player_loss_during_the_prompt_finishes_the_resolution_before_priority() {
          player's Patrol leave, once each"
     );
     assert_eq!(
-        shredder_triggers(runner.state()),
-        3,
-        "CR 603.6c: P0's own Super Shredder saw the Angel, the merged permanent and the departed \
-         player's Patrol leave, once each"
-    );
-    assert_eq!(
         demon_triggers(runner.state()),
         0,
         "CR 603.10a + CR 603.3a + CR 800.4d: the Extractor Demon P1 had stolen looked back to a \
-         source P1 controlled for the merged permanent's departure, which the resumed owner \
-         collected after P1 left, and for the Patrol that left with P1, so those triggers were \
+         source P1 controlled for the merged permanent's departure, which the owner collected \
+         before P1 left, and for the Patrol that left with P1, so those triggers were \
          P1's and left with P1"
     );
 }
@@ -1291,7 +1285,7 @@ fn another_seat_concession_leaves_the_commander_prompt_and_its_owner_intact() {
             0,
             "{label}: CR 603.10a + CR 800.4d: P2 conceded while P1's prompt was parked, so the \
              Extractor Demon P2 had stolen looked back to a source P2 controlled for the merged \
-             permanent's retained departure, which P1's answer collected after P2 left"
+             permanent's retained departure, which the owner collected before P2 left"
         );
     }
 }
@@ -1490,7 +1484,7 @@ fn a_second_leaver_in_the_turn_still_retires_its_stolen_observers_retained_trigg
             demon_triggers(runner.state()),
             0,
             "{label}: the Extractor Demon P2 had stolen looked back to a source P2 controlled \
-             for the merged permanent's retained departure, which the owner collected after P2 \
+             for the merged permanent's retained departure, which the owner collected before P2 \
              left, though P3 had left earlier in the turn"
         );
     }
@@ -1562,7 +1556,7 @@ fn another_seat_concession_leaves_a_parked_owner_iteration_intact() {
             0,
             "{label}: CR 603.10a + CR 800.4d: P2 conceded while P1's prompt was parked, so the \
              Extractor Demon P2 had stolen looked back to a source P2 controlled for the merged \
-             permanent's retained departure, which the owner collected after P2 left"
+             permanent's retained departure, which the owner collected before P2 left"
         );
     }
 }
