@@ -22,7 +22,7 @@
 
 use engine::game::combat::AttackTarget;
 use engine::game::deck_loading::{load_and_hydrate_decks, DeckPayload, MOMIR_SNOW_BASICS};
-use engine::game::engine::start_game;
+use engine::game::engine::start_game_winner_plays_first;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::types::actions::{DebugAction, GameAction};
 use engine::types::card::CardFace;
@@ -819,31 +819,14 @@ fn restored_between_games_state_does_not_eliminate_the_winner() {
     state.match_config.match_type = MatchType::Bo3;
     let db = crate::support::install_synthetic_card_db(&mut state, &faces);
     load_and_hydrate_decks(&mut state, &DeckPayload::default(), Some(&db));
-    let started = start_game(&mut state);
-    // CI's archived test binary has been observed returning only the
-    // StartingPlayerContest event with turn=0 (libraries hydrated) even though
-    // the same start path sets turn=1 locally. Normalize that partial pregame
-    // state so the between-games boundary this test covers is still exercised;
-    // the diagnostic records the CI shape if it recurs.
-    if state.turn_number == 0 {
-        eprintln!(
-            "normalizing partial start: events={:?} phase={:?} libraries={:?}",
-            started.events,
-            state.match_phase,
-            state
-                .players
-                .iter()
-                .map(|player| player.library.len())
-                .collect::<Vec<_>>()
-        );
-        state.turn_number = 1;
-        state.match_phase = MatchPhase::InGame;
-        state.active_player = P0;
-        state.priority_player = P0;
-        state.waiting_for = WaitingFor::Priority { player: P0 };
-    }
+    let started = start_game_winner_plays_first(&mut state);
     assert!(
-        state.turn_number == 1 && state.match_phase == MatchPhase::InGame,
+        started
+            .events
+            .iter()
+            .any(|event| matches!(event, GameEvent::GameStarted))
+            && state.turn_number == 1
+            && state.match_phase == MatchPhase::InGame,
         "reach: game one started; events={:?} turn={} phase={:?}",
         started.events,
         state.turn_number,

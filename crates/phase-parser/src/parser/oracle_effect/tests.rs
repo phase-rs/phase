@@ -47210,9 +47210,9 @@ fn teferi_minus_twelve_resolution_choice_is_explicitly_unsupported() {
         assert!(
             !matches!(
                 &*ability.effect,
-                Effect::TargetOnly { .. } | Effect::ChangeZoneAll { .. }
+                Effect::TargetOnly { .. } | Effect::ChangeZoneAll { .. } | Effect::Bounce { .. }
             ),
-            "no announced permanent target or mass shuffle may remain: {:?}",
+            "no announced permanent target, executable return, or mass shuffle may remain: {:?}",
             ability.effect
         );
         node = ability.sub_ability.as_deref();
@@ -47222,6 +47222,35 @@ fn teferi_minus_twelve_resolution_choice_is_explicitly_unsupported() {
         "both the choice and the following shuffle must stay explicit gaps: {:?}",
         minus_twelve
     );
+}
+
+/// CR 608.2c: the refusal drops only the unsupported choice-and-return
+/// instruction; a later independent instruction remains in the chain.
+#[test]
+fn teferi_refusal_retains_a_later_independent_instruction() {
+    let def = parse_effect_chain(
+        "Target opponent chooses a permanent they control and returns it to its owner's hand. Draw a card.",
+        AbilityKind::Spell,
+    );
+    assert!(
+        matches!(&*def.effect, Effect::Unimplemented { .. }),
+        "the choice-and-return is a gap: {:?}",
+        def.effect
+    );
+    let later = def.sub_ability.as_deref().expect("later sibling retained");
+    assert!(
+        matches!(&*later.effect, Effect::Draw { .. }),
+        "the later independent Draw survives the refusal: {:?}",
+        later.effect
+    );
+    let mut node = Some(later);
+    while let Some(ability) = node {
+        assert!(
+            !matches!(&*ability.effect, Effect::Bounce { .. }),
+            "the executable return must be removed"
+        );
+        node = ability.sub_ability.as_deref();
+    }
 }
 
 /// CR 701.24c + CR 400.6: "each card not put onto the battlefield this way" is
