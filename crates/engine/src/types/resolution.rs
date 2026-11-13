@@ -4315,6 +4315,11 @@ impl ResolutionStack {
 /// group's entry carries it: event buffers, parked trigger events, and the
 /// entry's row of the per-turn zone-change ledger, against which a restore binds
 /// the copies. Earlier versions decode it as empty.
+/// Version 12 also carries each logical zone-change group's `announced_members` (every
+/// member as it was when the event began) and stamps a battlefield `ProposedEvent::ZoneChange`
+/// of that event with the others (`co_entrants`, CR 614.4 + CR 614.12), each omitted when
+/// empty. Earlier versions decode them as empty, and their later members are checked against
+/// every permanent on the battlefield.
 pub const RESOLUTION_STATE_WIRE_VERSION: u64 = 12;
 
 /// Historical full-state resolution wire version accepted only for migration.

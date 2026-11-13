@@ -30,7 +30,7 @@ use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
 use crate::types::keywords::Keyword;
 use crate::types::player::PlayerId;
 use crate::types::proposed_event::{
-    AppliedReplacementKey, EntrantAbilities, ProposedEvent, WithEntryEffect,
+    AppliedReplacementKey, CoEntrants, EntrantAbilities, ProposedEvent, WithEntryEffect,
 };
 use crate::types::zones::{EtbTapState, Zone};
 
@@ -766,7 +766,7 @@ pub(crate) fn move_object(
     req: ZoneMoveRequest,
     events: &mut Vec<GameEvent>,
 ) -> ZoneMoveResult {
-    move_object_with_terminal(state, req, events).into_zone_move_result()
+    move_object_with_terminal(state, req, &[], events).into_zone_move_result()
 }
 
 #[cfg(feature = "test-support")]
@@ -818,6 +818,9 @@ pub(crate) fn zone_move_is_primitive_noop(
 pub(crate) fn move_object_with_terminal(
     state: &mut GameState,
     req: ZoneMoveRequest,
+    // CR 614.4 + CR 614.12: the announced members of the entry event this move belongs to
+    // (`LogicalZoneChangeGroup::announced_members`); `&[]` for a lone move.
+    event_members: &[ObjectIncarnationRef],
     events: &mut Vec<GameEvent>,
 ) -> ZoneMoveTerminalResult {
     let Some(object) = state.objects.get(&req.object_id) else {
@@ -1182,6 +1185,7 @@ pub(crate) fn move_object_with_terminal(
         req.face_down_in_exile,
         // No request-route producer carries a with-entry effect.
         None,
+        event_members,
         req.mods.chain_referent,
         track_exiled_by_source,
         None,
@@ -1432,7 +1436,12 @@ fn deliver_batch(
         let anticipated_pause = anticipated_zone_change_delivery(state, &req);
         let delivery_start = events.len();
         let object_id = req.object_id;
-        match move_object_with_terminal(state, req, events) {
+        match move_object_with_terminal(
+            state,
+            req,
+            logical_zone_change_group.announced_members(),
+            events,
+        ) {
             ZoneMoveTerminalResult::Completed(completion) => {
                 logical_zone_change_group
                     .record_delivery_completion(object_id, completion)
@@ -3893,6 +3902,7 @@ pub(crate) fn deliver_replaced_zone_change(
         performed_by,
         applied,
         with_entry_effect,
+        co_entrants,
         ..
     } = event
     {
@@ -3961,17 +3971,18 @@ pub(crate) fn deliver_replaced_zone_change(
             .flatten()
         });
 
-        // CR 614.1c: Static replacement effects that modify how an object enters
-        // must already be functioning before that object enters. Snapshot the
-        // definitions before `move_to_zone` so a newly-entered permanent cannot
-        // retroactively supply its own replacement effect.
+        // CR 614.1d + CR 614.4: a static that modifies how objects enter is a replacement
+        // effect, and it must already exist before the event. Snapshot the definitions before
+        // `move_to_zone`, so a newly-entered permanent cannot retroactively supply its own,
+        // and skip a member delivered earlier in this same event (Deanna Troi returned with the
+        // entrant by one Ever After).
         let enters_with_additional_counter_statics: Vec<_> = if to == Zone::Battlefield {
             crate::game::functioning_abilities::game_active_statics(state)
-                .filter(|(_, def)| {
+                .filter(|(source_obj, def)| {
                     matches!(
                         def.mode,
                         crate::types::statics::StaticMode::EntersWithAdditionalCounters { .. }
-                    )
+                    ) && !co_entrants.entered_earlier(source_obj)
                 })
                 .map(|(source_obj, def)| (source_obj.id, def.clone()))
                 .collect()
@@ -4616,6 +4627,8 @@ pub(crate) fn execute_zone_move_with_controller(
         face_down_profile,
         face_down_in_exile,
         with_entry_effect,
+        // A raw mover belongs to no logical entry event.
+        &[],
         track_exiled_by_source,
         library_placement,
         enter_attached_to,
@@ -4661,6 +4674,7 @@ pub(crate) fn execute_zone_move_with_terminal(
         ExileConcealment::Public,
         // A raw mover carries no with-entry effect.
         None,
+        &[],
         track_exiled_by_source,
         library_placement,
         enter_attached_to,
@@ -4686,6 +4700,8 @@ pub(crate) fn execute_zone_move_with_terminal_and_controller(
     face_down_profile: Option<&crate::types::ability::FaceDownProfile>,
     face_down_in_exile: ExileConcealment,
     with_entry_effect: Option<&WithEntryEffect>,
+    // CR 614.4 + CR 614.12: the announced members of this move's entry event.
+    event_members: &[ObjectIncarnationRef],
     track_exiled_by_source: bool,
     library_placement: Option<LibraryPosition>,
     enter_attached_to: Option<AttachTarget>,
@@ -4708,6 +4724,7 @@ pub(crate) fn execute_zone_move_with_terminal_and_controller(
         face_down_profile,
         face_down_in_exile,
         with_entry_effect,
+        event_members,
         crate::types::zones::ChainReferentIntent::Silent,
         track_exiled_by_source,
         library_placement,
@@ -4821,6 +4838,10 @@ fn execute_zone_move_with_applied_terminal(
     // CR 611.2e + CR 614.12: the same-resolution "is/has" effect that applies with the
     // entry; stamped on the proposal before the seed.
     with_entry_effect: Option<&WithEntryEffect>,
+    // CR 614.4 + CR 614.12: every announced member of the entry event this move belongs to,
+    // as it was when the event began (`LogicalZoneChangeGroup::announced_members`); `&[]`
+    // for a move outside a logical group.
+    event_members: &[ObjectIncarnationRef],
     // CR 608.2c: whether this entry is the producer a following demonstrative
     // anaphor binds to. Only `move_object_with_terminal` forwards a request's
     // intent; the four public `execute_zone_move*` wrappers are raw movers with
@@ -4895,6 +4916,7 @@ fn execute_zone_move_with_applied_terminal(
         chain_referent: ref mut intent,
         performed_by: ref mut performer,
         with_entry_effect: ref mut carried,
+        ref mut co_entrants,
         ..
     } = &mut proposed
     {
@@ -4905,6 +4927,11 @@ fn execute_zone_move_with_applied_terminal(
         // CR 611.2e + CR 614.12: stamped before `seed_intrinsic_entry_counters` and
         // `replace_event` read it, and carried through every replacement pass and pause.
         *carried = with_entry_effect.cloned().map(Box::new);
+        // CR 614.4 + CR 614.12: a battlefield entry carries the other members of its event, so a
+        // member delivered earlier is never a replacement source for this one (see `CoEntrants`).
+        if dest_zone == Zone::Battlefield {
+            *co_entrants = CoEntrants::for_entrant(event_members, obj_id);
+        }
     }
 
     // CR 712.14a: Set enter_transformed on the proposed event so replacement effects
@@ -5140,6 +5167,7 @@ fn execute_zone_move_with_applied_terminal(
                     state,
                     ZoneMoveRequest::effect(obj_id, Zone::Graveyard, source_id)
                         .with_replacement_applied(applied),
+                    &[],
                     events,
                 );
             }
@@ -5296,6 +5324,7 @@ mod announced_spell_residency_tests {
         let result = move_object_with_terminal(
             &mut state,
             ZoneMoveRequest::casting_to_stack(object_id, object_id, PlayerId(0)),
+            &[],
             &mut events,
         );
 

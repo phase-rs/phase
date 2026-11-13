@@ -129,7 +129,7 @@ use engine::types::game_state::{
     PersistedRestoreFinalization, ReplacementChoiceKind, StackEntryKind, WaitingFor,
     ZoneChangeRecord,
 };
-use engine::types::identifiers::ObjectId;
+use engine::types::identifiers::{ObjectId, ObjectIncarnationRef};
 use engine::types::keywords::{Keyword, KeywordKind};
 use engine::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
@@ -2331,6 +2331,8 @@ enum GraveyardCard {
     SoulWarden,
     CarmenCruelSkymarcher,
     FamishedWorldsire,
+    MetallicMimic,
+    ContainmentPriest,
 }
 
 impl GraveyardCard {
@@ -2353,6 +2355,8 @@ impl GraveyardCard {
                 .with_subtypes(vec!["Leviathan"])
                 .from_oracle_text_with_keywords(&["Ward {3}", "Devour land 3"], FAMISHED_WORLDSIRE)
                 .id(),
+            GraveyardCard::MetallicMimic => metallic_mimic_in_graveyard(scenario, player),
+            GraveyardCard::ContainmentPriest => containment_priest_in_graveyard(scenario, player),
         }
     }
 }
@@ -3071,5 +3075,880 @@ fn living_death_save_after_the_devour_pause_restores_the_parked_tremors_trigger(
             assert_eq!(restored.state().objects[&id].zone, Zone::Battlefield);
         }
         assert_priority_with_empty_stack(&restored);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// CR 614.4 + CR 614.12: a member of one battlefield-entry event delivered earlier is not a
+// source of replacement effects for a later member. The engine moves an event's members one at
+// a time, but a replacement effect must exist before the event it modifies (CR 614.4), and an
+// entry is checked "taking into account … continuous effects that already exist" (CR 614.12).
+// Metallic Mimic ruling (2017-02-09): "Creatures of the chosen type that enter the battlefield
+// at the same time as Metallic Mimic won't enter with an additional +1/+1 counter."
+// ---------------------------------------------------------------------------
+
+/// Eerie Ultimatum {W}{W}{B}{B}{B}{G}{G} Sorcery — verbatim.
+const EERIE_ULTIMATUM: &str =
+    "Return any number of permanent cards with different names from your graveyard to the battlefield.";
+/// Collected Company {3}{G} Instant — verbatim.
+const COLLECTED_COMPANY: &str = "Look at the top six cards of your library. Put up to two creature cards with mana value 3 or less from among them onto the battlefield. Put the rest on the bottom of your library in any order.";
+/// Elvish Mystic {G} Creature — Elf Druid 1/1 — verbatim.
+const ELVISH_MYSTIC: &str = "{T}: Add {G}.";
+/// Graaz, Unstoppable Juggernaut {8} Legendary Artifact Creature — Juggernaut 7/5 — verbatim.
+const GRAAZ_UNSTOPPABLE_JUGGERNAUT: &str = "Juggernauts you control attack each combat if able.\nJuggernauts you control can't be blocked by Walls.\nOther creatures you control have base power and toughness 5/3 and are Juggernauts in addition to their other creature types.";
+
+/// Metallic Mimic in `player`'s graveyard.
+fn metallic_mimic_in_graveyard(scenario: &mut GameScenario, player: PlayerId) -> ObjectId {
+    scenario
+        .add_creature_to_graveyard(player, "Metallic Mimic", 2, 1)
+        .as_artifact_creature()
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![],
+            generic: 2,
+        })
+        .with_subtypes(vec!["Shapeshifter"])
+        .from_oracle_text(METALLIC_MIMIC)
+        .id()
+}
+
+/// Containment Priest in `player`'s graveyard.
+fn containment_priest_in_graveyard(scenario: &mut GameScenario, player: PlayerId) -> ObjectId {
+    scenario
+        .add_creature_to_graveyard(player, "Containment Priest", 2, 2)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::White],
+            generic: 1,
+        })
+        .with_subtypes(vec!["Human", "Cleric"])
+        .from_oracle_text_with_keywords(&["Flash"], CONTAINMENT_PRIEST)
+        .id()
+}
+
+/// Deanna Troi, Psychic Counsel in P0's graveyard.
+fn deanna_troi_in_graveyard(scenario: &mut GameScenario) -> ObjectId {
+    scenario
+        .add_creature_to_graveyard(P0, "Deanna Troi, Psychic Counsel", 2, 2)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::White],
+            generic: 1,
+        })
+        .with_subtypes(vec!["Betazoid", "Human", "Advisor"])
+        .from_oracle_text(DEANNA_TROI)
+        .id()
+}
+
+/// Elvish Mystic in P0's graveyard.
+fn elvish_mystic_in_graveyard(scenario: &mut GameScenario) -> ObjectId {
+    scenario
+        .add_creature_to_graveyard(P0, "Elvish Mystic", 1, 1)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Green],
+            generic: 0,
+        })
+        .with_subtypes(vec!["Elf", "Druid"])
+        .from_oracle_text(ELVISH_MYSTIC)
+        .id()
+}
+
+/// Graaz, Unstoppable Juggernaut on P0's battlefield or in P0's graveyard. The scenario builder
+/// has no supertype setter, and no row reads Legendary.
+fn add_graaz(scenario: &mut GameScenario, zone: Zone) -> ObjectId {
+    let name = "Graaz, Unstoppable Juggernaut";
+    let cost = ManaCost::Cost {
+        shards: vec![],
+        generic: 8,
+    };
+    match zone {
+        Zone::Battlefield => scenario
+            .add_creature_from_oracle(P0, name, 7, 5, GRAAZ_UNSTOPPABLE_JUGGERNAUT)
+            .as_artifact_creature()
+            .with_mana_cost(cost)
+            .with_subtypes(vec!["Juggernaut"])
+            .id(),
+        Zone::Graveyard => scenario
+            .add_creature_to_graveyard(P0, name, 7, 5)
+            .as_artifact_creature()
+            .with_mana_cost(cost)
+            .with_subtypes(vec!["Juggernaut"])
+            .from_oracle_text(GRAAZ_UNSTOPPABLE_JUGGERNAUT)
+            .id(),
+        other => panic!("Graaz is staged on the battlefield or in the graveyard, not {other:?}"),
+    }
+}
+
+/// Move `cards` from `player`'s graveyard to the top of their library, in that order (the last
+/// one ends on top).
+fn put_on_library_top(runner: &mut GameRunner, player: PlayerId, cards: &[ObjectId]) {
+    let state = runner.state_mut();
+    for &card in cards {
+        let player_state = state
+            .players
+            .iter_mut()
+            .find(|staged| staged.id == player)
+            .expect("the player exists");
+        player_state.graveyard.retain(|&staged| staged != card);
+        player_state.library.push_front(card);
+        state
+            .objects
+            .get_mut(&card)
+            .expect("the card is staged")
+            .zone = Zone::Library;
+    }
+}
+
+/// A prompt a driven resolution answered.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Prompt {
+    /// Metallic Mimic's "As this creature enters, choose a creature type." (CR 614.12a).
+    NamedChoice,
+    /// A choice among applicable replacement effects (CR 616.1).
+    ReplacementChoice,
+    /// Eerie Ultimatum's choice of cards to return.
+    EffectZoneChoice,
+    /// Collected Company's choice of cards to put onto the battlefield.
+    DigChoice,
+}
+
+/// Answer every prompt of a committed spell's resolution until P0 has priority with an empty
+/// stack: name `chosen` at each creature-type choice, take the first applicable replacement
+/// (CR 616.1), select `selection` in that order, and pass priority while the stack is not empty.
+/// Returns the prompts answered, in order.
+fn answer_until_priority(
+    runner: &mut GameRunner,
+    chosen: &str,
+    selection: &[ObjectId],
+) -> Vec<Prompt> {
+    let mut prompts = Vec::new();
+    for _ in 0..24 {
+        match runner.state().waiting_for.clone() {
+            WaitingFor::NamedChoice { .. } => {
+                prompts.push(Prompt::NamedChoice);
+                runner
+                    .act(GameAction::ChooseOption {
+                        choice: chosen.to_string(),
+                    })
+                    .expect("name the creature type");
+            }
+            WaitingFor::ReplacementChoice { .. } => {
+                prompts.push(Prompt::ReplacementChoice);
+                runner
+                    .act(GameAction::ChooseReplacement { index: 0 })
+                    .expect("order the replacements");
+            }
+            WaitingFor::EffectZoneChoice { .. } => {
+                prompts.push(Prompt::EffectZoneChoice);
+                runner
+                    .act(GameAction::SelectCards {
+                        cards: selection.to_vec(),
+                    })
+                    .expect("choose the cards to return");
+            }
+            WaitingFor::DigChoice { .. } => {
+                prompts.push(Prompt::DigChoice);
+                runner
+                    .act(GameAction::SelectCards {
+                        cards: selection.to_vec(),
+                    })
+                    .expect("choose the cards to put onto the battlefield");
+            }
+            WaitingFor::Priority { .. } if !runner.state().stack.is_empty() => {
+                runner
+                    .act(GameAction::PassPriority)
+                    .expect("priority passes while the stack is not empty");
+            }
+            _ => break,
+        }
+    }
+    assert_priority_with_empty_stack(runner);
+    prompts
+}
+
+/// Pass priority one action at a time until P0 is asked to name a creature type.
+fn pass_until_named_choice(runner: &mut GameRunner) {
+    for _ in 0..4 {
+        if matches!(runner.state().waiting_for, WaitingFor::NamedChoice { .. }) {
+            return;
+        }
+        runner
+            .act(GameAction::PassPriority)
+            .expect("priority passes before the creature-type choice");
+    }
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::NamedChoice { .. }),
+        "no creature-type choice: {:?}",
+        runner.state().waiting_for
+    );
+}
+
+/// Cast Ever After from P0's hand targeting `targets` in that order, then answer every prompt.
+fn ever_after_returns(
+    runner: &mut GameRunner,
+    ever_after: ObjectId,
+    targets: &[ObjectId],
+    chosen: &str,
+) -> Vec<Prompt> {
+    runner.cast(ever_after).target_objects(targets).commit();
+    answer_until_priority(runner, chosen, &[])
+}
+
+/// The id of `card` among `ids`, staged in `order`.
+fn staged_id<const N: usize>(
+    order: [GraveyardCard; N],
+    ids: [ObjectId; N],
+    card: GraveyardCard,
+) -> ObjectId {
+    ids[order
+        .iter()
+        .position(|&staged| staged == card)
+        .expect("the card is staged")]
+}
+
+/// Number of `prompt`s among `prompts`.
+fn prompt_count(prompts: &[Prompt], prompt: Prompt) -> usize {
+    prompts
+        .iter()
+        .filter(|&&answered| answered == prompt)
+        .count()
+}
+
+/// Reach: `first`'s battlefield entry precedes `second`'s in the per-turn ledger.
+fn assert_entered_in_order(runner: &GameRunner, first: ObjectId, second: ObjectId) {
+    let state = runner.state();
+    assert!(
+        ledger_battlefield_entry_position(state, first)
+            < ledger_battlefield_entry_position(state, second),
+        "{} must enter before {}",
+        state.objects[&first].name,
+        state.objects[&second].name
+    );
+}
+
+/// Reach: the Mimic chose `chosen` as it entered.
+fn assert_mimic_chose(runner: &GameRunner, mimic: ObjectId, chosen: &str) {
+    let mimic_obj = &runner.state().objects[&mimic];
+    assert!(
+        mimic_obj
+            .chosen_attributes
+            .contains(&ChosenAttribute::CreatureType(chosen.to_string())),
+        "{:?}",
+        mimic_obj.chosen_attributes
+    );
+}
+
+/// `id` is on the battlefield as a black Zombie (Ever After's rider applied).
+fn assert_black_zombie_on_battlefield(runner: &GameRunner, id: ObjectId) {
+    let obj = &runner.state().objects[&id];
+    assert_eq!(obj.zone, Zone::Battlefield, "{}", obj.name);
+    assert!(
+        subtypes(runner, id).iter().any(|t| t == "Zombie"),
+        "{}",
+        obj.name
+    );
+    assert!(obj.color.contains(&ManaColor::Black), "{}", obj.name);
+}
+
+/// Ever After in P0's hand, and Metallic Mimic and Hill Giant in P0's graveyard.
+fn ever_after_mimic_board() -> (GameRunner, ObjectId, ObjectId, ObjectId) {
+    let mut scenario = main_phase();
+    let mimic = metallic_mimic_in_graveyard(&mut scenario, P0);
+    let giant = hill_giant_in_graveyard(&mut scenario, P0);
+    let ever_after = scenario
+        .add_spell_to_hand_from_oracle(P0, "Ever After", false, EVER_AFTER)
+        .id();
+    (scenario.build(), ever_after, mimic, giant)
+}
+
+/// R-CE1a — CR 614.4 + CR 614.12: Ever After returns Metallic Mimic, then Hill Giant, in one
+/// event. The Mimic's "enters with an additional +1/+1 counter" did not exist before the event,
+/// so the Giant, checked as a black Zombie with the rider, gets no counter although the Mimic
+/// named Zombie.
+/// The Mimic's own "As this creature enters, choose a creature type." still applies (CR 614.12a),
+/// and the group pauses on it before the Giant moves.
+#[test]
+fn ever_after_returned_mimic_gives_no_counter_to_a_giant_returned_with_it() {
+    let (mut runner, ever_after, mimic, giant) = ever_after_mimic_board();
+
+    let prompts = ever_after_returns(&mut runner, ever_after, &[mimic, giant], "Zombie");
+
+    // Reach: the Mimic was delivered first and named Zombie at its own choice.
+    assert_eq!(
+        prompt_count(&prompts, Prompt::NamedChoice),
+        1,
+        "{prompts:?}"
+    );
+    assert_entered_in_order(&runner, mimic, giant);
+    assert_mimic_chose(&runner, mimic, "Zombie");
+    // Pre-existing rider-after-pause defect (on main, filed separately): a member whose
+    // as-enters choice pauses the event, and every later member, never gets the resolution's
+    // "is/has" rider (CR 611.2e), so this row asserts no rider type, color or P/T on them.
+    for id in [mimic, giant] {
+        assert_eq!(runner.state().objects[&id].zone, Zone::Battlefield);
+    }
+    assert_eq!(plus_one_counters(&runner, giant), 0);
+    assert_eq!(plus_one_counters(&runner, mimic), 0);
+}
+
+/// R-CE1b — order guard for R-CE1a: Hill Giant is delivered before Metallic Mimic and gets no
+/// counter.
+#[test]
+fn ever_after_giant_returned_before_the_mimic_gets_no_counter() {
+    let (mut runner, ever_after, mimic, giant) = ever_after_mimic_board();
+
+    ever_after_returns(&mut runner, ever_after, &[giant, mimic], "Zombie");
+
+    assert_entered_in_order(&runner, giant, mimic);
+    assert_mimic_chose(&runner, mimic, "Zombie");
+    assert_black_zombie_on_battlefield(&runner, giant);
+    assert_eq!(plus_one_counters(&runner, giant), 0);
+}
+
+/// Storm of Souls returns `creation` from P0's graveyard; Metallic Mimic names Spirit.
+fn storm_mimic_run(creation: [GraveyardCard; 2]) -> (GameRunner, [ObjectId; 2]) {
+    let (scenario, storm, ids) = storm_scenario(creation);
+    let mut runner = scenario.build();
+    runner.cast(storm).commit();
+    answer_until_priority(&mut runner, "Spirit", &[]);
+    (runner, ids)
+}
+
+/// Both `ids` are on the battlefield, and the Giant has no +1/+1 counter.
+fn assert_storm_giant_without_counter(runner: &GameRunner, ids: [ObjectId; 2], giant: ObjectId) {
+    for id in ids {
+        assert_eq!(runner.state().objects[&id].zone, Zone::Battlefield);
+    }
+    assert_eq!(plus_one_counters(runner, giant), 0);
+}
+
+/// R-CE2a — CR 614.4 + CR 614.12: Storm of Souls delivers Metallic Mimic (naming Spirit) before
+/// Hill Giant. The Mimic did not exist before the event, so the Giant gets no counter.
+#[test]
+fn storm_of_souls_returned_mimic_gives_no_counter_to_a_giant_returned_after_it() {
+    let (runner, [mimic, giant]) = with_entry_order(
+        [GraveyardCard::MetallicMimic, GraveyardCard::HillGiant],
+        storm_mimic_run,
+    );
+
+    assert_mimic_chose(&runner, mimic, "Spirit");
+    // Pre-existing rider-after-pause defect (on main, filed separately): a member whose
+    // as-enters choice pauses the event, and every later member, never gets the resolution's
+    // "is/has" rider (CR 611.2e), so this row asserts no rider type, color or P/T on them.
+    assert_storm_giant_without_counter(&runner, [mimic, giant], giant);
+}
+
+/// R-CE2b — order guard for R-CE2a: Hill Giant delivered before the Mimic gets no counter.
+#[test]
+fn storm_of_souls_giant_returned_before_the_mimic_gets_no_counter() {
+    let (runner, [giant, mimic]) = with_entry_order(
+        [GraveyardCard::HillGiant, GraveyardCard::MetallicMimic],
+        storm_mimic_run,
+    );
+
+    assert_mimic_chose(&runner, mimic, "Spirit");
+    assert_storm_giant_without_counter(&runner, [giant, mimic], giant);
+}
+
+/// R-CE3 — CR 614.4 + CR 614.12: Living Death returns Metallic Mimic (naming Giant) and Hill
+/// Giant in one event. The Giant gets no counter in either delivery order.
+#[test]
+fn living_death_returned_mimic_gives_no_counter_to_a_co_entering_giant_in_either_order() {
+    for order in [
+        [GraveyardCard::MetallicMimic, GraveyardCard::HillGiant],
+        [GraveyardCard::HillGiant, GraveyardCard::MetallicMimic],
+    ] {
+        let (runner, ids) = with_entry_order(order, |creation| {
+            let (scenario, living_death, ids) =
+                living_death_scenario(creation, Resident::GrizzlyBears);
+            let mut runner = scenario.build();
+            runner.cast(living_death).commit();
+            answer_until_priority(&mut runner, "Giant", &[]);
+            (runner, ids)
+        });
+        let mimic = staged_id(order, ids, GraveyardCard::MetallicMimic);
+        let giant = staged_id(order, ids, GraveyardCard::HillGiant);
+
+        // Reach: both returned in the requested order, and the Mimic named Giant.
+        for id in ids {
+            assert_eq!(runner.state().objects[&id].zone, Zone::Battlefield);
+        }
+        assert_entered_in_order(&runner, ids[0], ids[1]);
+        assert_mimic_chose(&runner, mimic, "Giant");
+        assert_eq!(plus_one_counters(&runner, giant), 0, "{order:?}");
+    }
+}
+
+/// R-CE4 — CR 614.4 + CR 614.12, paired positive: Metallic Mimic A (naming Zombie) is on the
+/// battlefield before Ever After returns Metallic Mimic B, then Hill Giant. A's replacement
+/// existed before the event and applies to both; B's did not. The Giant and B get one counter
+/// each, A's.
+#[test]
+fn ever_after_giant_gets_only_the_preexisting_mimics_counter() {
+    let mut scenario = main_phase();
+    let mimic_a = add_metallic_mimic(&mut scenario, P0);
+    let mimic_b = metallic_mimic_in_graveyard(&mut scenario, P0);
+    let giant = hill_giant_in_graveyard(&mut scenario, P0);
+    let ever_after = scenario
+        .add_spell_to_hand_from_oracle(P0, "Ever After", false, EVER_AFTER)
+        .id();
+    let mut runner = scenario.build();
+    name_creature_type(&mut runner, mimic_a, "Zombie");
+
+    ever_after_returns(&mut runner, ever_after, &[mimic_b, giant], "Zombie");
+
+    assert_entered_in_order(&runner, mimic_b, giant);
+    assert_mimic_chose(&runner, mimic_b, "Zombie");
+    assert_eq!(runner.state().objects[&giant].zone, Zone::Battlefield);
+    assert_eq!(plus_one_counters(&runner, giant), 1, "Mimic A's only");
+    assert_eq!(plus_one_counters(&runner, mimic_b), 1, "Mimic A's");
+    assert_eq!(plus_one_counters(&runner, mimic_a), 0);
+}
+
+/// Eerie Ultimatum in P0's hand, and `first` then Hill Giant in P0's graveyard. Cast it, return
+/// `[first, giant]` in that order, and answer every prompt (a Mimic names Giant).
+fn eerie_ultimatum_returns(
+    stage_first: impl FnOnce(&mut GameScenario) -> ObjectId,
+) -> (GameRunner, Vec<Prompt>, ObjectId, ObjectId) {
+    let mut scenario = main_phase();
+    let first = stage_first(&mut scenario);
+    let giant = hill_giant_in_graveyard(&mut scenario, P0);
+    let eerie = scenario
+        .add_spell_to_hand_from_oracle(P0, "Eerie Ultimatum", false, EERIE_ULTIMATUM)
+        .id();
+    let mut runner = scenario.build();
+    runner.cast(eerie).commit();
+    let prompts = answer_until_priority(&mut runner, "Giant", &[first, giant]);
+    (runner, prompts, first, giant)
+}
+
+/// R-CE5a — CR 614.4 + CR 614.12: Eerie Ultimatum returns Metallic Mimic (naming Giant), then
+/// Hill Giant. The group pauses on the Mimic's choice; the Giant, moved on the resume, gets no
+/// counter.
+#[test]
+fn eerie_ultimatum_returned_mimic_gives_no_counter_to_a_giant_returned_with_it() {
+    let (runner, prompts, mimic, giant) =
+        eerie_ultimatum_returns(|scenario| metallic_mimic_in_graveyard(scenario, P0));
+
+    // Reach: the cards were chosen, and the Mimic was delivered first and named Giant.
+    assert_eq!(
+        prompt_count(&prompts, Prompt::EffectZoneChoice),
+        1,
+        "{prompts:?}"
+    );
+    assert_eq!(
+        prompt_count(&prompts, Prompt::NamedChoice),
+        1,
+        "{prompts:?}"
+    );
+    assert_entered_in_order(&runner, mimic, giant);
+    assert_mimic_chose(&runner, mimic, "Giant");
+    assert_eq!(runner.state().objects[&giant].zone, Zone::Battlefield);
+    assert_eq!(plus_one_counters(&runner, giant), 0);
+}
+
+/// R-CE5b — CR 614.4 + CR 614.12: Eerie Ultimatum returns Containment Priest ("If a nontoken
+/// creature would enter and it wasn't cast, exile it instead."), then Hill Giant. The Priest did
+/// not exist before the event, so it does not exile the Giant: both are on the battlefield.
+#[test]
+fn eerie_ultimatum_returned_priest_does_not_exile_a_giant_returned_with_it() {
+    let (runner, prompts, priest, giant) =
+        eerie_ultimatum_returns(|scenario| containment_priest_in_graveyard(scenario, P0));
+
+    assert_eq!(
+        prompt_count(&prompts, Prompt::EffectZoneChoice),
+        1,
+        "{prompts:?}"
+    );
+    assert_eq!(runner.state().objects[&priest].zone, Zone::Battlefield);
+    assert_eq!(runner.state().objects[&giant].zone, Zone::Battlefield);
+    assert_entered_in_order(&runner, priest, giant);
+}
+
+/// R-CE6a — CR 614.1d + CR 614.4: Ever After returns Deanna Troi, Psychic Counsel ("Other
+/// creatures you control enter with an additional +1/+1 counter on them.") and Hill Giant in one
+/// event. Deanna's static did not exist before the event, so the Giant gets no counter in either
+/// delivery order.
+#[test]
+fn ever_after_returned_deanna_troi_gives_no_counter_to_a_co_entering_giant() {
+    for deanna_first in [true, false] {
+        let mut scenario = main_phase();
+        let deanna = deanna_troi_in_graveyard(&mut scenario);
+        let giant = hill_giant_in_graveyard(&mut scenario, P0);
+        let ever_after = scenario
+            .add_spell_to_hand_from_oracle(P0, "Ever After", false, EVER_AFTER)
+            .id();
+        let mut runner = scenario.build();
+        let targets = if deanna_first {
+            [deanna, giant]
+        } else {
+            [giant, deanna]
+        };
+
+        ever_after_returns(&mut runner, ever_after, &targets, "Zombie");
+
+        assert_entered_in_order(&runner, targets[0], targets[1]);
+        assert_black_zombie_on_battlefield(&runner, deanna);
+        assert_black_zombie_on_battlefield(&runner, giant);
+        assert_eq!(
+            plus_one_counters(&runner, giant),
+            0,
+            "deanna_first {deanna_first}"
+        );
+        assert_eq!(plus_one_counters(&runner, deanna), 0);
+    }
+}
+
+/// R-CE7a — CR 614.4 + CR 614.12: Ever After returns Containment Priest and Hill Giant in one
+/// event. The Priest did not exist before the event, so both are on the battlefield in either
+/// delivery order.
+#[test]
+fn ever_after_returned_priest_does_not_exile_a_co_entering_giant() {
+    for priest_first in [true, false] {
+        let mut scenario = main_phase();
+        let priest = containment_priest_in_graveyard(&mut scenario, P0);
+        let giant = hill_giant_in_graveyard(&mut scenario, P0);
+        let ever_after = scenario
+            .add_spell_to_hand_from_oracle(P0, "Ever After", false, EVER_AFTER)
+            .id();
+        let mut runner = scenario.build();
+        let targets = if priest_first {
+            [priest, giant]
+        } else {
+            [giant, priest]
+        };
+
+        ever_after_returns(&mut runner, ever_after, &targets, "Zombie");
+
+        assert_black_zombie_on_battlefield(&runner, priest);
+        assert_black_zombie_on_battlefield(&runner, giant);
+        assert_entered_in_order(&runner, targets[0], targets[1]);
+    }
+}
+
+/// R-CE7c — CR 614.4 + CR 614.12: Storm of Souls delivers Containment Priest before Hill Giant
+/// (created first, so delivered first). The Priest did not exist before the event, so the Giant
+/// is on the battlefield as a Spirit.
+#[test]
+fn storm_of_souls_returned_priest_does_not_exile_a_giant_returned_after_it() {
+    let (scenario, storm, [priest, giant]) =
+        storm_scenario([GraveyardCard::ContainmentPriest, GraveyardCard::HillGiant]);
+    let mut runner = scenario.build();
+    runner.cast(storm).commit();
+
+    answer_until_priority(&mut runner, "Spirit", &[]);
+
+    for id in [priest, giant] {
+        let obj = &runner.state().objects[&id];
+        assert_eq!(obj.zone, Zone::Battlefield, "{}", obj.name);
+        assert!(
+            subtypes(&runner, id).iter().any(|t| t == "Spirit"),
+            "{}",
+            obj.name
+        );
+    }
+    assert_entered_in_order(&runner, priest, giant);
+}
+
+/// Living Death in P0's hand and `creation` staged in that order, each in the named player's
+/// graveyard; cast and resolve it.
+fn cross_player_living_death(
+    creation: [(GraveyardCard, PlayerId); 2],
+) -> (GameRunner, [ObjectId; 2]) {
+    let mut scenario = main_phase();
+    let ids = creation.map(|(card, owner)| card.add_to_graveyard(&mut scenario, owner));
+    let living_death = scenario
+        .add_spell_to_hand_from_oracle(P0, "Living Death", false, LIVING_DEATH)
+        .id();
+    let mut runner = scenario.build();
+    let _ = runner.cast(living_death).resolve();
+    (runner, ids)
+}
+
+/// Both `ids` are on the battlefield under their owners' control.
+fn assert_on_battlefield_under_owners(runner: &GameRunner, ids: [ObjectId; 2]) {
+    for id in ids {
+        let obj = &runner.state().objects[&id];
+        assert_eq!(obj.zone, Zone::Battlefield, "{}", obj.name);
+        assert_eq!(obj.controller, obj.owner, "{}", obj.name);
+    }
+}
+
+/// R-CE7d — CR 614.4 + CR 614.12, members owned by different players in one event: Living Death
+/// returns Containment Priest from one player's graveyard and Hill Giant from the other's, the
+/// Priest delivered first. The Priest did not exist before the event, so both are on the
+/// battlefield under their owners, whichever player owns which card.
+#[test]
+fn living_death_returned_priest_does_not_exile_another_players_giant() {
+    for (priest_owner, giant_owner) in [(P0, P1), (P1, P0)] {
+        let (runner, [priest, giant]) = cross_player_living_death([
+            (GraveyardCard::ContainmentPriest, priest_owner),
+            (GraveyardCard::HillGiant, giant_owner),
+        ]);
+
+        assert_on_battlefield_under_owners(&runner, [priest, giant]);
+        assert_entered_in_order(&runner, priest, giant);
+        assert_priority_with_empty_stack(&runner);
+    }
+}
+
+/// R-CE7e — order guard for R-CE7d: Hill Giant delivered before Containment Priest; both are on
+/// the battlefield under their owners.
+#[test]
+fn living_death_giant_returned_before_another_players_priest_stays() {
+    for (priest_owner, giant_owner) in [(P0, P1), (P1, P0)] {
+        let (runner, [giant, priest]) = cross_player_living_death([
+            (GraveyardCard::HillGiant, giant_owner),
+            (GraveyardCard::ContainmentPriest, priest_owner),
+        ]);
+
+        assert_on_battlefield_under_owners(&runner, [giant, priest]);
+        assert_entered_in_order(&runner, giant, priest);
+        assert_priority_with_empty_stack(&runner);
+    }
+}
+
+/// R-CE8 — CR 614.4 + CR 614.12, batch route: Collected Company puts Metallic Mimic (naming Elf)
+/// and Elvish Mystic onto the battlefield in one event. The Mystic gets no counter in either
+/// delivery order; Mimic-first pauses on the Mimic's choice and resumes the batch.
+#[test]
+fn collected_company_mimic_gives_no_counter_to_a_co_entering_elf() {
+    for mimic_first in [true, false] {
+        let mut scenario = main_phase();
+        let mimic = metallic_mimic_in_graveyard(&mut scenario, P0);
+        let mystic = elvish_mystic_in_graveyard(&mut scenario);
+        let company = scenario
+            .add_spell_to_hand_from_oracle(P0, "Collected Company", true, COLLECTED_COMPANY)
+            .id();
+        let mut runner = scenario.build();
+        put_on_library_top(&mut runner, P0, &[mimic, mystic]);
+        let selection = if mimic_first {
+            [mimic, mystic]
+        } else {
+            [mystic, mimic]
+        };
+        runner.cast(company).commit();
+
+        let prompts = answer_until_priority(&mut runner, "Elf", &selection);
+
+        // Reach: both cards were chosen and delivered in the selected order.
+        assert_eq!(prompt_count(&prompts, Prompt::DigChoice), 1, "{prompts:?}");
+        for id in [mimic, mystic] {
+            assert_eq!(runner.state().objects[&id].zone, Zone::Battlefield);
+        }
+        assert_entered_in_order(&runner, selection[0], selection[1]);
+        assert_mimic_chose(&runner, mimic, "Elf");
+        assert_eq!(
+            plus_one_counters(&runner, mystic),
+            0,
+            "mimic_first {mimic_first}"
+        );
+    }
+}
+
+/// Metallic Mimic on P0's battlefield naming Juggernaut, Graaz, Unstoppable Juggernaut in
+/// `graaz_zone`, Hill Giant in P0's graveyard and Ever After in P0's hand.
+fn graaz_board(graaz_zone: Zone) -> (GameRunner, ObjectId, ObjectId, ObjectId, ObjectId) {
+    let mut scenario = main_phase();
+    let mimic = add_metallic_mimic(&mut scenario, P0);
+    let graaz = add_graaz(&mut scenario, graaz_zone);
+    let giant = hill_giant_in_graveyard(&mut scenario, P0);
+    let ever_after = scenario
+        .add_spell_to_hand_from_oracle(P0, "Ever After", false, EVER_AFTER)
+        .id();
+    let mut runner = scenario.build();
+    name_creature_type(&mut runner, mimic, "Juggernaut");
+    (runner, ever_after, mimic, graaz, giant)
+}
+
+/// The Giant is on the battlefield as a black Giant Zombie Juggernaut with power and toughness
+/// `pt`.
+fn assert_giant_zombie_juggernaut(runner: &GameRunner, giant: ObjectId, pt: (i32, i32)) {
+    assert_black_zombie_on_battlefield(runner, giant);
+    let types = subtypes(runner, giant);
+    for subtype in ["Giant", "Juggernaut"] {
+        assert!(types.iter().any(|t| t == subtype), "{types:?}");
+    }
+    let giant_obj = &runner.state().objects[&giant];
+    assert_eq!(
+        (giant_obj.power, giant_obj.toughness),
+        (Some(pt.0), Some(pt.1))
+    );
+}
+
+/// R-CE10a — CR 614.12 + CR 614.4: Metallic Mimic named Juggernaut before Ever After returns
+/// Graaz, Unstoppable Juggernaut, then Hill Giant. The Mimic's replacement existed before the
+/// event, but Graaz's "Other creatures you control … are Juggernauts" did not, so the Giant is
+/// checked as a black Zombie Giant, not a Juggernaut: no counter. It ends a 5/3 Giant Zombie
+/// Juggernaut once Graaz's static applies.
+#[test]
+fn ever_after_giant_is_not_a_juggernaut_for_the_mimic_when_graaz_returns_with_it() {
+    let (mut runner, ever_after, mimic, graaz, giant) = graaz_board(Zone::Graveyard);
+
+    ever_after_returns(&mut runner, ever_after, &[graaz, giant], "Zombie");
+
+    // Reach: Graaz was delivered first, and the pre-existing Mimic gave it a counter in the
+    // same event.
+    assert_mimic_chose(&runner, mimic, "Juggernaut");
+    assert_entered_in_order(&runner, graaz, giant);
+    assert_eq!(runner.state().objects[&graaz].zone, Zone::Battlefield);
+    assert_eq!(plus_one_counters(&runner, graaz), 1);
+    assert_eq!(plus_one_counters(&runner, giant), 0);
+    assert_giant_zombie_juggernaut(&runner, giant, (5, 3));
+}
+
+/// R-CE10b — order guard for R-CE10a: Hill Giant delivered before Graaz gets no counter.
+#[test]
+fn ever_after_giant_returned_before_graaz_gets_no_counter() {
+    let (mut runner, ever_after, mimic, graaz, giant) = graaz_board(Zone::Graveyard);
+
+    ever_after_returns(&mut runner, ever_after, &[giant, graaz], "Zombie");
+
+    assert_mimic_chose(&runner, mimic, "Juggernaut");
+    assert_entered_in_order(&runner, giant, graaz);
+    assert_eq!(plus_one_counters(&runner, giant), 0);
+    assert_giant_zombie_juggernaut(&runner, giant, (5, 3));
+}
+
+/// R-CE10c — CR 614.12, positive reach guard for R-CE10a: Graaz is on the battlefield before Ever
+/// After returns Hill Giant, so its effect already exists, the Giant is checked as a Juggernaut,
+/// and the Mimic gives it a counter: a 6/4 Giant Zombie Juggernaut.
+#[test]
+fn ever_after_giant_is_a_juggernaut_for_the_mimic_beside_a_preexisting_graaz() {
+    let (mut runner, ever_after, mimic, graaz, giant) = graaz_board(Zone::Battlefield);
+
+    ever_after_returns(&mut runner, ever_after, &[giant], "Zombie");
+
+    assert_mimic_chose(&runner, mimic, "Juggernaut");
+    assert_eq!(runner.state().objects[&graaz].zone, Zone::Battlefield);
+    assert_eq!(plus_one_counters(&runner, giant), 1);
+    assert_giant_zombie_juggernaut(&runner, giant, (6, 4));
+}
+
+/// R-CE9 — CR 614.4 + CR 614.12, self vs external in one entry: Ever After returns Metallic Mimic
+/// (naming Zombie), then Barkhide Troll. The Mimic did not exist before the event, while the
+/// Troll's own "This creature enters with a +1/+1 counter on it." is its own ability as it enters:
+/// exactly one counter.
+#[test]
+fn ever_after_returned_troll_keeps_only_its_own_counter_beside_a_co_entering_mimic() {
+    let mut scenario = main_phase();
+    let mimic = metallic_mimic_in_graveyard(&mut scenario, P0);
+    let troll = add_barkhide_troll(&mut scenario);
+    let ever_after = scenario
+        .add_spell_to_hand_from_oracle(P0, "Ever After", false, EVER_AFTER)
+        .id();
+    let mut runner = scenario.build();
+
+    ever_after_returns(&mut runner, ever_after, &[mimic, troll], "Zombie");
+
+    assert_entered_in_order(&runner, mimic, troll);
+    assert_mimic_chose(&runner, mimic, "Zombie");
+    assert_eq!(runner.state().objects[&troll].zone, Zone::Battlefield);
+    assert_eq!(plus_one_counters(&runner, troll), 1, "the Troll's own only");
+}
+
+/// R-P-group — CR 614.4 + CR 603.6a: Ever After returns Metallic Mimic, then Hill Giant, and the
+/// game is saved at the Mimic's creature-type choice, before either card moves. A raw and a
+/// trusted save restore with the paused group's announced members, and after the answer the
+/// Giant gets no counter.
+#[test]
+fn ever_after_save_at_the_mimics_choice_keeps_the_announced_members() {
+    let (mut runner, ever_after, mimic, giant) = ever_after_mimic_board();
+    let announced = [mimic, giant]
+        .map(|id| ObjectIncarnationRef::of(id, runner.state().objects[&id].incarnation));
+    runner
+        .cast(ever_after)
+        .target_objects(&[mimic, giant])
+        .commit();
+    pass_until_named_choice(&mut runner);
+
+    // Reach: the group paused before the Mimic moved.
+    for id in [mimic, giant] {
+        assert_eq!(runner.state().objects[&id].zone, Zone::Graveyard);
+    }
+    for trusted in [false, true] {
+        let restored = restore_round_trip(runner.state(), trusted)
+            .unwrap_or_else(|error| panic!("trusted {trusted}: {error}"));
+        let group = &restored
+            .active_change_zone_frame()
+            .and_then(|frame| frame.pending.as_ref())
+            .expect("the paused ChangeZone frame survives the restore")
+            .logical_zone_change_group;
+        assert_eq!(
+            group.announced_members(),
+            &announced[..],
+            "trusted {trusted}"
+        );
+        let mut restored = GameRunner::from_state(restored);
+        answer_until_priority(&mut restored, "Zombie", &[]);
+
+        assert_entered_in_order(&restored, mimic, giant);
+        assert_mimic_chose(&restored, mimic, "Zombie");
+        assert_eq!(restored.state().objects[&giant].zone, Zone::Battlefield);
+        assert_eq!(plus_one_counters(&restored, giant), 0, "trusted {trusted}");
+    }
+}
+
+/// R-P-proposal — CR 614.4 + CR 614.12a + CR 616.1f: Ever After returns Metallic Mimic A, then
+/// Metallic Mimic B, both naming Zombie. After A's choice, B's own choice is its only applicable
+/// replacement (A did not exist before the event), so B's creature-type choice comes next, with
+/// B's proposal parked. A raw and a trusted save there restore, and neither Mimic gets a counter.
+#[test]
+fn ever_after_second_mimic_choice_is_not_preceded_by_a_replacement_choice() {
+    let mut scenario = main_phase();
+    let mimic_a = metallic_mimic_in_graveyard(&mut scenario, P0);
+    let mimic_b = metallic_mimic_in_graveyard(&mut scenario, P0);
+    let ever_after = scenario
+        .add_spell_to_hand_from_oracle(P0, "Ever After", false, EVER_AFTER)
+        .id();
+    let mut runner = scenario.build();
+    let mimic_a_announced =
+        ObjectIncarnationRef::of(mimic_a, runner.state().objects[&mimic_a].incarnation);
+    runner
+        .cast(ever_after)
+        .target_objects(&[mimic_a, mimic_b])
+        .commit();
+    pass_until_named_choice(&mut runner);
+    assert_eq!(runner.state().objects[&mimic_a].zone, Zone::Graveyard);
+    runner
+        .act(GameAction::ChooseOption {
+            choice: "Zombie".to_string(),
+        })
+        .expect("Mimic A names Zombie");
+
+    // Reach: A is on the battlefield and B is still in the graveyard; B's own choice is next.
+    assert_eq!(runner.state().objects[&mimic_a].zone, Zone::Battlefield);
+    assert_eq!(runner.state().objects[&mimic_b].zone, Zone::Graveyard);
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::NamedChoice { .. }),
+        "waiting_for: {:?}",
+        runner.state().waiting_for
+    );
+    for trusted in [false, true] {
+        let restored = restore_round_trip(runner.state(), trusted)
+            .unwrap_or_else(|error| panic!("trusted {trusted}: {error}"));
+        let parked = restored
+            .pending_replacement
+            .as_ref()
+            .expect("B's entry proposal is parked at its choice");
+        assert!(
+            parked
+                .proposed
+                .co_entrants()
+                .expect("B's proposal is a zone change")
+                .as_slice()
+                .contains(&mimic_a_announced),
+            "B's parked proposal names Mimic A as a co-entrant (trusted {trusted})"
+        );
+        let mut restored = GameRunner::from_state(restored);
+        let prompts = answer_until_priority(&mut restored, "Zombie", &[]);
+
+        assert_eq!(prompts, vec![Prompt::NamedChoice], "trusted {trusted}");
+        for mimic in [mimic_a, mimic_b] {
+            assert_mimic_chose(&restored, mimic, "Zombie");
+            assert_eq!(restored.state().objects[&mimic].zone, Zone::Battlefield);
+            assert!(
+                subtypes(&restored, mimic).iter().any(|t| t == "Zombie"),
+                "a Zombie by its own choice (trusted {trusted})"
+            );
+            assert_eq!(plus_one_counters(&restored, mimic), 0, "trusted {trusted}");
+        }
     }
 }

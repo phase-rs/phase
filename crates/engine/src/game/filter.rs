@@ -3,6 +3,7 @@
 //! Replaces the Forge-style string filter parsing with typed enum matching.
 //! All filter logic works against the TargetFilter enum hierarchy from types/ability.rs.
 
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
@@ -39,7 +40,7 @@ use crate::types::identifiers::{CardId, ObjectId, ObjectIncarnationRef, Triggeri
 use crate::types::keywords::Keyword;
 use crate::types::mana::{ManaColor, ManaCost};
 use crate::types::player::PlayerId;
-use crate::types::proposed_event::{EtbTapState, ProposedEvent, TokenSpec};
+use crate::types::proposed_event::{CoEntrants, EtbTapState, ProposedEvent, TokenSpec};
 use crate::types::resolution::CapturedDeclarationPayload;
 use crate::types::statics::StaticMode;
 use crate::types::zones::Zone;
@@ -5555,9 +5556,11 @@ impl EntryProjection {
 /// must be the board before the entry event's first member moved (CR 603.6a);
 /// multi-object callers resolve every member first
 /// (`change_zone::resolve_change_zone_member_entries`). [`Self::for_proposed_entry`]
-/// reads the board at the replacement check, where a `ChangeZoneAll`'s earlier
-/// members are already delivered (they move one by one), as the live read it
-/// replaces did (known gap).
+/// is called at the replacement check, where an earlier member of the same entry
+/// event is already delivered (members move one by one). It places the entrant on
+/// the board without those members (CR 614.4 + CR 614.12,
+/// `CoEntrants::entered_earlier`; see [`Self::pre_event_board`]), so it applies
+/// only the continuous effects that existed before the event.
 pub(crate) struct BattlefieldEntrantProjection {
     scratch: GameState,
     entrant: ObjectId,
@@ -5586,8 +5589,7 @@ impl BattlefieldEntrantProjection {
     /// Known gaps: an effect-carried entry gate does not install a with-entry
     /// effect (no printed return carries both a gate and a `WithEntry` rider); a
     /// liminal (transformed or melded) entrant with a rider keeps its liminal read
-    /// (none printed); earlier members of a mass move are already on the
-    /// scratch board; and a face-down entrant is placed without delivery's
+    /// (none printed); and a face-down entrant is placed without delivery's
     /// face-down preflight, so a face-down instant or sorcery card is refused on
     /// the scratch (CR 400.4a) and keeps today's read (no printed face-down return
     /// carries a rider).
@@ -5628,6 +5630,9 @@ impl BattlefieldEntrantProjection {
     /// full layer pass run (CR 613.1, 613.3, 613.6, 613.7), which a detached applier cannot reproduce.
     /// `None` when the event carries no such effect, is not a battlefield entry, or its entrant can't
     /// be placed (a liminal entrant keeps its liminal read; a refused placement keeps today's read).
+    /// CR 614.4: the entrant is placed on the board before the event, so a member of the same
+    /// event delivered earlier is moved back on a copy first ([`Self::pre_event_board`]);
+    /// `None` also when such a member has no entry record (not expected).
     pub(crate) fn for_proposed_entry(state: &GameState, event: &ProposedEvent) -> Option<Self> {
         let ProposedEvent::ZoneChange {
             object_id,
@@ -5639,13 +5644,17 @@ impl BattlefieldEntrantProjection {
             enter_as_copy,
             enter_with_choices,
             with_entry_effect: Some(effect),
+            co_entrants,
             ..
         } = event
         else {
             return None;
         };
+        // CR 614.12 + CR 614.4: the continuous effects that "already exist" are those of the
+        // board before the event; a member of this event delivered earlier is not on it.
+        let pre_event = Self::pre_event_board(state, co_entrants)?;
         let (scratch, origin) = Self::place(
-            state,
+            &pre_event,
             *object_id,
             &EntrantStaging {
                 controller_override: *controller_override,
@@ -5658,15 +5667,78 @@ impl BattlefieldEntrantProjection {
         )?;
         Some(Self::finish(
             scratch,
-            Some((state, Some(origin))),
+            Some((&*pre_event, Some(origin))),
             *object_id,
             Some(effect),
         ))
     }
 
+    /// CR 614.12 + CR 614.4 + CR 400.7: the board a proposed entry is checked against. The
+    /// engine moves an entry event's members one at a time, so a member delivered earlier in
+    /// the same event (`CoEntrants::entered_earlier`) is on the live battlefield although it
+    /// did not exist before the event, and none of its continuous effects "already exist"
+    /// (Graaz, Unstoppable Juggernaut returned with Hill Giant by one Ever After does not make
+    /// the Giant a Juggernaut for a Metallic Mimic that named Juggernaut). On a detached copy,
+    /// each such member is moved back to the zone its entering incarnation came from
+    /// (`GameState::incarnation_entry_record`), and the copy's turn ledger is truncated back to
+    /// `state`'s, so it carries no synthetic battlefield-to-origin rows. The layer pass then
+    /// reruns, so every remaining object's characteristics are current, because
+    /// `layers::pin_entry_population_conditions` reads the pre-entry board as-is. Borrowed when
+    /// no member was delivered earlier. `None` when such a member has no entry record with an
+    /// origin zone (guarded by a `debug_assert!`); the caller then keeps the read without the
+    /// carried effect. That case is not expected: every battlefield delivery records its
+    /// entered incarnation, and a member is a card moved from a zone.
+    fn pre_event_board<'a>(
+        state: &'a GameState,
+        co_entrants: &CoEntrants,
+    ) -> Option<Cow<'a, GameState>> {
+        let earlier = co_entrants
+            .as_slice()
+            .iter()
+            .filter_map(|member| state.objects.get(&member.object_id))
+            .filter(|host| co_entrants.entered_earlier(host))
+            .map(|host| {
+                state
+                    .incarnation_entry_record(ObjectIncarnationRef::from_object(host))
+                    .and_then(|record| record.from_zone)
+                    .map(|origin| (host.id, origin))
+            })
+            .collect::<Option<Vec<(ObjectId, Zone)>>>();
+        debug_assert!(
+            earlier.is_some(),
+            "a co-entrant delivered earlier has no entry record with an origin zone"
+        );
+        let earlier = earlier?;
+        if earlier.is_empty() {
+            return Some(Cow::Borrowed(state));
+        }
+        let mut board = state.clone();
+        let mut events = Vec::new();
+        for (host, origin) in earlier {
+            // CR 400.7: the zone-move primitive, on the detached copy only.
+            crate::game::zones::move_to_zone(&mut board, host, origin, &mut events);
+        }
+        // The moves back are not zone changes of the game: keep the copy's ledger as it was.
+        board
+            .zone_changes_this_turn
+            .truncate(state.zone_changes_this_turn.len());
+        // CR 613.1: the full layer pass, so no remaining object keeps a characteristic the
+        // moved members' statics gave it.
+        crate::game::layers::mark_layers_full(&mut board);
+        crate::game::layers::flush_layers(&mut board);
+        Some(Cow::Owned(board))
+    }
+
     /// CR 614.12 + CR 611.2e + CR 614.1c: a just-delivered entrant (already placed, its entry
     /// characteristics installed) with the carried effect installed and the layer pass run, for the
     /// delivered `EntersWithAdditionalCounters` read.
+    /// Known gap: it reads `state` after delivery, where a member of the same entry event
+    /// delivered earlier (`CoEntrants::entered_earlier`) is on the battlefield and its
+    /// continuous effects apply, although CR 614.12 takes into account only those that
+    /// already exist. No printed `EntersWithAdditionalCounters` static reads a characteristic
+    /// such a member can change: Deanna Troi, Psychic Counsel and Master Chef read "other
+    /// creatures you control", Mysterious Pathlighter an Adventure, and Thunderous Velocipede
+    /// a Vehicle or creature and mana value.
     pub(crate) fn entered(
         state: &GameState,
         entrant: ObjectId,
@@ -14644,6 +14716,48 @@ mod tests {
         // Reach: the rider applied.
         assert_eq!((proposed_read.2, proposed_read.3), (Some(1), Some(1)));
         assert_eq!(proposed_read, read(&entered));
+    }
+
+    /// N6 — CR 614.12 + CR 614.4 + CR 400.7: the pre-event board is the live board, borrowed,
+    /// while no member of the entry event has been delivered; once one has, a copy moves back
+    /// only that member (a later member, a member the move leaves on the battlefield and a
+    /// non-member stay put) and keeps the live ledger's length.
+    #[test]
+    fn battlefield_entrant_projection_pre_event_board_moves_back_only_earlier_members() {
+        let (mut state, source, giant) = rider_board(Entrant::HillGiant);
+        let bears = graveyard_card(&mut state, "Grizzly Bears", &[CoreType::Creature]);
+        let resident = graveyard_card(&mut state, "Resident", &[CoreType::Creature]);
+        crate::game::zones::move_to_zone(&mut state, resident, Zone::Battlefield, &mut Vec::new());
+        let announced: Vec<ObjectIncarnationRef> = [resident, bears, giant]
+            .iter()
+            .map(|id| ObjectIncarnationRef::from_object(&state.objects[id]))
+            .collect();
+        let giant_co_entrants = CoEntrants::for_entrant(&announced, giant);
+
+        assert!(matches!(
+            BattlefieldEntrantProjection::pre_event_board(&state, &giant_co_entrants),
+            Some(Cow::Borrowed(_))
+        ));
+
+        // The Bears is delivered first.
+        crate::game::zones::move_to_zone(&mut state, bears, Zone::Battlefield, &mut Vec::new());
+        let ledger_len = state.zone_changes_this_turn.len();
+        let Some(Cow::Owned(board)) =
+            BattlefieldEntrantProjection::pre_event_board(&state, &giant_co_entrants)
+        else {
+            panic!("a member delivered earlier makes a detached copy");
+        };
+        assert_eq!(board.objects[&bears].zone, Zone::Graveyard);
+        assert!(!board.battlefield.contains(&bears));
+        assert_eq!(board.objects[&giant].zone, Zone::Graveyard);
+        assert_eq!(board.objects[&resident].zone, Zone::Battlefield);
+        assert_eq!(board.objects[&source].zone, Zone::Battlefield);
+        assert_eq!(board.zone_changes_this_turn.len(), ledger_len);
+        assert_eq!(
+            state.objects[&bears].zone,
+            Zone::Battlefield,
+            "live state untouched"
+        );
     }
 
     /// CR 614.12 + CR 712.14a + CR 400.4a (V-P6): the projection applies (a)

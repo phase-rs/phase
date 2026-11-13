@@ -7533,7 +7533,11 @@ pub(super) fn handle_resolution_choice(
                             );
                         let delivery_start = events.len();
                         match effects::change_zone::process_one_zone_move_with_terminal(
-                            state, &ctx, member, events,
+                            state,
+                            &ctx,
+                            member,
+                            logical_zone_change_group.announced_members(),
+                            events,
                         ) {
                             crate::game::zone_pipeline::ZoneMoveTerminalResult::Completed(completion) => {
                                 logical_zone_change_group
@@ -8059,7 +8063,11 @@ pub(super) fn handle_resolution_choice(
                             );
                         let delivery_start = events.len();
                         match effects::change_zone::process_one_zone_move_with_terminal(
-                            state, &ctx, member, events,
+                            state,
+                            &ctx,
+                            member,
+                            logical_zone_change_group.announced_members(),
+                            events,
                         ) {
                             crate::game::zone_pipeline::ZoneMoveTerminalResult::Completed(completion) => {
                                 logical_zone_change_group

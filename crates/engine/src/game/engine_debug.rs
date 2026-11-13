@@ -16,7 +16,7 @@ use crate::types::game_state::{
 };
 use crate::types::identifiers::{CardId, ObjectId};
 use crate::types::player::{PlayerCounterKind, PlayerId};
-use crate::types::proposed_event::{CopyTokenSpec, ProposedEvent, TokenAttackRequest};
+use crate::types::proposed_event::{CoEntrants, CopyTokenSpec, ProposedEvent, TokenAttackRequest};
 use crate::types::resolved_commands::ResolvedPlayerEdit;
 use crate::types::zones::Zone;
 
@@ -1138,6 +1138,7 @@ fn enter_battlefield_with_etb(
         enter_transformed: false,
         face_down_profile: None,
         with_entry_effect: None,
+        co_entrants: CoEntrants::default(),
         face_down_in_exile: crate::types::ability::ExileConcealment::Public,
         chain_referent: crate::types::zones::ChainReferentIntent::Silent,
         enter_as_copy: None,

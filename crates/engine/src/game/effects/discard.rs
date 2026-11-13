@@ -15,7 +15,7 @@ use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
 use crate::types::identifiers::{ObjectId, ObjectIncarnationRef, LEGACY_INCARNATION};
 use crate::types::player::PlayerId;
-use crate::types::proposed_event::{AppliedReplacementKey, ProposedEvent};
+use crate::types::proposed_event::{AppliedReplacementKey, CoEntrants, ProposedEvent};
 use crate::types::zones::Zone;
 
 /// Outcome of a discard attempt routed through the replacement pipeline.
@@ -75,6 +75,7 @@ pub(crate) fn complete_discard_to_graveyard(
         enter_transformed: false,
         face_down_profile: None,
         with_entry_effect: None,
+        co_entrants: CoEntrants::default(),
         face_down_in_exile: crate::types::ability::ExileConcealment::Public,
         chain_referent: crate::types::zones::ChainReferentIntent::Silent,
         enter_as_copy: None,

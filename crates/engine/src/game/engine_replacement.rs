@@ -6143,6 +6143,7 @@ mod tests {
             applied: std::collections::HashSet::new(),
             face_down_profile: None,
             with_entry_effect: None,
+            co_entrants: crate::types::proposed_event::CoEntrants::default(),
             face_down_in_exile: crate::types::ability::ExileConcealment::Public,
             chain_referent: crate::types::zones::ChainReferentIntent::Silent,
         };
@@ -8504,6 +8505,7 @@ mod tests {
             applied: std::collections::HashSet::new(),
             face_down_profile: None,
             with_entry_effect: None,
+            co_entrants: crate::types::proposed_event::CoEntrants::default(),
             face_down_in_exile: crate::types::ability::ExileConcealment::Public,
             chain_referent: crate::types::zones::ChainReferentIntent::Silent,
         };
@@ -8715,6 +8717,7 @@ mod tests {
             applied: std::collections::HashSet::new(),
             face_down_profile: None,
             with_entry_effect: None,
+            co_entrants: crate::types::proposed_event::CoEntrants::default(),
             face_down_in_exile: crate::types::ability::ExileConcealment::Public,
             chain_referent: crate::types::zones::ChainReferentIntent::Silent,
         };
@@ -8842,6 +8845,7 @@ mod tests {
             applied: std::collections::HashSet::new(),
             face_down_profile: None,
             with_entry_effect: None,
+            co_entrants: crate::types::proposed_event::CoEntrants::default(),
             face_down_in_exile: crate::types::ability::ExileConcealment::Public,
             chain_referent: crate::types::zones::ChainReferentIntent::Silent,
         };
@@ -9309,6 +9313,7 @@ mod tests {
             applied: std::collections::HashSet::new(),
             face_down_profile: None,
             with_entry_effect: None,
+            co_entrants: crate::types::proposed_event::CoEntrants::default(),
             face_down_in_exile: crate::types::ability::ExileConcealment::Public,
             chain_referent: crate::types::zones::ChainReferentIntent::Silent,
         };

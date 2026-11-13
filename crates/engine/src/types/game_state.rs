@@ -3694,9 +3694,13 @@ pub struct LatchedSuppressTrigger {
 
 /// Complete ownership for one logical zone-change action.
 ///
-/// Both pause carriers persist this same shape. It deliberately has no serde
-/// defaults: an active legacy carrier cannot reconstruct the original member
-/// set, terminal outcomes, or already-delivered event authority safely.
+/// Both pause carriers persist this same shape. Its terminal and occurrence
+/// authority deliberately has no serde defaults: an active legacy carrier cannot
+/// reconstruct the original member set, terminal outcomes, or already-delivered
+/// event authority safely. `announced_members` alone defaults to empty, because a
+/// legacy carrier without it only loses the CR 614.4 co-entrant exclusion for its
+/// later members (they are checked against every permanent on the battlefield, as
+/// before).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct LogicalZoneChangeGroup {
     pub logical_group_id: LogicalZoneChangeGroupId,
@@ -3720,6 +3724,13 @@ pub struct LogicalZoneChangeGroup {
     pub immediately_after_latched: bool,
     pub immediately_after_batched_triggers: Vec<LatchedBatchedTrigger>,
     pub immediately_after_suppress_triggers: Vec<LatchedSuppressTrigger>,
+    /// CR 614.4 + CR 603.6a: every announced member as it was when the event began, in
+    /// announcement order. A member's battlefield entry proposal is stamped with the others
+    /// (`CoEntrants`), so a member delivered earlier is not a replacement source for a later one.
+    /// A group parked by an older build has none; its later members are checked against every
+    /// permanent on the battlefield, as before.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub announced_members: Vec<ObjectIncarnationRef>,
 }
 
 /// Wire-only mirror used to reject malformed paused logical-zone authority at
@@ -3738,6 +3749,8 @@ struct LogicalZoneChangeGroupWire {
     immediately_after_latched: bool,
     immediately_after_batched_triggers: Vec<LatchedBatchedTrigger>,
     immediately_after_suppress_triggers: Vec<LatchedSuppressTrigger>,
+    #[serde(default)]
+    announced_members: Vec<ObjectIncarnationRef>,
 }
 
 impl From<LogicalZoneChangeGroupWire> for LogicalZoneChangeGroup {
@@ -3754,6 +3767,7 @@ impl From<LogicalZoneChangeGroupWire> for LogicalZoneChangeGroup {
             immediately_after_latched: wire.immediately_after_latched,
             immediately_after_batched_triggers: wire.immediately_after_batched_triggers,
             immediately_after_suppress_triggers: wire.immediately_after_suppress_triggers,
+            announced_members: wire.announced_members,
         }
     }
 }
@@ -3998,7 +4012,20 @@ impl LogicalZoneChangeGroup {
             immediately_after_latched: false,
             immediately_after_batched_triggers: Vec::new(),
             immediately_after_suppress_triggers: Vec::new(),
+            announced_members: Vec::new(),
         }
+    }
+
+    /// CR 614.4: record every announced member as it was when the event began.
+    pub(crate) fn with_announced_members(mut self, members: Vec<ObjectIncarnationRef>) -> Self {
+        self.announced_members = members;
+        self
+    }
+
+    /// CR 614.4 + CR 603.6a: every announced member as it was when the event began, in
+    /// announcement order (empty for a group parked by an older build).
+    pub fn announced_members(&self) -> &[ObjectIncarnationRef] {
+        &self.announced_members
     }
 
     /// Install the one authoritative pre-delivery trigger latch. Re-latching a
@@ -32159,6 +32186,20 @@ impl GameState {
         })
     }
 
+    /// CR 400.7 + CR 603.6a: the zone change that put the exact object `identity` onto the
+    /// battlefield this turn (its `entered_incarnation`). An incarnation enters at most once.
+    /// `None` when it has not entered this turn (the ledger is per-turn).
+    pub(crate) fn incarnation_entry_record(
+        &self,
+        identity: ObjectIncarnationRef,
+    ) -> Option<&ZoneChangeRecord> {
+        self.zone_changes_this_turn.iter().find(|record| {
+            record.object_id == identity.object_id
+                && record.to_zone == Zone::Battlefield
+                && record.entered_incarnation == Some(identity.incarnation)
+        })
+    }
+
     /// CR 701.50b + CR 400.7: The conniver as it LAST EXISTED on the
     /// battlefield, for a connive whose performer left before the action ran
     /// (and may have returned as a new object at the same storage id).
@@ -32185,11 +32226,7 @@ impl GameState {
             .and_then(|history| history.get(&identity.incarnation))?;
         let departure = self.incarnation_departure_record(identity);
         let context = departure.and_then(|record| record.trigger_source_context.as_ref());
-        let entered_this_turn = self.zone_changes_this_turn.iter().any(|record| {
-            record.object_id == object_id
-                && record.to_zone == Zone::Battlefield
-                && record.entered_incarnation == Some(identity.incarnation)
-        });
+        let entered_this_turn = self.incarnation_entry_record(identity).is_some();
         Some(ConniveSubject {
             snapshot: EventObjectSnapshot {
                 identity,
@@ -32749,7 +32786,15 @@ impl GameState {
                 identity: ObjectIncarnationRef::from_object(object),
             })
             .collect();
+        // CR 614.4: every announced member, wherever it is, as the object it is before
+        // any member moves (`CoEntrants`).
+        let identities = announced_members
+            .iter()
+            .filter_map(|object_id| self.objects.get(object_id))
+            .map(ObjectIncarnationRef::from_object)
+            .collect();
         LogicalZoneChangeGroup::new(logical_group_id, prospective_battlefield_members)
+            .with_announced_members(identities)
     }
 
     /// Capture the live ChaCha20 stream offset into `rng_word_pos` so it
@@ -55113,6 +55158,100 @@ mod tests {
             vec![LogicalZoneChangeTerminalOutcome::Pending]
         );
         assert!(group.all_origin_occurrences.is_empty());
+    }
+
+    /// U3 — CR 614.4 + CR 603.6a: the group records every announced member (the hand member
+    /// too, which is no prospective battlefield member) as it was at allocation. The field
+    /// round-trips, and a group serialized without it decodes with none and still validates.
+    #[test]
+    fn logical_zone_change_group_records_and_round_trips_announced_members() {
+        let mut state = GameState::new_two_player(19);
+        let battlefield_id = ObjectId(71);
+        let hand_id = ObjectId(72);
+        let mut battlefield = GameObject::new(
+            battlefield_id,
+            CardId(71),
+            PlayerId(0),
+            "battlefield member".to_string(),
+            Zone::Battlefield,
+        );
+        battlefield.incarnation = 4;
+        let mut hand = GameObject::new(
+            hand_id,
+            CardId(72),
+            PlayerId(0),
+            "hand member".to_string(),
+            Zone::Hand,
+        );
+        hand.incarnation = 7;
+        state.objects.insert(battlefield_id, battlefield);
+        state.objects.insert(hand_id, hand);
+        state.battlefield.push_back(battlefield_id);
+
+        let mut group = state.allocate_logical_zone_change_group(&[battlefield_id, hand_id]);
+        group
+            .latch_immediately_before(Vec::new(), Vec::new())
+            .expect("test group owns an explicit pre-delivery latch");
+
+        assert_eq!(
+            group.announced_members(),
+            &[
+                ObjectIncarnationRef::of(battlefield_id, 4),
+                ObjectIncarnationRef::of(hand_id, 7),
+            ]
+        );
+        let value = serde_json::to_value(&group).expect("group serializes");
+        let roundtripped: LogicalZoneChangeGroup =
+            serde_json::from_value(value.clone()).expect("group deserializes");
+        assert_eq!(roundtripped, group);
+
+        let mut legacy = value;
+        legacy
+            .as_object_mut()
+            .expect("group serializes as an object")
+            .remove("announced_members")
+            .expect("announced members are serialized");
+        let legacy: LogicalZoneChangeGroup =
+            serde_json::from_value(legacy).expect("a legacy group decodes and validates");
+        assert!(legacy.announced_members().is_empty());
+        assert_eq!(
+            legacy.prospective_battlefield_members,
+            group.prospective_battlefield_members
+        );
+    }
+
+    /// U4 — CR 400.7 + CR 603.6a: `incarnation_entry_record` finds the ledger row that put
+    /// that exact incarnation onto the battlefield, and none for an incarnation that never
+    /// entered.
+    #[test]
+    fn incarnation_entry_record_finds_each_incarnations_own_entry() {
+        let mut state = GameState::new_two_player(19);
+        let card = crate::game::zones::create_object(
+            &mut state,
+            CardId(81),
+            PlayerId(0),
+            "Returned card".to_string(),
+            Zone::Graveyard,
+        );
+        let identity = |state: &GameState| ObjectIncarnationRef::from_object(&state.objects[&card]);
+        let in_graveyard = identity(&state);
+        crate::game::zones::move_to_zone(&mut state, card, Zone::Battlefield, &mut Vec::new());
+        let first = identity(&state);
+        crate::game::zones::move_to_zone(&mut state, card, Zone::Graveyard, &mut Vec::new());
+        crate::game::zones::move_to_zone(&mut state, card, Zone::Battlefield, &mut Vec::new());
+        let second = identity(&state);
+        assert_ne!(first, second, "each entry is a new object");
+
+        assert!(state.incarnation_entry_record(in_graveyard).is_none());
+        let first_record = state
+            .incarnation_entry_record(first)
+            .expect("the first entry is recorded");
+        let second_record = state
+            .incarnation_entry_record(second)
+            .expect("the second entry is recorded");
+        assert_eq!(first_record.entered_incarnation, Some(first.incarnation));
+        assert_eq!(second_record.entered_incarnation, Some(second.incarnation));
+        assert!(!std::ptr::eq(first_record, second_record));
     }
 
     #[test]

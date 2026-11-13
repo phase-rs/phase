@@ -1570,7 +1570,13 @@ pub fn resolve(
         );
         let delivery_start = events.len();
         let stack_depth_before_zone_move = state.resolution_stack.capture_child_boundary();
-        match process_one_zone_move_with_terminal(state, &ctx, member, events) {
+        match process_one_zone_move_with_terminal(
+            state,
+            &ctx,
+            member,
+            logical_zone_change_group.announced_members(),
+            events,
+        ) {
             crate::game::zone_pipeline::ZoneMoveTerminalResult::Completed(completion) => {
                 logical_zone_change_group
                     .record_delivery_completion(*obj_id, completion)
@@ -2055,13 +2061,17 @@ pub(crate) fn process_one_zone_move(
     member: &ChangeZoneMemberEntry,
     events: &mut Vec<GameEvent>,
 ) -> ZoneMoveResult {
-    process_one_zone_move_with_terminal(state, ctx, member, events).into_zone_move_result()
+    // A single-object move belongs to no multi-member entry event.
+    process_one_zone_move_with_terminal(state, ctx, member, &[], events).into_zone_move_result()
 }
 
 pub(crate) fn process_one_zone_move_with_terminal(
     state: &mut GameState,
     ctx: &ChangeZoneIterationCtx,
     member: &ChangeZoneMemberEntry,
+    // CR 614.4 + CR 614.12: the announced members of the entry event this member belongs to
+    // (`LogicalZoneChangeGroup::announced_members`).
+    event_members: &[ObjectIncarnationRef],
     events: &mut Vec<GameEvent>,
 ) -> crate::game::zone_pipeline::ZoneMoveTerminalResult {
     let obj_id = member.object_id;
@@ -2107,6 +2117,7 @@ pub(crate) fn process_one_zone_move_with_terminal(
         // CR 611.2e + CR 614.12: the with-entry effect derived at the instruction's
         // resolver entry.
         ctx.with_entry_effect.as_deref(),
+        event_members,
         ctx.track_exiled_by_source,
         ctx.library_placement.clone(),
         ctx.enter_attached_to,
@@ -3176,6 +3187,7 @@ pub fn resolve_all(
             face_down_profile.as_ref(),
             ability.context.face_down_in_exile,
             with_entry_effect.as_deref(),
+            logical_zone_change_group.announced_members(),
             track_exiled_by_source,
             member_library_placement.clone(),
             None,
@@ -3971,7 +3983,7 @@ mod tests {
             enters_attacking: false,
         };
         let result =
-            process_one_zone_move_with_terminal(&mut state, &ctx, &member, &mut Vec::new());
+            process_one_zone_move_with_terminal(&mut state, &ctx, &member, &[], &mut Vec::new());
         assert!(matches!(
             result,
             crate::game::zone_pipeline::ZoneMoveTerminalResult::Completed(

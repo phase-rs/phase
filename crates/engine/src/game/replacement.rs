@@ -37,9 +37,9 @@ use crate::types::mana::{StepEndManaAction, UnitDisposition};
 use crate::types::player::PlayerId;
 use crate::types::proposed_event::{
     AppliedReplacementKey, BoundSearchFoundCandidate, BoundSearchFoundDisposition,
-    BoundSearchFoundGrant, CopyTokenSpec, CounterMoveStage, CounterPlacement, DrawEventStage,
-    EtbTapState, ProposedEvent, ReplacementId, SearchFoundDisposition, TokenAttackRequest,
-    TokenBatch,
+    BoundSearchFoundGrant, CoEntrants, CopyTokenSpec, CounterMoveStage, CounterPlacement,
+    DrawEventStage, EtbTapState, ProposedEvent, ReplacementId, SearchFoundDisposition,
+    TokenAttackRequest, TokenBatch,
 };
 use crate::types::replacements::ReplacementEvent;
 use crate::types::zones::Zone;
@@ -2186,6 +2186,7 @@ fn discard_applier(
             enter_transformed: false,
             face_down_profile: None,
             with_entry_effect: None,
+            co_entrants: CoEntrants::default(),
             face_down_in_exile: crate::types::ability::ExileConcealment::Public,
             chain_referent: crate::types::zones::ChainReferentIntent::Silent,
             enter_as_copy: None,
@@ -7882,6 +7883,20 @@ fn object_replacement_candidate_applies(
         {
             return false;
         }
+    }
+    // CR 614.4 + CR 614.12: a replacement effect must exist before the event it modifies, and
+    // an entry may be modified by another source only if that source already exists. The engine
+    // moves an entry event's members one at a time, so a member delivered earlier in the same
+    // event is on the battlefield here although it did not exist before the event: none of its
+    // replacement effects apply to a later member (Metallic Mimic ruling 2017-02-09; Containment
+    // Priest returned with the entrant by one Ever After). The entrant's own self-replacements
+    // (`is_entering`) and every source that existed before the event are unaffected.
+    if !is_entering
+        && event
+            .co_entrants()
+            .is_some_and(|co_entrants| co_entrants.entered_earlier(obj))
+    {
+        return false;
     }
     if event.already_applied(&rid) {
         return false;
@@ -15979,6 +15994,7 @@ mod tests {
             applied: HashSet::new(),
             face_down_profile: None,
             with_entry_effect: None,
+            co_entrants: crate::types::proposed_event::CoEntrants::default(),
             face_down_in_exile: crate::types::ability::ExileConcealment::Public,
             chain_referent: crate::types::zones::ChainReferentIntent::Silent,
         };
@@ -20037,6 +20053,7 @@ mod tests {
             applied: HashSet::new(),
             face_down_profile: None,
             with_entry_effect: None,
+            co_entrants: crate::types::proposed_event::CoEntrants::default(),
             face_down_in_exile: crate::types::ability::ExileConcealment::Public,
             chain_referent: crate::types::zones::ChainReferentIntent::Silent,
         };
@@ -21514,6 +21531,7 @@ mod tests {
             applied: HashSet::new(),
             face_down_profile: None,
             with_entry_effect: None,
+            co_entrants: crate::types::proposed_event::CoEntrants::default(),
             face_down_in_exile: crate::types::ability::ExileConcealment::Public,
             chain_referent: crate::types::zones::ChainReferentIntent::Silent,
         };
@@ -24921,6 +24939,7 @@ mod tests {
             enter_with_choices: None,
             face_down_profile: None,
             with_entry_effect: None,
+            co_entrants: crate::types::proposed_event::CoEntrants::default(),
             face_down_in_exile: crate::types::ability::ExileConcealment::Public,
             chain_referent: crate::types::zones::ChainReferentIntent::Silent,
             discard_frame: None,
@@ -24974,6 +24993,7 @@ mod tests {
             enter_with_choices: None,
             face_down_profile: None,
             with_entry_effect: None,
+            co_entrants: crate::types::proposed_event::CoEntrants::default(),
             face_down_in_exile: crate::types::ability::ExileConcealment::Public,
             chain_referent: crate::types::zones::ChainReferentIntent::Silent,
             discard_frame: None,
