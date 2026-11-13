@@ -476,7 +476,7 @@ fn essence_burn_battlefield_exit_replay_clears_damage_and_rider() {
 
     // Commit Unsummon first so replay starts after its Hand-to-Stack zone
     // change; the recorded host-exit index is relative to that exact prestate.
-    let mut committed = r.cast(unsummon).target_object(host).commit();
+    let committed = r.cast(unsummon).target_object(host).commit();
     let before_exit = committed.state().clone();
     let journal_start = committed.state().resolved_rules_journal.entries().len();
     let exited = committed.resolve();
@@ -695,7 +695,8 @@ fn live_resolution_count_in_state(
     state: &engine::types::game_state::GameState,
     host: ObjectId,
 ) -> usize {
-    use engine::types::ability::{Effect, ReplacementEvent, RestrictionExpiry};
+    use engine::types::ability::{Effect, RestrictionExpiry};
+    use engine::types::replacements::ReplacementEvent;
     state.objects[&host]
         .replacement_definitions
         .iter_unchecked()
