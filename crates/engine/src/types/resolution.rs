@@ -1990,6 +1990,19 @@ impl ResolutionStack {
                 && matches!(&link.expected_event, crate::types::proposed_event::ProposedEvent::ZoneChange { object_id, .. } if *object_id == link.member.object_id)
                 && child.logical_zone_change_group.prospective_battlefield_members.iter()
                     .any(|member| member.identity == link.member)
+                // CR 603.2c: what the owner collected before a departure is an
+                // occurrence its child holds or has handed back to it.
+                && owner_group.collected_before_departure.iter().all(|collected| {
+                    child
+                        .logical_zone_change_group
+                        .all_origin_occurrences
+                        .iter()
+                        .chain(owner_group.all_origin_occurrences.iter())
+                        .any(|occurrence| {
+                            crate::types::game_state::CollectedZoneChange::of(&occurrence.event)
+                                == Some(*collected)
+                        })
+                })
         });
         if valid {
             Ok(())

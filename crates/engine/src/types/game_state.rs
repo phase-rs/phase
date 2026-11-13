@@ -3700,19 +3700,49 @@ pub struct LogicalZoneChangeGroup {
     pub immediately_before_latched: bool,
     pub immediately_before_batched_triggers: Vec<LatchedBatchedTrigger>,
     pub immediately_before_suppress_triggers: Vec<LatchedSuppressTrigger>,
-    /// CR 603.2c + CR 603.10a: the retained zone changes (object and per-turn
-    /// record index) whose ordinary triggers were already collected for this
-    /// owner before a player left the game, while its component child still held
-    /// them (`triggers::collect_delegated_departures_before_a_player_leaves`).
-    /// The owner's later collection of the handed-back slice skips them.
+    /// CR 603.2c + CR 603.10a: the retained zone changes whose ordinary
+    /// triggers were already collected for this owner before a player left the
+    /// game, while its component child still held them
+    /// (`triggers::collect_delegated_departures_before_a_player_leaves`). The
+    /// owner's later collection of the handed-back slice skips them. Within one
+    /// owner's event an object makes a given move once (CR 400.7), so the
+    /// object and its two zones identify the occurrence without a ledger index.
     #[serde(default)]
-    pub collected_before_departure: Vec<(ObjectId, usize)>,
+    pub collected_before_departure: Vec<CollectedZoneChange>,
     /// `true` only after final delivery has flushed layers and captured every
     /// ordinary CR 603.10 observation. This stays explicit even when no retained
     /// occurrence admits an immediately-after definition.
     pub immediately_after_latched: bool,
     pub immediately_after_batched_triggers: Vec<LatchedBatchedTrigger>,
     pub immediately_after_suppress_triggers: Vec<LatchedSuppressTrigger>,
+}
+
+/// CR 603.2c: one retained zone change a logical owner collected before a player
+/// left the game (`LogicalZoneChangeGroup::collected_before_departure`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CollectedZoneChange {
+    pub object_id: ObjectId,
+    pub from: Option<Zone>,
+    pub to: Zone,
+}
+
+impl CollectedZoneChange {
+    /// The identity of a `ZoneChanged` event; `None` for any other event.
+    pub fn of(event: &GameEvent) -> Option<Self> {
+        match event {
+            GameEvent::ZoneChanged {
+                object_id,
+                from,
+                to,
+                ..
+            } => Some(Self {
+                object_id: *object_id,
+                from: *from,
+                to: *to,
+            }),
+            _ => None,
+        }
+    }
 }
 
 /// Wire-only mirror used to reject malformed paused logical-zone authority at
@@ -3729,7 +3759,7 @@ struct LogicalZoneChangeGroupWire {
     immediately_before_batched_triggers: Vec<LatchedBatchedTrigger>,
     immediately_before_suppress_triggers: Vec<LatchedSuppressTrigger>,
     #[serde(default)]
-    collected_before_departure: Vec<(ObjectId, usize)>,
+    collected_before_departure: Vec<CollectedZoneChange>,
     immediately_after_latched: bool,
     immediately_after_batched_triggers: Vec<LatchedBatchedTrigger>,
     immediately_after_suppress_triggers: Vec<LatchedSuppressTrigger>,
@@ -3787,6 +3817,16 @@ impl LogicalZoneChangeGroup {
                 return Err(format!(
                     "logical zone-change member {}:{} was announced more than once",
                     member.identity.object_id.0, member.identity.incarnation
+                ));
+            }
+        }
+
+        // CR 603.2c: an occurrence is collected before a departure at most once.
+        for (index, collected) in self.collected_before_departure.iter().enumerate() {
+            if self.collected_before_departure[..index].contains(collected) {
+                return Err(format!(
+                    "logical zone-change owner collected object {} before a departure more than once",
+                    collected.object_id.0
                 ));
             }
         }

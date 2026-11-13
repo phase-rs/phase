@@ -4772,17 +4772,6 @@ pub(crate) fn collect_logical_zone_trigger_segment(
     )
 }
 
-/// The identity of a retained zone change: its object and its index in this
-/// turn's zone-change records.
-fn retained_zone_change_key(event: &GameEvent) -> Option<(ObjectId, usize)> {
-    match event {
-        GameEvent::ZoneChanged {
-            object_id, record, ..
-        } => Some((*object_id, record.turn_zone_change_index)),
-        _ => None,
-    }
-}
-
 /// CR 603.10a + CR 603.3a + CR 603.2c: a merged permanent's component child
 /// retains the departures it delivered for the owner that announced them, and
 /// that owner collects them when the child hands them back. A player leaving
@@ -4793,8 +4782,6 @@ fn retained_zone_change_key(event: &GameEvent) -> Option<(ObjectId, usize)> {
 /// and its later collection of the handed-back slice skips exactly those
 /// occurrences, so each is collected once.
 pub(crate) fn collect_delegated_departures_before_a_player_leaves(state: &mut GameState) {
-    use crate::types::resolution::ZoneChangeOwnerMut;
-
     let Some((link, held)) = state.active_batch_delivery().and_then(|child| {
         let link = child.component_delivery_parent.clone()?;
         let held: Vec<GameEvent> = child
@@ -4813,8 +4800,12 @@ pub(crate) fn collect_delegated_departures_before_a_player_leaves(state: &mut Ga
         .resolution_stack
         .visit_active_zone_change_owners_mut(|visited| {
             let group = match visited {
-                ZoneChangeOwnerMut::Batch(batch) => &batch.logical_zone_change_group,
-                ZoneChangeOwnerMut::ChangeZone(iteration) => &iteration.logical_zone_change_group,
+                crate::types::resolution::ZoneChangeOwnerMut::Batch(batch) => {
+                    &batch.logical_zone_change_group
+                }
+                crate::types::resolution::ZoneChangeOwnerMut::ChangeZone(iteration) => {
+                    &iteration.logical_zone_change_group
+                }
             };
             if group.logical_group_id == link.parent_group_id {
                 owner = Some(group.clone());
@@ -4826,7 +4817,7 @@ pub(crate) fn collect_delegated_departures_before_a_player_leaves(state: &mut Ga
     let uncollected: Vec<GameEvent> = held
         .into_iter()
         .filter(|event| {
-            retained_zone_change_key(event)
+            crate::types::game_state::CollectedZoneChange::of(event)
                 .is_some_and(|key| !owner.collected_before_departure.contains(&key))
         })
         .collect();
@@ -4847,16 +4838,18 @@ pub(crate) fn collect_delegated_departures_before_a_player_leaves(state: &mut Ga
     {
         return;
     }
-    let keys: Vec<(ObjectId, usize)> = uncollected
+    let keys: Vec<crate::types::game_state::CollectedZoneChange> = uncollected
         .iter()
-        .filter_map(retained_zone_change_key)
+        .filter_map(crate::types::game_state::CollectedZoneChange::of)
         .collect();
     state
         .resolution_stack
         .visit_active_zone_change_owners_mut(|visited| {
             let group = match visited {
-                ZoneChangeOwnerMut::Batch(batch) => &mut batch.logical_zone_change_group,
-                ZoneChangeOwnerMut::ChangeZone(iteration) => {
+                crate::types::resolution::ZoneChangeOwnerMut::Batch(batch) => {
+                    &mut batch.logical_zone_change_group
+                }
+                crate::types::resolution::ZoneChangeOwnerMut::ChangeZone(iteration) => {
                     &mut iteration.logical_zone_change_group
                 }
             };
@@ -4890,7 +4883,7 @@ pub(crate) fn append_and_collect_logical_zone_trigger_segment(
     let uncollected: Vec<_> = zone_change_events
         .into_iter()
         .filter(|event| {
-            retained_zone_change_key(event)
+            crate::types::game_state::CollectedZoneChange::of(event)
                 .is_none_or(|key| !group.collected_before_departure.contains(&key))
         })
         .collect();

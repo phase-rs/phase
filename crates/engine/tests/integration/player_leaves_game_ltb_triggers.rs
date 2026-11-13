@@ -1205,3 +1205,35 @@ fn losing_at_a_prompt_with_nothing_to_resume_puts_the_departure_triggers_on_the_
          the stack"
     );
 }
+
+/// CR 704.5a + CR 603.2c + CR 603.10a: the sandbox's state-based-action check.
+/// P2 steals one of P0's two Extractor Demons, owns a bear, and is at 0 life when
+/// the debug action runs the check and the trigger scan that follows it. The
+/// departure is collected once: P0's other Demon triggers once and the stolen
+/// Demon triggers for nothing; the follow-up scan does not collect it again.
+#[test]
+fn debug_state_based_actions_collect_a_departure_once_and_retire_the_stolen_observers_trigger() {
+    let mut board = stolen_observer_board(3, &[P2]);
+    let runner = &mut board.runner;
+    runner.state_mut().debug_mode = true;
+    runner.state_mut().players[2].life = 0;
+    runner
+        .act(GameAction::Debug(
+            engine::types::actions::DebugAction::RunStateBasedActions,
+        ))
+        .expect("the debug state-based-action check runs");
+    assert!(runner.state().players[2].is_eliminated);
+    assert_eq!(zone(runner, board.bears[0]), Zone::Exile);
+    drive_trigger_prompts(runner);
+    assert_eq!(
+        triggers_from(runner, board.unstolen_demon),
+        1,
+        "CR 603.2c: P0's Demon sees the bear leave once"
+    );
+    assert_eq!(
+        triggers_from(runner, board.stolen_demon),
+        0,
+        "CR 603.10a + CR 800.4d: the stolen Demon's trigger was P2's"
+    );
+    assert!(runner.state().deferred_triggers.is_empty());
+}
