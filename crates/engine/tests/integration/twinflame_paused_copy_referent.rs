@@ -2452,57 +2452,76 @@ fn r23_esix_gargantuan(carry: PauseCarry) {
 /// acquired as-enters color choices before priority and belong to Twinflame's cleanup.
 #[test]
 fn r24_doubled_gargantuan_own_entry_choices_keep_the_full_batch() {
+    r24_doubled_gargantuan(PauseCarry::Live);
+}
+
+#[test]
+fn r24s_doubled_gargantuan_own_entry_choices_across_save_and_restore() {
+    r24_doubled_gargantuan(PauseCarry::SavedAndRestored);
+}
+
+fn r24_doubled_gargantuan(carry: PauseCarry) {
     let mut choices = 0;
     let mut offers = 0;
     let mut colors = 0;
     let driven = cast_twinflame_with(
         &[QUICKSILVER_GARGANTUAN],
         &[(P0, PARALLEL_LIVES), (P0, PAINTERS_SERVANT)],
-        |waiting, driven| match waiting {
-            WaitingFor::ReplacementChoice {
-                player, candidates, ..
-            } => {
-                assert_eq!(*player, P0);
-                assert_eq!(candidates.len(), 2);
-                assert!(candidates
-                    .iter()
-                    .all(|candidate| !driven.pre.contains(&candidate.source_id)));
-                offers += 1;
-                Some(GameAction::ChooseReplacement {
-                    index: candidates
+        |waiting, driven| {
+            if is_paused(&driven.runner) {
+                match carry {
+                    PauseCarry::Live => {}
+                    PauseCarry::SavedAndRestored => {
+                        driven.runner = save_and_restore(&driven.runner);
+                    }
+                }
+            }
+            match waiting {
+                WaitingFor::ReplacementChoice {
+                    player, candidates, ..
+                } => {
+                    assert_eq!(*player, P0);
+                    assert_eq!(candidates.len(), 2);
+                    assert!(candidates
                         .iter()
-                        .position(|candidate| candidate.description != "Decline")
-                        .expect("entry copy acceptance offered"),
-                })
+                        .all(|candidate| !driven.pre.contains(&candidate.source_id)));
+                    offers += 1;
+                    Some(GameAction::ChooseReplacement {
+                        index: candidates
+                            .iter()
+                            .position(|candidate| candidate.description != "Decline")
+                            .expect("entry copy acceptance offered"),
+                    })
+                }
+                WaitingFor::CopyTargetChoice {
+                    player,
+                    valid_targets,
+                    ..
+                } => {
+                    assert_eq!(*player, P0);
+                    let donor = driven
+                        .pre
+                        .iter()
+                        .copied()
+                        .find(|id| driven.runner.state().objects[id].name == PAINTERS_SERVANT)
+                        .expect("original Painter's Servant exists");
+                    assert!(valid_targets.contains(&donor));
+                    choices += 1;
+                    Some(GameAction::ChooseTarget {
+                        target: Some(TargetRef::Object(donor)),
+                    })
+                }
+                WaitingFor::NamedChoice {
+                    player, options, ..
+                } => {
+                    assert_eq!(*player, P0);
+                    colors += 1;
+                    Some(GameAction::ChooseOption {
+                        choice: options[0].clone(),
+                    })
+                }
+                _ => None,
             }
-            WaitingFor::CopyTargetChoice {
-                player,
-                valid_targets,
-                ..
-            } => {
-                assert_eq!(*player, P0);
-                let donor = driven
-                    .pre
-                    .iter()
-                    .copied()
-                    .find(|id| driven.runner.state().objects[id].name == PAINTERS_SERVANT)
-                    .expect("original Painter's Servant exists");
-                assert!(valid_targets.contains(&donor));
-                choices += 1;
-                Some(GameAction::ChooseTarget {
-                    target: Some(TargetRef::Object(donor)),
-                })
-            }
-            WaitingFor::NamedChoice {
-                player, options, ..
-            } => {
-                assert_eq!(*player, P0);
-                colors += 1;
-                Some(GameAction::ChooseOption {
-                    choice: options[0].clone(),
-                })
-            }
-            _ => None,
         },
     );
     let Some(mut driven) = driven else {
