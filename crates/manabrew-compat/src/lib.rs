@@ -6537,6 +6537,15 @@ mod tests {
 
         let continuation =
             prepare_snapshot_with_prompt_id(runner.state(), P0, "game-a", 42).unwrap();
+        assert_eq!(
+            continuation
+                .derived
+                .unless_draw_cost
+                .as_ref()
+                .map(|draw| draw.stage),
+            Some(engine::game::derived_views::UnlessDrawPaymentStage::Continuing),
+            "the snapshot's views read the stage from the authoritative state"
+        );
         let PromptInput::Upstream(UpstreamPromptInput::ChooseFromSelection(input)) =
             build_prompt(&continuation, &lookup).unwrap().input
         else {
