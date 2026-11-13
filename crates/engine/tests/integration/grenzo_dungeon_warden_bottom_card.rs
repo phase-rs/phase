@@ -10,16 +10,21 @@
 
 use engine::game::scenario::{GameRunner, GameScenario, P0};
 use engine::types::actions::GameAction;
+use engine::types::counter::CounterType;
 use engine::types::events::GameEvent;
 use engine::types::game_state::{CastPaymentMode, WaitingFor};
 use engine::types::identifiers::ObjectId;
-use engine::types::mana::{ManaType, ManaUnit};
+use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::zones::Zone;
 
 /// Verbatim printed Oracle text (Scryfall). A paraphrase can reach a different
 /// parser branch and go green while the real card stays broken.
 const GRENZO: &str = "Grenzo enters with X +1/+1 counters on it.\n{2}: Put the bottom card of your library into your graveyard. If it's a creature card with power less than or equal to Grenzo's power, put it onto the battlefield.";
+
+/// A plain removal spell: Grenzo must be put into the graveyard in response to
+/// its own activation. Murder is "Destroy target creature." for {1}{B}{B}.
+const MURDER: &str = "Destroy target creature.";
 
 struct GrenzoRun {
     runner: GameRunner,
@@ -28,13 +33,28 @@ struct GrenzoRun {
     events: Vec<GameEvent>,
 }
 
-/// Stage a library whose BOTTOMMOST card is `bottom` (creature with the given
-/// power/toughness, or a plain noncreature card when `None`) under `filler_count`
-/// other cards, then activate Grenzo's `{2}` ability through the real pipeline.
+/// The staged board for one Grenzo activation: `grenzo` on the battlefield with
+/// `grenzo_power` as its current power, `bottom` as the BOTTOMMOST library card
+/// (a creature with the given power/toughness, or a plain noncreature card when
+/// `None`) under `filler_count` other cards, and a Lightning Bolt in hand.
+struct GrenzoSetup {
+    runner: GameRunner,
+    grenzo: ObjectId,
+    bottom: ObjectId,
+    top: ObjectId,
+    removal: ObjectId,
+}
+
+/// Stage the board under `grenzo_power` as Grenzo's CURRENT power (the printed
+/// base stays 2, so a buff and the card's base characteristics differ).
 ///
-/// Any window other than priority/mana payment fails the test: the pre-fix
-/// `ChangeZone` lowered to a card-selection prompt over the whole library.
-fn activate_grenzo(bottom_creature: Option<(i32, i32)>, filler_count: usize) -> GrenzoRun {
+/// `add_*_to_library_top` seats each new card at index 0 (CR 401.2: the top), so
+/// adding the bottom card first leaves it beneath every filler.
+fn stage_grenzo(
+    bottom_creature: Option<(i32, i32)>,
+    filler_count: usize,
+    grenzo_power: i32,
+) -> GrenzoSetup {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     scenario.with_mana_pool(
@@ -42,14 +62,29 @@ fn activate_grenzo(bottom_creature: Option<(i32, i32)>, filler_count: usize) -> 
         vec![
             ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]),
             ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]),
+            ManaUnit::new(ManaType::Black, ObjectId(0), false, vec![]),
+            ManaUnit::new(ManaType::Black, ObjectId(0), false, vec![]),
+            ManaUnit::new(ManaType::Black, ObjectId(0), false, vec![]),
         ],
     );
     let grenzo = scenario
         .add_creature_from_oracle(P0, "Grenzo, Dungeon Warden", 2, 2, GRENZO)
         .id();
+    // `grenzo_power` is Grenzo's CURRENT power, staged as +1/+1 counters (layer
+    // 7d) so the layer pass keeps it. The printed base power stays 2 — that is
+    // what the departed graveyard card reads, while its last-known power is the
+    // buffed value.
+    if grenzo_power > 2 {
+        scenario.with_counter(grenzo, CounterType::Plus1Plus1, (grenzo_power - 2) as u32);
+    }
+    let removal = scenario
+        .add_spell_to_hand_from_oracle(P0, "Murder", true, MURDER)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Black, ManaCostShard::Black],
+            generic: 1,
+        })
+        .id();
 
-    // `add_*_to_library_top` seats each new card at index 0 (CR 401.2: the top),
-    // so adding the bottom card first leaves it beneath every filler.
     let bottom = match bottom_creature {
         Some(_) => scenario
             .add_spell_to_library_top(P0, "Bottom Creature", false)
@@ -74,6 +109,21 @@ fn activate_grenzo(bottom_creature: Option<(i32, i32)>, filler_count: usize) -> 
         obj.base_power = Some(power);
         obj.base_toughness = Some(toughness);
     }
+    GrenzoSetup {
+        runner,
+        grenzo,
+        bottom,
+        top,
+        removal,
+    }
+}
+
+/// Activate Grenzo's `{2}` ability and stop at priority with it on the stack, so
+/// a test can respond before it resolves.
+///
+/// Any window other than priority/mana payment fails: the pre-fix `ChangeZone`
+/// lowered to a card-selection prompt over the whole library.
+fn activate_onto_stack(runner: &mut GameRunner, grenzo: ObjectId) -> Vec<GameEvent> {
     let mut events = runner
         .act(GameAction::ActivateAbility {
             source_id: grenzo,
@@ -82,6 +132,40 @@ fn activate_grenzo(bottom_creature: Option<(i32, i32)>, filler_count: usize) -> 
         })
         .expect("Grenzo's {2} ability must be activatable")
         .events;
+    for _ in 0..8 {
+        match &runner.state().waiting_for {
+            WaitingFor::Priority { .. } => break,
+            // The {2} is funded by the caller; confirm the automatic payment.
+            WaitingFor::ManaPayment { .. } => {
+                events.extend(
+                    runner
+                        .act(GameAction::PassPriority)
+                        .expect("pay {2} from the pool")
+                        .events,
+                );
+            }
+            other => panic!(
+                "Grenzo's activation must take the bottom card without an \
+                 interactive choice, got {other:?}"
+            ),
+        }
+    }
+    assert!(
+        !runner.state().stack.is_empty(),
+        "the activation is on the stack, not resolved"
+    );
+    events
+}
+
+fn activate_grenzo(bottom_creature: Option<(i32, i32)>, filler_count: usize) -> GrenzoRun {
+    let GrenzoSetup {
+        mut runner,
+        grenzo,
+        bottom,
+        top,
+        ..
+    } = stage_grenzo(bottom_creature, filler_count, 2);
+    let mut events = activate_onto_stack(&mut runner, grenzo);
 
     for _ in 0..64 {
         match &runner.state().waiting_for {
@@ -183,6 +267,59 @@ fn grenzo_leaves_a_noncreature_bottom_card_in_the_graveyard() {
     );
     assert_eq!(
         run.runner.state().objects[&run.top].zone,
+        Zone::Library,
+        "the top card must stay in the library"
+    );
+}
+
+/// CR 608.2h: "power less than or equal to Grenzo's power" reads the power the
+/// source had in the zone the ability expects it in. Grenzo is a 4-power
+/// creature (a buff over its printed 2) when it is removed in response; the
+/// ability still resolves and must compare the bottom card against the
+/// last-known power (4), not the base power of the graveyard card (2).
+#[test]
+fn grenzo_uses_last_known_power_after_dying_in_response() {
+    let GrenzoSetup {
+        mut runner,
+        grenzo,
+        bottom,
+        top,
+        removal,
+    } = stage_grenzo(Some((3, 3)), 2, 4);
+    let _ = activate_onto_stack(&mut runner, grenzo);
+    assert_eq!(
+        runner.state().objects[&grenzo].power,
+        Some(4),
+        "reach: Grenzo is a 4-power creature when the ability is activated"
+    );
+
+    let _ = runner.cast(removal).target_objects(&[grenzo]).commit();
+    runner.resolve_top();
+    assert_eq!(
+        runner.state().objects[&grenzo].zone,
+        Zone::Graveyard,
+        "reach: the removal spell killed Grenzo before the ability resolved"
+    );
+    assert_eq!(
+        runner.state().stack.len(),
+        1,
+        "Grenzo's ability is still on the stack"
+    );
+    assert_eq!(
+        runner.state().objects[&bottom].zone,
+        Zone::Library,
+        "reach: the bottom card has not moved yet"
+    );
+
+    runner.advance_until_stack_empty();
+
+    assert_eq!(
+        runner.state().objects[&bottom].zone,
+        Zone::Battlefield,
+        "power 3 <= Grenzo's last-known power 4; the graveyard card's base power 2 must not be used"
+    );
+    assert_eq!(
+        runner.state().objects[&top].zone,
         Zone::Library,
         "the top card must stay in the library"
     );

@@ -9373,6 +9373,20 @@ pub(super) fn parse_put_ast(
             .parse(tail.trim_start())
             .is_ok();
             if graveyard_destination {
+                // CR 401.1: "each player's library" / "each opponent's library"
+                // is a per-player fan-out that `Mill` does not expand; the
+                // top-edge branch below fails closed for the same owners. A
+                // `ScopedPlayer` owner bound by an enclosing "Each player ..."
+                // scope (Largepox) is already iterated by that scope, so it
+                // stays the supported singular form.
+                let literal_per_player = matches!(target, TargetFilter::ScopedPlayer)
+                    && ctx.relative_player_scope != Some(ControllerRef::ScopedPlayer);
+                if literal_per_player || matches!(target, TargetFilter::Opponent) {
+                    return Some(PutImperativeAst::Unimplemented {
+                        gap: "put_bottom_of_library_per_player",
+                        fragment: text.to_string(),
+                    });
+                }
                 return Some(PutImperativeAst::Mill {
                     count: QuantityExpr::Fixed { value: 1 },
                     target,

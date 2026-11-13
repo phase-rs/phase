@@ -86163,6 +86163,30 @@ fn cellar_door_bottom_card_mill() {
     assert!(matches!(&*sub.effect, Effect::Token { .. }));
 }
 
+/// CR 401.1: the bottom-edge recognizer does not claim a distributive library
+/// owner it cannot fan out — "each opponent's library" and the literal "each
+/// player's library" name one library per player, and a single `Mill` would move
+/// only one of them. The supported singular owners (Grenzo's "your library",
+/// Cellar Door's "their library") are covered above.
+#[test]
+fn bottom_card_per_player_library_fails_closed() {
+    for text in [
+        "Put the bottom card of each opponent's library into their graveyard.",
+        "Put the bottom card of each player's library into their graveyard.",
+    ] {
+        let def = parse_effect_chain(text, AbilityKind::Spell);
+        assert!(
+            matches!(
+                def.effect.as_ref(),
+                Effect::Unimplemented { name, .. }
+                    if name == "put_bottom_of_library_per_player"
+            ),
+            "{text}: {:?}",
+            def.effect
+        );
+    }
+}
+
 /// A "perpetually get(s) ±" clause the fixed-delta effect cannot model (dynamic
 /// amount, zone-wide, battlefield-wide or compound subject) fails closed instead of
 /// lowering to an until-end-of-turn pump.

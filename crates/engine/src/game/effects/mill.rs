@@ -8,6 +8,19 @@ use crate::types::identifiers::ObjectId;
 use crate::types::proposed_event::ProposedEvent;
 use crate::types::zones::Zone;
 
+/// CR 701.17a: A mill is a move of cards from the TOP of a library into their
+/// owner's graveyard. Any other library edge or destination is the shared
+/// library→zone move building block (Scroll Rack, Grenzo, Dungeon Warden,
+/// Cellar Door): it proposes no `Mill` replacement event and publishes neither a
+/// `Milled` event nor a `Milled` "this way" cause.
+///
+/// Single authority for that predicate, shared with
+/// `effects::this_way_cause_for_effect`, so the emitted action event and the
+/// tracked-set producer verb can never disagree.
+pub(crate) fn is_mill_move(destination: Zone, position: &LibraryPosition) -> bool {
+    destination == Zone::Graveyard && *position == LibraryPosition::Top
+}
+
 /// CR 701.17a: Mill N — put the top N cards of a player's library into their graveyard.
 /// When `destination` is set to a zone other than Graveyard (e.g., Exile or Hand),
 /// cards are moved there instead -- building block for top-of-library move patterns.
@@ -59,7 +72,7 @@ pub fn resolve(
     // their graveyard. A bottom-edge instruction is an ordinary library→zone
     // move (Grenzo, Dungeon Warden; Cellar Door): it proposes no `Mill`
     // replacement event and publishes no `Milled` event.
-    if destination == Zone::Graveyard && position == LibraryPosition::Top {
+    if is_mill_move(destination, &position) {
         let proposed = ProposedEvent::Mill {
             player_id: target_player,
             count: num_cards as u32,
@@ -215,13 +228,12 @@ fn apply_library_edge_move(
     // delivered after the pause, and those cards leave the library without ever
     // firing a milled trigger. The completion runs exactly once after the whole
     // batch settles, on the synchronous and the resumed path alike.
-    let completion =
-        (destination == Zone::Graveyard && position == LibraryPosition::Top).then(|| {
-            crate::types::game_state::BatchCompletion::MilledDeliveryComplete {
-                player_id,
-                cards: cards_to_mill.clone(),
-            }
-        });
+    let completion = is_mill_move(destination, &position).then(|| {
+        crate::types::game_state::BatchCompletion::MilledDeliveryComplete {
+            player_id,
+            cards: cards_to_mill.clone(),
+        }
+    });
     let delivered = matches!(
         zone_pipeline::move_objects_simultaneously_then(state, reqs, completion, events),
         BatchMoveResult::Done

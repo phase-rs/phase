@@ -3109,6 +3109,19 @@ pub(super) fn rebind_zone_changed_this_way_pronoun_to_moved_object(def: &mut Abi
     }
 }
 
+/// CR 608.2c: rebind a bare "it" body that names the single card a preceding
+/// library→zone move just changed. The body lowered to
+/// `TargetFilter::ParentTarget`, which a `Mill` head cannot resolve — it
+/// declares no object target — so the sentinel becomes the moved-card referent
+/// (`LastZoneChanged`).
+fn rebind_parent_target_to_moved_card(def: &mut AbilityDefinition) {
+    if let Effect::ChangeZone { target, .. } = def.effect.as_mut() {
+        if *target == TargetFilter::ParentTarget {
+            *target = TargetFilter::LastZoneChanged;
+        }
+    }
+}
+
 /// CR 608.2c: A leading "If it's a [type] card, …" rider on a single-card mill
 /// names the card that mill just moved. The clause parser lowers the body's bare
 /// "it" to the generic `TargetFilter::ParentTarget` fallback, but `Mill`
@@ -3134,10 +3147,12 @@ pub(super) fn rebind_revealed_card_type_pronoun_to_moved_object(def: &mut Abilit
                 sub.condition.as_ref(),
                 Some(AbilityCondition::RevealedHasCardType { .. })
             ) {
-                if let Effect::ChangeZone { target, .. } = sub.effect.as_mut() {
-                    if *target == TargetFilter::ParentTarget {
-                        *target = TargetFilter::LastZoneChanged;
-                    }
+                rebind_parent_target_to_moved_card(sub);
+                // CR 608.2c: the gate's "Otherwise" branch names the same
+                // just-moved card ("Otherwise, put it into your hand"), and a
+                // `Mill` head declares no object target for its bare "it".
+                if let Some(otherwise) = sub.else_ability.as_deref_mut() {
+                    rebind_parent_target_to_moved_card(otherwise);
                 }
             }
         }

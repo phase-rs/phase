@@ -1,6 +1,6 @@
 use crate::types::ability::{
-    ControllerRef, Effect, EffectScope, ManaProduction, PtValue, QuantityExpr, TapStateChange,
-    TargetFilter, TypedFilter,
+    ControllerRef, Effect, EffectScope, LibraryPosition, ManaProduction, PtValue, QuantityExpr,
+    TapStateChange, TargetFilter, TypedFilter,
 };
 use crate::types::mana::ManaColor;
 use crate::types::Zone;
@@ -482,6 +482,8 @@ fn translate_mill(
         count,
         target,
         destination: Zone::Graveyard,
+        // CR 701.17a: Forge's Mill action always takes the top edge.
+        position: LibraryPosition::Top,
     })
 }
 
