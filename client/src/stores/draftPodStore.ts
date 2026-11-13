@@ -17,7 +17,7 @@
 import { create } from "zustand";
 import i18n from "i18next";
 
-import { DraftAdapter, distinctJoined, setPackSequence, type CubeDraftSettings, type DraftProcedure, type PackDistribution, type PoolInput, type SetLayoutKind, type SetPackSequence, type TournamentFormat, type PodPolicy } from "../adapter/draft-adapter";
+import { DraftAdapter, distinctJoined, setPackSequence, type CubeDraftSettings, type DraftProcedure, type PackDistribution, type PoolInput, type PostDraftPlay, type SetLayoutKind, type SetPackSequence, type TournamentFormat, type PodPolicy } from "../adapter/draft-adapter";
 import { CUSTOM_CUBE_SET_CODE } from "../adapter/draftKinds";
 import type { DraftPackChoice } from "./draftStore";
 import type { DraftPodHostConfig, DraftPodListing } from "../adapter/draftPodHostAdapter";
@@ -284,6 +284,8 @@ interface DraftPodState {
   packsPerPlayer: number | null;
   /** Engine-published cube deck-size floor for `procedureCacheKey`. */
   cubeMinDeckSize: number | null;
+  /** Engine-published post-draft play for the selected kind; `null` until published, kept across a format change. */
+  postDraftPlay: PostDraftPlay | null;
 }
 
 interface DraftPodActions {
@@ -394,6 +396,7 @@ const initialState: DraftPodState = {
   allowedSetLayouts: null,
   packsPerPlayer: null,
   cubeMinDeckSize: null,
+  postDraftPlay: null,
 };
 
 /**
@@ -527,6 +530,7 @@ function procedureCache(
   | "allowedSetLayouts"
   | "packsPerPlayer"
   | "cubeMinDeckSize"
+  | "postDraftPlay"
 > {
   return {
     allowedPodSizes: procedure.allowed_pod_sizes,
@@ -535,6 +539,7 @@ function procedureCache(
     allowedSetLayouts: procedure.allowed_set_layouts,
     packsPerPlayer: procedure.packs_per_player,
     cubeMinDeckSize: procedure.cube_min_deck_size,
+    postDraftPlay: procedure.post_draft_play,
   };
 }
 
@@ -724,6 +729,7 @@ export const useDraftPodStore = create<DraftPodState & DraftPodActions>()(
           allowedSetLayouts: procedureChanged ? null : prev.allowedSetLayouts,
           packsPerPlayer: procedureChanged ? null : prev.packsPerPlayer,
           cubeMinDeckSize: procedureChanged ? null : prev.cubeMinDeckSize,
+          postDraftPlay: kindChanged ? null : prev.postDraftPlay,
           loadingPool: false,
           configError: null,
         };
