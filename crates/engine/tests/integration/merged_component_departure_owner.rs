@@ -1377,6 +1377,59 @@ fn kor_skyfisher_selection_hands_a_parked_component_back_to_its_loop() {
     }
 }
 
+/// CR 603.10a + CR 603.3a + CR 800.4d: a second player leaves the same turn.
+/// In a four-player game P3 concedes first, so an earlier departure is already
+/// recorded this turn. P2 then steals P0's Extractor Demon, P0's Rebuking
+/// Ceremony starts moving P1's merged commander pile, and Brokkos's CR 903.9b
+/// prompt parks the owner. P2 concedes while P1's prompt is open, the Demon goes
+/// back to P0, and P1 answers: the merged permanent's retained departure was
+/// collected under the controllers before P2 left, so the Demon triggers nothing.
+/// The boundary is the departure during this owner's operation, not the first
+/// of the turn.
+#[test]
+fn a_second_leaver_in_the_turn_still_retires_its_stolen_observers_retained_trigger() {
+    for answer_index in [0, 1] {
+        let db = shared_card_db().expect("integration card fixture must load");
+        let mut scenario = GameScenario::new_with_format(FormatConfig::commander(), 4, 7);
+        scenario.at_phase(Phase::PreCombatMain);
+        let (mender, brokkos) = add_pile(&mut scenario, P1);
+        let stolen_demon = scenario.add_real_card(P0, "Extractor Demon", Zone::Battlefield, db);
+        let turn_against = scenario.add_real_card(P2, "Turn Against", Zone::Hand, db);
+        let ceremony = scenario.add_real_card(P0, "Rebuking Ceremony", Zone::Hand, db);
+        let surviving = scenario.add_real_card(P2, "Circuit Mender", Zone::Battlefield, db);
+        scenario.with_library_top(P1, &["Library Card A"]);
+        scenario.with_mana_pool(P0, mana(ManaType::Green, 5));
+        scenario.with_mana_pool(P2, mana(ManaType::Red, 5));
+        let mut runner = scenario.build();
+        let pile = merge_pile(&mut runner, Pile::BrokkosUnderMender, mender, brokkos, true);
+        let label = format!("answer {answer_index}");
+
+        concede(&mut runner, PlayerId(3));
+        assert!(runner.state().players[3].is_eliminated, "{label}");
+        steal_for(&mut runner, P2, turn_against, stolen_demon);
+        cast_until_resolved_or_asked(&mut runner, ceremony, &[surviving, pile.survivor]);
+        assert_commander_prompt(runner.state(), P1, pile.brokkos);
+        concede(&mut runner, P2);
+        assert!(runner.state().players[2].is_eliminated, "{label}");
+        assert_commander_prompt(runner.state(), P1, pile.brokkos);
+
+        answer(&mut runner, answer_index);
+        resolution_finished(runner.state());
+        assert_eq!(
+            mender_departure_triggers(runner.state()),
+            vec![P1],
+            "{label}: one merged permanent left, so its ability triggers once"
+        );
+        assert_eq!(
+            demon_triggers(runner.state()),
+            0,
+            "{label}: the Extractor Demon P2 had stolen looked back to a source P2 controlled \
+             for the merged permanent's retained departure, which the owner collected after P2 \
+             left, though P3 had left earlier in the turn"
+        );
+    }
+}
+
 /// CR 800.4a + CR 730.3: another seat concedes while Chaos Warp's owner
 /// iteration is parked on Brokkos's prompt. The prompt, the component child and
 /// the owner iteration beneath it are untouched; either answer finishes the

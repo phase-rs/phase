@@ -497,8 +497,11 @@ fn run_post_action_pipeline_core(
     // the loss without sending the still-entering permanent to the graveyard.
     while matches!(state.waiting_for, WaitingFor::Priority { .. }) {
         let events_before = events.len();
-        let deferred_before_sba = state.deferred_triggers.len();
-        sba::check_state_based_actions_in_pass(state, events);
+        let departure_queued = sba::check_state_based_actions_in_pass(state, events);
+        let departure_first_queued = state
+            .deferred_triggers
+            .len()
+            .saturating_sub(departure_queued);
         if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
             // CR 603.3b + CR 903.9a: an SBA batch can open a resumable
             // non-priority choice (for example, a commander-zone return choice)
@@ -531,11 +534,7 @@ fn run_post_action_pipeline_core(
                 );
                 // A player's departure in that batch queued its own triggers
                 // (CR 603.10a); they wait behind the choice under the batch's origin.
-                triggers::stamp_deferred_triggers_from(
-                    state,
-                    deferred_before_sba.min(state.deferred_triggers.len()),
-                    origin,
-                );
+                triggers::stamp_deferred_triggers_from(state, departure_first_queued, origin);
                 triggers::collect_parked_triggers_into_deferred(state, &sba_events, origin);
                 // Logical zone-change owners collect ordinary observers only.
                 // Delayed triggers remain entitled to the raw occurrences; the
@@ -578,7 +577,7 @@ fn run_post_action_pipeline_core(
                 if !super::stack::resolving_spell_owes_final_part(state) {
                     triggers::stamp_deferred_triggers_from(
                         state,
-                        deferred_before_sba.min(state.deferred_triggers.len()),
+                        departure_first_queued,
                         triggers::DeferredTriggerBatchOrigin::PriorityBoundary,
                     );
                 }

@@ -2568,8 +2568,12 @@ fn latch_logical_zone_change_group_immediately_before(
     group.immediately_before_controllers = state
         .battlefield
         .iter()
-        .filter_map(|id| Some((*id, state.objects.get(id)?.controller)))
+        .filter_map(|id| {
+            let object = state.objects.get(id)?;
+            Some((ObjectIncarnationRef::from_object(object), object.controller))
+        })
         .collect();
+    group.immediately_before_zone_change_record = state.zone_changes_this_turn.len();
 }
 
 fn trigger_observes_zone_change(
@@ -4794,6 +4798,7 @@ pub(crate) fn collect_logical_zone_trigger_segment(
             .players
             .iter()
             .filter_map(|player| player.left_at_zone_change_record)
+            .filter(|left_at| *left_at >= group.immediately_before_zone_change_record)
             .min()
             .is_some_and(|boundary| {
                 state
@@ -4819,10 +4824,14 @@ pub(crate) fn collect_logical_zone_trigger_segment(
         if events.peek().is_none() || !events.all(|event| performed_before_departure(event)) {
             continue;
         }
+        let source = state
+            .objects
+            .get(&context.pending.source_id)
+            .map(ObjectIncarnationRef::from_object);
         if let Some((_, controller)) = group
             .immediately_before_controllers
             .iter()
-            .find(|(source, _)| *source == context.pending.source_id)
+            .find(|(latched, _)| Some(*latched) == source)
         {
             context.pending.controller = *controller;
         }

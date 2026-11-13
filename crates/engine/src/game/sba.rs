@@ -110,16 +110,19 @@ pub(crate) fn check_state_based_actions_reporting_departure(
     state: &mut GameState,
     events: &mut Vec<GameEvent>,
 ) -> DepartureResume {
-    run_state_based_actions(state, events, &[], DepartureTriggers::ScannedByCaller)
+    run_state_based_actions(state, events, &[], DepartureTriggers::ScannedByCaller).0
 }
 
 /// CR 704.3 + CR 117.5: [`check_state_based_actions`] inside a post-action pass, which places
 /// what is waiting to be put on the stack at its own settle.
+///
+/// Returns how many triggered abilities a player's departure in it queued: the last that
+/// many contexts of `deferred_triggers`.
 pub(crate) fn check_state_based_actions_in_pass(
     state: &mut GameState,
     events: &mut Vec<GameEvent>,
-) {
-    let _ = run_state_based_actions(state, events, &[], DepartureTriggers::PlacedByPass);
+) -> usize {
+    run_state_based_actions(state, events, &[], DepartureTriggers::PlacedByPass).1
 }
 
 /// CR 704.3 + CR 704.5v + CR 510.3a: run state-based actions in a fixpoint loop
@@ -132,8 +135,8 @@ pub(crate) fn check_state_based_actions_with_waiting_triggers(
     state: &mut GameState,
     events: &mut Vec<GameEvent>,
     waiting: &[crate::game::triggers::PendingTriggerContext],
-) {
-    let _ = run_state_based_actions(state, events, waiting, DepartureTriggers::ScannedByCaller);
+) -> usize {
+    run_state_based_actions(state, events, waiting, DepartureTriggers::ScannedByCaller).1
 }
 
 fn run_state_based_actions(
@@ -141,7 +144,7 @@ fn run_state_based_actions(
     events: &mut Vec<GameEvent>,
     waiting: &[crate::game::triggers::PendingTriggerContext],
     departures: DepartureTriggers,
-) -> DepartureResume {
+) -> (DepartureResume, usize) {
     let mut departed = Vec::new();
     let resume =
         run_state_based_action_iterations(state, events, waiting, departures, &mut departed);
@@ -149,10 +152,11 @@ fn run_state_based_actions(
     // as one simultaneous event, so the abilities a player's departure in it
     // triggered are collected now, once, against the observers latched before
     // that departure. A game that ended triggers nothing (`collect`, CR 104.1).
-    for departure in departed {
-        departure.collect(state, events);
-    }
-    resume
+    let queued = departed
+        .into_iter()
+        .map(|departure| departure.collect(state, events))
+        .sum();
+    (resume, queued)
 }
 
 fn run_state_based_action_iterations(

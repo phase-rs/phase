@@ -2629,10 +2629,25 @@ fn reconcile_terminal_sba(state: &mut GameState, result: &mut ActionResult) {
         // its events (CR 603.10a, CR 603.2c), so the settlement's scan from
         // `departure_start` takes only what happened after it.
         let departure_start = result.events.len();
-        if sba::check_state_based_actions_reporting_departure(state, &mut result.events)
-            == super::elimination::DepartureResume::ParkedZoneChangeTail
-        {
-            settle_resolution_resumed_after_departure(state, &mut result.events, departure_start);
+        match sba::check_state_based_actions_reporting_departure(state, &mut result.events) {
+            super::elimination::DepartureResume::ParkedZoneChangeTail => {
+                settle_resolution_resumed_after_departure(
+                    state,
+                    &mut result.events,
+                    departure_start,
+                );
+            }
+            // CR 603.3 + CR 117.5: nothing was resumed, so no pipeline follows the
+            // loss on this route; the abilities the departure triggered and queued
+            // go on the stack before the next player has priority, as after a
+            // concession.
+            super::elimination::DepartureResume::Settled => {
+                super::elimination::drain_or_clear_deferred_triggers_after_elimination(
+                    state,
+                    super::elimination::DepartureTriggers::ScannedByCaller,
+                    &mut result.events,
+                );
+            }
         }
         // SBA may have advanced waiting_for (e.g., GameOver, or Priority for
         // the next living player). Sync the result.

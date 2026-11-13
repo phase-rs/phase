@@ -170,7 +170,7 @@ pub fn eliminate_players_simultaneously(
     // CR 603.2: an effect's loss is no state-based-action batch, so nothing
     // stamps the departure after it: collect it now.
     if let Some(looked_back) = outcome.looked_back {
-        looked_back.collect(state, events);
+        let _queued = looked_back.collect(state, events);
     }
 }
 
@@ -254,18 +254,23 @@ impl LookedBackDeparture {
     /// buffer collects the departure again under its live controllers. The
     /// triggers wait in `deferred_triggers` for the caller's normal settlement
     /// (CR 603.3b). CR 104.1: nothing triggers once the game is over, and
-    /// CR 800.4d: a trigger whose controller left is retired.
-    pub(crate) fn collect(self, state: &mut GameState, events: &[GameEvent]) {
+    /// CR 800.4d: a trigger whose controller left is retired. Returns how many
+    /// contexts it queued, which are the last that many of `deferred_triggers`.
+    pub(crate) fn collect(self, state: &mut GameState, events: &[GameEvent]) -> usize {
         if matches!(state.waiting_for, WaitingFor::GameOver { .. }) {
-            return;
+            return 0;
         }
+        // CR 800.4d: what was already waiting for a player who left is retired first,
+        // so the contexts queued below are exactly the tail.
+        prune_deferred_triggers_for_eliminated_players(state);
+        let queued_before = state.deferred_triggers.len();
         super::triggers::collect_departure_triggers_into_deferred(
             state,
             &events[..self.departure_end],
             self.first_event,
             Some((self.observers, self.departure_end)),
         );
-        prune_deferred_triggers_for_eliminated_players(state);
+        state.deferred_triggers.len() - queued_before
     }
 }
 
@@ -1072,7 +1077,7 @@ fn prune_deferred_triggers_for_eliminated_players(state: &mut GameState) {
 /// CR 603.3b: If prune collapsed an ordering pass into `deferred_triggers`
 /// while `waiting_for` is Priority, dispatch now so phase auto-advance does
 /// not skip them (issue #1350).
-fn drain_or_clear_deferred_triggers_after_elimination(
+pub(crate) fn drain_or_clear_deferred_triggers_after_elimination(
     state: &mut GameState,
     departure_triggers: DepartureTriggers,
     events: &mut Vec<GameEvent>,
