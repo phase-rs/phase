@@ -419,7 +419,7 @@ impl TacticalPolicy for PoisonClockPolicy {
             // CR 509.1a: declared combat damage is not guaranteed — the attack
             // can be blocked or prevented — so even a would-be-lethal poison
             // swing is held below the critical band (`STRONG_MAX` ceiling) that
-            // a guaranteed direct poison earns. A committed attacker is still a
+            // a direct poison confirmed through the engine earns. A committed attacker is still a
             // strong play, just not a booked win.
             PoisonContribution::CombatDamage(pool) => {
                 score_clock(scalar, pool.measure, pool.added, pool.ceiling)
