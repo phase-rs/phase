@@ -12926,6 +12926,8 @@ fn apply_action(
 /// the step is left when the players next pass priority. CR 502.4 gives no
 /// player priority during the untap step; this window is the handler's
 /// departure from it.
+/// The resume repeats no CR 502.1/502.2 action: `begin_untap_step` already ran
+/// them, and CR 502.4 admits nothing in between.
 fn untap_completion_waiting_for(
     state: &mut GameState,
     events: &mut Vec<GameEvent>,
@@ -12945,8 +12947,8 @@ fn untap_completion_waiting_for(
             player: state.active_player,
         },
     );
-    match turns::begin_untap_or_subset_prompt(state, events, chosen_not_to_untap) {
-        turns::UntapCompletion::ChooseSubset(prompt) => *prompt,
+    match turns::resume_untap_step(state, events, chosen_not_to_untap) {
+        turns::UntapCompletion::Determination(prompt) => *prompt,
         // CR 500.8 + CR 500.9: a later step the interpreter reaches without
         // priority (another added untap step, or the cleanup step after a
         // step added after the end step) can defer its own transition. The

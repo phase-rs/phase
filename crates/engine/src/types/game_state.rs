@@ -54344,6 +54344,7 @@ mod tests {
     fn day_night_changed_event_roundtrips() {
         let event = GameEvent::DayNightChanged {
             new_state: "Night".to_string(),
+            previous: None,
         };
         let serialized = serde_json::to_string(&event).unwrap();
         let deserialized: GameEvent = serde_json::from_str(&serialized).unwrap();

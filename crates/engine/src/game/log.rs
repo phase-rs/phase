@@ -1794,7 +1794,7 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
             num(*level as i32),
         ],
 
-        GameEvent::DayNightChanged { new_state } => {
+        GameEvent::DayNightChanged { new_state, .. } => {
             vec![text("Day/Night changed to "), text(new_state)]
         }
 
@@ -3315,6 +3315,7 @@ mod tests {
             },
             GameEvent::DayNightChanged {
                 new_state: "Day".to_string(),
+                previous: None,
             },
             GameEvent::TokenCreated {
                 object_id: ObjectId(1),

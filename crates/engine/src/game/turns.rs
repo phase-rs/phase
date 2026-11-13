@@ -2234,13 +2234,13 @@ pub fn execute_untap(state: &mut GameState, events: &mut Vec<GameEvent>) {
 }
 
 /// CR 502.3 + CR 500.5: how completing the untap step ended, returned by
-/// [`begin_untap_or_subset_prompt`].
+/// [`begin_untap_step`].
 #[derive(Debug)]
 pub enum UntapCompletion {
-    /// CR 502.3: a `MaxUntapPerType` cap is over its limit, so the active
-    /// player determines which permanents of the capped group untap. The untap
-    /// has not run.
-    ChooseSubset(Box<WaitingFor>),
+    /// CR 502.3: the active player determines optional declines (`UntapChoice`) or
+    /// the capped group (`ChooseUntapSubset`). The CR 502.1 + CR 502.2 actions have
+    /// already run and must not run again; the untap has not run.
+    Determination(Box<WaitingFor>),
     /// The untap ran and the turn left the untap step.
     Advanced,
     /// The untap ran, but leaving the untap step ends the turn while a
@@ -2248,6 +2248,25 @@ pub enum UntapCompletion {
     /// [`advance_phase_once`]). The step is still in progress; its untap must
     /// not run again, and the leave is retried once the resolution settles.
     LeaveDeferred,
+}
+
+/// CR 502.1 + CR 502.2 + CR 502.3: run the untap step from its first turn-based action.
+/// Phasing, the phase-in reconciliation, the day/night check and the layer flush happen
+/// exactly once, before either CR 502.3 determination reads the board, so a permanent that
+/// phased in, or that the designation turned over, is the one the active player determines
+/// about (CR 502.3). A determination's answer resumes at [`resume_untap_step`], which does
+/// not repeat them.
+pub fn begin_untap_step(state: &mut GameState, events: &mut Vec<GameEvent>) -> UntapCompletion {
+    perform_untap_step_turn_based_actions(state, events);
+    let candidates = untap_choice_candidates(state, state.active_player);
+    if !candidates.is_empty() {
+        return UntapCompletion::Determination(Box::new(WaitingFor::UntapChoice {
+            player: state.active_player,
+            candidates,
+            chosen_not_to_untap: Vec::new(),
+        }));
+    }
+    resume_untap_step(state, events, HashSet::new())
 }
 
 /// CR 502.3: Bridge between the optional-decline prompt (`UntapChoice`) and the
@@ -2258,7 +2277,9 @@ pub enum UntapCompletion {
 /// which `max` permanents untap (CR 502.3); otherwise it performs the untap
 /// with the recorded declines and leaves the untap step, reporting whether the
 /// leave committed or was deferred (see [`UntapCompletion`]).
-pub fn begin_untap_or_subset_prompt(
+/// This entry resumes after the CR 502.1 + CR 502.2 actions; CR 502.4 grants no
+/// priority in between, so those actions must not repeat.
+pub fn resume_untap_step(
     state: &mut GameState,
     events: &mut Vec<GameEvent>,
     chosen_not_to_untap: HashSet<ObjectId>,
@@ -2268,13 +2289,13 @@ pub fn begin_untap_or_subset_prompt(
         // Persist the declines so the subset resolution can fold the unchosen
         // complement in alongside them when it finally executes the untap.
         state.pending_untap_declines = chosen_not_to_untap.into_iter().collect();
-        return UntapCompletion::ChooseSubset(Box::new(WaitingFor::ChooseUntapSubset {
+        return UntapCompletion::Determination(Box::new(WaitingFor::ChooseUntapSubset {
             player: active,
             group,
             max,
         }));
     }
-    execute_untap_with_choices(state, events, &chosen_not_to_untap);
+    untap_permanents(state, events, &chosen_not_to_untap);
     // CR 500.5: Untap completion owns one committed phase entry;
     // `advance_phase_once` proceeds past any skipped successor.
     match advance_phase_once(state, events) {
@@ -2283,11 +2304,43 @@ pub fn begin_untap_or_subset_prompt(
     }
 }
 
+/// CR 502.1 + CR 502.2 + CR 502.3: perform the whole untap step, first its
+/// phasing and designation actions, then its untap with the recorded declines.
 pub fn execute_untap_with_choices(
     state: &mut GameState,
     events: &mut Vec<GameEvent>,
     chosen_not_to_untap: &HashSet<ObjectId>,
 ) {
+    perform_untap_step_turn_based_actions(state, events);
+    untap_permanents(state, events, chosen_not_to_untap);
+}
+
+/// CR 502.4 + CR 503.1a: hold every ability that `events[event_start..]` triggered during the
+/// untap step. CR 603.3: they go on the stack the next time a player would receive priority,
+/// which is usually the upkeep step, together with that boundary's own triggers
+/// (`process_phase_triggers`). CR 603.2c: the occurrences are claimed, so the post-action
+/// ordinary scan does not collect them a second time. CR 800.4d is inherited by living in
+/// `deferred_triggers` (`elimination::prune_deferred_triggers_for_eliminated_players`).
+fn hold_untap_step_triggers(state: &mut GameState, events: &[GameEvent], event_start: usize) {
+    if events.len() == event_start {
+        return;
+    }
+    let first_held = state.deferred_triggers.len();
+    super::triggers::collect_unclaimed_triggers_into_deferred(state, events, event_start, None);
+    super::triggers::claim_events_for_ordinary_collection(state, events, event_start);
+    super::triggers::stamp_deferred_triggers_from(
+        state,
+        first_held,
+        super::triggers::DeferredTriggerBatchOrigin::UntapStep,
+    );
+}
+
+/// CR 502.1 + CR 502.2: the untap step's first two turn-based actions.
+pub(crate) fn perform_untap_step_turn_based_actions(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+) {
+    let phasing_start = events.len();
     // CR 500.8 + CR 500.9 + CR 500.10: an untap step an effect added — in an
     // added beginning phase, directly after an untap step, or in a phase
     // created to hold it — performs the untap step's turn-based actions, but
@@ -2315,6 +2368,9 @@ pub fn execute_untap_with_choices(
         // an added one; a turn deadline does not.
         super::layers::prune_added_untap_step_casting_permissions(state, active);
     }
+    // CR 502.1 + CR 702.26a: phasing is the first turn-based action; its triggers
+    // wait with the rest of the untap step's triggers until priority.
+    hold_untap_step_triggers(state, events, phasing_start);
 
     // CR 502.1 + CR 702.26c + CR 702.145c + CR 702.145f: a permanent that just phased in
     // with a face that disagrees with day or night transforms immediately, not as a
@@ -2326,19 +2382,30 @@ pub fn execute_untap_with_choices(
     // Cathar's "transforms into Brutal Cathar" exists only on the face it turned to).
     // CR 502.4 + CR 503.1a: they wait for the upkeep in the deferred queue; CR 603.2c: the
     // claimed occurrences aren't collected again by this action's post-action scan.
-    super::triggers::collect_unclaimed_triggers_into_deferred(state, events, reconcile_start, None);
-    super::triggers::claim_events_for_ordinary_collection(state, events, reconcile_start);
-    // CR 502.2 + CR 731.2: second, the day/night check against the previous turn, in every
-    // untap step, an added one included (`begins_turn == false`). CR 502.4 + CR 503.1a: its
-    // transforms' and "day becomes night" triggers (CR 731.1a) wait for the upkeep, through
-    // this action's ordinary post-action trigger scan.
+    hold_untap_step_triggers(state, events, reconcile_start);
+    // CR 502.2 + CR 731.2: second, check the previous turn in every untap step,
+    // an added one included (`begins_turn == false`). CR 603.10 + CR 701.27e:
+    // collect its transform and CR 731.1a designation triggers before CR 502.3
+    // or the upkeep's SBA check can remove their source; CR 502.4 holds them.
+    let transition_start = events.len();
     super::day_night::check_day_night_transition(state, events);
+    hold_untap_step_triggers(state, events, transition_start);
     // CR 613.1 + CR 613.4c + CR 122.1a: a transform writes the new face's printed values and
     // marks layers dirty, so settle them before CR 502.3 reads power, color or type: a
     // Brutal Cathar with a +1/+1 counter is 3/3 when Meekstone decides.
     if state.layers_dirty.is_dirty() {
         super::layers::flush_layers(state);
     }
+}
+
+/// CR 502.3: the untap step's third turn-based action.
+fn untap_permanents(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+    chosen_not_to_untap: &HashSet<ObjectId>,
+) {
+    let untap_start = events.len();
+    let active = state.active_player;
 
     // CR 502.3: Collect object IDs that have a CantUntap transient effect
     // (e.g., "doesn't untap during its controller's next untap step").
@@ -2518,6 +2585,8 @@ pub fn execute_untap_with_choices(
     // CR 502.3: Prune "until controller's next untap step" effects AFTER the untap
     // step has been processed, so the permanent skips exactly one untap.
     super::layers::prune_controller_untap_step_effects(state, active);
+    // CR 502.3 + CR 502.4: "becomes untapped" triggers also wait for priority.
+    hold_untap_step_triggers(state, events, untap_start);
 }
 
 /// CR 611.2a: end or arm the durations whose deadline is the start of
@@ -3824,6 +3893,7 @@ fn add_lore_counters_to_sagas(state: &mut GameState, events: &mut Vec<GameEvent>
 
 /// CR 503.1 / CR 504.2 / CR 507.1 / CR 513.1: Process phase triggers for the current step.
 /// Fabricates a PhaseChanged event for `state.phase` and runs trigger matching.
+/// CR 503.1a: held untap-step triggers join this boundary's own triggers in one batch.
 ///
 /// Returns `(fired, ordering_prompt)`:
 /// * `fired` is `true` if any triggers were placed on the stack, are pending
@@ -3864,9 +3934,22 @@ fn process_phase_triggers(
     } else {
         (phase_events, events.to_vec())
     };
-    let outcome = super::triggers::process_triggers_with_delayed_phase_events(
+    // CR 503.1a + CR 603.3b: untap-step and upkeep triggers are one APNAP batch;
+    // their controllers order them together, regardless of when they triggered.
+    // CR 502.4 + CR 614.10a: a skipped upkeep hands the batch to the first step
+    // that grants priority. A live resolution keeps it held for the drain below.
+    let mut normal_pending = if super::triggers::should_drain_deferred_triggers_now(state) {
+        super::triggers::take_untap_step_trigger_batch(state)
+    } else {
+        Vec::new()
+    };
+    normal_pending.extend(super::triggers::collect_triggers_for_batch(
         state,
         &phase_events,
+    ));
+    let outcome = super::triggers::process_collected_triggers_with_delayed_phase_events(
+        state,
+        normal_pending,
         &delayed_events,
         events_out,
     );
@@ -4056,22 +4139,19 @@ fn auto_advance_once(state: &mut GameState, events: &mut Vec<GameEvent>) -> Auto
             // CR 614.1b + CR 614.10a: Skip the untap step if a static or
             // one-shot "skip your next untap step" replacement applies.
             if !should_skip_step_now(state, Phase::Untap) {
-                let candidates = untap_choice_candidates(state, state.active_player);
-                if !candidates.is_empty() {
-                    return AutoAdvanceStep::waiting(WaitingFor::UntapChoice {
-                        player: state.active_player,
-                        candidates,
-                        chosen_not_to_untap: Vec::new(),
-                    });
+                // CR 502.1 + CR 502.2 + CR 502.3: a standing determination means the
+                // turn-based actions ran; re-entry must not phase the permanents again
+                // (CR 702.26a). Mirrors the pending_phase_transition_progress guard above.
+                if matches!(
+                    state.waiting_for,
+                    WaitingFor::UntapChoice { .. } | WaitingFor::ChooseUntapSubset { .. }
+                ) {
+                    return AutoAdvanceStep::waiting(state.waiting_for.clone());
                 }
-                // CR 502.3: With no optional-decline candidates, either
-                // surface a required bounded `ChooseUntapSubset` prompt (a
-                // MaxUntapPerType cap is over its limit) or untap + advance.
-                // `begin_untap_or_subset_prompt` leaves the step itself when
-                // it untaps. A deferred leave stops the interpreter with the
-                // untap done: repeating this arm would run the untap again.
-                return match begin_untap_or_subset_prompt(state, events, HashSet::new()) {
-                    UntapCompletion::ChooseSubset(prompt) => AutoAdvanceStep::Waiting(prompt),
+                // CR 502.3: begin performs the earlier actions, then raises a determination
+                // or untaps and leaves. A deferred leave stops with the untap done.
+                return match begin_untap_step(state, events) {
+                    UntapCompletion::Determination(prompt) => AutoAdvanceStep::Waiting(prompt),
                     UntapCompletion::Advanced => AutoAdvanceStep::Continue,
                     UntapCompletion::LeaveDeferred => AutoAdvanceStep::Deferred,
                 };
@@ -4698,7 +4778,7 @@ mod tests {
         state.steps_to_skip[PlayerId(0).0 as usize].insert(Phase::Upkeep, 1);
 
         assert!(matches!(
-            begin_untap_or_subset_prompt(&mut state, &mut Vec::new(), HashSet::new()),
+            begin_untap_step(&mut state, &mut Vec::new()),
             UntapCompletion::Advanced
         ));
         assert_eq!(
@@ -7885,8 +7965,8 @@ card into your hand at the beginning of your next end step.";
         let creature_a = create_tapped_creature(&mut state, 2, "Bear A");
         let creature_b = create_tapped_creature(&mut state, 3, "Bear B");
 
-        let prompt = begin_untap_or_subset_prompt(&mut state, &mut Vec::new(), HashSet::new());
-        let UntapCompletion::ChooseSubset(prompt) = prompt else {
+        let prompt = begin_untap_step(&mut state, &mut Vec::new());
+        let UntapCompletion::Determination(prompt) = prompt else {
             panic!("expected ChooseUntapSubset prompt, got {prompt:?}");
         };
         match *prompt {
@@ -7937,7 +8017,7 @@ card into your hand at the beginning of your next end step.";
                 skipped.insert(id);
             }
         }
-        let resumed = begin_untap_or_subset_prompt(&mut state, &mut Vec::new(), skipped);
+        let resumed = resume_untap_step(&mut state, &mut Vec::new(), skipped);
         assert!(
             matches!(resumed, UntapCompletion::Advanced),
             "after the subset is resolved, untap executes and no further prompt is raised"
@@ -8184,7 +8264,7 @@ card into your hand at the beginning of your next end step.";
         let mut skipped = HashSet::new();
         skipped.insert(creature_a);
         skipped.insert(creature_b);
-        let resumed = begin_untap_or_subset_prompt(&mut state, &mut Vec::new(), skipped);
+        let resumed = resume_untap_step(&mut state, &mut Vec::new(), skipped);
         assert!(
             matches!(resumed, UntapCompletion::Advanced),
             "an empty untap subset resolves the step — no further prompt is raised"
@@ -8305,6 +8385,139 @@ card into your hand at the beginning of your next end step.";
         state.objects.get_mut(&normal_tapped).unwrap().tapped = true;
 
         assert_eq!(untap_choice_candidates(&state, PlayerId(0)), vec![shackles]);
+    }
+
+    /// CR 502.1 + CR 502.3 + CR 702.26a: a standing determination is a
+    /// continuation, so re-entering it cannot perform phasing again.
+    #[test]
+    fn untap_determination_reentry_does_not_repeat_turn_based_actions() {
+        let mut state = setup();
+        state.phase = Phase::Untap;
+        let whisperer = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Hedge Whisperer".to_string(),
+            Zone::Battlefield,
+        );
+        install_may_choose_not_to_untap_static(&mut state, whisperer);
+        state.objects.get_mut(&whisperer).unwrap().tapped = true;
+        let phaser = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Phasing observer".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&phaser).unwrap();
+            obj.keywords.push(crate::types::keywords::Keyword::Phasing);
+            obj.base_keywords
+                .push(crate::types::keywords::Keyword::Phasing);
+        }
+        let mut events = Vec::new();
+        let first = auto_advance(&mut state, &mut events);
+        assert!(
+            matches!(&first, WaitingFor::UntapChoice { candidates, .. } if candidates == &vec![whisperer])
+        );
+        assert_eq!(state.phase, Phase::Untap);
+        state.waiting_for = first.clone();
+        let second = auto_advance(&mut state, &mut events);
+        assert_eq!(first, second);
+        assert!(state.objects[&phaser].is_phased_out());
+        assert_eq!(events.iter().filter(|e| matches!(e, GameEvent::PermanentPhasedOut { object_id, .. } if *object_id == phaser)).count(), 1);
+        assert!(!events.iter().any(
+            |e| matches!(e, GameEvent::PermanentPhasedIn { object_id } if *object_id == phaser)
+        ));
+
+        // A priority state is not a standing determination: beginning again runs the actions.
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+        let third = auto_advance(&mut state, &mut events);
+        assert_eq!(third, first);
+        assert!(state.objects[&phaser].is_phased_in());
+        assert_eq!(events.iter().filter(|e| matches!(e, GameEvent::PermanentPhasedIn { object_id } if *object_id == phaser)).count(), 1);
+    }
+
+    /// CR 502.4 + CR 614.10a + CR 500.11: the first priority boundary consumes
+    /// the held batch even when upkeep was skipped. A draw observer makes the
+    /// shared-batch requirement visible instead of accepting a later separate drain.
+    /// Unit harness: the fixture has no printed skip-upkeep source (Eon Hub).
+    /// The synthetic observer isolates two batch origins on one source; the printed
+    /// untap observer is Ghostly Pilferer, covered through public actions below.
+    #[test]
+    fn untap_held_batch_joins_draw_triggers_when_upkeep_is_skipped() {
+        let mut state = setup();
+        state.phase = Phase::Untap;
+        state.turn_number = 2;
+        state.steps_to_skip[0].insert(Phase::Upkeep, 1);
+        create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Draw card".to_string(),
+            Zone::Library,
+        );
+        let observer = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Untap and draw observer".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&observer).unwrap();
+            obj.tapped = true;
+            let gain = AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::GainLife {
+                    amount: QuantityExpr::Fixed { value: 1 },
+                    player: TargetFilter::Controller,
+                },
+            );
+            obj.push_printed_trigger(
+                TriggerDefinition::new(TriggerMode::Untaps)
+                    .valid_card(TargetFilter::SelfRef)
+                    .execute(gain.clone()),
+            );
+            obj.push_printed_trigger(
+                TriggerDefinition::new(TriggerMode::Phase)
+                    .phase(Phase::Draw)
+                    .execute(AbilityDefinition::new(
+                        AbilityKind::Spell,
+                        Effect::GainLife {
+                            amount: QuantityExpr::Fixed { value: 2 },
+                            player: TargetFilter::Controller,
+                        },
+                    )),
+            );
+        }
+        let mut events = Vec::new();
+        let waiting = auto_advance(&mut state, &mut events);
+        assert_eq!(state.phase, Phase::Draw);
+        assert!(!state.steps_to_skip[0].contains_key(&Phase::Upkeep));
+        assert!(!state.objects[&observer].tapped);
+        assert!(
+            matches!(&waiting, WaitingFor::OrderTriggers { triggers, .. } if triggers.len() == 2)
+        );
+        state.waiting_for = waiting;
+        apply(
+            &mut state,
+            PlayerId(0),
+            GameAction::OrderTriggers { order: vec![0, 1] },
+        )
+        .expect("order at draw boundary");
+        assert_eq!(state.phase, Phase::Draw);
+        assert_eq!(
+            state
+                .stack
+                .iter()
+                .filter(|entry| entry.source_id == observer)
+                .count(),
+            2
+        );
+        assert!(state.deferred_triggers.is_empty());
     }
 
     #[test]
@@ -10081,7 +10294,7 @@ card into your hand at the beginning of your next end step.";
         );
 
         assert!(matches!(
-            begin_untap_or_subset_prompt(&mut state, &mut events, HashSet::new()),
+            begin_untap_step(&mut state, &mut events),
             UntapCompletion::Advanced
         ));
         assert!(
@@ -10953,7 +11166,7 @@ card into your hand at the beginning of your next end step.";
     fn an_untap_completion_whose_leave_defers_reports_the_deferral() {
         let (mut state, stunned) = deferring_untap_board();
 
-        let completion = begin_untap_or_subset_prompt(&mut state, &mut Vec::new(), HashSet::new());
+        let completion = begin_untap_step(&mut state, &mut Vec::new());
 
         assert!(
             matches!(completion, UntapCompletion::LeaveDeferred),

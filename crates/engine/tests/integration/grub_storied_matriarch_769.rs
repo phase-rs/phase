@@ -222,6 +222,31 @@ const INTO_THE_NIGHT_ORACLE: &str =
 const CELESTUS_ORACLE: &str = "If it's neither day nor night, it becomes day as The Celestus enters.\n{T}: Add one mana of any color.\n{3}, {T}: If it's night, it becomes day. Otherwise, it becomes night. Activate only as a sorcery.\nWhenever day becomes night or night becomes day, you gain 1 life. You may draw a card. If you do, discard a card.";
 const DOUBLING_SEASON_ORACLE: &str = "If an effect would create one or more tokens under your control, it creates twice that many of those tokens instead.\nIf an effect would put one or more counters on a permanent you control, it puts twice that many of those counters on that permanent instead.";
 
+const SMOKE: &str = "Smoke";
+const SMOKE_ORACLE: &str = "Players can't untap more than one creature during their untap steps.";
+
+const TEFERIS_IMP: &str = "Teferi's Imp";
+const TEFERIS_IMP_ORACLE: &str = "Flying\nPhasing (This phases in or out before you untap during each of your untap steps. While it's phased out, it's treated as though it doesn't exist.)\nWhenever this creature phases out, discard a card.\nWhenever this creature phases in, draw a card.";
+
+const GHOSTLY_PILFERER: &str = "Ghostly Pilferer";
+const GHOSTLY_PILFERER_ORACLE: &str = "Whenever this creature becomes untapped, you may pay {2}. If you do, draw a card.\nWhenever an opponent casts a spell from anywhere other than their hand, draw a card.\nDiscard a card: This creature can't be blocked this turn.";
+
+const HEDGE_WHISPERER: &str = "Hedge Whisperer";
+const HEDGE_WHISPERER_ORACLE: &str = "You may choose not to untap this creature during your untap step.\n{3}{G}, {T}, Collect evidence 4: Target land you control becomes a 5/5 green Plant Boar creature with haste for as long as this creature remains tapped. It's still a land. Activate only as a sorcery. (To collect evidence 4, exile cards with total mana value 4 or greater from your graveyard.)";
+
+const SULFURIC_VORTEX: &str = "Sulfuric Vortex";
+const SULFURIC_VORTEX_ORACLE: &str = "At the beginning of each player's upkeep, this enchantment deals 2 damage to that player.\nIf a player would gain life, that player gains no life instead.";
+
+const PLATINUM_ANGEL: &str = "Platinum Angel";
+const PLATINUM_ANGEL_ORACLE: &str =
+    "Flying\nYou can't lose the game and your opponents can't win the game.";
+
+const TEFERIS_CURSE: &str = "Teferi's Curse";
+const TEFERIS_CURSE_ORACLE: &str = "Enchant artifact or creature\nEnchanted permanent has phasing. (It phases in or out before its controller untaps during each of their untap steps. While it's phased out, it's treated as though it doesn't exist.)";
+
+const BANISHER_PRIEST: &str = "Banisher Priest";
+const BANISHER_PRIEST_ORACLE: &str = "When this creature enters, exile target creature an opponent controls until this creature leaves the battlefield.";
+
 /// A board at `phase`, with stocked libraries so a real draw step can't end the
 /// game (CR 704.5b).
 fn board<T>(
@@ -4552,6 +4577,7 @@ fn pass_into_next_upkeep(
                 bands: vec![],
             },
             WaitingFor::Priority { .. } => GameAction::PassPriority,
+            WaitingFor::UntapChoice { .. } | WaitingFor::ChooseUntapSubset { .. } => return events,
             ref other => panic!("unexpected prompt before the next upkeep: {other:?}"),
         };
         let result = runner
@@ -4564,7 +4590,7 @@ fn pass_into_next_upkeep(
 }
 
 /// Resolves the stack through public actions, declining The Celestus's optional draw if its
-/// day/night trigger resolves (filed follow-up: it does not fire today).
+/// day/night trigger resolves; these rows decline that optional draw.
 fn resolve_stack(runner: &mut GameRunner) -> Vec<GameEvent> {
     let mut events = Vec::new();
     for _ in 0..12 {
@@ -4933,7 +4959,7 @@ fn a_permanent_that_phases_in_by_day_transforms_before_it_becomes_night() {
     );
     assert!(matches!(
         &events[changes[0]],
-        GameEvent::DayNightChanged { new_state } if new_state == "Night"
+        GameEvent::DayNightChanged { new_state, .. } if new_state == "Night"
     ));
     assert!(
         untap_at < phased_in_at
@@ -5066,7 +5092,7 @@ fn an_added_untap_step_checks_the_previous_turn_again() {
         )
     });
     let night_at =
-        at(&|e| matches!(e, GameEvent::DayNightChanged { new_state } if new_state == "Night"));
+        at(&|e| matches!(e, GameEvent::DayNightChanged { new_state, .. } if new_state == "Night"));
     let untapped_at =
         at(&|e| matches!(e, GameEvent::PermanentUntapped { object_id } if *object_id == celestus));
     let combat_at = at(&|e| {
@@ -5204,11 +5230,8 @@ fn activate_celestus(runner: &mut GameRunner, celestus: ObjectId) {
         "the day/night ability must have resolved; stack: {:?}",
         runner.state().stack
     );
-    // The Celestus's own "Whenever day becomes night or night becomes day, you gain
-    // 1 life. You may draw a card. If you do, discard a card." not resolving after
-    // this activation is a filed follow-up. These rows don't depend on it either
-    // way: the permanents turn over inside `resolve_set_day_night`, before any
-    // trigger. If it fires, it resolves here and its draw is declined.
+    // The permanents turn over inside `resolve_set_day_night`, before The Celestus's
+    // trigger resolves here; decline its optional draw.
     for _ in 0..4 {
         match runner.state().waiting_for {
             WaitingFor::OptionalEffectChoice { .. } => decide(runner, false),
@@ -6524,4 +6547,858 @@ fn a_departed_transformed_card_was_a_transformed_permanent() {
         depart_and_read(&mut runner, prowler),
         (true, true, true, true)
     );
+}
+
+/// CR 502.1 + CR 502.2 + CR 502.3: Smoke caps untaps at one creature and Meekstone
+/// excludes power 3 or greater. Determine eligibility after Cathar becomes the 3/3 Brute.
+#[test]
+fn untap_determination_reads_the_transformed_face_before_applying_smoke() {
+    for smoke in [false, true] {
+        let (mut runner, (cathar, bears)) = board(Phase::PreCombatMain, |s, db| {
+            for (name, oracle) in [
+                (SMOKE, SMOKE_ORACLE),
+                (MEEKSTONE, MEEKSTONE_ORACLE),
+                (BRUTAL_CATHAR, BRUTAL_CATHAR_ORACLE),
+                (MOONRAGE_BRUTE, MOONRAGE_BRUTE_ORACLE),
+            ] {
+                assert_oracle(db, name, oracle);
+            }
+            s.add_real_card(P0, MEEKSTONE, Zone::Battlefield, db);
+            if smoke {
+                s.add_real_card(P0, SMOKE, Zone::Battlefield, db);
+            }
+            (
+                s.add_real_card(P1, BRUTAL_CATHAR, Zone::Battlefield, db),
+                s.add_real_card(P1, BEARS, Zone::Battlefield, db),
+            )
+        });
+        runner.state_mut().day_night = Some(DayNight::Day);
+        for id in [cathar, bears] {
+            runner.state_mut().objects.get_mut(&id).unwrap().tapped = true;
+        }
+        settle(&mut runner);
+        pass_into_next_upkeep(&mut runner, |r, _| {
+            assert!(!matches!(
+                r.state().waiting_for,
+                WaitingFor::ChooseUntapSubset { .. } | WaitingFor::UntapChoice { .. }
+            ));
+        });
+        assert_eq!(runner.state().phase, Phase::Upkeep);
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { player: P1 }
+        ));
+        assert_eq!(runner.state().day_night, Some(DayNight::Night));
+        assert_eq!(runner.state().objects[&cathar].name, MOONRAGE_BRUTE);
+        assert_eq!(runner.state().objects[&cathar].power, Some(3));
+        assert!(runner.state().objects[&cathar].tapped);
+        assert!(!runner.state().objects[&bears].tapped);
+    }
+}
+
+/// CR 502.3 + CR 702.26a: Hedge Whisperer may decline untapping, Smoke caps the
+/// remaining Bears at one, and Teferi's Imp phases exactly once across both choices.
+#[test]
+fn untap_determinations_resume_without_repeating_phasing() {
+    for empty in [false, true] {
+        let (mut runner, (whisperer, a, b, imp)) = board(Phase::PreCombatMain, |s, db| {
+            for (name, oracle) in [
+                (SMOKE, SMOKE_ORACLE),
+                (HEDGE_WHISPERER, HEDGE_WHISPERER_ORACLE),
+                (TEFERIS_IMP, TEFERIS_IMP_ORACLE),
+            ] {
+                assert_oracle(db, name, oracle);
+            }
+            s.add_real_card(P0, SMOKE, Zone::Battlefield, db);
+            (
+                s.add_real_card(P1, HEDGE_WHISPERER, Zone::Battlefield, db),
+                s.add_real_card(P1, BEARS, Zone::Battlefield, db),
+                s.add_real_card(P1, BEARS, Zone::Battlefield, db),
+                s.add_real_card(P1, TEFERIS_IMP, Zone::Battlefield, db),
+            )
+        });
+        for id in [whisperer, a, b] {
+            runner.state_mut().objects.get_mut(&id).unwrap().tapped = true;
+        }
+        settle(&mut runner);
+        let mut events = pass_into_next_upkeep(&mut runner, |_, _| {});
+        assert_eq!(runner.state().phase, Phase::Untap);
+        assert!(
+            matches!(&runner.state().waiting_for, WaitingFor::UntapChoice { player: P1, candidates, .. } if candidates == &vec![whisperer])
+        );
+        assert!(runner.state().objects[&imp].is_phased_out());
+        events.extend(
+            runner
+                .act(GameAction::ChooseUntap {
+                    object_id: whisperer,
+                    untap: false,
+                })
+                .expect("decline untap")
+                .events,
+        );
+        assert!(
+            matches!(&runner.state().waiting_for, WaitingFor::ChooseUntapSubset { player: P1, group, max: 1 } if sorted(group.clone()) == sorted(vec![a,b]))
+        );
+        events.extend(
+            runner
+                .act(GameAction::SelectCards {
+                    cards: if empty { vec![] } else { vec![a] },
+                })
+                .expect("choose subset")
+                .events,
+        );
+        assert_eq!(runner.state().phase, Phase::Upkeep);
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { player: P1 }
+        ));
+        assert!(runner.state().objects[&whisperer].tapped && runner.state().objects[&b].tapped);
+        assert_eq!(runner.state().objects[&a].tapped, empty);
+        assert_eq!(events.iter().filter(|e| matches!(e, GameEvent::PermanentPhasedOut { object_id, .. } if *object_id == imp)).count(), 1);
+        assert!(!events
+            .iter()
+            .any(|e| matches!(e, GameEvent::PermanentPhasedIn { object_id } if *object_id == imp)));
+        assert_eq!(
+            events
+                .iter()
+                .filter(
+                    |e| matches!(e, GameEvent::PermanentUntapped { object_id } if *object_id == a)
+                )
+                .count(),
+            usize::from(!empty)
+        );
+        assert!(runner.state().objects[&imp].is_phased_out());
+    }
+}
+
+/// CR 502.1 + CR 502.3: Reality Ripple's phased-out Hedge Whisperer phases in
+/// before its "You may choose not to untap" determination is offered.
+#[test]
+fn untap_determination_offers_a_whisperer_that_just_phased_in() {
+    let (mut runner, (whisperer, ripple)) = board(Phase::PreCombatMain, |s, db| {
+        assert_oracle(db, HEDGE_WHISPERER, HEDGE_WHISPERER_ORACLE);
+        assert_oracle(db, REALITY_RIPPLE, REALITY_RIPPLE_ORACLE);
+        (
+            s.add_real_card(P1, HEDGE_WHISPERER, Zone::Battlefield, db),
+            s.add_real_card(P1, REALITY_RIPPLE, Zone::Hand, db),
+        )
+    });
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&whisperer)
+        .unwrap()
+        .tapped = true;
+    runner.act(GameAction::PassPriority).expect("P1 priority");
+    fund_player(&mut runner, P1, ManaType::Blue, 2);
+    runner.cast(ripple).target_object(whisperer).commit();
+    resolve_stack(&mut runner);
+    assert!(runner.state().objects[&whisperer].is_phased_out());
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+    let events = pass_into_next_upkeep(&mut runner, |_, _| {});
+    assert!(events.iter().any(
+        |e| matches!(e, GameEvent::PermanentPhasedIn { object_id } if *object_id == whisperer)
+    ));
+    assert!(runner.state().objects[&whisperer].is_phased_in());
+    assert_eq!(runner.state().phase, Phase::Untap);
+    assert!(
+        matches!(&runner.state().waiting_for, WaitingFor::UntapChoice { candidates, .. } if candidates == &vec![whisperer])
+    );
+    runner
+        .act(GameAction::ChooseUntap {
+            object_id: whisperer,
+            untap: false,
+        })
+        .expect("decline");
+    assert_eq!(runner.state().phase, Phase::Upkeep);
+    assert!(runner.state().objects[&whisperer].tapped);
+    assert_settled(&runner);
+}
+
+/// CR 502.2 + CR 603.10 + CR 610.3b: Cathar's "transforms into" exile triggers
+/// before it dies under Elesh Norn; "until this creature leaves" has already occurred.
+#[test]
+fn untap_transform_trigger_survives_its_source_and_keeps_the_until_latch() {
+    for (single_target, spell_count) in [(false, 2), (true, 2), (false, 1)] {
+        let (mut runner, (brute, norn, spells, lands)) = board(Phase::PreCombatMain, |s, db| {
+            for (name, oracle) in [
+                (BRUTAL_CATHAR, BRUTAL_CATHAR_ORACLE),
+                (MOONRAGE_BRUTE, MOONRAGE_BRUTE_ORACLE),
+                (ELESH_NORN, ELESH_NORN_ORACLE),
+                (REALITY_RIPPLE, REALITY_RIPPLE_ORACLE),
+            ] {
+                assert_oracle(db, name, oracle);
+            }
+            let spells: Vec<_> = (0..spell_count)
+                .map(|_| {
+                    s.add_real_card(
+                        P0,
+                        if single_target { REALITY_RIPPLE } else { BEARS },
+                        Zone::Hand,
+                        db,
+                    )
+                })
+                .collect();
+            let lands: Vec<_> = (0..spell_count)
+                .map(|_| s.add_basic_land(P0, ManaColor::Blue))
+                .collect();
+            (
+                s.add_real_card(P1, BRUTAL_CATHAR, Zone::Battlefield, db),
+                s.add_real_card(P0, ELESH_NORN, Zone::Battlefield, db),
+                spells,
+                lands,
+            )
+        });
+        runner.state_mut().day_night = Some(DayNight::Night);
+        turn_by_designation(&mut runner, brute, MOONRAGE_BRUTE);
+        for (index, spell) in spells.iter().copied().enumerate() {
+            fund(
+                &mut runner,
+                if single_target {
+                    ManaType::Blue
+                } else {
+                    ManaType::Green
+                },
+                2,
+            );
+            if single_target {
+                runner.cast(spell).target_object(lands[index]).commit();
+            } else {
+                runner.cast(spell).commit();
+            }
+            pass_until_settled(&mut runner);
+        }
+        assert_eq!(
+            runner.state().spells_cast_this_turn_by_player[&P0].len(),
+            spell_count
+        );
+        let events = pass_into_next_upkeep(&mut runner, |_, _| {});
+        assert_eq!(runner.state().phase, Phase::Upkeep);
+        if spell_count == 1 {
+            assert_eq!(runner.state().day_night, Some(DayNight::Night));
+            assert_eq!(runner.state().objects[&brute].zone, Zone::Battlefield);
+            assert!(runner.state().stack.is_empty());
+            assert!(!events
+                .iter()
+                .any(|e| matches!(e, GameEvent::Transformed { object_id } if *object_id == brute)));
+            continue;
+        }
+        assert_eq!(runner.state().day_night, Some(DayNight::Day));
+        assert_eq!(runner.state().objects[&brute].zone, Zone::Graveyard);
+        let transformed = events
+            .iter()
+            .position(|e| matches!(e, GameEvent::Transformed { object_id } if *object_id == brute))
+            .expect("transformed");
+        let died = events.iter().position(|e| matches!(e, GameEvent::ZoneChanged { object_id, from: Some(Zone::Battlefield), .. } if *object_id == brute)).expect("died");
+        assert!(transformed < died);
+        assert_eq!(runner.state().stack.iter().filter(|e| matches!(e.kind, StackEntryKind::TriggeredAbility { source_id, .. } if source_id == brute)).count(), 1);
+        if !single_target {
+            match &runner.state().waiting_for {
+                WaitingFor::TriggerTargetSelection { target_slots, .. } => {
+                    let legal = &target_slots[0].legal_targets;
+                    assert_eq!(legal.len(), 3);
+                    for id in std::iter::once(norn).chain(spells.iter().copied()) {
+                        assert!(legal.contains(&TargetRef::Object(id)));
+                    }
+                }
+                other => panic!("expected Cathar targets, got {other:?}"),
+            }
+            runner
+                .act(GameAction::ChooseTarget {
+                    target: Some(TargetRef::Object(norn)),
+                })
+                .expect("choose Norn");
+        } else {
+            assert!(matches!(
+                runner.state().waiting_for,
+                WaitingFor::Priority { .. }
+            ));
+        }
+        pass_until_settled(&mut runner);
+        assert_eq!(runner.state().objects[&norn].zone, Zone::Battlefield);
+        assert!(!runner
+            .state()
+            .exile_links
+            .iter()
+            .any(|link| link.source_id == brute));
+    }
+}
+
+/// CR 610.3b + CR 603.3d: Banisher Priest's "until this creature leaves" latch
+/// survives choosing targets after the Priest dies as a 0/0 under Elesh Norn.
+#[test]
+fn until_source_leaves_latch_survives_trigger_target_selection() {
+    for dies in [true, false] {
+        let (mut runner, (priest, bears)) = board(Phase::PreCombatMain, |s, db| {
+            assert_oracle(db, BANISHER_PRIEST, BANISHER_PRIEST_ORACLE);
+            assert_oracle(db, ELESH_NORN, ELESH_NORN_ORACLE);
+            if dies {
+                s.add_real_card(P1, ELESH_NORN, Zone::Battlefield, db);
+            } else {
+                s.add_real_card(P1, BEARS, Zone::Battlefield, db);
+            }
+            (
+                s.add_real_card(P0, BANISHER_PRIEST, Zone::Hand, db),
+                s.add_real_card(P1, BEARS, Zone::Battlefield, db),
+            )
+        });
+        fund(&mut runner, ManaType::White, 3);
+        runner.cast(priest).commit();
+        both_pass(&mut runner);
+        assert_eq!(
+            runner.state().objects[&priest].zone,
+            if dies {
+                Zone::Graveyard
+            } else {
+                Zone::Battlefield
+            }
+        );
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::TriggerTargetSelection { .. }
+        ));
+        assert_eq!(
+            runner
+                .state()
+                .stack
+                .iter()
+                .filter(|e| e.source_id == priest)
+                .count(),
+            1
+        );
+        runner
+            .act(GameAction::ChooseTarget {
+                target: Some(TargetRef::Object(bears)),
+            })
+            .expect("choose Bears");
+        pass_until_settled(&mut runner);
+        assert_eq!(
+            runner.state().objects[&bears].zone,
+            if dies { Zone::Battlefield } else { Zone::Exile }
+        );
+    }
+}
+
+/// CR 502.4 + CR 704.5a + CR 800.4d: Teferi's Imp's phase-out discard waits;
+/// when Teferi's Curse phases Platinum Angel out, its controller at 0 life loses
+/// before the held trigger can be placed. At 1 life the same trigger is placed once.
+#[test]
+fn untap_held_trigger_is_pruned_when_its_controller_loses() {
+    for life in [0, 1] {
+        let db = load_db().expect("card db");
+        for (name, oracle) in [
+            (TEFERIS_IMP, TEFERIS_IMP_ORACLE),
+            (PLATINUM_ANGEL, PLATINUM_ANGEL_ORACLE),
+            (TEFERIS_CURSE, TEFERIS_CURSE_ORACLE),
+        ] {
+            assert_oracle(db, name, oracle);
+        }
+        let mut s = GameScenario::new_n_player(3, 769);
+        s.at_phase(Phase::PreCombatMain);
+        for player in [P0, P1, P2] {
+            s.with_library_top(player, &["Top One", "Top Two", "Top Three"]);
+        }
+        let angel = s.add_real_card(P1, PLATINUM_ANGEL, Zone::Battlefield, db);
+        let imp = s.add_real_card(P1, TEFERIS_IMP, Zone::Battlefield, db);
+        let curse = s.add_real_card(P0, TEFERIS_CURSE, Zone::Hand, db);
+        let mut runner = s.build();
+        runner.state_mut().players[1].life = life;
+        fund(&mut runner, ManaType::Blue, 2);
+        runner.cast(curse).target_object(angel).commit();
+        pass_until_settled(&mut runner);
+        settle(&mut runner);
+        assert_eq!(
+            runner.state().objects[&curse].attached_to,
+            Some(engine::game::game_object::AttachTarget::Object(angel))
+        );
+        assert!(runner.state().objects[&angel]
+            .keywords
+            .contains(&Keyword::Phasing));
+        assert!(!runner.state().players[1].is_eliminated);
+        assert_eq!(runner.state().active_player, P0);
+        let mut events = Vec::new();
+        for _ in 0..80 {
+            if runner.state().players[1].is_eliminated
+                || (runner.state().active_player == P1 && runner.state().phase == Phase::Upkeep)
+            {
+                break;
+            }
+            if runner.state().active_player == P0 {
+                assert!(!runner.state().players[1].is_eliminated);
+            }
+            let action = match runner.state().waiting_for {
+                WaitingFor::DeclareAttackers { .. } => GameAction::DeclareAttackers {
+                    attacks: vec![],
+                    bands: vec![],
+                },
+                WaitingFor::Priority { .. } => GameAction::PassPriority,
+                ref other => panic!("unexpected prompt before elimination: {other:?}"),
+            };
+            events.extend(runner.act(action).expect("advance to P1 upkeep").events);
+        }
+        assert_eq!(runner.state().phase, Phase::Upkeep);
+        for id in [angel, imp] {
+            assert!(events.iter().any(
+                |e| matches!(e, GameEvent::PermanentPhasedOut { object_id, .. } if *object_id == id)
+            ));
+        }
+        assert!(runner.state().game_end.is_none());
+        if life == 0 {
+            assert!(events
+                .iter()
+                .any(|e| matches!(e, GameEvent::PlayerLost { player_id: P1 })));
+            assert!(runner.state().players[1].is_eliminated);
+            assert!(!runner.state().stack.iter().any(|e| e.source_id == imp));
+            assert!(runner.state().deferred_triggers.is_empty());
+            assert!(runner.state().pending_trigger.is_none());
+        } else {
+            assert!(!runner.state().players[1].is_eliminated);
+            assert_eq!(runner.state().stack.iter().filter(|e| matches!(e.kind, StackEntryKind::TriggeredAbility { source_id, .. } if source_id == imp) && e.controller == P1).count(), 1);
+        }
+    }
+}
+
+/// Stages the printed phase-in witness with Sulfuric Vortex under the chosen controller.
+fn untap_vortex_board(
+    vortex_controller: PlayerId,
+) -> (GameRunner, ObjectId, ObjectId, ObjectId, ObjectId) {
+    let (mut runner, (celestus, brute, bears, ripple, vortex)) =
+        board(Phase::PreCombatMain, |s, db| {
+            for (name, oracle) in [
+                (CELESTUS, CELESTUS_ORACLE),
+                (BRUTAL_CATHAR, BRUTAL_CATHAR_ORACLE),
+                (MOONRAGE_BRUTE, MOONRAGE_BRUTE_ORACLE),
+                (REALITY_RIPPLE, REALITY_RIPPLE_ORACLE),
+                (SULFURIC_VORTEX, SULFURIC_VORTEX_ORACLE),
+            ] {
+                assert_oracle(db, name, oracle);
+            }
+            (
+                s.add_real_card(P0, CELESTUS, Zone::Battlefield, db),
+                s.add_real_card(P1, BRUTAL_CATHAR, Zone::Battlefield, db),
+                s.add_real_card(P0, BEARS, Zone::Battlefield, db),
+                s.add_real_card(P1, REALITY_RIPPLE, Zone::Hand, db),
+                s.add_real_card(vortex_controller, SULFURIC_VORTEX, Zone::Battlefield, db),
+            )
+        });
+    runner.state_mut().day_night = Some(DayNight::Night);
+    turn_by_designation(&mut runner, brute, MOONRAGE_BRUTE);
+    fund(&mut runner, ManaType::Colorless, 3);
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: celestus,
+            ability_index: CELESTUS_DAY_NIGHT_ABILITY,
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("activate");
+    runner.act(GameAction::PassPriority).expect("P1 priority");
+    fund_player(&mut runner, P1, ManaType::Blue, 2);
+    runner.cast(ripple).target_object(brute).commit();
+    resolve_stack(&mut runner);
+    assert_eq!(runner.state().day_night, Some(DayNight::Day));
+    assert!(runner.state().objects[&brute].is_phased_out());
+    (runner, celestus, brute, bears, vortex)
+}
+
+/// CR 503.1a + CR 603.3b: Cathar's phase-in transform trigger is placed with
+/// Vortex's upkeep trigger in APNAP order. Celestus's change trigger joins too;
+/// Vortex's "gains no life instead" prevents its life gain.
+#[test]
+fn untap_and_upkeep_triggers_join_one_apnap_batch() {
+    let (mut runner, celestus, brute, bears, vortex) = untap_vortex_board(P0);
+    let events = pass_into_next_upkeep(&mut runner, |_, _| {});
+    assert_eq!(runner.state().day_night, Some(DayNight::Night));
+    assert!(runner.state().objects[&brute].is_phased_in());
+    assert_eq!(transformed_events(&events, brute), 2);
+    let sources = order_prompt_sources(&runner, P0);
+    assert_eq!(sorted(sources.clone()), sorted(vec![celestus, vortex]));
+    order_first(&mut runner, &sources, celestus);
+    assert_eq!(
+        runner
+            .state()
+            .stack
+            .iter()
+            .map(|e| e.source_id)
+            .collect::<Vec<_>>(),
+        vec![brute, celestus, vortex]
+    );
+    let life = runner.state().players[1].life;
+    both_pass(&mut runner);
+    assert_eq!(runner.state().players[1].life, life - 2);
+    assert_eq!(runner.state().objects[&bears].zone, Zone::Battlefield);
+    resolve_stack(&mut runner);
+    assert_eq!(runner.state().objects[&bears].zone, Zone::Exile);
+    assert_settled(&runner);
+}
+
+/// CR 503.1a + CR 603.3b: one controller orders Cathar's held trigger and
+/// Vortex's upkeep trigger together; either chosen order determines which resolves first.
+#[test]
+fn untap_and_upkeep_triggers_share_the_controllers_order_prompt() {
+    for exile_last in [true, false] {
+        let (mut runner, celestus, brute, bears, vortex) = untap_vortex_board(P1);
+        pass_into_next_upkeep(&mut runner, |_, _| {});
+        let sources = order_prompt_sources(&runner, P1);
+        assert_eq!(sorted(sources.clone()), sorted(vec![brute, vortex]));
+        let first = if exile_last { brute } else { vortex };
+        order_first(&mut runner, &sources, first);
+        assert_eq!(
+            runner
+                .state()
+                .stack
+                .iter()
+                .map(|e| e.source_id)
+                .collect::<Vec<_>>(),
+            if exile_last {
+                vec![brute, vortex, celestus]
+            } else {
+                vec![vortex, brute, celestus]
+            }
+        );
+        // The nonactive player's Celestus resolves before either active-player trigger.
+        both_pass(&mut runner);
+        decide(&mut runner, false);
+        let life = runner.state().players[1].life;
+        both_pass(&mut runner);
+        assert_eq!(
+            runner.state().players[1].life,
+            life - if exile_last { 2 } else { 0 }
+        );
+        assert_eq!(
+            runner.state().objects[&bears].zone,
+            if exile_last {
+                Zone::Battlefield
+            } else {
+                Zone::Exile
+            }
+        );
+        resolve_stack(&mut runner);
+        assert_settled(&runner);
+        assert_eq!(runner.state().players[1].life, life - 2);
+        assert_eq!(runner.state().objects[&bears].zone, Zone::Exile);
+    }
+}
+
+/// CR 502.1 + CR 502.3 + CR 502.4 + CR 603.3b: the Imp's "phases out"
+/// and Pilferer's "becomes untapped" triggers each go below an opponent's Vortex.
+#[test]
+fn untap_phasing_and_untapping_triggers_join_the_upkeep_batch_once() {
+    for phasing in [true, false] {
+        let (mut runner, (source, vortex)) = board(Phase::PreCombatMain, |s, db| {
+            for (name, oracle) in [
+                (TEFERIS_IMP, TEFERIS_IMP_ORACLE),
+                (GHOSTLY_PILFERER, GHOSTLY_PILFERER_ORACLE),
+                (SULFURIC_VORTEX, SULFURIC_VORTEX_ORACLE),
+            ] {
+                assert_oracle(db, name, oracle);
+            }
+            (
+                s.add_real_card(
+                    P1,
+                    if phasing {
+                        TEFERIS_IMP
+                    } else {
+                        GHOSTLY_PILFERER
+                    },
+                    Zone::Battlefield,
+                    db,
+                ),
+                s.add_real_card(P0, SULFURIC_VORTEX, Zone::Battlefield, db),
+            )
+        });
+        if !phasing {
+            runner.state_mut().objects.get_mut(&source).unwrap().tapped = true;
+        }
+        let events = pass_into_next_upkeep(&mut runner, |_, _| {});
+        assert_eq!(runner.state().phase, Phase::Upkeep);
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { player: P1 }
+        ));
+        if phasing {
+            assert!(runner.state().objects[&source].is_phased_out());
+        } else {
+            assert!(!runner.state().objects[&source].tapped);
+        }
+        assert_eq!(
+            runner
+                .state()
+                .stack
+                .iter()
+                .map(|e| e.source_id)
+                .collect::<Vec<_>>(),
+            vec![source, vortex]
+        );
+        assert_eq!(events.iter().filter(|e| matches!(e, GameEvent::PermanentUntapped { object_id } if *object_id == source)).count(), usize::from(!phasing));
+        both_pass(&mut runner);
+        assert_eq!(runner.state().stack.len(), 1);
+        assert_eq!(runner.state().stack[0].source_id, source);
+        if !phasing {
+            resolve_stack(&mut runner);
+        } else {
+            pass_until_settled(&mut runner);
+            // Mirror: on its following turn, the phased-out Imp phases in and draws.
+            for _ in 0..80 {
+                if runner.state().active_player == P0 && runner.state().phase == Phase::Upkeep {
+                    break;
+                }
+                let action = match runner.state().waiting_for {
+                    WaitingFor::DeclareAttackers { .. } => GameAction::DeclareAttackers {
+                        attacks: vec![],
+                        bands: vec![],
+                    },
+                    WaitingFor::Priority { .. } => GameAction::PassPriority,
+                    ref other => panic!("unexpected prompt: {other:?}"),
+                };
+                runner.act(action).expect("advance to P0 upkeep");
+            }
+            assert_eq!(runner.state().active_player, P0);
+            resolve_stack(&mut runner);
+            let events = pass_into_next_upkeep(&mut runner, |_, _| {});
+            assert!(events.iter().any(
+                |e| matches!(e, GameEvent::PermanentPhasedIn { object_id } if *object_id == source)
+            ));
+            assert_eq!(
+                runner
+                    .state()
+                    .stack
+                    .iter()
+                    .map(|e| e.source_id)
+                    .collect::<Vec<_>>(),
+                vec![source, vortex]
+            );
+            both_pass(&mut runner);
+            let hand = runner.state().players[1].hand.len();
+            pass_until_settled(&mut runner);
+            assert_eq!(runner.state().players[1].hand.len(), hand + 1);
+        }
+    }
+}
+
+/// CR 502.2 + CR 731.1a + CR 603.2c: The Celestus's "Whenever day becomes
+/// night or night becomes day" gains exactly 1 life on an untap-step change.
+#[test]
+fn untap_designation_change_triggers_celestus_exactly_once() {
+    for controller in [P0, P1] {
+        let (mut runner, celestus) = board(Phase::PreCombatMain, |s, db| {
+            assert_oracle(db, CELESTUS, CELESTUS_ORACLE);
+            s.add_real_card(controller, CELESTUS, Zone::Battlefield, db)
+        });
+        runner.state_mut().day_night = Some(DayNight::Day);
+        let life = runner.state().players[controller.0 as usize].life;
+        let mut events = pass_into_next_upkeep(&mut runner, |_, _| {});
+        assert_eq!(runner.state().day_night, Some(DayNight::Night));
+        assert_eq!(
+            events
+                .iter()
+                .filter(|e| matches!(
+                    e,
+                    GameEvent::DayNightChanged {
+                        previous: Some(DayNight::Day),
+                        ..
+                    }
+                ))
+                .count(),
+            1
+        );
+        assert_eq!(runner.state().stack.iter().filter(|e| matches!(e.kind, StackEntryKind::TriggeredAbility { source_id, .. } if source_id == celestus)).count(), 1);
+        events.extend(resolve_stack(&mut runner));
+        assert_settled(&runner);
+        assert_eq!(runner.state().players[controller.0 as usize].life, life + 1);
+        if controller == P1 {
+            // Two producers in one turn: the untap action, then the active player's activation.
+            for _ in 0..8 {
+                if runner.state().phase == Phase::PreCombatMain {
+                    break;
+                }
+                events.extend(
+                    runner
+                        .act(GameAction::PassPriority)
+                        .expect("advance to main")
+                        .events,
+                );
+            }
+            assert_eq!(runner.state().active_player, P1);
+            assert_eq!(runner.state().phase, Phase::PreCombatMain);
+            assert!(matches!(
+                runner.state().waiting_for,
+                WaitingFor::Priority { player: P1 }
+            ));
+            fund_player(&mut runner, P1, ManaType::Colorless, 3);
+            events.extend(
+                runner
+                    .act(GameAction::ActivateAbility {
+                        source_id: celestus,
+                        ability_index: CELESTUS_DAY_NIGHT_ABILITY,
+                        payment_mode: CastPaymentMode::Auto,
+                    })
+                    .expect("activate")
+                    .events,
+            );
+            events.extend(resolve_stack(&mut runner));
+            assert_settled(&runner);
+            assert_eq!(runner.state().day_night, Some(DayNight::Day));
+            assert_eq!(runner.state().players[1].life, life + 2);
+            assert_eq!(
+                events
+                    .iter()
+                    .filter(|e| matches!(e, GameEvent::DayNightChanged { .. }))
+                    .count(),
+                2
+            );
+        }
+    }
+}
+
+/// CR 731.1a + CR 603.2c: Celestus's own activation emits one change and one
+/// trigger; accepting "You may draw a card. If you do, discard a card" completes both choices.
+#[test]
+fn celestus_activation_triggers_once_and_completes_its_optional_draw() {
+    for accept in [false, true] {
+        let (mut runner, celestus) = board(Phase::PreCombatMain, |s, db| {
+            assert_oracle(db, CELESTUS, CELESTUS_ORACLE);
+            // A card already in hand, so the discard after the draw is a real choice.
+            s.add_real_card(P0, BEARS, Zone::Hand, db);
+            s.add_real_card(P0, CELESTUS, Zone::Battlefield, db)
+        });
+        runner.state_mut().day_night = Some(DayNight::Day);
+        let life = runner.state().players[0].life;
+        let hand = runner.state().players[0].hand.len();
+        fund(&mut runner, ManaType::Colorless, 3);
+        let mut events = runner
+            .act(GameAction::ActivateAbility {
+                source_id: celestus,
+                ability_index: CELESTUS_DAY_NIGHT_ABILITY,
+                payment_mode: CastPaymentMode::Auto,
+            })
+            .expect("activate")
+            .events;
+        events.extend(each_player_passes(&mut runner, 2));
+        assert_eq!(runner.state().day_night, Some(DayNight::Night));
+        assert_eq!(runner.state().stack.iter().filter(|e| matches!(e.kind, StackEntryKind::TriggeredAbility { source_id, .. } if source_id == celestus)).count(), 1);
+        events.extend(each_player_passes(&mut runner, 2));
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::OptionalEffectChoice { .. }
+        ));
+        events.extend(
+            runner
+                .act(GameAction::DecideOptionalEffect { accept })
+                .expect("decide draw")
+                .events,
+        );
+        if accept {
+            assert!(matches!(
+                runner.state().waiting_for,
+                WaitingFor::DiscardChoice { .. }
+            ));
+            assert_eq!(runner.state().players[0].hand.len(), hand + 1);
+            let card = *runner.state().players[0]
+                .hand
+                .iter()
+                .next()
+                .expect("drawn card");
+            events.extend(
+                runner
+                    .act(GameAction::SelectCards { cards: vec![card] })
+                    .expect("discard")
+                    .events,
+            );
+            assert_eq!(runner.state().objects[&card].zone, Zone::Graveyard);
+        }
+        assert_settled(&runner);
+        assert_eq!(runner.state().players[0].hand.len(), hand);
+        assert_eq!(runner.state().players[0].life, life + 1);
+        assert_eq!(
+            events
+                .iter()
+                .filter(|e| matches!(
+                    e,
+                    GameEvent::DayNightChanged {
+                        previous: Some(DayNight::Day),
+                        ..
+                    }
+                ))
+                .count(),
+            1
+        );
+    }
+}
+
+/// CR 731.1 + CR 731.1a: Into the Night gains a first designation from neither,
+/// without "day becomes night". The same spell from day is the positive control.
+#[test]
+fn first_designation_does_not_trigger_celestus() {
+    for previous in [None, Some(DayNight::Day)] {
+        let (runner, events, life) = resolve_into_the_night_with_celestus(previous);
+        assert_eq!(runner.state().day_night, Some(DayNight::Night));
+        assert_eq!(
+            runner.state().players[0].life,
+            life + i32::from(previous.is_some())
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|e| matches!(e, GameEvent::DayNightChanged { .. }))
+                .count(),
+            1
+        );
+        assert!(events.iter().any(
+            |e| matches!(e, GameEvent::DayNightChanged { previous: lost, .. } if *lost == previous)
+        ));
+    }
+}
+
+/// CR 731.1: Into the Night at night gains nothing and emits nothing. From day,
+/// the same producer emits one event and Celestus gains 1 life.
+#[test]
+fn unchanged_designation_emits_no_event_and_fires_no_celestus_trigger() {
+    for previous in [DayNight::Night, DayNight::Day] {
+        let (runner, events, life) = resolve_into_the_night_with_celestus(Some(previous));
+        let changed = previous == DayNight::Day;
+        assert_eq!(runner.state().day_night, Some(DayNight::Night));
+        assert_eq!(runner.state().players[0].life, life + i32::from(changed));
+        assert_eq!(
+            events
+                .iter()
+                .filter(|e| matches!(e, GameEvent::DayNightChanged { .. }))
+                .count(),
+            usize::from(changed)
+        );
+    }
+}
+
+/// Resolves Into the Night, choosing zero discards and declining Celestus's optional draw.
+fn resolve_into_the_night_with_celestus(
+    previous: Option<DayNight>,
+) -> (GameRunner, Vec<GameEvent>, i32) {
+    let (mut runner, spell) = board(Phase::PreCombatMain, |s, db| {
+        assert_oracle(db, CELESTUS, CELESTUS_ORACLE);
+        assert_oracle(db, INTO_THE_NIGHT, INTO_THE_NIGHT_ORACLE);
+        s.add_real_card(P0, CELESTUS, Zone::Battlefield, db);
+        s.add_real_card(P0, INTO_THE_NIGHT, Zone::Hand, db)
+    });
+    runner.state_mut().day_night = previous;
+    let life = runner.state().players[0].life;
+    fund(&mut runner, ManaType::Red, 4);
+    runner.cast(spell).commit();
+    let mut events = Vec::new();
+    for _ in 0..16 {
+        let action = match runner.state().waiting_for {
+            WaitingFor::Priority { .. } if runner.state().stack.is_empty() => break,
+            WaitingFor::Priority { .. } => GameAction::PassPriority,
+            WaitingFor::DiscardChoice { .. } => GameAction::SelectCards { cards: vec![] },
+            WaitingFor::OptionalEffectChoice { .. } => {
+                GameAction::DecideOptionalEffect { accept: false }
+            }
+            ref other => panic!("unexpected prompt: {other:?}"),
+        };
+        events.extend(runner.act(action).expect("resolve Into the Night").events);
+    }
+    assert_settled(&runner);
+    assert_eq!(runner.state().objects[&spell].zone, Zone::Graveyard);
+    (runner, events, life)
 }

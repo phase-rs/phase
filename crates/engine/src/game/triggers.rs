@@ -198,6 +198,11 @@ pub(crate) enum DeferredTriggerBatchOrigin {
     /// later one behind a wait that is not SBA-owned). It never selects the
     /// `Any` answer scope.
     PriorityBoundary,
+    /// CR 502.4 + CR 503.1a: an ability that triggered during the untap step, where no player
+    /// receives priority. It is held until the next time a player would receive priority and
+    /// placed together with that boundary's own triggers in one CR 603.3b process — "the order
+    /// in which they triggered doesn't matter".
+    UntapStep,
 }
 
 fn deferred_trigger_batch_origin_is_ordinary(origin: &DeferredTriggerBatchOrigin) -> bool {
@@ -9190,6 +9195,21 @@ pub(crate) fn take_priority_boundary_batch(state: &mut GameState) -> Vec<Pending
     parked
 }
 
+/// CR 502.4 + CR 503.1a + CR 603.3b: take the held untap-step partition in order.
+/// Ownership is consumed, so a context that pauses during placement re-parks as an
+/// ordinary tail. If a live resolution kept the join from running, the pipeline's
+/// whole-queue drain places the stamped contexts at the same CR 502.4 boundary.
+pub(crate) fn take_untap_step_trigger_batch(state: &mut GameState) -> Vec<PendingTriggerContext> {
+    let (mut held, rest): (Vec<_>, Vec<_>) = std::mem::take(&mut state.deferred_triggers)
+        .into_iter()
+        .partition(|context| matches!(context.batch_origin, DeferredTriggerBatchOrigin::UntapStep));
+    state.deferred_triggers = rest;
+    for context in &mut held {
+        context.batch_origin = DeferredTriggerBatchOrigin::Ordinary;
+    }
+    held
+}
+
 /// CR 603.7: [`collect_unclaimed_delayed_triggers_into_deferred`], returning the
 /// contexts it matched instead of leaving them queued; the claims stay published.
 pub(crate) fn collect_unclaimed_delayed_trigger_contexts(
@@ -10443,6 +10463,7 @@ pub(crate) fn finalize_pending_trigger_entry(
 /// Locate the in-construction `TriggeredAbility` entry identified by `entry_id`
 /// (searching from the top of the stack down) and overwrite its resolved
 /// ability. Shared find-and-assign logic for `mutate`/`finalize` above.
+/// CR 610.3b: retain the provisional ability's latched "until" events when replacing it.
 ///
 /// Returns `false` when no stack entry carries `entry_id` — the triggered
 /// ability is unexpectedly no longer on the stack (dangling push-first cursor;
@@ -10489,6 +10510,12 @@ fn assign_pending_trigger_entry_ability(
     let ability = entry
         .ability_mut()
         .expect("pending_trigger_entry must reference a TriggeredAbility stack entry");
+    // CR 610.3b + CR 603.3d: an "until" event latched on the provisional entry
+    // after it triggered must survive construction from the chosen targets.
+    // Otherwise a source that left before target selection would still exile them.
+    for duration_event in ability.latched_duration_events() {
+        assigned_ability.record_duration_event_recursive(duration_event);
+    }
     if assigned_ability.target_incarnations.is_empty()
         && !ability.target_incarnations.is_empty()
         && ability_uses_event_target_prevent_damage(&assigned_ability)
@@ -16219,21 +16246,6 @@ fn process_collected_triggers_with_delayed_events_scoped(
         prompt,
         consumed_events,
     }
-}
-
-pub(crate) fn process_triggers_with_delayed_phase_events(
-    state: &mut GameState,
-    normal_events: &[GameEvent],
-    delayed_events: &[GameEvent],
-    events_out: &mut Vec<GameEvent>,
-) -> TriggerBatchOutcome {
-    let normal_pending = collect_triggers_for_batch(state, normal_events);
-    process_collected_triggers_with_delayed_phase_events(
-        state,
-        normal_pending,
-        delayed_events,
-        events_out,
-    )
 }
 
 /// CR 603.3b + CR 508.3a + CR 509.3a: settle an attack or block declaration.
@@ -30123,9 +30135,10 @@ pub mod tests {
             phase: Phase::Upkeep,
         }];
         let mut events_out = Vec::new();
-        let outcome = process_triggers_with_delayed_phase_events(
+        let normal_pending = collect_triggers_for_batch(&mut state, &events);
+        let outcome = process_collected_triggers_with_delayed_phase_events(
             &mut state,
-            &events,
+            normal_pending,
             &events,
             &mut events_out,
         );

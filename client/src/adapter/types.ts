@@ -3987,7 +3987,7 @@ export type GameEvent =
   // CR 701.42a: a meld pair entered the battlefield as one melded permanent.
   // `object_id` is the melded permanent; `partner_id` is the pair's other card.
   | { type: "Melded"; data: { object_id: ObjectId; partner_id: ObjectId; controller: PlayerId } }
-  | { type: "DayNightChanged"; data: { new_state: string } }
+  | { type: "DayNightChanged"; data: { new_state: string; previous?: DayNight | null } }
   | { type: "TurnedFaceUp"; data: { object_id: ObjectId } }
   | { type: "TurnedFaceDown"; data: { object_id: ObjectId } }
   | { type: "CardsRevealed"; data: { player: PlayerId; card_ids?: ObjectId[]; card_names: string[] } }

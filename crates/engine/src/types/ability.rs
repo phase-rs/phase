@@ -4310,6 +4310,20 @@ impl ResolvedAbility {
         }
     }
 
+    /// CR 610.3a + CR 610.3b: every "until" event latched on this ability or any sub/else branch,
+    /// in first-latched order — the read mirror of [`Self::record_duration_event_recursive`].
+    pub(crate) fn latched_duration_events(&self) -> Vec<DurationEvent> {
+        let mut latched = self.context.duration_events.clone();
+        for (_, child) in self.child_links() {
+            for event in child.latched_duration_events() {
+                if !latched.contains(&event) {
+                    latched.push(event);
+                }
+            }
+        }
+        latched
+    }
+
     /// Clears the latched "until" events on this ability and every sub/else
     /// branch, mirroring [`Self::record_duration_event_recursive`].
     pub(crate) fn clear_duration_events_recursive(&mut self) {

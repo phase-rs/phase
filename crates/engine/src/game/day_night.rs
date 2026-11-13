@@ -109,14 +109,7 @@ pub fn check_day_night_transition(state: &mut GameState, events: &mut Vec<GameEv
         _ => return, // No transition
     };
 
-    state.day_night = Some(new_state);
-
-    events.push(GameEvent::DayNightChanged {
-        new_state: match new_state {
-            DayNight::Day => "Day".to_string(),
-            DayNight::Night => "Night".to_string(),
-        },
-    });
+    set_designation(state, new_state, events);
 
     // CR 613.1: a copy effect's daybound/nightbound is a layer-applied keyword, and the untap
     // step's phase-in reconciliation runs just before this check.
@@ -133,19 +126,9 @@ pub fn check_day_night_transition(state: &mut GameState, events: &mut Vec<GameEv
 /// CR 731.1: Set the game's day/night designation to a specific value.
 /// Triggered by Effect::SetDayNight. Transforms all Daybound/Nightbound permanents
 /// as appropriate for the new designation.
+/// CR 731.1: re-stating the current designation changes nothing and emits no event.
 pub fn resolve_set_day_night(state: &mut GameState, to: DayNight, events: &mut Vec<GameEvent>) {
-    let current = state.day_night;
-    state.day_night = Some(to);
-
-    events.push(GameEvent::DayNightChanged {
-        new_state: match to {
-            DayNight::Day => "Day".to_string(),
-            DayNight::Night => "Night".to_string(),
-        },
-    });
-
-    // Only transform permanents if the designation actually changed
-    if current == Some(to) {
+    if !set_designation(state, to, events) {
         return;
     }
 
@@ -162,10 +145,31 @@ pub fn initialize_day_night(state: &mut GameState, events: &mut Vec<GameEvent>) 
         return; // Already initialized
     }
 
-    state.day_night = Some(DayNight::Day);
+    set_designation(state, DayNight::Day, events);
+}
+
+/// CR 731.1 + CR 731.1a: the single authority that writes the game's day/night designation.
+/// "It becomes day" and "it becomes night" refer to the game GAINING that designation
+/// (CR 731.1), so a write that would set the designation the game already has changes
+/// nothing and emits no event. A write that replaces one designation with the other is what
+/// CR 731.1a calls "day becomes night"/"night becomes day", and the lost designation rides
+/// on the event for the trigger matcher.
+/// Returns whether the designation changed; each caller transforms the permanents that now
+/// disagree (CR 702.145b + CR 702.145e) only then.
+fn set_designation(state: &mut GameState, to: DayNight, events: &mut Vec<GameEvent>) -> bool {
+    let previous = state.day_night;
+    if previous == Some(to) {
+        return false;
+    }
+    state.day_night = Some(to);
     events.push(GameEvent::DayNightChanged {
-        new_state: "Day".to_string(),
+        new_state: match to {
+            DayNight::Day => "Day".to_string(),
+            DayNight::Night => "Night".to_string(),
+        },
+        previous,
     });
+    true
 }
 
 #[cfg(test)]
@@ -247,6 +251,35 @@ mod tests {
         record_previous_turn(state);
     }
 
+    /// CR 731.1 + CR 731.1a: unchanged designations emit nothing; a first
+    /// designation loses nothing, and a genuine transition carries its previous one.
+    #[test]
+    fn designation_authority_emits_only_changes_and_records_the_lost_designation() {
+        let mut state = GameState::new_two_player(42);
+        let mut events = Vec::new();
+        assert!(set_designation(&mut state, DayNight::Day, &mut events));
+        assert_eq!(state.day_night, Some(DayNight::Day));
+        assert!(
+            matches!(events.as_slice(), [GameEvent::DayNightChanged { new_state, previous: None }] if new_state == "Day")
+        );
+        events.clear();
+        assert!(!set_designation(&mut state, DayNight::Day, &mut events));
+        assert!(events.is_empty());
+        assert_eq!(state.day_night, Some(DayNight::Day));
+        assert!(set_designation(&mut state, DayNight::Night, &mut events));
+        assert_eq!(state.day_night, Some(DayNight::Night));
+        assert!(
+            matches!(events.as_slice(), [GameEvent::DayNightChanged { new_state, previous: Some(DayNight::Day) }] if new_state == "Night")
+        );
+        events.clear();
+        assert!(!set_designation(&mut state, DayNight::Night, &mut events));
+        assert!(events.is_empty());
+        assert!(set_designation(&mut state, DayNight::Day, &mut events));
+        assert!(
+            matches!(events.as_slice(), [GameEvent::DayNightChanged { new_state, previous: Some(DayNight::Night) }] if new_state == "Day")
+        );
+    }
+
     #[test]
     fn test_day_to_night_on_zero_spells() {
         let mut state = GameState::new_two_player(42);
@@ -259,7 +292,7 @@ mod tests {
         assert_eq!(state.day_night, Some(DayNight::Night));
         assert!(events.iter().any(|e| matches!(
             e,
-            GameEvent::DayNightChanged { new_state } if new_state == "Night"
+            GameEvent::DayNightChanged { new_state, .. } if new_state == "Night"
         )));
     }
 
@@ -275,7 +308,7 @@ mod tests {
         assert_eq!(state.day_night, Some(DayNight::Day));
         assert!(events.iter().any(|e| matches!(
             e,
-            GameEvent::DayNightChanged { new_state } if new_state == "Day"
+            GameEvent::DayNightChanged { new_state, .. } if new_state == "Day"
         )));
     }
 
@@ -590,7 +623,7 @@ mod tests {
         assert_eq!(state.day_night, Some(DayNight::Day));
         assert!(events.iter().any(|e| matches!(
             e,
-            GameEvent::DayNightChanged { new_state } if new_state == "Day"
+            GameEvent::DayNightChanged { new_state, .. } if new_state == "Day"
         )));
     }
 
