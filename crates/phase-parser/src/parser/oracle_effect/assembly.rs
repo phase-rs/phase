@@ -4854,10 +4854,15 @@ fn refuse_unsupported_target_opponent_choice(def: &mut AbilityDefinition) {
             .description
             .clone()
             .unwrap_or_else(|| "unsupported target-opponent permanent choice".to_string());
+        // Drop the executable return itself; promote any later sequential
+        // siblings so the independently unsupported shuffle remains visible.
+        let later = def
+            .sub_ability
+            .as_deref_mut()
+            .and_then(|bounce| bounce.sub_ability.take());
         *def.effect =
             Effect::unimplemented("target-opponent permanent choice", description.as_str());
-        // Keep the sequential chain: the following shuffle is a separate
-        // explicit gap and must remain visible in the parse artifact.
+        def.sub_ability = later;
         return;
     }
     if let Some(sub) = def.sub_ability.as_deref_mut() {
