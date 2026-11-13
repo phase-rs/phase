@@ -8,7 +8,7 @@ use engine::game::coverage::{
     analyze_coverage, audit_resolver_features, audit_semantic, build_warning_drilldown,
     format_semantic_audit_markdown, CoverageSupport, ParseWarningPattern, WarningDrilldownCard,
 };
-use engine::game::gap_analysis::{gap_report, GapReport};
+use engine::game::gap_analysis::{gap_report_from_args, GapReport};
 use flate2::read::GzDecoder;
 use serde::Serialize;
 
@@ -879,25 +879,61 @@ fn otherwise_supported_counts_a_face_gapped_only_by_its_warnings() {
 
 #[test]
 fn gap_report_format_filter_reads_each_face_legality() {
-    let export =
-        serde_json::Value::Object(serde_json::Map::from_iter(channel_faces_with_legalities()))
-            .to_string();
-    let db = CardDatabase::from_json_str(&export).expect("test export deserializes");
-    let gaps = |key| {
-        analyze_coverage(&db)
+    let [mut channel, channel_prepare] = channel_faces_with_legalities();
+    // Synthetic: a second detector, so the report shows which Channel face it kept.
+    channel.1["parse_warnings"][0]["detector"] = "Duration_UntilEndOfTurn".into();
+    channel.1["parse_warnings"][0]["description"] = "until end of turn".into();
+    let export = serde_json::Value::Object(serde_json::Map::from_iter([channel, channel_prepare]))
+        .to_string();
+    let summary =
+        analyze_coverage(&CardDatabase::from_json_str(&export).expect("test export deserializes"));
+    let handlers = |key| {
+        summary
             .cards
             .iter()
             .find(|card| card.card_face_key.as_deref() == Some(key))
-            .map(|card| card.gap_count)
+            .map(|card| {
+                card.gap_details
+                    .iter()
+                    .map(|gap| gap.handler.clone())
+                    .collect::<Vec<_>>()
+            })
     };
-    let soc_gaps = gaps(CHANNEL_PREPARE).expect("SOC Channel is scanned");
-    assert!(soc_gaps > 0 && gaps(CHANNEL).is_some_and(|n| n > 0));
+    let soc_handlers = handlers(CHANNEL_PREPARE).expect("SOC Channel is scanned");
+    assert!(soc_handlers.iter().any(|h| h == "Swallow:Condition_If"));
+    assert!(handlers(CHANNEL)
+        .expect("standalone Channel is scanned")
+        .iter()
+        .any(|h| h == "Swallow:Duration_UntilEndOfTurn"));
 
-    let GapReport { analysis, retained } = gap_report(&db, Some(LegalityFormat::Commander), None);
-    let retained = retained.expect("the format filter ran");
-    assert_eq!((retained.kept, retained.before), (1, 2));
+    let root = tempfile::tempdir().expect("temp data root");
+    std::fs::write(root.path().join("card-data.json"), export).expect("export written");
+    let argv = [
+        "parser-gap-analyzer".into(),
+        root.path().display().to_string(),
+        "--format".into(),
+        "commander".into(),
+    ];
+    let Ok(GapReport { analysis, retained }) = gap_report_from_args(argv) else {
+        panic!("the CLI argv yields a report");
+    };
+    let retained = retained.expect("the CLI forwards --format");
+    assert_eq!(
+        (retained.format, retained.kept, retained.before),
+        (LegalityFormat::Commander, 1, 2)
+    );
     assert_eq!(
         (analysis.total_unsupported, analysis.total_classified),
-        (1, soc_gaps)
+        (1, soc_handlers.len())
+    );
+    let families: BTreeSet<&str> = analysis
+        .categories
+        .values()
+        .flat_map(|category| category.families.iter().map(|family| family.key.as_str()))
+        .collect();
+    assert!(families.contains("Swallow:Condition_If"), "{families:?}");
+    assert!(
+        !families.contains("Swallow:Duration_UntilEndOfTurn"),
+        "{families:?}"
     );
 }

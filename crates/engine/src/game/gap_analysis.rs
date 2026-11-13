@@ -4,6 +4,7 @@
 //! affect and how many cards that fix alone would make supported.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::PathBuf;
 
 use serde::Serialize;
 use strum::IntoEnumIterator;
@@ -282,6 +283,7 @@ pub struct GapReport {
 }
 
 pub struct RetainedRows {
+    pub format: LegalityFormat,
     pub kept: usize,
     pub before: usize,
 }
@@ -297,6 +299,7 @@ pub fn gap_report(
         let before = cards.len();
         retain_faces_legal_in(&mut cards, card_db, format);
         RetainedRows {
+            format,
             kept: cards.len(),
             before,
         }
@@ -307,6 +310,48 @@ pub fn gap_report(
         analysis.categories.retain(|key, _| *key == label);
     }
     GapReport { analysis, retained }
+}
+
+/// Why `gap_report_from_args` made no report; the binary words each case.
+pub enum GapArgsError {
+    Usage,
+    UnknownCategory(String),
+    UnknownFormat(String),
+    Load(PathBuf, Box<dyn std::error::Error>),
+}
+
+/// `parser-gap-analyzer`'s argv (`<data-root> [--format F] [--category C]`, root defaulting to
+/// `PHASE_CARDS_PATH`) run against `<data-root>/card-data.json`.
+pub fn gap_report_from_args(
+    args: impl IntoIterator<Item = String>,
+) -> Result<GapReport, GapArgsError> {
+    let args: Vec<String> = args.into_iter().skip(1).collect();
+    let (mut format, mut category) = (None, None);
+    let mut args_iter = args.iter();
+    while let Some(arg) = args_iter.next() {
+        match arg.as_str() {
+            "--category" => {
+                let raw = args_iter.next().cloned().unwrap_or_default();
+                let class = GapClass::from_label(&raw);
+                category = Some(class.ok_or(GapArgsError::UnknownCategory(raw))?);
+            }
+            "--format" => {
+                let raw = args_iter.next().cloned().unwrap_or_default();
+                let key = LegalityFormat::from_key(&raw);
+                format = Some(key.ok_or(GapArgsError::UnknownFormat(raw))?);
+            }
+            _ => {}
+        }
+    }
+    let root = args
+        .iter()
+        .find(|a| !a.starts_with("--"))
+        .cloned()
+        .or_else(|| std::env::var("PHASE_CARDS_PATH").ok())
+        .ok_or(GapArgsError::Usage)?;
+    let export = PathBuf::from(root).join("card-data.json");
+    let db = CardDatabase::from_export(&export).map_err(|e| GapArgsError::Load(export, e))?;
+    Ok(gap_report(&db, format, category))
 }
 
 #[cfg(test)]
