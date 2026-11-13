@@ -427,7 +427,7 @@ added_lines_load $DIFF_MODE "$BASE" -- "${SCOPE[@]}" "${SCOPE_EXCLUDES[@]}"
 while IFS= read -r file; do
     [ -f "$file" ] || continue
 
-    # This file's genuinely-added records; `kept` drops blank and `+`-leading content, as the old `^\+[^+]` filter did.
+    # This file's genuinely-added records; `kept` drops blank and `+`-leading content.
     file_added=$(added_lines_for "$file")
     kept=$(printf '%s\n' "$file_added" | grep -E $'^[0-9]+\t[^+]' || true)
     if [ -z "$kept" ]; then
