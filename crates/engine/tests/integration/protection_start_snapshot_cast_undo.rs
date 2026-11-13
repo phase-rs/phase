@@ -46,7 +46,8 @@ use crate::support::shared_card_db;
 
 const P2: PlayerId = PlayerId(2);
 
-/// The save the merge base's writer (`917542cd0`) produced at Thrill of
+/// The save upstream main's writer at `917542cd0` (release v0.123.0, which
+/// predates the occurrence keys) produced at Thrill of
 /// Possibility's mana payment on the board above, with three players. It was
 /// made by running this file's `play_to_the_payment_window` in a checkout of
 /// that commit (with Benevolent Blessing's printed record added to its card
@@ -324,7 +325,7 @@ fn predecessor_save() -> serde_json::Value {
     serde_json::from_str(&json).expect("the fixture is JSON")
 }
 
-/// The save was written by the merge base's build, whose inverse of the
+/// The save was written by the older build, whose inverse of the
 /// Altar's sacrifice stores Blessing's snapshot under the older slot key.
 #[test]
 fn canceling_a_predecessors_saved_cast_keeps_the_start_snapshot() {
