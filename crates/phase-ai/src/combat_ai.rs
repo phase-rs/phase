@@ -7556,7 +7556,7 @@ mod tests {
     // before the per-blocker block search.
 
     #[test]
-    fn futile_one_huge_trampler_vs_thousand_tokens_bails_fast() {
+    fn futile_one_huge_trampler_vs_thousand_tokens_bails_before_block_search() {
         let mut state = setup();
         state.players[1].life = 20;
 
@@ -7596,7 +7596,7 @@ mod tests {
     }
 
     #[test]
-    fn futile_thousand_normal_attackers_vs_five_blockers_bails_fast() {
+    fn futile_thousand_normal_attackers_vs_five_blockers_bails_before_block_search() {
         let mut state = setup();
         state.players[1].life = 20;
 

@@ -14840,7 +14840,7 @@ mod tests {
         );
     }
 
-    /// The priority decision's board-evaluation count is independent of the opponent's board size.
+    /// Below the large-board fast path, the priority decision's board-evaluation count is independent of the opponent's board size.
     #[test]
     fn priority_search_work_does_not_scale_with_opponent_tokens() {
         let board = |tokens: usize| {
