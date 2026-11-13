@@ -3595,6 +3595,170 @@ fn a_departing_substitute_chooser_leaves_the_payers_own_draw_sequence_running() 
         .expect("the game goes on");
 }
 
+/// CR 800.4a + CR 614.17c: the departed chooser's parked draw is settled as a
+/// draw that can't happen even when every effect offered for it belongs to a
+/// player still in the game. P1's Notion Thief turns the first of P0's two
+/// upkeep draws into P1's draw, and P1 is asked to order P2's Hullbreacher and
+/// P2's Possessed Portal on it. P1 concedes: both effects still apply to a
+/// draw, but a player who left draws nothing, so neither is applied (no
+/// Treasure), and P0's next instruction asks P0 for the same order.
+#[test]
+fn a_departed_players_parked_draw_is_settled_though_survivors_effects_still_apply() {
+    let (mut runner, vortex, portal) = three_player_vortex_board(1, |scenario| {
+        scenario.with_library_top(P1, &STAGED_LIBRARY[..6]);
+        scenario.add_creature_from_oracle(P1, "Notion Thief", 3, 1, NOTION_THIEF_ORACLE);
+        scenario.add_creature_from_oracle(PlayerId(2), "Hullbreacher", 3, 2, HULLBREACHER_ORACLE);
+        scenario
+            .add_artifact_from_oracle(PlayerId(2), "Possessed Portal", POSSESSED_PORTAL_ORACLE)
+            .id()
+    });
+    advance_through_upkeep(&mut runner);
+    assert_draw_cost_prompt(&runner, 2, 1);
+    let before = ZoneSizes::of(&runner, P0);
+    runner
+        .act(GameAction::PayUnlessCost { pay: true })
+        .expect("choosing the draw cost is legal");
+    assert_replacement_choice(&runner, "P0 orders the three effects on the first draw");
+    let thief = runner
+        .state()
+        .pending_replacement
+        .as_ref()
+        .expect("the order is parked")
+        .candidates
+        .iter()
+        .position(|rid| runner.state().objects[&rid.source].name == "Notion Thief")
+        .expect("Notion Thief is offered");
+    runner
+        .act(GameAction::ChooseReplacement { index: thief })
+        .expect("choosing Notion Thief first is legal");
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::ReplacementChoice { player: P1, .. }
+        ),
+        "reach guard: P1 orders Hullbreacher and Possessed Portal on their own draw: {:?}",
+        runner.state().waiting_for
+    );
+    let offered = offered_candidates(&runner);
+    assert!(
+        offered.len() == 2
+            && offered
+                .iter()
+                .all(|rid| runner.state().objects[&rid.source].controller == PlayerId(2)),
+        "reach guard: both effects offered to P1 are P2's"
+    );
+
+    let departure = concede_with_events(&mut runner, P1);
+    assert!(
+        !departure
+            .iter()
+            .any(|event| matches!(event, GameEvent::CardDrawn { .. })),
+        "no card is drawn at the departure"
+    );
+    assert_eq!(
+        treasures_of(&runner, PlayerId(2)),
+        0,
+        "Hullbreacher replaces nothing: the departed player's draw does not happen"
+    );
+    assert_replacement_choice(&runner, "P0's second instruction asks P0");
+    assert_eq!(
+        offered_candidates(&runner).len(),
+        2,
+        "Hullbreacher and Possessed Portal apply to P0's draw"
+    );
+    assert_eq!(upkeep_resolutions(&departure, vortex), 0);
+    let index = offered_candidates(&runner)
+        .iter()
+        .position(|rid| rid.source == portal)
+        .expect("Possessed Portal is offered");
+    let result = runner
+        .act(GameAction::ChooseReplacement { index })
+        .expect("choosing Possessed Portal is legal");
+    assert_eq!(
+        ZoneSizes::of(&runner, P0),
+        before,
+        "both of P0's draws were replaced"
+    );
+    assert_eq!(treasures_of(&runner, PlayerId(2)), 0);
+    assert!(upkeep_ability_resolved(&result.events, vortex));
+    assert!(runner.state().pending_cost_move_resume.is_none());
+}
+
+/// Abundance, verbatim Oracle text: an interactive draw substitute.
+const ABUNDANCE_ORACLE: &str = "If you would draw a card, you may instead choose land or \
+nonland and reveal cards from the top of your library until you reveal a card \
+of the chosen kind. Put that card into your hand and put all other cards \
+revealed this way on the bottom of your library in any order.";
+
+/// CR 800.4a + CR 117.2e: the departed chooser's open question is not their
+/// own draw here. P1's Notion Thief turns the first of P0's two upkeep draws
+/// into P1's draw, P1 accepts Abundance for it, and P1 concedes at Abundance's
+/// land-or-nonland choice. That choice is abandoned with P1, the payment has
+/// no prompt left, and P0 performs the instruction still owed before any
+/// player receives priority.
+#[test]
+fn a_departing_substitute_chooser_at_a_later_choice_leaves_the_payer_to_finish() {
+    let (mut runner, vortex, ()) = three_player_vortex_board(1, |scenario| {
+        scenario.with_library_top(P1, &STAGED_LIBRARY[..6]);
+        scenario.add_creature_from_oracle(P1, "Notion Thief", 3, 1, NOTION_THIEF_ORACLE);
+        scenario.add_enchantment_from_oracle(P1, "Abundance", ABUNDANCE_ORACLE);
+    });
+    advance_through_upkeep(&mut runner);
+    assert_draw_cost_prompt(&runner, 2, 1);
+    let before = ZoneSizes::of(&runner, P0);
+    runner
+        .act(GameAction::PayUnlessCost { pay: true })
+        .expect("choosing the draw cost is legal");
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::ReplacementChoice { player: P1, .. }
+        ),
+        "reach guard: Notion Thief's draw offers P1 Abundance: {:?}",
+        runner.state().waiting_for
+    );
+    engine::game::engine::apply(
+        runner.state_mut(),
+        P1,
+        GameAction::ChooseReplacement {
+            index: APPLY_REPLACEMENT,
+        },
+    )
+    .expect("P1 accepts Abundance");
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::NamedChoice { player: P1, .. }
+        ),
+        "reach guard: Abundance asks P1 for land or nonland: {:?}",
+        runner.state().waiting_for
+    );
+    assert!(
+        runner.state().pending_replacement.is_none(),
+        "reach guard: the open question is not a parked draw"
+    );
+    assert_eq!(parked_unpaid_suffix(&runner), owed_instructions(1));
+    let departure = concede_with_events(&mut runner, P1);
+    let drawn_by = |player: PlayerId| {
+        departure
+            .iter()
+            .filter(|event| matches!(event, GameEvent::CardDrawn { player_id, .. } if *player_id == player))
+            .count()
+    };
+    assert_eq!(drawn_by(P1), 0, "nothing is drawn for the departed player");
+    assert_eq!(drawn_by(P0), 1, "the instruction still owed is performed");
+    assert_eq!(ZoneSizes::of(&runner, P0).hand, before.hand + 1);
+    assert_eq!(upkeep_resolutions(&departure, vortex), 1);
+    let state = runner.state();
+    assert!(state.pending_cost_move_resume.is_none(), "nothing is owed");
+    assert_eq!(zone_of(&runner, vortex), Zone::Battlefield);
+    assert!(
+        matches!(state.waiting_for, WaitingFor::Priority { player: P0 }),
+        "priority only once the payment is over: {:?}",
+        state.waiting_for
+    );
+}
+
 /// CR 800.4a: the same board as
 /// `a_departing_substitute_chooser_leaves_the_surviving_payer_to_finish_the_payment`,
 /// with the payer leaving instead. Psychic Vortex's upkeep ability ceases to

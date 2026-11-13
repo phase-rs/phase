@@ -1970,6 +1970,31 @@ fn abandon_source_bound_resolution_prompt(
         return;
     }
 
+    // CR 800.4a + CR 117.2e: under a parked draw unless payment that outlives
+    // this departure, the leaver's prompt is a choice inside a substitute for
+    // one of the payment's draws (Abundance's land-or-nonland, after Notion
+    // Thief made that draw the leaver's). Only the substitute is abandoned:
+    // its replacement tails and the continuation its choice deferred. The
+    // resolution the payment settles is not the leaver's to abandon; it
+    // stays, and the payment resumes at the concession's action boundary
+    // (`engine::reconcile_parked_unless_payment_after_departure`).
+    if super::engine_payment_choices::draw_payment_is_parked(state)
+        && !selecting_resolution_sacrifice
+        && !parked_resolution_sacrifice
+    {
+        super::replacement::abandon_post_replacement_continuation(state);
+        if state
+            .active_ability_continuation()
+            .is_some_and(|pending| leaving_set.contains(&pending.chain.controller))
+        {
+            let _ = state.clear_active_ability_continuation();
+        }
+        state.waiting_for = WaitingFor::Priority {
+            player: players::next_player(state, player),
+        };
+        return;
+    }
+
     if selecting_resolution_sacrifice {
         let _ = state
             .take_active_optional_effect_frame()

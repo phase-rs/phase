@@ -2929,12 +2929,15 @@ fn checked_restore_refuses_a_used_floating_shield_candidate() {
         index: floating.len(),
     };
     floating.push(used);
+    // Listed beside the live Dredge candidate: no applicable effect is left
+    // out, so only the used shield's own discovery can refuse the prompt.
     checkpoint
         .state
         .pending_replacement
         .as_mut()
         .expect("the checkpoint holds the Dredge choice")
-        .candidates = vec![candidate];
+        .candidates
+        .push(candidate);
     let refusal = checked_round_trip(&state);
     assert!(
         refused_with(
