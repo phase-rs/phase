@@ -4228,6 +4228,160 @@ mod feldon_tokens {
         }
     }
 
+    const CRAFTY_CUTPURSE: &str = "Flash\nWhen this creature enters, each token that would be created under an opponent's control this turn is created under your control instead.";
+    const JETMIR: &str = "Creatures you control get +1/+0 and have vigilance as long as you control three or more creatures.\nCreatures you control also get +1/+0 and have trample as long as you control six or more creatures.\nCreatures you control also get +1/+0 and have double strike as long as you control nine or more creatures.";
+    const ILLNESS_IN_THE_RANKS: &str = "Creature tokens get -1/-1.";
+    const SPIDERSILK_ARMOR: &str =
+        "Creatures you control get +0/+1 and have reach. (They can block creatures with flying.)";
+    const ORB_OF_DREAMS: &str = "Permanents enter tapped.";
+
+    /// Grismold, the Dreadsower's end-step trigger in a three-player game after the active
+    /// player resolved Crafty Cutpurse this turn, so every seat's Plant is created under the
+    /// active player's control. Orb of Dreams and an untapped Archelos, Lagoon Mystic give each
+    /// Plant two tap-state replacements to order. Jetmir, Nexus of Revels gives the active
+    /// player's creatures +1/+0 at three, six and nine creatures; Illness in the Ranks and
+    /// Spidersilk Armor make a Plant a 0/1 before Jetmir. With `fillers` other creatures the
+    /// active player controls `5 + fillers` creatures before the Plants. Returns the ordering
+    /// prompts, each Plant's final power and the number of Mentor of the Meek triggers.
+    fn grismold_cutpurse_mentor(fillers: usize, persist: bool) -> (usize, Vec<Option<i32>>, usize) {
+        let mut scenario = GameScenario::new_n_player(3, 42);
+        scenario.at_phase(Phase::PostCombatMain);
+        for player in (0..3).map(PlayerId) {
+            scenario.with_library_top(player, &["Plains", "Island", "Swamp", "Mountain"]);
+        }
+        scenario
+            .add_creature_from_oracle(P0, "Grismold, the Dreadsower", 3, 3, GRISMOLD)
+            .as_legendary()
+            .with_subtypes(vec!["Troll", "Shaman"]);
+        scenario
+            .add_creature_from_oracle(P0, "Archelos, Lagoon Mystic", 2, 4, ARCHELOS)
+            .as_legendary()
+            .with_subtypes(vec!["Turtle", "Shaman"]);
+        scenario
+            .add_creature_from_oracle(P0, "Jetmir, Nexus of Revels", 5, 4, JETMIR)
+            .as_legendary()
+            .with_subtypes(vec!["Cat", "Demon"]);
+        let mentor = scenario
+            .add_creature_from_oracle(P0, "Mentor of the Meek", 2, 2, MENTOR_OF_THE_MEEK)
+            .with_subtypes(vec!["Human", "Soldier"])
+            .id();
+        for _ in 0..fillers {
+            // Grizzly Bears: a vanilla 2/2.
+            scenario.add_creature(P0, "Grizzly Bears", 2, 2);
+        }
+        scenario.add_artifact_from_oracle(P0, "Orb of Dreams", ORB_OF_DREAMS);
+        scenario.add_enchantment_from_oracle(P0, "Illness in the Ranks", ILLNESS_IN_THE_RANKS);
+        scenario.add_enchantment_from_oracle(P0, "Spidersilk Armor", SPIDERSILK_ARMOR);
+        let cutpurse = scenario
+            .add_creature_to_hand_from_oracle(P0, "Crafty Cutpurse", 2, 2, CRAFTY_CUTPURSE)
+            .with_mana_cost(ManaCost::zero())
+            .id();
+        let mut runner = scenario.build();
+        // Crafty Cutpurse resolves, then its enters trigger: tokens are redirected this turn.
+        // Its own entry orders the same two tap-state replacements.
+        runner.cast(cutpurse).resolve();
+        for _ in 0..12 {
+            match &runner.state().waiting_for {
+                WaitingFor::ReplacementChoice { .. } => {
+                    runner
+                        .act(GameAction::ChooseReplacement { index: 0 })
+                        .unwrap();
+                }
+                WaitingFor::Priority { .. } if runner.state().stack.is_empty() => break,
+                WaitingFor::Priority { .. } => {
+                    runner.act(GameAction::PassPriority).unwrap();
+                }
+                other => panic!("unexpected prompt: {other:?}"),
+            }
+        }
+        assert_eq!(runner.state().objects[&cutpurse].zone, Zone::Battlefield);
+        assert_eq!(runner.state().phase, Phase::PostCombatMain);
+        // Every player passes in turn: the end step begins.
+        for _ in 0..3 {
+            runner.act(GameAction::PassPriority).unwrap();
+        }
+        assert_eq!(runner.state().phase, Phase::End);
+        assert_eq!(runner.state().stack.len(), 1, "Grismold's trigger");
+        let mut orders = 0;
+        let mut mentor_triggers = std::collections::HashSet::new();
+        for _ in 0..60 {
+            if persist && !matches!(runner.state().waiting_for, WaitingFor::Priority { .. }) {
+                runner = restore(runner);
+            }
+            match &runner.state().waiting_for {
+                WaitingFor::ReplacementChoice { .. } => {
+                    orders += 1;
+                    runner
+                        .act(GameAction::ChooseReplacement { index: 0 })
+                        .unwrap();
+                }
+                WaitingFor::OptionalEffectChoice { source_id, .. } => {
+                    assert_eq!(*source_id, mentor, "only Mentor of the Meek asks");
+                    runner
+                        .act(GameAction::DecideOptionalEffect { accept: false })
+                        .unwrap();
+                }
+                WaitingFor::OrderTriggers { triggers, .. } => {
+                    let order = (0..triggers.len()).collect();
+                    runner.act(GameAction::OrderTriggers { order }).unwrap();
+                }
+                WaitingFor::Priority { .. }
+                    if runner.state().stack.is_empty()
+                        && runner.state().deferred_triggers.is_empty() =>
+                {
+                    break
+                }
+                WaitingFor::Priority { .. } => {
+                    mentor_triggers.extend(
+                        runner
+                            .state()
+                            .stack
+                            .iter()
+                            .filter(|entry| entry.source_id == mentor)
+                            .map(|entry| entry.id),
+                    );
+                    runner.act(GameAction::PassPriority).unwrap();
+                }
+                other => panic!("unexpected prompt: {other:?}"),
+            }
+        }
+        let powers: Vec<_> = runner
+            .state()
+            .objects
+            .values()
+            .filter(|object| {
+                object.is_token
+                    && object.zone == Zone::Battlefield
+                    && object.name == "Plant"
+                    && object.controller == P0
+            })
+            .map(|object| object.power)
+            .collect();
+        (orders, powers, mentor_triggers.len())
+    }
+
+    /// CR 603.6a + CR 611.3c + CR 101.4: the three Plants of "each player creates a 1/1 green
+    /// Plant creature token" enter as one event, each after its own ordering prompt. With six
+    /// other creatures the active player controls seven and eight creatures while the cohort is
+    /// partial (a Plant is a 2/1 under Jetmir) and nine once it is complete (a 3/1), so Mentor of
+    /// the Meek ("power 2 or less") triggers for none of them. Control: with five other
+    /// creatures the completed cohort leaves each Plant a 2/1 and Mentor triggers for all three.
+    #[test]
+    fn resumed_seat_legs_match_the_completed_cohorts_power() {
+        for persist in [false, true] {
+            assert_eq!(
+                grismold_cutpurse_mentor(1, persist),
+                (3, vec![Some(3); 3], 0),
+                "the completed cohort's Plants are 3/1s (restore: {persist})"
+            );
+            assert_eq!(
+                grismold_cutpurse_mentor(0, persist),
+                (3, vec![Some(2); 3], 3),
+                "control: the completed cohort's Plants are 2/1s (restore: {persist})"
+            );
+        }
+    }
+
     const SECRETS_OF_THE_KEY: &str = "Investigate. If this spell was cast from a graveyard, investigate twice instead. (Create a Clue token. It's an artifact with \"{2}, Sacrifice this token: Draw a card.\")\nFlashback {3}{U}";
 
     /// Mister Fantastic's "Whenever one or more tokens you control enter, you may draw a card."
