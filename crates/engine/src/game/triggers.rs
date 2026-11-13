@@ -4805,12 +4805,11 @@ pub(crate) fn collect_logical_zone_trigger_segment(
                     .zone_changes_this_turn
                     .iter()
                     .enumerate()
-                    .filter(|(_, record)| {
+                    .rfind(|(_, record)| {
                         record.object_id == *object_id
                             && record.from_zone == *from
                             && record.to_zone == *to
                     })
-                    .next_back()
                     .is_some_and(|(index, _)| index < boundary)
             }),
         _ => false,
