@@ -1,22 +1,25 @@
 //! Profile one AI priority decision as the opponent's board scales.
 //!
-//! The AI holds Grizzly Bears with {G}{G} floating in its precombat main phase,
-//! facing N vanilla 1/1s; each N prints the fastest of the repeated
-//! `choose_action` calls and the perf counters they accrued. N = 1 and 100 run
-//! the scored route (below `LARGE_BOARD_FAST_PRIORITY_BATTLEFIELD_OBJECTS`, 128,
-//! in `search.rs`): compare their `min` ratio with the same bench on the parent
-//! commit, and a higher ratio flags repeated board-dependent work. N = 1000 and
-//! 2000 run the large-board fast route: compare their `min` ratio with the
-//! parent commit's the same way; a ratio moving toward 4x rather than 2x points
-//! at quadratic work.
+//! The AI holds Grizzly Bears with two green mana in its pool in its precombat
+//! main phase, facing N vanilla 1/1s; each N prints the fastest of the repeated
+//! `choose_action` calls and the perf counters they accrued. One untimed call
+//! first asserts the cast and the route: ordinary scoring, which clones the
+//! state for legality, at N = 1 and 100 (below
+//! `LARGE_BOARD_FAST_PRIORITY_BATTLEFIELD_OBJECTS`, 128, in `search.rs`), and the
+//! large-board fast route, which clones nothing, at N = 1000 and 2000.
 //!
 //! The empty-hand rows rerun N = 1000 and 2000 with the AI holding nothing and
-//! controlling five Forests. Each row times `score_candidates`, asserting it
-//! answers with the no-development shortcut's lone pass
-//! (`large_board_main_phase_has_no_development_sources`) and no static scan, so
-//! the shortcut is the whole measured cost; it also times `choose_action` on the
-//! same board and asserts it passes. Compare both `min`s with the parent
-//! commit's; a battlefield walk nested inside the shortcut multiplies them.
+//! controlling five Forests. Each times `score_candidates`, asserting the
+//! no-development shortcut's lone pass
+//! (`large_board_main_phase_has_no_development_sources`) with no static scan,
+//! and `choose_action`, asserting it passes.
+//!
+//! Comparing: copy this file onto the comparison revision (it has no bench of its
+//! own; add this target's `[[bin]]` entry to `crates/phase-ai/Cargo.toml`) and run
+//! it on both revisions on one machine. Per route, a `min` ratio above the
+//! comparison's flags repeated board-dependent work, and one moving toward 4x
+//! rather than 2x points at quadratic work. For the empty-hand rows compare both
+//! `min`s directly; a battlefield walk nested inside the shortcut multiplies them.
 //!
 //! Build/run (measurement mode: node-bounded, no wall-clock cap, so the time
 //! reflects the work rather than the search deadline):
@@ -28,22 +31,16 @@
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use engine::game::perf_counters;
-use engine::game::zones::create_object;
-use engine::types::ability::{
-    AbilityCost, AbilityDefinition, AbilityKind, Effect, ManaContribution, ManaProduction,
-};
+use engine::game::scenario::GameScenario;
 use engine::types::actions::GameAction;
-use engine::types::card_type::{CoreType, Supertype};
-use engine::types::game_state::{GameState, WaitingFor};
-use engine::types::identifiers::{CardId, ObjectId};
+use engine::types::game_state::GameState;
+use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaPipId, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
-use engine::types::zones::Zone;
 use phase_ai::config::{create_config, AiDifficulty, Platform};
 use phase_ai::search::{choose_action, score_candidates};
 use rand::rngs::SmallRng;
@@ -61,104 +58,39 @@ enum Hand {
 }
 
 fn board(tokens: usize, hand: Hand) -> GameState {
-    let mut state = GameState::new_two_player(42);
-    state.turn_number = 2;
-    state.phase = Phase::PreCombatMain;
-    state.active_player = P0;
-    state.priority_player = P0;
-    state.waiting_for = WaitingFor::Priority { player: P0 };
-
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
     for _ in 0..tokens {
-        let card_id = CardId(state.next_object_id);
-        let id = create_object(
-            &mut state,
-            card_id,
-            P1,
-            "Creature".to_string(),
-            Zone::Battlefield,
-        );
-        let obj = state.objects.get_mut(&id).unwrap();
-        obj.card_types.core_types.push(CoreType::Creature);
-        obj.power = Some(1);
-        obj.toughness = Some(1);
-        obj.base_card_types = obj.card_types.clone();
-        obj.base_power = obj.power;
-        obj.base_toughness = obj.toughness;
-        obj.entered_battlefield_turn = Some(1);
+        scenario.add_creature(P1, "Creature", 1, 1);
     }
-
-    if let Hand::Empty = hand {
-        for _ in 0..5 {
-            let card_id = CardId(state.next_object_id);
-            let id = create_object(
-                &mut state,
-                card_id,
-                P0,
-                "Forest".to_string(),
-                Zone::Battlefield,
-            );
-            let obj = state.objects.get_mut(&id).unwrap();
-            obj.card_types.core_types.push(CoreType::Land);
-            obj.card_types.supertypes.push(Supertype::Basic);
-            obj.card_types.subtypes.push("Forest".to_string());
-            obj.base_card_types = obj.card_types.clone();
-            obj.entered_battlefield_turn = Some(1);
-            obj.summoning_sick = false;
-            let tap_for_green = AbilityDefinition::new(
-                AbilityKind::Activated,
-                Effect::Mana {
-                    produced: ManaProduction::Fixed {
-                        colors: vec![ManaColor::Green],
-                        contribution: ManaContribution::Base,
-                    },
-                    restrictions: vec![],
-                    grants: vec![],
-                    expiry: None,
-                    target: None,
-                },
-            )
-            .cost(AbilityCost::Tap);
-            Arc::make_mut(&mut obj.abilities).push(tap_for_green.clone());
-            Arc::make_mut(&mut obj.base_abilities).push(tap_for_green);
+    match hand {
+        Hand::Empty => {
+            for _ in 0..5 {
+                scenario.add_basic_land(P0, ManaColor::Green);
+            }
         }
-        return state;
+        Hand::Bears => {
+            scenario
+                .add_creature_to_hand(P0, "Grizzly Bears", 2, 2)
+                .with_subtypes(vec!["Bear"])
+                .with_mana_cost(ManaCost::Cost {
+                    shards: vec![ManaCostShard::Green],
+                    generic: 1,
+                });
+            let green = ManaUnit {
+                color: ManaType::Green,
+                source_id: ObjectId(0),
+                pip_id: ManaPipId(0),
+                supertype: None,
+                source_could_produce_two_or_more_colors: false,
+                restrictions: Vec::new(),
+                grants: Vec::new(),
+                expiry: None,
+            };
+            scenario.with_mana_pool(P0, vec![green.clone(), green]);
+        }
     }
-
-    let card_id = CardId(state.next_object_id);
-    let bears = create_object(
-        &mut state,
-        card_id,
-        P0,
-        "Grizzly Bears".to_string(),
-        Zone::Hand,
-    );
-    let obj = state.objects.get_mut(&bears).unwrap();
-    obj.card_types.core_types.push(CoreType::Creature);
-    obj.card_types.subtypes.push("Bear".to_string());
-    obj.power = Some(2);
-    obj.toughness = Some(2);
-    obj.base_card_types = obj.card_types.clone();
-    obj.base_power = obj.power;
-    obj.base_toughness = obj.toughness;
-    obj.mana_cost = ManaCost::Cost {
-        shards: vec![ManaCostShard::Green],
-        generic: 1,
-    };
-
-    let pool = &mut state.players[P0.0 as usize].mana_pool;
-    for _ in 0..2 {
-        pool.add(ManaUnit {
-            color: ManaType::Green,
-            source_id: ObjectId(0),
-            pip_id: ManaPipId(0),
-            supertype: None,
-            source_could_produce_two_or_more_colors: false,
-            restrictions: Vec::new(),
-            grants: Vec::new(),
-            expiry: None,
-        });
-    }
-    state
+    scenario.build().state().clone()
 }
 
 fn bench_n(n: usize, hand: Hand) -> Duration {
@@ -168,12 +100,25 @@ fn bench_n(n: usize, hand: Hand) -> Duration {
     let choose = || choose_action(&state, P0, &config, &mut SmallRng::seed_from_u64(42));
     let (fastest, outcome, route) = match hand {
         Hand::Bears => {
-            let (fastest, action) = fastest_of(choose);
-            let route = if objects >= LARGE_BOARD_OBJECTS {
+            // Only ordinary scoring clones the state to check candidate legality.
+            perf_counters::reset();
+            let action = choose();
+            let route = if perf_counters::snapshot().state_clone_for_legality > 0 {
+                "scored"
+            } else {
+                "fast"
+            };
+            assert!(
+                matches!(action, Some(GameAction::CastSpell { .. })),
+                "{action:?}"
+            );
+            let expected = if objects >= LARGE_BOARD_OBJECTS {
                 "fast"
             } else {
                 "scored"
             };
+            assert_eq!(route, expected, "N={n} took the wrong priority route");
+            let (fastest, action) = fastest_of(choose);
             (fastest, format!("{action:?}"), route)
         }
         Hand::Empty => {
