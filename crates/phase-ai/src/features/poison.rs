@@ -93,7 +93,7 @@ pub fn detect(deck: &[DeckEntry]) -> PoisonFeature {
         if is_poison_source_parts(&face.card_type.core_types, &face.keywords) {
             source_count = source_count.saturating_add(entry.count);
         }
-        if gives_opponents_poison_parts(&face.abilities, AbilityScope::Potential) {
+        if opponent_poison_recipients_parts(&face.abilities, AbilityScope::Potential).is_some() {
             direct_count = direct_count.saturating_add(entry.count);
         }
         if proliferates_parts(&face.abilities, AbilityScope::Potential) {
@@ -194,35 +194,52 @@ pub(crate) fn poison_yield_parts(core_types: &[CoreType], keywords: &[Keyword], 
     from_infect.saturating_add(flat)
 }
 
-/// CR 122.1f: an ability tree that gives poison counters to a player who can
-/// be an opponent, walked at `scope`.
+/// CR 102.3 + CR 810.10: which opponents a direct-poison effect is guaranteed to reach.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum PoisonRecipients {
+    /// One opponent: a target, or a scope that may pass over some opponents.
+    One,
+    /// CR 810.10: every opponent, each getting its own counters.
+    EachOpponent,
+}
+
+/// CR 122.1f: the widest opponent reach of the poison counters an ability tree
+/// gives, walked at `scope`; `None` when no recipient can be an opponent.
 ///
 /// Under a `player_scope` the resolver rebinds `Controller` to each scoped
 /// player, so "each opponent gets a poison counter" counts. An unscoped
 /// `Controller` / `SelfRef` recipient is a drawback, not a payoff (Phyrexian
 /// Vatmother).
-pub(crate) fn gives_opponents_poison_parts<'a>(
+pub(crate) fn opponent_poison_recipients_parts<'a>(
     abilities: impl IntoIterator<Item = &'a AbilityDefinition>,
     scope: AbilityScope,
-) -> bool {
-    abilities.into_iter().any(|ability| {
-        collect_scoped_nodes(ability, scope).iter().any(|node| {
-            matches!(
-                &*node.effect,
-                Effect::GivePlayerCounter {
-                    counter_kind: PlayerCounterKind::Poison,
-                    target,
-                    ..
-                } if recipients_can_include_opponent(target, node.player_scope.as_ref())
-            )
+) -> Option<PoisonRecipients> {
+    abilities
+        .into_iter()
+        .flat_map(|ability| collect_scoped_nodes(ability, scope))
+        .filter_map(|node| match &*node.effect {
+            Effect::GivePlayerCounter {
+                counter_kind: PlayerCounterKind::Poison,
+                target,
+                ..
+            } => poison_recipients(target, node.player_scope.as_ref()),
+            _ => None,
         })
-    })
+        .max()
 }
 
-fn recipients_can_include_opponent(target: &TargetFilter, scope: Option<&PlayerFilter>) -> bool {
+fn poison_recipients(
+    target: &TargetFilter,
+    scope: Option<&PlayerFilter>,
+) -> Option<PoisonRecipients> {
     match (target, scope) {
-        (TargetFilter::Controller, Some(scope)) => scope_reaches_only_opponents(scope),
-        _ => filter_can_hit_opponent(target),
+        (TargetFilter::Controller, Some(PlayerFilter::Opponent)) => {
+            Some(PoisonRecipients::EachOpponent)
+        }
+        (TargetFilter::Controller, Some(scope)) => {
+            scope_reaches_only_opponents(scope).then_some(PoisonRecipients::One)
+        }
+        _ => filter_can_hit_opponent(target).then_some(PoisonRecipients::One),
     }
 }
 

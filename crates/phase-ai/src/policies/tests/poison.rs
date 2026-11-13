@@ -186,6 +186,14 @@ fn score_of(verdict: PolicyVerdict) -> (f64, PolicyReason) {
     }
 }
 
+fn fact(reason: &PolicyReason, key: &str) -> Option<i64> {
+    reason
+        .facts
+        .iter()
+        .find(|(name, _)| *name == key)
+        .map(|(_, value)| *value)
+}
+
 // ─── helper boundaries ──────────────────────────────────────────────────────
 
 fn measure(count: u32, threshold: u32) -> PoisonLossMeasure {
@@ -1316,6 +1324,51 @@ fn two_headed_giant_direct_poison_and_proliferate_read_the_team_total() {
     );
     assert_eq!(
         cast_on(two_hg(), 4, &poison, steady_progress).1.kind,
+        "poison_clock_lethal"
+    );
+}
+
+/// CR 810.10 + CR 704.6b: each opposing head gets Prologue's counter, so the
+/// team total rises by two; CR 701.34b: one proliferate adds one.
+#[test]
+fn two_headed_giant_each_opponent_poison_counts_both_heads() {
+    let two_hg = FormatConfig::two_headed_giant;
+    let at_13 = [(PlayerId(2), 6), (PlayerId(3), 7)];
+    let (_, prologue) = cast_on(two_hg(), 4, &at_13, prologue_to_phyresis);
+    assert_eq!(prologue.kind, "poison_clock_lethal");
+    assert_eq!(fact(&prologue, "poison_added"), Some(2));
+    assert_eq!(
+        cast_on(two_hg(), 4, &at_13, steady_progress).1.kind,
+        "poison_clock_pressure"
+    );
+    let at_12 = [(PlayerId(2), 6), (PlayerId(3), 6)];
+    assert_eq!(
+        cast_on(two_hg(), 4, &at_12, prologue_to_phyresis).1.kind,
+        "poison_clock_pressure"
+    );
+}
+
+/// CR 704.5c: in a free-for-all each opponent's counter lands on its own clock.
+#[test]
+fn each_opponent_poison_credits_each_free_for_all_clock_once() {
+    let standard = FormatConfig::standard;
+    let (_, at_8_8) = cast_on(
+        standard(),
+        3,
+        &[(PlayerId(1), 8), (PlayerId(2), 8)],
+        prologue_to_phyresis,
+    );
+    assert_eq!(at_8_8.kind, "poison_clock_pressure");
+    assert_eq!(fact(&at_8_8, "poison_added"), Some(1));
+    assert_eq!(
+        cast_on(
+            standard(),
+            3,
+            &[(PlayerId(1), 9), (PlayerId(2), 8)],
+            prologue_to_phyresis
+        )
+        .1
+        .kind,
         "poison_clock_lethal"
     );
 }

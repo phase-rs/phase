@@ -184,7 +184,7 @@ fn scoped_poison_counts_only_for_opponent_only_scopes() {
         face.abilities[0].player_scope = player_scope.clone();
         for scope in [AbilityScope::Potential, AbilityScope::Unconditional] {
             assert_eq!(
-                gives_opponents_poison_parts(&face.abilities, scope),
+                opponent_poison_recipients_parts(&face.abilities, scope).is_some(),
                 credited,
                 "{player_scope:?} at {scope:?}"
             );
@@ -534,14 +534,8 @@ fn detects_poison_inside_a_modal_ability_mode() {
 #[test]
 fn modal_poison_mode_is_not_unconditional() {
     let abilities = vec![modal_poison_ability()];
-    assert!(gives_opponents_poison_parts(
-        &abilities,
-        AbilityScope::Potential
-    ));
-    assert!(!gives_opponents_poison_parts(
-        &abilities,
-        AbilityScope::Unconditional
-    ));
+    assert!(opponent_poison_recipients_parts(&abilities, AbilityScope::Potential).is_some());
+    assert!(opponent_poison_recipients_parts(&abilities, AbilityScope::Unconditional).is_none());
 }
 
 /// CR 608.2c: an "Otherwise, ..." branch is a reachable outcome, so deck-time

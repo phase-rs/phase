@@ -54,7 +54,8 @@ use engine::types::player::PlayerId;
 
 use crate::ability_chain::AbilityScope;
 use crate::features::poison::{
-    gives_opponents_poison_parts, poison_yield_parts, proliferates_parts, POISON_CLOCK_FLOOR,
+    opponent_poison_recipients_parts, poison_yield_parts, proliferates_parts, PoisonRecipients,
+    POISON_CLOCK_FLOOR,
 };
 use crate::features::DeckFeatures;
 
@@ -69,8 +70,9 @@ pub struct PoisonClockPolicy;
 /// than a pair of bools so the branch set stays exhaustive.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PoisonContribution {
-    /// Adds poison counters to a player who can be an opponent (CR 122.1f).
-    DirectPoison,
+    /// Adds poison counters to opponents (CR 122.1f); the recipients decide how
+    /// many land on one shared pool (CR 810.10).
+    DirectPoison(PoisonRecipients),
     /// Proliferates (CR 701.34a) — only advances the clock on an already
     /// poisoned opponent.
     Proliferate,
@@ -136,8 +138,10 @@ fn classify_abilities<'a, I>(abilities: I) -> PoisonContribution
 where
     I: IntoIterator<Item = &'a AbilityDefinition> + Clone,
 {
-    if gives_opponents_poison_parts(abilities.clone(), AbilityScope::Unconditional) {
-        PoisonContribution::DirectPoison
+    if let Some(recipients) =
+        opponent_poison_recipients_parts(abilities.clone(), AbilityScope::Unconditional)
+    {
+        PoisonContribution::DirectPoison(recipients)
     } else if proliferates_parts(abilities, AbilityScope::Unconditional) {
         PoisonContribution::Proliferate
     } else {
@@ -156,47 +160,70 @@ fn combat_contribution(
     ctx: &PolicyContext<'_>,
     attacks: &[(ObjectId, AttackTarget)],
 ) -> PoisonContribution {
-    // (defending seat, its poison-loss measure, poison this declaration would add).
-    let mut per_defender: Vec<(PlayerId, PoisonLossMeasure, u32)> = Vec::new();
-    for (attacker_id, target) in attacks {
+    let gains = attacks.iter().filter_map(|(attacker_id, target)| {
         let AttackTarget::Player(defender) = target else {
-            continue;
+            return None;
         };
-        let Some(measure) = live_opponent_poison(ctx.state, ctx.ai_player, *defender) else {
-            continue;
-        };
-        let Some(attacker) = ctx.state.objects.get(attacker_id) else {
-            continue;
-        };
+        let attacker = ctx.state.objects.get(attacker_id)?;
         let yielded = poison_yield_parts(
             &attacker.card_types.core_types,
             &attacker.keywords,
             attacker.power.unwrap_or(0),
         );
-        if yielded == 0 {
-            continue;
-        }
-        let shares_clock = |seat: &PlayerId| {
-            seat == defender
-                || (measure.scope == PoisonLossScope::Team
-                    && players::teammates(ctx.state, *defender).contains(seat))
-        };
-        // CR 810.10: teammates who share poison counters share one clock.
-        match per_defender
-            .iter_mut()
-            .find(|(seat, ..)| shares_clock(seat))
-        {
-            Some((_, _, added)) => *added = added.saturating_add(yielded),
-            None => per_defender.push((*defender, measure, yielded)),
-        }
-    }
-
-    per_defender
-        .into_iter()
-        .min_by_key(|(_, measure, added)| headroom(*measure).saturating_sub(*added))
-        .map_or(PoisonContribution::None, |(_, measure, added)| {
+        (yielded > 0).then_some((*defender, yielded))
+    });
+    closest_pool(ctx.state, ctx.ai_player, gains)
+        .map_or(PoisonContribution::None, |(measure, added)| {
             PoisonContribution::CombatDamage { measure, added }
         })
+}
+
+/// CR 810.10: sum per-seat poison gains into the pool each seat's measure
+/// reads, and return the pool with the fewest counters left after its gain.
+fn closest_pool(
+    state: &GameState,
+    ai_player: PlayerId,
+    gains: impl IntoIterator<Item = (PlayerId, u32)>,
+) -> Option<(PoisonLossMeasure, u32)> {
+    // (seat, its poison-loss measure, poison added to its pool).
+    let mut pools: Vec<(PlayerId, PoisonLossMeasure, u32)> = Vec::new();
+    for (seat, gained) in gains {
+        let Some(measure) = live_opponent_poison(state, ai_player, seat) else {
+            continue;
+        };
+        let shares_clock = |other: &PlayerId| {
+            *other == seat
+                || (measure.scope == PoisonLossScope::Team
+                    && players::teammates(state, seat).contains(other))
+        };
+        match pools.iter_mut().find(|(other, ..)| shares_clock(other)) {
+            Some((_, _, added)) => *added = added.saturating_add(gained),
+            None => pools.push((seat, measure, gained)),
+        }
+    }
+    pools
+        .into_iter()
+        .min_by_key(|(_, measure, added)| headroom(*measure).saturating_sub(*added))
+        .map(|(_, measure, added)| (measure, added))
+}
+
+/// The opponent measure a direct-poison effect advances most, and by how much.
+fn direct_poison_clock(
+    state: &GameState,
+    ai_player: PlayerId,
+    recipients: PoisonRecipients,
+) -> Option<(PoisonLossMeasure, u32)> {
+    match recipients {
+        PoisonRecipients::One => closest_opponent_poison_loss(state, ai_player).map(|m| (m, 1)),
+        // CR 810.10: each opponent gets its counter individually; teammates' counters share one pool.
+        PoisonRecipients::EachOpponent => closest_pool(
+            state,
+            ai_player,
+            players::opponents(state, ai_player)
+                .into_iter()
+                .map(|seat| (seat, 1)),
+        ),
+    }
 }
 
 /// Counters still needed before this measure is lethal.
@@ -282,19 +309,19 @@ impl TacticalPolicy for PoisonClockPolicy {
             PoisonContribution::None => {
                 PolicyVerdict::neutral(PolicyReason::new("poison_clock_na"))
             }
-            // A single counter is the conservative floor: `GivePlayerCounter.count`
-            // is a `QuantityExpr` that need not be statically known. A resolving
-            // spell's counter is guaranteed, so its lethal case may reach the
-            // critical band (`CRITICAL_MAX` ceiling).
-            PoisonContribution::DirectPoison => {
-                match closest_opponent_poison_loss(ctx.state, ctx.ai_player) {
-                    Some(measure) => score_clock(scalar, measure, 1, CRITICAL_MAX),
+            // One counter per recipient is the floor: `GivePlayerCounter.count`
+            // need not be static. A resolving spell's counters are guaranteed,
+            // so its lethal case may reach `CRITICAL_MAX`.
+            PoisonContribution::DirectPoison(recipients) => {
+                match direct_poison_clock(ctx.state, ctx.ai_player, recipients) {
+                    Some((measure, added)) => score_clock(scalar, measure, added, CRITICAL_MAX),
                     None => {
                         PolicyVerdict::neutral(PolicyReason::new("poison_clock_no_poison_loss"))
                     }
                 }
             }
             PoisonContribution::Proliferate => {
+                // CR 701.34b: one proliferate gives a shared-poison team a single counter.
                 // CR 701.34a: proliferate chooses among permanents and players
                 // that ALREADY have a counter. With no poisoned opponent it
                 // advances nothing, so it earns nothing on this axis.
