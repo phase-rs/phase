@@ -65,6 +65,7 @@ mod display_identity_serde;
 mod divine_gambit_metamorphose_prompt_8257;
 mod divine_visitation_token_substitution;
 mod djinn_most_common_color_static;
+mod dominion_saboteur_copied_counters;
 mod doom_s_time_platform_exile_with_time_counters;
 mod doomsday;
 mod doomsday_excruciator_copy;

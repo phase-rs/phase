@@ -997,6 +997,7 @@ fn continuous_modification_dynamic_quantity_mut(
         | ContinuousModification::AddDynamicToughness { value }
         | ContinuousModification::AddDynamicKeyword { value, .. } => Some(value),
         ContinuousModification::AddCounterOnEnter { .. }
+        | ContinuousModification::AddCopiedCountersOnEnter
         | ContinuousModification::SetStartingLoyalty { .. }
         | ContinuousModification::CopyValues { .. }
         // CR 707.2c (Metamorphic Alteration): inert copy marker — no dynamic quantity.

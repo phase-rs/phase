@@ -4241,6 +4241,13 @@ pub(crate) fn deliver_replaced_zone_change(
         // copiable values on the proposed event. Install the copy effect before
         // ETB counters/triggers run so the permanent is observed as the copied
         // object as it enters, without overwriting its printed/base identity.
+        //
+        // Known gap (CR 614.12 + CR 616.1f): an optional "enter as a copy"
+        // replacement this pre-entry copy gives the entrant (Mystic Reflection
+        // naming an uncopied Dominion Saboteur or Clone) is not offered here.
+        // The interactive `CopyTargetChoice` answers own that offer
+        // (`engine_replacement::offer_acquired_enter_as_copy_replacement`);
+        // this delivery-time install does not route through them yet.
         if entered_battlefield {
             if let Some(copy) = enter_as_copy {
                 let copy = *copy;

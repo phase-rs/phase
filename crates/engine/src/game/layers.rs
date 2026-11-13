@@ -6521,6 +6521,7 @@ fn modification_characteristic_writes_at(
         // never reached through the layer pipeline (its apply site asserts);
         // counters are not characteristics in any case.
         | ContinuousModification::AddCounterOnEnter { .. }
+        | ContinuousModification::AddCopiedCountersOnEnter
         // CR 306.5b: loyalty is read from the copiable values, not written as a
         // layer effect; the apply site asserts unreachable.
         | ContinuousModification::SetStartingLoyalty { .. } => CharacteristicKinds::EMPTY,
@@ -12376,6 +12377,17 @@ fn apply_continuous_effect_filtered(
                      not via apply_continuous_effect"
                 );
             }
+            // CR 707.2 + CR 122.6: a copied-counters rider that a copy path
+            // failed to snapshot fails closed: it places no counters (counters
+            // are never copiable values, so no layer can supply them) and is
+            // logged as the wiring bug it is.
+            ContinuousModification::AddCopiedCountersOnEnter => {
+                tracing::error!(
+                    object = ?id,
+                    "AddCopiedCountersOnEnter reached the layer system unexpanded; \
+                     a copy path skipped become_copy::snapshot_copied_counter_exceptions"
+                );
+            }
             // CR 707.9b + CR 306.5b/c: Starting-loyalty exceptions are folded
             // into copied values at copy resolution, before loyalty counters
             // are seeded. Reaching the layer system means a resolver forgot to
@@ -12924,6 +12936,7 @@ pub(crate) fn apply_type_or_color_modification(
         | ContinuousModification::RetainPrintedAbilityFromSource { .. }
         | ContinuousModification::RetainAllOtherAbilitiesFromSource
         | ContinuousModification::AddCounterOnEnter { .. }
+        | ContinuousModification::AddCopiedCountersOnEnter
         | ContinuousModification::SetStartingLoyalty { .. }
         | ContinuousModification::RemoveManaCost => return TypeColorModification::OtherLayer,
     }

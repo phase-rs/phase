@@ -22,7 +22,7 @@ pub fn resolve(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    let (recipient, duration, additional_modifications) = match &ability.effect {
+    let (recipient, duration, mut additional_modifications) = match &ability.effect {
         Effect::BecomeCopy {
             recipient,
             duration,
@@ -51,9 +51,12 @@ pub fn resolve(
     // The Flood of Mars) copies the ability's own source, with its last-known
     // copiable values once it has left; any other copy source is the declared
     // object target.
-    let source = if copies_own_source(&ability.effect) {
-        copy_source(state, ability, CopySourceReferent::OwnSource)
-            .ok_or(EffectError::ObjectNotFound(ability.source_id))?
+    let (source, copied_id) = if copies_own_source(&ability.effect) {
+        (
+            copy_source(state, ability, CopySourceReferent::OwnSource)
+                .ok_or(EffectError::ObjectNotFound(ability.source_id))?,
+            ability.source_id,
+        )
     } else {
         let target_id = ability
             .targets
@@ -71,9 +74,15 @@ pub fn resolve(
             // `fight::resolve_fight_fighters`.
             .nth(crate::game::ability_utils::become_copy_copy_source_target_index(&ability.effect))
             .ok_or_else(|| EffectError::MissingParam("BecomeCopy requires a target".to_string()))?;
-        copy_source(state, ability, CopySourceReferent::Object(target_id))
-            .ok_or(EffectError::ObjectNotFound(target_id))?
+        (
+            copy_source(state, ability, CopySourceReferent::Object(target_id))
+                .ok_or(EffectError::ObjectNotFound(target_id))?,
+            target_id,
+        )
     };
+    // CR 707.2 + CR 122.6: a copied-counters rider reads the copy source's
+    // counters once, as the copy source is fixed.
+    snapshot_copied_counter_exceptions(state, copied_id, &mut additional_modifications);
 
     // Display identity follows the copy: carry the source's image routing so the
     // copying object renders the copied source's art. Not a CR 707.2 copiable
@@ -355,20 +364,103 @@ pub(crate) fn partition_entry_counter_exceptions(
     })
 }
 
-/// CR 707.2 + CR 613.1a: whether `recipient` carries a layer-1 copy effect
-/// installed by [`apply_precomputed_copy_values`]. A `BecomeCopy` that errored
-/// (for example because its source is gone) installs none, so entry-time copy
-/// exceptions must not be evaluated against the uncopied object.
-pub(crate) fn has_installed_copy_effect(
+/// CR 707.2 + CR 122.6 + CR 614.12a: realize every "enters with additional
+/// counters equal to the same number and kinds of counters the copied
+/// permanent has" rider (`AddCopiedCountersOnEnter`) as concrete
+/// `AddCounterOnEnter` exceptions, one per counter kind on `copied_id`.
+///
+/// Counters are not copiable values (CR 707.2), so the rider must read the
+/// copied permanent itself. The snapshot is taken when the copy source is
+/// fixed — the CR 614.12a choice made before the permanent enters — so later
+/// changes to the copied permanent's counters never propagate. A copy source
+/// that has already left uses its last-known counters (CR 608.2h). Kinds are
+/// emitted in `CounterType` order so placement is deterministic.
+pub(crate) fn snapshot_copied_counter_exceptions(
     state: &GameState,
+    copied_id: ObjectId,
+    modifications: &mut Vec<ContinuousModification>,
+) {
+    if !modifications.iter().any(|modification| {
+        matches!(
+            modification,
+            ContinuousModification::AddCopiedCountersOnEnter
+        )
+    }) {
+        return;
+    }
+    // CR 608.2h + CR 400.7: the copied *permanent* is read on the battlefield;
+    // once it has left (a card keeps its storage id in its new zone, where it
+    // is a new object with no counters), its last-known counters apply.
+    let counters = state
+        .objects
+        .get(&copied_id)
+        .filter(|object| object.zone == crate::types::zones::Zone::Battlefield)
+        .map(|object| &object.counters)
+        .or_else(|| state.lki_cache.get(&copied_id).map(|lki| &lki.counters));
+    let mut copied: Vec<(crate::types::counter::CounterType, u32)> = counters
+        .into_iter()
+        .flatten()
+        .filter(|(_, count)| **count > 0)
+        .map(|(counter_type, count)| (counter_type.clone(), *count))
+        .collect();
+    copied.sort();
+    *modifications = std::mem::take(modifications)
+        .into_iter()
+        .flat_map(|modification| match modification {
+            ContinuousModification::AddCopiedCountersOnEnter => copied
+                .iter()
+                .map(
+                    |(counter_type, count)| ContinuousModification::AddCounterOnEnter {
+                        counter_type: counter_type.clone(),
+                        count: crate::types::ability::QuantityExpr::Fixed {
+                            value: i32::try_from(*count).unwrap_or(i32::MAX),
+                        },
+                        if_type: None,
+                    },
+                )
+                .collect::<Vec<_>>(),
+            other => vec![other],
+        })
+        .collect();
+}
+
+/// CR 707.2 + CR 613.1a + CR 707.9e: a point in one recipient's copy-effect
+/// history, taken before a `BecomeCopy` resolves, that answers whether that
+/// resolution installed a layer-1 copy effect on it (via
+/// [`apply_precomputed_copy_values`]).
+///
+/// "The recipient carries a copy effect" cannot answer this once an entry has
+/// already copied once (CR 707.9e's later copy): the earlier copy is still
+/// installed when a later `BecomeCopy` errors because its source is gone.
+/// Continuous-effect ids are allocated monotonically, so an installed copy
+/// effect on this exact incarnation with an id at or past the mark was
+/// installed by the resolution that followed it.
+#[derive(Clone, Copy)]
+pub(crate) struct CopyInstallMark {
     recipient: ObjectIncarnationRef,
-) -> bool {
-    state.transient_continuous_effects.iter().any(|effect| {
-        effect.affected_recipient == Some(recipient)
-            && effect.modifications.iter().any(|modification| {
-                matches!(modification, ContinuousModification::CopyValues { .. })
-            })
-    })
+    first_new_effect_id: u64,
+}
+
+impl CopyInstallMark {
+    pub(crate) fn before(state: &GameState, recipient: ObjectIncarnationRef) -> Self {
+        Self {
+            recipient,
+            first_new_effect_id: state.next_continuous_effect_id,
+        }
+    }
+
+    /// Whether a copy effect was installed on the recipient since the mark.
+    /// When it was not, entry-time copy exceptions must not be evaluated
+    /// against the object (CR 707.9f).
+    pub(crate) fn copy_installed(&self, state: &GameState) -> bool {
+        state.transient_continuous_effects.iter().any(|effect| {
+            effect.id >= self.first_new_effect_id
+                && effect.affected_recipient == Some(self.recipient)
+                && effect.modifications.iter().any(|modification| {
+                    matches!(modification, ContinuousModification::CopyValues { .. })
+                })
+        })
+    }
 }
 
 /// Fold the permanent `BecomeCopy` exception vocabulary into `values`.
@@ -422,6 +514,13 @@ enum CopyExceptionOperation<'a> {
         value: u32,
     },
     RemoveManaCost,
+    /// CR 707.2 + CR 122.6: resolution-time counter rider whose kinds and
+    /// counts come from the copied permanent. The enter-as-copy paths replace
+    /// it with concrete `AddCounterOnEnter` exceptions via
+    /// [`snapshot_copied_counter_exceptions`] before classification matters;
+    /// an unexpanded occurrence (a direct `CopyTokenOf` exception, which does
+    /// not expand it) places nothing and is never layered.
+    AddCopiedCountersOnEnter,
     Layered(&'a ContinuousModification),
 }
 
@@ -536,6 +635,7 @@ impl<'a> CopyExceptionOperation<'a> {
                 Self::SetStartingLoyalty { value: *value }
             }
             ContinuousModification::RemoveManaCost => Self::RemoveManaCost,
+            ContinuousModification::AddCopiedCountersOnEnter => Self::AddCopiedCountersOnEnter,
         }
     }
 
@@ -543,6 +643,7 @@ impl<'a> CopyExceptionOperation<'a> {
         match self {
             Self::Fold(_) | Self::Layered(_) => true,
             Self::AddCounterOnEnter { .. }
+            | Self::AddCopiedCountersOnEnter
             | Self::SetStartingLoyalty { .. }
             | Self::RemoveManaCost => false,
         }
@@ -553,6 +654,7 @@ impl<'a> CopyExceptionOperation<'a> {
             Self::Fold(operation) => Some(operation),
             Self::Layered(_)
             | Self::AddCounterOnEnter { .. }
+            | Self::AddCopiedCountersOnEnter
             | Self::SetStartingLoyalty { .. }
             | Self::RemoveManaCost => None,
         }
@@ -566,6 +668,7 @@ impl<'a> CopyExceptionOperation<'a> {
             Self::Fold(_) => Some(original),
             Self::Layered(modification) => Some(modification),
             Self::AddCounterOnEnter { .. }
+            | Self::AddCopiedCountersOnEnter
             | Self::SetStartingLoyalty { .. }
             | Self::RemoveManaCost => None,
         }
@@ -3081,6 +3184,94 @@ mod tests {
                 .unwrap_or(0)
                 >= 1,
             "Persist copy must re-enter with a -1/-1 counter"
+        );
+    }
+
+    // ── Copied-counters rider (Dominion Saboteur) ────────────────────────
+
+    /// CR 608.2h + CR 400.7 + CR 707.2: a copied permanent that has left the
+    /// battlefield before the rider is read is a new object in its new zone
+    /// (with no counters); the rider reads its last-known counters instead.
+    #[test]
+    fn copied_counters_snapshot_reads_last_known_counters_after_the_donor_leaves() {
+        let mut state = GameState::new_two_player(42);
+        let donor = create_creature(&mut state, 1, PlayerId(1), "Bear", 2, 2);
+        let charge = CounterType::Generic("charge".to_string());
+        {
+            let obj = state.objects.get_mut(&donor).unwrap();
+            obj.counters.insert(CounterType::Plus1Plus1, 2);
+            obj.counters.insert(charge.clone(), 1);
+        }
+        let mut events = Vec::new();
+        move_to_zone(&mut state, donor, Zone::Graveyard, &mut events);
+        // The card keeps its storage id in the graveyard, without counters.
+        assert_eq!(state.objects[&donor].zone, Zone::Graveyard);
+        assert!(state.objects[&donor].counters.is_empty());
+
+        let mut modifications = vec![
+            ContinuousModification::RemoveSupertype {
+                supertype: crate::types::card_type::Supertype::Legendary,
+            },
+            ContinuousModification::AddCopiedCountersOnEnter,
+        ];
+        snapshot_copied_counter_exceptions(&state, donor, &mut modifications);
+
+        let mut expected = vec![(CounterType::Plus1Plus1, 2), (charge, 1)];
+        expected.sort();
+        let mut expected_modifications = vec![ContinuousModification::RemoveSupertype {
+            supertype: crate::types::card_type::Supertype::Legendary,
+        }];
+        expected_modifications.extend(expected.into_iter().map(|(counter_type, count)| {
+            ContinuousModification::AddCounterOnEnter {
+                counter_type,
+                count: crate::types::ability::QuantityExpr::Fixed { value: count },
+                if_type: None,
+            }
+        }));
+        assert_eq!(modifications, expected_modifications);
+    }
+
+    /// CR 707.2 + CR 122.6: an unexpanded copied-counters rider that reaches
+    /// copy installation (a copy path that skipped the snapshot) fails closed:
+    /// the copy still applies, no counters are placed, and nothing panics.
+    #[test]
+    fn unexpanded_copied_counters_rider_places_no_counters_and_does_not_panic() {
+        let mut state = GameState::new_two_player(42);
+        let donor = create_creature(&mut state, 1, PlayerId(1), "Bear", 2, 2);
+        state
+            .objects
+            .get_mut(&donor)
+            .unwrap()
+            .counters
+            .insert(CounterType::Plus1Plus1, 2);
+        let recipient = create_creature(&mut state, 2, PlayerId(0), "Saboteur", 3, 3);
+        let donor_object = state.objects.get(&donor).unwrap();
+        let copy = PrecomputedCopyValues {
+            source_id: recipient,
+            controller: PlayerId(0),
+            duration_subject: ObjectIncarnationRef::from_object(&state.objects[&recipient]),
+            duration: Duration::Permanent,
+            values: intrinsic_copiable_values(donor_object),
+            display: donor_object.display_identity(),
+            additional_modifications: vec![ContinuousModification::AddCopiedCountersOnEnter],
+            effect_kind: EffectKind::BecomeCopy,
+        };
+        assert_eq!(
+            ContinuousModification::AddCopiedCountersOnEnter.layer(),
+            crate::types::Layer::Copy,
+            "an unexpanded rider orders with its copy effect instead of panicking"
+        );
+
+        let mut events = Vec::new();
+        apply_precomputed_copy_values(&mut state, recipient, copy, &mut events).unwrap();
+        evaluate_layers(&mut state);
+
+        let copied = &state.objects[&recipient];
+        assert_eq!(copied.name, "Bear");
+        assert!(
+            copied.counters.is_empty(),
+            "an unexpanded rider must add no counters, got {:?}",
+            copied.counters
         );
     }
 }
