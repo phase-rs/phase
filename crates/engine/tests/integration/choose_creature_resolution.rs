@@ -3359,3 +3359,110 @@ fn first_slot_filter_past_another_target_reads_the_announced_creature() {
         "the dependent pool is the creatures sharing a type with the chosen Elf"
     );
 }
+
+const STORM_KILN_ARTIST: &str = "This creature gets +1/+0 for each artifact you control.\nMagecraft \u{2014} Whenever you cast or copy an instant or sorcery spell, create a Treasure token. (It's an artifact with \"{T}, Sacrifice this token: Add one mana of any color.\")";
+const SHOCK: &str = "Shock deals 2 damage to any target.";
+
+/// CR 603.2c: the copy sibling of the departure row above. SYNTHETIC spell text
+/// (no printed card has this chain; Final Showdown supplies the bare choice and
+/// Twincast the copy instruction): "Choose a creature you control. Copy target
+/// spell." P2's Shock is on the stack; P0 controls Storm-Kiln Artist and a
+/// creature borrowed from P1. P1 concedes at the choice, the remaining creature
+/// is bound, and the resumed instruction copies Shock. The Artist triggers once
+/// for P0's cast and once for the copy: two Treasures, not three.
+#[test]
+fn spell_copy_observer_triggers_once_when_a_concession_resumes_the_choice() {
+    let mut scenario = GameScenario::new_n_player(3, 7);
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.add_creature_from_oracle(P0, "Storm-Kiln Artist", 2, 2, STORM_KILN_ARTIST);
+    scenario
+        .add_creature(P1, "Borrowed creature", 3, 3)
+        .controlled_by(P0);
+    scenario.add_basic_land(P0, ManaColor::White);
+    scenario.add_basic_land(P2, ManaColor::Red);
+    let shock = scenario
+        .add_spell_to_hand_from_oracle(P2, "Shock", true, SHOCK)
+        .with_mana_cost(parse_mtgjson_mana_cost("{R}"))
+        .id();
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(
+            P0,
+            "Synthetic choose, copy",
+            true,
+            "Choose a creature you control. Copy target spell.",
+        )
+        .with_mana_cost(parse_mtgjson_mana_cost("{W}"))
+        .id();
+    let mut runner = scenario.build();
+    let treasures = |runner: &GameRunner| {
+        runner
+            .state()
+            .objects
+            .values()
+            .filter(|object| {
+                object.zone == Zone::Battlefield
+                    && object.controller == P0
+                    && object.name == "Treasure"
+            })
+            .count()
+    };
+    // P2 casts Shock at P0 with priority handed to them.
+    runner.act(GameAction::PassPriority).unwrap();
+    runner.act(GameAction::PassPriority).unwrap();
+    assert_eq!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { player: P2 },
+        "reach guard: P2 has priority"
+    );
+    runner.cast(shock).target_player(P0).commit();
+    // Priority returns to P0, who responds.
+    for _ in 0..3 {
+        if runner.state().waiting_for == (WaitingFor::Priority { player: P0 }) {
+            break;
+        }
+        runner.act(GameAction::PassPriority).unwrap();
+    }
+    assert_eq!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { player: P0 }
+    );
+    assert_eq!(runner.state().objects[&shock].zone, Zone::Stack);
+    runner.cast(spell).target_object(shock).commit();
+    // The Artist's cast trigger resolves first, then the spell reaches its choice.
+    pass_priority_to_prompt(&mut runner, "the creature choice");
+    let WaitingFor::ChooseFromZoneChoice { cards, .. } = &runner.state().waiting_for else {
+        panic!(
+            "reach guard: the resolution choice is open: {:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert_eq!(
+        cards.len(),
+        2,
+        "reach guard: two candidates before the concession"
+    );
+    assert_eq!(
+        treasures(&runner),
+        1,
+        "reach guard: one Treasure for the cast"
+    );
+    runner.act(GameAction::Concede { player_id: P1 }).unwrap();
+    for _ in 0..12 {
+        if runner.state().stack.is_empty()
+            || !matches!(runner.state().waiting_for, WaitingFor::Priority { .. })
+        {
+            break;
+        }
+        runner.act(GameAction::PassPriority).unwrap();
+    }
+    assert!(
+        runner.state().stack.is_empty(),
+        "everything resolved: {:?}",
+        runner.state().waiting_for
+    );
+    assert_eq!(
+        treasures(&runner),
+        2,
+        "one Treasure for the cast and exactly one for the copy"
+    );
+}

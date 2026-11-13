@@ -495,16 +495,16 @@ fn collect_resumed_span_observer_triggers(
     // CR 601.2h + CR 603.3: a live announcement takes custody of the span it owns.
     let owned = super::announcement_triggers::take_inline_trigger_span(state, events, start);
     let announced = owned.is_empty() && owned.end < events.len();
-    let trigger_events: Vec<GameEvent> =
-        super::triggers::filter_already_collected_trigger_events_from(
-            state,
-            &events[..owned.end],
-            start,
-            &state.consumed_before_priority_trigger_events,
-        )
-        .into_iter()
-        .filter(|event| !matches!(event, GameEvent::PhaseChanged { .. }))
-        .collect();
+    let candidates = super::triggers::filter_already_collected_trigger_events_from(
+        state,
+        &events[..owned.end],
+        start,
+        &state.consumed_before_priority_trigger_events,
+    );
+    // CR 603.2c: the same ownership rule the paused route applies. A spell copy's
+    // observers are collected by `copy_spell`, and a parked entry event by its
+    // replay site.
+    let trigger_events = super::triggers::paused_observer_trigger_events(state, candidates);
     super::triggers::collect_triggers_into_deferred(state, &trigger_events);
     if announced {
         return Some(ResolutionChoiceOutcome::WaitingFor(
