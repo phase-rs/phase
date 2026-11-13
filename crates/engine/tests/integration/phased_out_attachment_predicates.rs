@@ -5,15 +5,20 @@
 use engine::game::combat::AttackTarget;
 use engine::game::effects::attach::attach_to;
 use engine::game::game_object::PhaseOutCause;
+use engine::game::keywords::protection_prevents_from;
 use engine::game::phasing::phase_out_object;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
+use engine::game::scenario_db::GameScenarioDbExt;
 use engine::types::actions::GameAction;
 use engine::types::game_state::{GameState, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::keywords::Keyword;
+use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 use engine::types::zones::Zone;
+
+use crate::support::shared_card_db;
 
 const WALL_OF_PUTRID_FLESH: &str = "Defender (This creature can't attack.)\nProtection from white\nPrevent all damage that would be dealt to this creature by enchanted creatures.";
 const PRODIGAL_PYROMANCER: &str = "{T}: This creature deals 1 damage to any target.";
@@ -23,6 +28,7 @@ const BONESPLITTER: &str = "Equipped creature gets +2/+0.\nEquip {1}";
 const SYR_GWYN: &str = "Vigilance, menace\nWhenever an equipped creature you control attacks, you draw a card and you lose 1 life.\nEquipment you control have equip Knight {0}.";
 const HALVAR: &str = "Creatures you control that are enchanted or equipped have double strike.\nAt the beginning of each combat, you may attach target Aura or Equipment attached to a creature you control to target creature you control.";
 const ENVOY_OF_THE_ANCESTORS: &str = "Outlast {W} ({W}, {T}: Put a +1/+1 counter on this creature. Outlast only as a sorcery.)\nModified creatures you control have lifelink. (Equipment, Auras you control, and counters are modifications.)";
+const BENEVOLENT_BLESSING: &str = "Flash\nEnchant creature\nAs this Aura enters, choose a color.\nEnchanted creature has protection from the chosen color. This effect doesn't remove Auras and Equipment you control that are already attached to it.";
 const KOLL: &str = "Whenever another nontoken creature you control dies, if it was enchanted or equipped, return it to its owner's hand.\nCreature tokens you control that are enchanted or equipped get +1/+1.";
 
 fn add_firebreathing(scenario: &mut GameScenario, controller: PlayerId) -> ObjectId {
@@ -215,4 +221,85 @@ fn departure_snapshot_omits_phased_out_aura() {
         bolted_enchanted_bears_zone_under_koll(true),
         Zone::Graveyard
     );
+}
+
+/// Whether Embercleave is still attached to Grizzly Bears at P0's next upkeep,
+/// after Benevolent Blessing (choosing red) enchants the Bears — with Reality
+/// Ripple phasing Embercleave out first when `phased`.
+fn embercleave_attached_at_next_upkeep(phased: bool) -> bool {
+    let db = shared_card_db().expect("the checked-in fixture contains the cards");
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_library_top(P0, &["Filler A"]);
+    scenario.with_library_top(P1, &["Filler B"]);
+    let mana = [
+        ManaType::Blue,
+        ManaType::Blue,
+        ManaType::White,
+        ManaType::White,
+    ]
+    .into_iter()
+    .map(|color| ManaUnit::new(color, ObjectId(9_990), false, vec![]))
+    .collect();
+    scenario.with_mana_pool(P0, mana);
+    // Summoning sick, so no declare-attackers prompt interrupts the turn walk.
+    let bears = scenario
+        .add_creature(P0, "Grizzly Bears", 2, 2)
+        .with_summoning_sickness()
+        .id();
+    let embercleave = scenario.add_real_card(P0, "Embercleave", Zone::Battlefield, db);
+    let ripple = scenario.add_real_card(P0, "Reality Ripple", Zone::Hand, db);
+    let blessing = scenario
+        .add_spell_to_hand(P0, "Benevolent Blessing", false)
+        .as_enchantment()
+        .with_subtypes(vec!["Aura"])
+        .with_mana_cost(ManaCost::Cost {
+            generic: 1,
+            shards: vec![ManaCostShard::White],
+        })
+        .from_oracle_text_with_keywords(&["Flash", "Enchant"], BENEVOLENT_BLESSING)
+        .id();
+    let mut runner = scenario.build();
+    attach_to(runner.state_mut(), embercleave, bears);
+
+    if phased {
+        let outcome = runner.cast(ripple).target_object(embercleave).resolve();
+        assert_priority_with_empty_stack(outcome.state());
+        assert!(runner.state().objects[&embercleave].is_phased_out());
+    }
+
+    let outcome = runner
+        .cast(blessing)
+        .target_object(bears)
+        .choose_option("Red")
+        .resolve();
+    assert_priority_with_empty_stack(outcome.state());
+    let state = runner.state();
+    assert_eq!(state.objects[&blessing].attached_to, Some(bears.into()));
+    assert!(protection_prevents_from(
+        &state.objects[&bears],
+        &state.objects[&embercleave]
+    ));
+    assert_eq!(state.objects[&embercleave].attached_to, Some(bears.into()));
+
+    // CR 702.26i: a directly phased-out Equipment phases in attached during its
+    // controller's untap step.
+    runner.advance_to_upkeep();
+    runner.advance_to_phase(Phase::PreCombatMain);
+    assert_eq!(runner.state().active_player, P1);
+    runner.advance_to_upkeep();
+    let state = runner.state();
+    assert_eq!((state.active_player, state.phase), (P0, Phase::Upkeep));
+    assert!(!state.objects[&embercleave].is_phased_out());
+    assert_eq!(state.objects[&embercleave].zone, Zone::Battlefield);
+    state.objects[&embercleave].attached_to == Some(bears.into())
+}
+
+/// CR 702.16p + CR 702.26b + CR 702.16d: Equipment phased out when Benevolent
+/// Blessing's protection starts is not "already attached", so it falls off once
+/// it phases in; phased-in Equipment stays under the exemption.
+#[test]
+fn protection_start_snapshot_ignores_phased_out_equipment() {
+    assert!(embercleave_attached_at_next_upkeep(false));
+    assert!(!embercleave_attached_at_next_upkeep(true));
 }
