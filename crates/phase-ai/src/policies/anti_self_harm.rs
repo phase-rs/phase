@@ -11,6 +11,10 @@ use engine::game::keywords;
 use engine::game::life_safety::{preview_candidate_life_safety, CandidateLifeSafety};
 use engine::game::mana_abilities;
 use engine::game::quantity::resolve_quantity;
+#[cfg(test)]
+use engine::game::scenario::GameScenario;
+#[cfg(test)]
+use engine::game::scenario_db::GameScenarioDbExt;
 use engine::game::targeting::find_legal_targets;
 use engine::game::turn_control;
 #[cfg(test)]
@@ -56,7 +60,7 @@ use super::registry::{
 };
 use super::removal_lethality;
 use super::self_cost::count_death_triggers_on_board;
-use super::strategy_helpers::can_pay_ward_cost;
+use super::strategy_helpers::{can_pay_ward_cost, ward_cost_against_ai};
 use crate::features::DeckFeatures;
 #[cfg(test)]
 use engine::types::game_state::CastPaymentMode;
@@ -727,12 +731,9 @@ fn harmful_effect_has_opponent_creature_target(ctx: &PolicyContext<'_>, effect: 
 /// Bounce) stay useful, since `lethal_to_creature` returns `None` for them.
 fn is_useful_removal_target(ctx: &PolicyContext<'_>, id: ObjectId, effects: &[&Effect]) -> bool {
     if let Some(object) = ctx.state.objects.get(&id) {
-        for keyword in &object.keywords {
-            if let Keyword::Ward(ward) = keyword {
-                if !can_pay_ward_cost(ctx, ward, object) {
-                    return false;
-                }
-                break;
+        if let Some(ward) = ward_cost_against_ai(ctx, object) {
+            if !can_pay_ward_cost(ctx, ward, object) {
+                return false;
             }
         }
     }
@@ -1518,93 +1519,89 @@ fn score_target_object(ctx: &PolicyContext<'_>, object_id: ObjectId, beneficial:
     // is hard-rejected upstream by `tactical_gate` (CR 702.21a — the spell would just be
     // countered), so this judgment layer never double-scores that case.
     if !beneficial {
-        for keyword in &object.keywords {
-            if let Keyword::Ward(ward_cost) = keyword {
-                if !can_pay_ward_cost(ctx, ward_cost, object) {
-                    break;
+        if let Some(ward_cost) =
+            ward_cost_against_ai(ctx, object).filter(|ward| can_pay_ward_cost(ctx, ward, object))
+        {
+            let severity = match ward_cost {
+                WardCost::Mana(cost) => (cost.mana_value() as f64 / 2.0).min(2.0),
+                WardCost::PayLife(amount) => (*amount as f64 / 3.0).min(2.0),
+                WardCost::PayLifeEqualToPower => {
+                    (object.power.unwrap_or(0).max(0) as f64 / 3.0).min(2.0)
                 }
-                let severity = match ward_cost {
-                    WardCost::Mana(cost) => (cost.mana_value() as f64 / 2.0).min(2.0),
-                    WardCost::PayLife(amount) => (*amount as f64 / 3.0).min(2.0),
-                    WardCost::PayLifeEqualToPower => {
-                        (object.power.unwrap_or(0).max(0) as f64 / 3.0).min(2.0)
-                    }
-                    WardCost::Discard { count, .. } => *count as f64 * 1.5,
-                    WardCost::Sacrifice { count, .. } => *count as f64 * 2.0,
-                    WardCost::Waterbend(cost) => (cost.mana_value() as f64 / 2.0).min(2.0),
-                    // CR 702.21a + CR 122.1 + CR 728.1: giving yourself
-                    // player counters has an explicit, kind-specific
-                    // valuation — no wildcard fallback, so a future
-                    // supported counter kind forces a deliberate
-                    // decision here. A lethal poison payment never
-                    // reaches this scoring at all — `can_pay_ward_cost`
-                    // above already rejects it (reframed as "can't
-                    // rationally pay"), so the Poison arm only ever sees
-                    // sub-lethal, ordinary-severity payments.
-                    WardCost::GetPlayerCounters {
-                        counter_kind: engine::types::player::PlayerCounterKind::Poison,
-                        count,
-                    } => *count as f64 * 3.0,
-                    // CR 728.1: each rad counter mills a card and, if that
-                    // card is nonland, costs 1 life. Real cost, not
-                    // harmless — approximated as PayLife's per-life
-                    // severity (amount/3.0) scaled by ~0.6 (typical
-                    // nonland fraction of a deck), i.e. ~0.2 per counter.
-                    WardCost::GetPlayerCounters {
-                        counter_kind: engine::types::player::PlayerCounterKind::Rad,
-                        count,
-                    } => (*count as f64 * 0.2).min(2.0),
-                    // Experience/ticket counters carry no loss-condition
-                    // or resource-drain risk — purely beneficial or
-                    // neutral to receive.
-                    WardCost::GetPlayerCounters {
-                        counter_kind: engine::types::player::PlayerCounterKind::Experience,
-                        ..
-                    } => 0.0,
-                    WardCost::GetPlayerCounters {
-                        counter_kind: engine::types::player::PlayerCounterKind::Ticket,
-                        ..
-                    } => 0.0,
-                    // CR 702.21a: Compound costs sum severity of components.
-                    // A Compound containing a lethal poison sub-cost is
-                    // also already rejected upstream by `can_pay_ward_cost`
-                    // (which requires every sub-cost payable), so this
-                    // fold only ever sees payable compounds.
-                    WardCost::Compound(costs) => costs
-                        .iter()
-                        .map(|c| match c {
-                            WardCost::Mana(cost) => (cost.mana_value() as f64 / 2.0).min(2.0),
-                            WardCost::PayLife(amount) => (*amount as f64 / 3.0).min(2.0),
-                            WardCost::PayLifeEqualToPower => {
-                                (object.power.unwrap_or(0).max(0) as f64 / 3.0).min(2.0)
-                            }
-                            WardCost::Discard { count, .. } => *count as f64 * 1.5,
-                            WardCost::Sacrifice { count, .. } => *count as f64 * 2.0,
-                            WardCost::Waterbend(cost) => (cost.mana_value() as f64 / 2.0).min(2.0),
-                            WardCost::GetPlayerCounters {
-                                counter_kind: engine::types::player::PlayerCounterKind::Poison,
-                                count,
-                            } => *count as f64 * 3.0,
-                            WardCost::GetPlayerCounters {
-                                counter_kind: engine::types::player::PlayerCounterKind::Rad,
-                                count,
-                            } => (*count as f64 * 0.2).min(2.0),
-                            WardCost::GetPlayerCounters {
-                                counter_kind: engine::types::player::PlayerCounterKind::Experience,
-                                ..
-                            } => 0.0,
-                            WardCost::GetPlayerCounters {
-                                counter_kind: engine::types::player::PlayerCounterKind::Ticket,
-                                ..
-                            } => 0.0,
-                            WardCost::Compound(_) => 2.0,
-                        })
-                        .sum::<f64>()
-                        .min(4.0),
-                };
-                score += ctx.penalties().ward_cost_penalty_base * severity;
-                break;
-            }
+                WardCost::Discard { count, .. } => *count as f64 * 1.5,
+                WardCost::Sacrifice { count, .. } => *count as f64 * 2.0,
+                WardCost::Waterbend(cost) => (cost.mana_value() as f64 / 2.0).min(2.0),
+                // CR 702.21a + CR 122.1 + CR 728.1: giving yourself
+                // player counters has an explicit, kind-specific
+                // valuation — no wildcard fallback, so a future
+                // supported counter kind forces a deliberate
+                // decision here. A lethal poison payment never
+                // reaches this scoring at all — `can_pay_ward_cost`
+                // above already rejects it (reframed as "can't
+                // rationally pay"), so the Poison arm only ever sees
+                // sub-lethal, ordinary-severity payments.
+                WardCost::GetPlayerCounters {
+                    counter_kind: engine::types::player::PlayerCounterKind::Poison,
+                    count,
+                } => *count as f64 * 3.0,
+                // CR 728.1: each rad counter mills a card and, if that
+                // card is nonland, costs 1 life. Real cost, not
+                // harmless — approximated as PayLife's per-life
+                // severity (amount/3.0) scaled by ~0.6 (typical
+                // nonland fraction of a deck), i.e. ~0.2 per counter.
+                WardCost::GetPlayerCounters {
+                    counter_kind: engine::types::player::PlayerCounterKind::Rad,
+                    count,
+                } => (*count as f64 * 0.2).min(2.0),
+                // Experience/ticket counters carry no loss-condition
+                // or resource-drain risk — purely beneficial or
+                // neutral to receive.
+                WardCost::GetPlayerCounters {
+                    counter_kind: engine::types::player::PlayerCounterKind::Experience,
+                    ..
+                } => 0.0,
+                WardCost::GetPlayerCounters {
+                    counter_kind: engine::types::player::PlayerCounterKind::Ticket,
+                    ..
+                } => 0.0,
+                // CR 702.21a: Compound costs sum severity of components.
+                // A Compound containing a lethal poison sub-cost is
+                // also already rejected upstream by `can_pay_ward_cost`
+                // (which requires every sub-cost payable), so this
+                // fold only ever sees payable compounds.
+                WardCost::Compound(costs) => costs
+                    .iter()
+                    .map(|c| match c {
+                        WardCost::Mana(cost) => (cost.mana_value() as f64 / 2.0).min(2.0),
+                        WardCost::PayLife(amount) => (*amount as f64 / 3.0).min(2.0),
+                        WardCost::PayLifeEqualToPower => {
+                            (object.power.unwrap_or(0).max(0) as f64 / 3.0).min(2.0)
+                        }
+                        WardCost::Discard { count, .. } => *count as f64 * 1.5,
+                        WardCost::Sacrifice { count, .. } => *count as f64 * 2.0,
+                        WardCost::Waterbend(cost) => (cost.mana_value() as f64 / 2.0).min(2.0),
+                        WardCost::GetPlayerCounters {
+                            counter_kind: engine::types::player::PlayerCounterKind::Poison,
+                            count,
+                        } => *count as f64 * 3.0,
+                        WardCost::GetPlayerCounters {
+                            counter_kind: engine::types::player::PlayerCounterKind::Rad,
+                            count,
+                        } => (*count as f64 * 0.2).min(2.0),
+                        WardCost::GetPlayerCounters {
+                            counter_kind: engine::types::player::PlayerCounterKind::Experience,
+                            ..
+                        } => 0.0,
+                        WardCost::GetPlayerCounters {
+                            counter_kind: engine::types::player::PlayerCounterKind::Ticket,
+                            ..
+                        } => 0.0,
+                        WardCost::Compound(_) => 2.0,
+                    })
+                    .sum::<f64>()
+                    .min(4.0),
+            };
+            score += ctx.penalties().ward_cost_penalty_base * severity;
         }
     }
 
@@ -6763,6 +6760,119 @@ mod tests {
             bare_score > warded_score,
             "Should prefer targeting the unwarded artifact ({bare_score}) over the poison-Ward artifact ({warded_score})"
         );
+    }
+
+    /// P0 casts a real Murder with Gev, Scaled Scorch ("Ward—Pay 2 life.") and
+    /// Grizzly Bears on the battlefield; returns `AntiSelfHarmPolicy`'s score
+    /// for targeting Gev as printed and with its ward stripped.
+    fn murder_gev_scores(
+        format: Option<FormatConfig>,
+        gev_controller: PlayerId,
+        bears_controller: PlayerId,
+    ) -> (f64, f64) {
+        let db = crate::test_support::shared_integration_card_db();
+        let mut scenario = match format {
+            Some(format) => GameScenario::new_with_format(format, 4, 7),
+            None => GameScenario::new(),
+        };
+        scenario.at_phase(Phase::PreCombatMain);
+        let gev =
+            scenario.add_real_card(gev_controller, "Gev, Scaled Scorch", Zone::Battlefield, db);
+        scenario.add_real_card(bears_controller, "Grizzly Bears", Zone::Battlefield, db);
+        let murder = scenario.add_real_card(PlayerId(0), "Murder", Zone::Hand, db);
+        let mana = |color| ManaUnit::new(color, ObjectId(0), false, vec![]);
+        scenario.with_mana_pool(
+            PlayerId(0),
+            vec![
+                mana(ManaType::Black),
+                mana(ManaType::Black),
+                mana(ManaType::Colorless),
+            ],
+        );
+        let mut runner = scenario.build();
+        {
+            let state = runner.state_mut();
+            state.active_player = PlayerId(0);
+            state.priority_player = PlayerId(0);
+            state.waiting_for = WaitingFor::Priority {
+                player: PlayerId(0),
+            };
+        }
+        let card_id = runner.state().objects[&murder].card_id;
+        runner
+            .act(GameAction::CastSpell {
+                object_id: murder,
+                card_id,
+                targets: vec![],
+                payment_mode: Default::default(),
+            })
+            .unwrap();
+        let warded = runner.state().clone();
+        assert!(matches!(
+            warded.waiting_for,
+            WaitingFor::TargetSelection { .. }
+        ));
+        let mut stripped = warded.clone();
+        let stripped_gev = stripped.objects.get_mut(&gev).unwrap();
+        let ward_count = stripped_gev.keywords.len();
+        stripped_gev
+            .keywords
+            .retain(|keyword| !matches!(keyword, Keyword::Ward(_)));
+        assert_eq!(stripped_gev.keywords.len() + 1, ward_count);
+
+        let config = AiConfig::default();
+        let candidate = CandidateAction {
+            action: GameAction::ChooseTarget {
+                target: Some(TargetRef::Object(gev)),
+            },
+            metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Target),
+        };
+        let score = |state: &GameState| {
+            let decision = AiDecisionContext {
+                waiting_for: state.waiting_for.clone(),
+                candidates: engine::ai_support::candidate_actions(state),
+            };
+            let ctx = PolicyContext {
+                state,
+                decision: &decision,
+                candidate: &candidate,
+                ai_player: PlayerId(0),
+                config: &config,
+                context: &crate::context::AiContext::empty(&config.weights),
+                cast_facts: None,
+                search_depth: crate::policies::context::SearchDepth::Root,
+            };
+            assert!(!is_spell_beneficial(&ctx));
+            AntiSelfHarmPolicy.score(&ctx)
+        };
+        (score(&warded), score(&stripped))
+    }
+
+    /// CR 702.21a: the AI's own spell never triggers its own ward, so the ward
+    /// adds no penalty to targeting its own creature.
+    #[test]
+    fn own_ward_adds_no_target_penalty() {
+        let (warded, stripped) = murder_gev_scores(None, PlayerId(0), PlayerId(0));
+        assert_eq!(warded, stripped);
+    }
+
+    /// CR 702.21a + CR 102.3: a 2HG teammate's ward does not trigger for the
+    /// AI's spell, so it adds no penalty.
+    #[test]
+    fn teammate_ward_adds_no_target_penalty() {
+        let (warded, stripped) = murder_gev_scores(
+            Some(FormatConfig::two_headed_giant()),
+            PlayerId(1),
+            PlayerId(2),
+        );
+        assert_eq!(warded, stripped);
+    }
+
+    /// CR 702.21a: an opponent's payable ward is still priced.
+    #[test]
+    fn opponent_ward_still_adds_target_penalty() {
+        let (warded, stripped) = murder_gev_scores(None, PlayerId(1), PlayerId(1));
+        assert!(warded < stripped, "{warded} vs {stripped}");
     }
 
     #[test]

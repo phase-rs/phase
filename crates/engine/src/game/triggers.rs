@@ -5731,8 +5731,8 @@ fn collect_pending_triggers_with_collection(
                 }
             }
 
-            // CR 702.21a: Ward triggers when this permanent becomes the target
-            // of a spell or ability an opponent controls. Each ward instance
+            // CR 702.21a + CR 102.3: Ward triggers when this permanent becomes the
+            // target of a spell or ability an opponent (not a teammate) controls. Each ward instance
             // triggers independently. Only fires for permanents (battlefield scan).
             if !ward_costs.is_empty() {
                 if let GameEvent::BecomesTarget {
@@ -5764,7 +5764,9 @@ fn collect_pending_triggers_with_collection(
                             &active_suppress_triggers,
                         );
                         if let Some(src_ctrl) = source_controller {
-                            if src_ctrl != controller && !ward_suppressed {
+                            if super::players::is_opponent(state, controller, src_ctrl)
+                                && !ward_suppressed
+                            {
                                 for ward in &ward_costs {
                                     // CR 702.21a + CR 118.12: Ward generates a counter
                                     // effect with an unless-pay modifier. Post-fold, the
