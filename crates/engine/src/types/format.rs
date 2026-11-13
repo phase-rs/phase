@@ -3913,9 +3913,9 @@ impl FormatConfig {
             .map_err(|error| error.to_string())
     }
 
-    /// Every persisted ingress and every lobby-frame decode routes here; Full mode then
-    /// re-checks strictly (`check_strict_admission`). The one list of values earlier
-    /// engines derived differently, swapped for today's.
+    /// Every persisted ingress and every lobby-frame decode routes here; Full-mode and
+    /// current-client lobby create frames re-check strictly (`check_strict_admission`).
+    /// The one list of values earlier engines derived differently, swapped for today's.
     fn migrate_legacy_fields(config: &mut serde_json::Value) -> LegacyFormatFields {
         let mut legacy = LegacyFormatFields::default();
         let is_brawl = config

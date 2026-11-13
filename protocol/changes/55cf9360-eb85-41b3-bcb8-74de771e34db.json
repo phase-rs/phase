@@ -4,5 +4,5 @@
     "lobby",
     "wire"
   ],
-  "reason": "Brawl and Historic Brawl FormatConfig drop commander_damage_threshold (CR 903.12h) while keeping uses_commander; an older peer rejects a Brawl config with a null threshold and a newer one rejects Some(21) in game state and P2P envelopes. Lobbies decode a create frame's config as recorded, admit a legacy value only from a client declaring an older lobby version, and relay it to the writer's build; newer clients refuse Brawl, Historic Brawl and Custom registration on lobbies below this version"
+  "reason": "Brawl and Historic Brawl FormatConfig drop commander_damage_threshold (CR 903.12h) while keeping uses_commander; an older peer rejects a Brawl config with a null threshold and a newer one rejects Some(21) in game state and P2P envelopes. Lobbies decode a create frame's config as recorded, admit a legacy value only from a client declaring an older lobby version or none, and relay it to the writer's build; newer clients refuse Brawl, Historic Brawl and Custom registration on lobbies below this version"
 }

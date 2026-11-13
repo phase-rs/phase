@@ -1437,6 +1437,10 @@ export function lobbyProtocolRequiredForFormatConfig(config: FormatConfig): numb
   if (isCustomGameFormat(config.format) || config.format === "Brawl" || config.format === "HistoricBrawl") {
     return MIN_LOBBY_PROTOCOL_FOR_COMMANDER_CONFIG_RULES;
   }
+  // Brokers below the floor reject a Commander-survivor Horde config at decode.
+  if (config.format === "Horde" && config.horde_ruleset?.survivor_deck_format === "Commander") {
+    return MIN_LOBBY_PROTOCOL_FOR_COMMANDER_CONFIG_RULES;
+  }
   return lobbyProtocolRequiredForFormat(config.format);
 }
 

@@ -70,6 +70,10 @@ pub const MAX_TOURNAMENT_ENTRIES: usize = 200;
 /// why reaching the cap evicts rather than refuses.
 pub const MAX_CONN_TOURNAMENT_ENTRIES: usize = 50;
 
+/// First lobby version whose clients write today's format-config rules; never
+/// derived from `LOBBY_PROTOCOL_VERSION`.
+const MIN_LOBBY_PROTOCOL_FOR_COMMANDER_CONFIG_RULES: u32 = 23;
+
 /// The client's self-reported identity from `ClientHello`. `build_commit` is
 /// the join-compatibility gate; `client_version` is the display-only string
 /// stamped into a registered entry's `host_version`.
@@ -652,7 +656,9 @@ impl Broker {
                     .client_hello
                     .as_ref()
                     .and_then(|hello| hello.lobby_protocol_version)
-                    .is_some_and(|version| version >= crate::protocol::LOBBY_PROTOCOL_VERSION);
+                    .is_some_and(|version| {
+                        version >= MIN_LOBBY_PROTOCOL_FOR_COMMANDER_CONFIG_RULES
+                    });
                 if declares_current {
                     if let Some(config) = &format_config {
                         if let Err(reason) = config.check_strict_admission() {
@@ -2757,7 +2763,7 @@ mod tests {
                 &mut host,
                 &mut broker,
                 &env,
-                Some(crate::protocol::LOBBY_PROTOCOL_VERSION - 1),
+                Some(MIN_LOBBY_PROTOCOL_FOR_COMMANDER_CONFIG_RULES - 1),
             );
             let out = broker.handle(&mut host, parsed(&create_frame(config, edit)), &env);
             let code = game_code_of(&out);
@@ -2792,6 +2798,7 @@ mod tests {
                 "{frame}"
             );
         }
+        parsed(&create_frame(custom_command_zone(Some(21)), |_| {}));
     }
 
     /// A client declaring the current lobby version sends only what today's
@@ -2809,7 +2816,7 @@ mod tests {
                 &mut host,
                 &mut broker,
                 &env,
-                Some(crate::protocol::LOBBY_PROTOCOL_VERSION),
+                Some(MIN_LOBBY_PROTOCOL_FOR_COMMANDER_CONFIG_RULES),
             );
             let out = broker.handle(&mut host, parsed(&frame), &env);
             let (message, _) = only_error(&out);
@@ -2820,7 +2827,10 @@ mod tests {
             let current = create_frame(config, |_| {});
             game_code_of(&broker.handle(&mut host, parsed(&current), &env));
 
-            for declared in [Some(crate::protocol::LOBBY_PROTOCOL_VERSION - 1), None] {
+            for declared in [
+                Some(MIN_LOBBY_PROTOCOL_FOR_COMMANDER_CONFIG_RULES - 1),
+                None,
+            ] {
                 let mut broker = Broker::new();
                 let mut host = ConnState::default();
                 hello_declaring(&mut host, &mut broker, &env, declared);

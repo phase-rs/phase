@@ -14,6 +14,7 @@ import type { LobbyGame } from "../../adapter/types";
 import {
   MIN_LOBBY_PROTOCOL_FOR_COMMANDER_CONFIG_RULES,
   MIN_LOBBY_PROTOCOL_FOR_FREEFORM_FORMATS,
+  MIN_LOBBY_PROTOCOL_FOR_HORDE,
   PROTOCOL_VERSION,
   type ServerInfo,
 } from "../../adapter/ws-adapter";
@@ -610,6 +611,32 @@ describe("registerHost lobby-capability floor", () => {
     };
     expect(frame.type).toBe("CreateGameWithSettings");
     expect(frame.data.format_config.format).toBe(format);
+  });
+
+  const constructedHorde = formatMetadata("Horde")!.default_config;
+  // The engine's Commander-survivor Horde shape (100-card singleton survivors).
+  const commanderHorde = {
+    ...constructedHorde,
+    deck_size: { type: "Exactly", data: 100 },
+    singleton: true,
+    commander_damage_threshold: 21,
+    uses_commander: true,
+    default_deck_copy_limit: { type: "UpTo", data: 1 },
+    horde_ruleset: { ...constructedHorde.horde_ruleset!, survivor_deck_format: "Commander" },
+  } as RegisterHostRequest["formatConfig"];
+
+  it.each([
+    ["Commander-survivor Horde", MIN_LOBBY_PROTOCOL_FOR_COMMANDER_CONFIG_RULES - 1, false, commanderHorde],
+    ["Commander-survivor Horde", MIN_LOBBY_PROTOCOL_FOR_COMMANDER_CONFIG_RULES, true, commanderHorde],
+    ["Constructed-survivor Horde", MIN_LOBBY_PROTOCOL_FOR_HORDE, true, constructedHorde],
+  ] as const)("%s at lobby protocol %i sends: %s", async (_, lobbyProtocolVersion, sends, config) => {
+    const ws = new MockWebSocket();
+    const client = makeBrokerClient(makePhaseSocket(ws, { lobbyProtocolVersion }));
+
+    const registration = client.registerHost(baseRequest(config)).catch((e: unknown) => e);
+
+    expect(ws.send).toHaveBeenCalledTimes(sends ? 1 : 0);
+    if (!sends) expect(await registration).toBeInstanceOf(LobbyCapabilityError);
   });
 
   it("sends Commander below the commander-config floor (the floor is scoped)", async () => {
