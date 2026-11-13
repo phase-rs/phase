@@ -80865,16 +80865,46 @@ fn bare_choose_does_not_change_how_later_clauses_lower() {
     fn nodes(def: &AbilityDefinition) -> Vec<&AbilityDefinition> {
         std::iter::successors(Some(def), |node| node.sub_ability.as_deref()).collect()
     }
-    for text in [
-        "Choose a Giant creature you control. It deals damage equal to its power to target creature. Destroy up to two Auras attached to that creature.",
-        "Choose an artifact you control. Tap target creature. Destroy up to two Auras attached to that creature.",
-        "Choose a creature you control. If it has flying, draw a card.",
-        "Choose a creature you control. If it has flying, it gains haste until end of turn.",
-        "Choose an artifact you control. This spell deals 5 damage to target creature. Exile up to one target Equipment attached to that creature. If that creature would die this turn, exile it instead.",
-        "Choose a creature you control. Exile target artifact. If that creature would die this turn, exile it instead.",
-        "Choose a creature you control. Destroy target artifact. If that creature would die this turn, exile it instead.",
-        "Choose a creature you control. Target player loses 2 life. If that creature would die this turn, exile it instead.",
-    ] {
+    // Each row names the serialized markers of the later instruction it protects,
+    // so a row cannot pass with that instruction dropped.
+    let aura_tail = ["\"DestroyAll\"", "\"DeclaredTarget\""];
+    let keyword_condition = ["\"TargetMatchesFilter\""];
+    let die_exile_rider = ["\"AddTargetReplacement\"", "\"ParentTargetSlot\""];
+    let rows: [(&str, Vec<&str>); 8] = [
+        (
+            "Choose a Giant creature you control. It deals damage equal to its power to target creature. Destroy up to two Auras attached to that creature.",
+            aura_tail.to_vec(),
+        ),
+        (
+            "Choose an artifact you control. Tap target creature. Destroy up to two Auras attached to that creature.",
+            aura_tail.to_vec(),
+        ),
+        (
+            "Choose a creature you control. If it has flying, draw a card.",
+            [keyword_condition.as_slice(), &["\"Draw\""]].concat(),
+        ),
+        (
+            "Choose a creature you control. If it has flying, it gains haste until end of turn.",
+            [keyword_condition.as_slice(), &["\"Haste\""]].concat(),
+        ),
+        (
+            "Choose an artifact you control. This spell deals 5 damage to target creature. Exile up to one target Equipment attached to that creature. If that creature would die this turn, exile it instead.",
+            [die_exile_rider.as_slice(), &["\"DeclaredTarget\"", "\"Equipment\""]].concat(),
+        ),
+        (
+            "Choose a creature you control. Exile target artifact. If that creature would die this turn, exile it instead.",
+            die_exile_rider.to_vec(),
+        ),
+        (
+            "Choose a creature you control. Destroy target artifact. If that creature would die this turn, exile it instead.",
+            die_exile_rider.to_vec(),
+        ),
+        (
+            "Choose a creature you control. Target player loses 2 life. If that creature would die this turn, exile it instead.",
+            die_exile_rider.to_vec(),
+        ),
+    ];
+    for (text, markers) in rows {
         let def = parse_effect_chain(text, AbilityKind::Spell);
         assert!(
             !nodes(&def)
@@ -80882,6 +80912,13 @@ fn bare_choose_does_not_change_how_later_clauses_lower() {
                 .any(|node| matches!(node.effect.as_ref(), Effect::Unimplemented { .. })),
             "{text}: every later clause lowers supported: {def:#?}"
         );
+        let json = serde_json::to_string(&def).expect("the definition serializes");
+        for marker in markers {
+            assert!(
+                json.contains(marker),
+                "{text}: the later instruction must survive with {marker}: {def:#?}"
+            );
+        }
         assert_eq!(
             target_only_chain_timings(&def),
             vec![TargetChoiceTiming::Stack],
