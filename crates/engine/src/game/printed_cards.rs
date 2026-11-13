@@ -711,12 +711,12 @@ pub(crate) fn printed_prepare_face(
 /// CR 707.2 / CR 707.2b: copiable values are the object's printed/defining
 /// characteristics, NOT resolved continuous effects installed by other
 /// permanents (CR 611.2b "for as long as you control ~" locks). A
-/// `ControllerControlsSource`-gated replacement and a turn-bound, target-bound
-/// die-exile rider are runtime effects durably stored in
-/// `base_replacement_definitions` purely so they survive a layer reset
-/// (evaluate_layers rebuilds live defs from base — layers.rs); neither is a
-/// printed characteristic. Exclude them from copiable values so that a copy of
-/// the affected host does not inherit the lock or die-exile rider.
+/// `ControllerControlsSource`-gated replacement and a host-lifetime replacement
+/// are runtime effects durably stored in `base_replacement_definitions` so they
+/// survive a layer reset (evaluate_layers rebuilds live defs from base —
+/// layers.rs). A turn-bound, target-bound die-exile rider is resolution-installed
+/// in the live replacement store. None is a printed characteristic or copiable
+/// value, so a copy of the affected host does not inherit them.
 ///
 /// Zero-alloc fast path: every printed card has no gated def, so the common case
 /// keeps sharing the source `Arc<Vec<_>>`. A filtered allocation is paid only
@@ -752,8 +752,8 @@ pub(crate) fn is_runtime_control_gated_replacement(def: &ReplacementDefinition) 
 
 /// CR 614.1a + CR 514.2: True for a runtime replacement attached to a damaged
 /// target by an effect such as Torch the Tower or Obliterating Bolt. It is
-/// persisted in base only to survive layer resets; it is not a copiable value
-/// and must lapse when that object leaves the battlefield (CR 400.7).
+/// resolution-installed in the live replacement store, is not a copiable value,
+/// and ends when that object leaves the battlefield (CR 400.7).
 pub(crate) fn is_runtime_target_die_exile_replacement(def: &ReplacementDefinition) -> bool {
     def.event == ReplacementEvent::Moved
         && matches!(def.valid_card, Some(TargetFilter::SelfRef))
@@ -774,7 +774,7 @@ pub(crate) fn is_runtime_target_die_exile_replacement(def: &ReplacementDefinitio
 /// lifetime of the OBJECT hosting it — the "if it would leave the battlefield,
 /// exile it instead" rider installed by Unearth (CR 702.84a) and the
 /// parser-driven reanimation cards (Gruesome Encore, Whip of Erebos, …). It is
-/// stamped `RestrictionExpiry::UntilHostLeavesPlay`. Like the die-exile rider it
+/// stamped `RestrictionExpiry::UntilHostLeavesPlay`. It
 /// is persisted in base only to survive CR 613.1 layer reseeds; it is NOT a
 /// copiable value (a copy of the host must not inherit the exile redirect,
 /// CR 707.2) and must lapse when the host leaves the battlefield (CR 400.7).

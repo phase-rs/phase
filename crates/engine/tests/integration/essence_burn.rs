@@ -1206,10 +1206,24 @@ fn essence_burn_copy_recipient_keeps_die_exile() {
     let rites = real(&mut s, P0, "Village Rites", Zone::Hand);
     let host_rites = real(&mut s, P0, "Village Rites", Zone::Hand);
     let mut r = s.build();
+    let host_incarnation = r.state().objects[&host].incarnation;
     burn_surviving_host(&mut r, essence, host);
     let out = r.cast(mirror).target_object(target).resolve();
     out.assert_zone(&[host], Zone::Battlefield);
     out.assert_zone(&[mirror], Zone::Graveyard);
+    out.assert_stack_size(0);
+    assert!(matches!(
+        out.final_waiting_for(),
+        WaitingFor::Priority { .. }
+    ));
+    let copied_host = &r.state().objects[&host];
+    // CR 707.2 + CR 707.4: an in-place copy leaves existing effects on the host.
+    assert_eq!(copied_host.name, "Grizzly Bears");
+    assert_eq!(
+        (copied_host.power, copied_host.toughness),
+        (Some(2), Some(2))
+    );
+    assert_eq!(copied_host.incarnation, host_incarnation);
     assert_eq!(out.damage_marked(host), 0);
     assert_eq!(live_resolution_count(&r, host), 1);
     assert_eq!(live_targeted_prevention_count(&r, host), 1);
@@ -1299,9 +1313,17 @@ fn essence_burn_survives_lazav_multifarious_copy() {
     let incarnation = r.state().objects[&host].incarnation;
 
     burn_surviving_host(&mut r, essence, host);
-    r.activate(host, 0).x(2).target_object(grave_card).resolve();
+    let out = r.activate(host, 0).x(2).target_object(grave_card).resolve();
+    out.assert_stack_size(0);
+    assert!(matches!(
+        out.final_waiting_for(),
+        WaitingFor::Priority { .. }
+    ));
     let copied = &r.state().objects[&host];
+    // CR 707.2 + CR 707.4: Lazav's in-place copy leaves its existing rider in place.
     assert_eq!(copied.name, "Lazav, the Multifarious");
+    assert_eq!((copied.power, copied.toughness), (Some(2), Some(2)));
+    assert_eq!(copied.colors, vec![ManaColor::Green]);
     assert_eq!(copied.incarnation, incarnation);
     assert_eq!(copied.damage_marked, 0);
     assert_eq!(live_resolution_count(&r, host), 1);
@@ -1356,10 +1378,15 @@ fn essence_burn_donor_does_not_give_spark_double_its_rider() {
     })
     .expect("copy the protected donor");
     r.advance_until_stack_empty();
+    assert!(r.state().stack.is_empty());
+    assert!(matches!(r.state().waiting_for, WaitingFor::Priority { .. }));
 
     let entered = &r.state().objects[&spark];
     assert_eq!(entered.zone, Zone::Battlefield);
     assert!(entered.incarnation > hand_incarnation);
+    // CR 707.2: Spark Double copies copiable values, not the donor's rider.
+    assert_eq!(entered.name, "Catacomb Slug");
+    assert_eq!(entered.counters.get(&CounterType::Plus1Plus1), Some(&1));
     assert_eq!(live_resolution_count(&r, spark), 0);
     assert_eq!(live_targeted_prevention_count(&r, spark), 0);
     assert_intrinsic_base(&r, spark);
