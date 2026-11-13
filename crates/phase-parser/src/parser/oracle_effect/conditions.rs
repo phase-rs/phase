@@ -349,9 +349,10 @@ impl LeadingConditionRoute {
     pub(super) fn merge(self, other: Self) -> Self {
         match (self, other) {
             (Self::General, Self::General) => Self::General,
-            // The P/T threshold guard refuses an instruction that announces its
-            // own target, which every own-target-controller gate's instruction
-            // does, so it subsumes that route's tail guard.
+            // A P/T threshold member keeps the whole gate on that route, whose
+            // guard refuses an instruction that announces its own target. The
+            // own-target-controller check (`keep_own_target_gate_readable`)
+            // follows the suffix's own route, not this merged one.
             (Self::TargetPtThreshold, _) | (_, Self::TargetPtThreshold) => Self::TargetPtThreshold,
             (Self::OwnTargetController, _) | (_, Self::OwnTargetController) => {
                 Self::OwnTargetController
@@ -5011,8 +5012,9 @@ fn enumeration_returns_early(effect: &Effect) -> bool {
 /// coin-flip branch definition nested inside an effect is not walked: those
 /// branches come from later sentences, not from a clause prefix. The head's own
 /// `repeat_for`, `player_scope` and `target_chooser` are not fields of the
-/// parsed clause; the caller declines them from the printed text
-/// (`head_stamps_clause_scope`).
+/// parsed clause; the caller declines the first two from the printed text
+/// (`head_stamps_clause_scope`) and the announcer override from the parse
+/// context (`stack_announced_roles`).
 /// Declined on the head and on every descendant: `multi_target` (every
 /// per-opponent fanout and every `EachDealsDamageEqualToPower` carries it),
 /// `distribute`, `optional_targeting`; on descendants also `repeat_for`,
@@ -11870,7 +11872,7 @@ mod tests {
         assert_eq!(body, text);
     }
 
-    /// CR 115.1d + CR 115.10a: an enchanted-creature host written without the
+    /// CR 115.10a: an enchanted-creature host written without the
     /// word "target" is re-timed to Resolution by production after the probe's
     /// view, so the literal-"target " gate must keep it from binding. Without
     /// the gate the probe reads one Stack-timed object role. Synthetic text;
