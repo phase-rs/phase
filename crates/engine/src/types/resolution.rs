@@ -4535,6 +4535,35 @@ impl ResolutionStack {
                     });
                 }
             }
+            // CR 730.3 + CR 616.1: a component batch directly above an owner that
+            // is paused on one of the batch's own members is delivering that
+            // member for the owner, so it must carry the owner link; without it
+            // the batch would collect as a standalone and the owner's paused
+            // member would never get its terminal completion.
+            if let ResolutionFrame::BatchDelivery(child) = frame {
+                let delegated_without_link = child.component_delivery_parent.is_none()
+                    && index
+                        .checked_sub(1)
+                        .and_then(|i| self.frames.iter().nth(i))
+                        .and_then(Self::zone_change_owner)
+                        .and_then(|(_, paused)| paused)
+                        .is_some_and(|paused| {
+                            paused.terminal_completion.is_none()
+                                && child
+                                    .logical_zone_change_group
+                                    .prospective_battlefield_members
+                                    .iter()
+                                    .any(|member| member.identity == paused.member)
+                        });
+                if delegated_without_link {
+                    return Err(ResolutionStackError::InvalidPayload {
+                        frame: FrameKind::BatchDelivery,
+                        message:
+                            "component delivery of its owner's paused member has no owner link"
+                                .into(),
+                    });
+                }
+            }
             if let ResolutionFrame::BatchDelivery(child) = frame {
                 if let Some(link) = &child.component_delivery_parent {
                     let owner = index
