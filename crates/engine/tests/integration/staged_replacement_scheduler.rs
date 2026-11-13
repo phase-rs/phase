@@ -526,6 +526,110 @@ fn a_held_decisions_chooser_concedes_and_its_owner_decides() {
     assert_eq!(attached_to(&runner, c_spider), Some(c));
 }
 
+/// CR 104.3a + CR 800.4a + CR 101.4c: Day of Judgment in a three-player
+/// Commander game. P0's commander is Progenitus, whose redirect exposes P0's
+/// CR 903.9b choice. P2 controls two of P0's creatures through two Control
+/// Magics, each wearing P0's Hyena Umbra and Spider Umbra, so each one's armor
+/// choice is P2's, both held while P0 is asked about the commander. P2
+/// concedes during that question. Both held decisions outlive P2 (the
+/// creatures and their Auras are P0's cards) and are consulted again for P0,
+/// who now holds three simultaneous decisions and orders them. No selection is
+/// ever offered to P2.
+#[test]
+fn a_departed_chooser_holding_two_decisions_hands_both_to_their_owner() {
+    let p2 = PlayerId(2);
+    let mut scenario =
+        GameScenario::new_with_format(engine::types::format::FormatConfig::commander(), 3, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    let commander = scenario
+        .add_creature_from_oracle(P0, "Progenitus", 10, 10, PROGENITUS)
+        .as_legendary()
+        .with_subtypes(vec!["Hydra", "Avatar"])
+        .commander()
+        .id();
+    let mut attachments = Vec::new();
+    let mut controlled = Vec::new();
+    for name in ["Grizzly Bears", "Runeclaw Bear"] {
+        let creature = scenario.add_creature(P0, name, 2, 2).id();
+        let hyena = umbra(&mut scenario, P0, "Hyena Umbra", HYENA_UMBRA);
+        let spider = umbra(&mut scenario, P0, "Spider Umbra", SPIDER_UMBRA);
+        let magic = umbra(&mut scenario, p2, "Control Magic", CONTROL_MAGIC);
+        attachments.extend([(hyena, creature), (spider, creature), (magic, creature)]);
+        controlled.push((creature, hyena, spider));
+    }
+    let judgment = zero_cost_spell(&mut scenario, "Day of Judgment", DAY_OF_JUDGMENT);
+    let mut runner = scenario.build();
+    for (aura, host) in attachments {
+        attach(&mut runner, aura, host);
+    }
+    engine::game::layers::flush_layers(runner.state_mut());
+    let [(first, first_hyena, first_spider), (second, second_hyena, second_spider)] =
+        controlled[..]
+    else {
+        unreachable!("two controlled creatures");
+    };
+    assert_eq!(runner.state().objects[&first].controller, p2);
+    assert_eq!(runner.state().objects[&second].controller, p2);
+
+    cast_until_decision(&mut runner, judgment);
+    assert_eq!(
+        asked_choice(&runner),
+        (P0, commander),
+        "P0 is asked first (CR 101.4)"
+    );
+    runner
+        .act(GameAction::Concede { player_id: p2 })
+        .expect("P2 concedes while P0's choice is open");
+    assert!(runner.state().players[2].is_eliminated);
+    assert_eq!(runner.state().objects[&first].controller, P0);
+    assert_eq!(runner.state().objects[&second].controller, P0);
+    // CR 800.4a: P2 left, so both held decisions are consulted again and are
+    // now P0's beside the commander's; P0 chooses which to make first
+    // (CR 101.4c).
+    assert_eq!(
+        runner.state().waiting_for,
+        WaitingFor::ReplacementDecisionOrder {
+            player: P0,
+            objects: vec![commander, first, second],
+        }
+    );
+    round_trip(&mut runner);
+    select_decision(&mut runner, commander);
+    assert_eq!(asked_choice(&runner), (P0, commander));
+    let WaitingFor::ReplacementChoice { candidates, .. } = runner.state().waiting_for.clone()
+    else {
+        unreachable!("asked above");
+    };
+    let command = candidates
+        .iter()
+        .position(|candidate| candidate.description == "Move to command zone")
+        .expect("CR 903.9b offers the command zone");
+    runner
+        .act(GameAction::ChooseReplacement { index: command })
+        .expect("P0 answers for the commander");
+    assert_eq!(
+        runner.state().waiting_for,
+        WaitingFor::ReplacementDecisionOrder {
+            player: P0,
+            objects: vec![first, second],
+        }
+    );
+    round_trip(&mut runner);
+    select_decision(&mut runner, second);
+    assert_eq!(asked_choice(&runner), (P0, second));
+    choose_source(&mut runner, second_hyena);
+    assert_eq!(asked_choice(&runner), (P0, first));
+    choose_source(&mut runner, first_spider);
+    finish(&mut runner);
+    assert_eq!(zone(&runner, commander), Zone::Command);
+    assert_eq!(zone(&runner, first), Zone::Battlefield);
+    assert_eq!(zone(&runner, second), Zone::Battlefield);
+    assert_eq!(zone(&runner, second_hyena), Zone::Graveyard);
+    assert_eq!(zone(&runner, first_spider), Zone::Graveyard);
+    assert_eq!(attached_to(&runner, first_hyena), Some(first));
+    assert_eq!(attached_to(&runner, second_spider), Some(second));
+}
+
 /// CR 101.4c + CR 104.3a + CR 800.4a: Wrath of God in a three-player game.
 /// P1 holds two Umbra armor choices and is choosing which to make first when
 /// P1 concedes; both creatures leave the game with P1. P2's creature with no
@@ -1923,6 +2027,69 @@ fn a_selection_save_with_inconsistent_held_decisions_is_refused() {
         };
         assert!(error.contains(expected), "{case}: {error}");
     }
+}
+
+/// CR 800.4a + CR 101.4c: checked restore refuses a save at the selection
+/// prompt in which another held decision's chooser has left the game. Wrath of
+/// God in a three-player game: P0's two creatures each wear Hyena Umbra and
+/// Spider Umbra, so P0 is choosing which armor choice to make first, while
+/// P2, who controls P0's Runeclaw Bear through Control Magic, holds the Bear's
+/// Dauthi Voidwalker vs Rest in Peace choice. The save is edited so that P2 is
+/// eliminated: a live game consults a departed player's decision again before
+/// it raises a selection, so this save is not one the engine writes.
+#[test]
+fn a_selection_save_whose_other_held_chooser_has_left_is_refused() {
+    let p2 = PlayerId(2);
+    let mut scenario = GameScenario::new_n_player(3, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.add_creature_from_oracle(P1, "Dauthi Voidwalker", 3, 2, DAUTHI_VOIDWALKER);
+    scenario.add_enchantment_from_oracle(P1, "Rest in Peace", REST_IN_PEACE);
+    let mut attachments = Vec::new();
+    let mut armored = Vec::new();
+    for name in ["Grizzly Bears", "Bear Cub"] {
+        let creature = scenario.add_creature(P0, name, 2, 2).id();
+        let hyena = umbra(&mut scenario, P0, "Hyena Umbra", HYENA_UMBRA);
+        let spider = umbra(&mut scenario, P0, "Spider Umbra", SPIDER_UMBRA);
+        attachments.extend([(hyena, creature), (spider, creature)]);
+        armored.push(creature);
+    }
+    let bear = scenario.add_creature(P0, "Runeclaw Bear", 2, 2).id();
+    let magic = umbra(&mut scenario, p2, "Control Magic", CONTROL_MAGIC);
+    attachments.push((magic, bear));
+    let wrath = zero_cost_spell(&mut scenario, "Wrath of God", WRATH_OF_GOD);
+    let mut runner = scenario.build();
+    for (aura, host) in attachments {
+        attach(&mut runner, aura, host);
+    }
+    engine::game::layers::flush_layers(runner.state_mut());
+    assert_eq!(runner.state().objects[&bear].controller, p2);
+    cast_until_decision(&mut runner, wrath);
+    assert_eq!(
+        runner.state().waiting_for,
+        WaitingFor::ReplacementDecisionOrder {
+            player: P0,
+            objects: armored,
+        }
+    );
+    let saved = serde_json::to_value(PersistedGameState::capture(runner.state().clone()))
+        .expect("the selection prompt serializes");
+    restore_fixture(&saved.to_string()).expect("the untouched save restores");
+
+    let mut tampered = saved.clone();
+    edit_objects(&mut tampered, &mut |map| {
+        if map.contains_key("is_eliminated") && map.get("id") == Some(&serde_json::json!(2)) {
+            map.insert("is_eliminated".to_string(), serde_json::json!(true));
+        }
+    });
+    assert_ne!(tampered, saved, "the edit applies");
+    let error = match restore_fixture(&tampered.to_string()) {
+        Ok(_) => panic!("a selection beside a departed chooser's decision must not restore"),
+        Err(error) => error,
+    };
+    assert!(
+        error.contains("a held staged decision's chooser is not in the game"),
+        "{error}"
+    );
 }
 
 /// CR 101.4c: at the replacement decision order prompt, the AI's legal actions
