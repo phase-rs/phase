@@ -2415,7 +2415,13 @@ mod tests {
         let held = mandatory_period_holds(&frame, span);
         let scans = DAMAGE_RECIPIENT_JOURNAL_VISITS.with(std::cell::Cell::get);
         let projections = loop_detect_cost().projected_clones as usize;
-        assert!(held.is_some(), "the Worldgorger period holds");
+        assert_eq!(
+            held.map(|held| held.counted_take),
+            Some(crate::analysis::loop_check::CountedTake::Unperformable(
+                crate::analysis::loop_check::UnperformableCause::UndelimitedCover
+            )),
+            "the period holds; no replayed settle frame recurs against the boundary"
+        );
         assert!(
             scans >= rows,
             "reach guard: the buried reader made a projection read the history ({scans} visits)"

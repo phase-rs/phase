@@ -4861,11 +4861,12 @@ impl ResolvedAbility {
     ///
     /// - `trigger_source`, `trigger_definition_ref` and
     ///   `context.triggering_spell` are erased with `source_id` by
-    ///   `clear_source_provenance`. `trigger_source` holds the incarnation a
-    ///   trigger OBSERVED its source at (`identity.reference`); what survives is
-    ///   `source_incarnation`, which the stack push stamps from the live object,
-    ///   so a dies or leaves trigger whose source left is told apart from one
-    ///   whose source is live only by that stamp, not by the observed one;
+    ///   `clear_source_provenance`. A trigger's `source_incarnation` is the
+    ///   incarnation it observed its source at (`set_trigger_source_recursive`
+    ///   stamps it from `trigger_source.identity.reference`); an activation's is
+    ///   stamped at the stack push. That stamp survives and carries the source's
+    ///   liveness; the rest of `trigger_source` (its snapshot, zone and
+    ///   attachments) is erased;
     /// - the last-known-information snapshots and the creation lookback event
     ///   are walked by their own visitors
     ///   ([`Self::for_each_loop_lki_snapshot_mut`],

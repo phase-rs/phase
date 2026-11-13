@@ -35872,6 +35872,14 @@ impl GameState {
             });
         });
 
+        // CR 508.1 + CR 608.2h: an attack trigger's intervening-if rechecks a departed
+        // attacker against the snapshot of the incarnation that attacked
+        // (`triggers::attack_declaration_attacker_matches_filter`), named by this combat's
+        // attack ledger, which loop normalization ranks.
+        if let Some(combat) = self.combat.as_ref() {
+            referenced_lki.extend(combat.attacking_incarnations_this_combat.iter().copied());
+        }
+
         // CR 608.2c: the departure snapshots the frame's live tracked-set
         // anaphor reads — the resolved set's origins
         // (`targeting::resolve_tracked_set_id`) — are retained alongside carrier references, or
@@ -53863,6 +53871,40 @@ mod tests {
                 "{name}: the snapshot the stamp selects differs, so the positions differ"
             );
         }
+    }
+
+    /// CR 508.1 + CR 608.2h: an attack trigger's intervening-if (Squall, Gunblade Duelist:
+    /// "Whenever one or more creatures attack one of your opponents, if any of those creatures
+    /// have power or toughness equal to the chosen number, ...") rechecks a departed attacker
+    /// against the snapshot of the incarnation the attack ledger names. Synthetic frames: the
+    /// ledger names incarnation 5 of an object now at 8. The same ledger stamp and the same
+    /// latest last-known information with a different selected snapshot is a different
+    /// position.
+    #[test]
+    fn normalization_keeps_the_departure_snapshot_the_attack_ledger_selects() {
+        let frame = |power: i32| {
+            let (mut state, x) = records_naming(8, &[]);
+            state.combat = Some(CombatState {
+                attacking_incarnations_this_combat: HashSet::from([ObjectIncarnationRef::of(x, 5)]),
+                ..CombatState::default()
+            });
+            let mut departed = state.objects[&x].snapshot_public_characteristics();
+            departed.power = Some(power);
+            state
+                .lki_by_incarnation
+                .entry(x)
+                .or_default()
+                .insert(5, departed);
+            state
+        };
+        assert!(
+            normalized_equal(&frame(2), &frame(2)),
+            "reach guard: the same selected snapshot is the same position"
+        );
+        assert!(
+            !normalized_equal(&frame(2), &frame(4)),
+            "the snapshot the attack ledger selects differs, so the positions differ"
+        );
     }
 
     /// Every ranked carrier keeps the merge direction: a pin left at a superseded
