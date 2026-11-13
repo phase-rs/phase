@@ -1328,11 +1328,12 @@ impl<'a> PlannerServices<'a> {
             // Mulligan as the complete legal set; neither can fail apply_as_current.
             // Skipping the clone+simulate eliminates ~2 state clones per mulligan step.
             engine::types::actions::GameAction::MulliganDecision { .. } => true,
-            // CR 608.2d + CR 614.12a + CR 701.23a + CR 732.2b: a named-choice answer from the
-            // prompt's enumerated domain, a library search selection, or a loop-shortcut
-            // responder's answer is admitted by its submission guard without mutating the game;
-            // the engine decides that through the same authority `SimulationFilter` consults
-            // before its probe. Under `PromptAnswerValidation::AtSubmission` no state copy is
+            // CR 608.2d + CR 614.12a + CR 701.23a + CR 732.2a + CR 732.2b: a named-choice
+            // answer from the prompt's enumerated domain, a library search selection, or a
+            // loop-shortcut declaration or responder's answer is admitted by its submission guard
+            // without mutating the game; the engine decides that through the same authority
+            // `SimulationFilter` consults before its probe. Under
+            // `PromptAnswerValidation::AtSubmission` no state copy is
             // made here: the root search simulates the answers in its beam until one fails, and
             // the caller the one answer it submits. A shape
             // the authority declines (a scoped search, a card name, a free-entry
@@ -1346,6 +1347,7 @@ impl<'a> PlannerServices<'a> {
             // time — two takes where the unadmitted shape paid one.
             engine::types::actions::GameAction::ChooseOption { .. }
             | engine::types::actions::GameAction::SelectCards { .. }
+            | engine::types::actions::GameAction::DeclareShortcut { .. }
             | engine::types::actions::GameAction::RespondToShortcut { .. }
                 if prompt_answers.admits_without_simulation(state, &candidate.action) =>
             {

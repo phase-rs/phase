@@ -17,7 +17,7 @@ use engine::analysis::resource::{
     ChargeBound, LoopDetectCost, PeriodSignature, PeriodicDelta, ResourceAxis,
 };
 use engine::game::derived_views::{FamilyCollapseState, UnboundedFamily};
-use engine::game::engine::{apply, shorten_refusal, EngineError, ShortenRefusal};
+use engine::game::engine::{apply, shorten_refusal, EngineError, ShortcutEvidence, ShortenRefusal};
 use engine::game::perf_counters::{
     take_cost_records, take_cost_snapshot, TakeCostCounters, TakeCostRecord,
 };
@@ -849,7 +849,7 @@ fn interactive_3p_optional_cascade_apnap_accept_win() {
 /// empty — the seat whose `Accept` is the materializing one (CR 732.2c: the shortcut is taken once
 /// the last player has answered). On a window that still has a queued
 /// responder an `Accept` merely advances the poll, which is why the shorter window would pass
-/// vacuously. The enumeration reach guard (`exactly one RespondToShortcut`) is what keeps the
+/// vacuously. The enumeration reach guard (the Accept and the issued Shorten) is what keeps the
 /// zero counters from being satisfied by an empty action list.
 #[test]
 fn shortcut_accept_validation_does_not_take_the_shortcut() {
@@ -896,41 +896,213 @@ fn shortcut_accept_validation_does_not_take_the_shortcut() {
     let validation_clones =
         engine::game::perf_counters::snapshot().raw_validation_state_clones - validation_before;
 
+    let shorten = GameAction::RespondToShortcut {
+        response: ShortcutResponse::Shorten {
+            at_iteration: engine::ai_support::AI_SHORTEN_PLACE,
+        },
+    };
     assert!(
         matches!(
             actions.as_slice(),
             [GameAction::RespondToShortcut {
                 response: ShortcutResponse::Accept
-            }]
+            }, issued] if *issued == shorten
         ),
-        "REACH-GUARD: the window enumerates exactly the materializing Accept, got {actions:?} — \
-         a Shorten at place 0 takes nothing, so the take counters below would not be measuring \
-         the take this row exists to remove"
+        "REACH-GUARD: the window enumerates the materializing Accept and the issued Shorten, got \
+         {actions:?}"
     );
     assert_eq!(
         validation_clones, 0,
         "deciding whether the Accept is legal must not reach the clone-and-apply probe"
     );
-    let refusal_before = take_cost_snapshot();
-    let refusal = shorten_refusal(
-        runner.state(),
-        &proposal,
-        P2,
-        engine::ai_support::AI_SHORTEN_PLACE,
-    );
-    let refusal_copies = take_cost_snapshot().since(refusal_before).state_copies;
-    assert!(
-        refusal.is_some(),
-        "REACH-GUARD: the issued Shorten is refused, so the Accept above is all that survives"
-    );
-    // Every copy `legal_actions` makes is the issued Shorten's refusal; the Accept adds none. 20 is
-    // that refusal alone: the CR 732.2b admission runs the take to place 1 on a scratch state, and
-    // no cheaper rules-equivalent refusal exists.
     assert_eq!(
-        during.state_copies, refusal_copies,
-        "the Accept's legality verdict must not add a take's snapshot"
+        during.state_copies, 0,
+        "CR 732.2b: legality reads measured evidence, so it takes nothing on a scratch state"
     );
-    assert_eq!(during.state_copies, 20);
+
+    // CR 732.2b: P2 holds nothing at place 1, so the committed Shorten is refused there and P2
+    // keeps the window it can still accept from.
+    assert_eq!(
+        shorten_refusal(
+            runner.state(),
+            &proposal,
+            P2,
+            engine::ai_support::AI_SHORTEN_PLACE,
+            ShortcutEvidence::Performed,
+        ),
+        Some(ShortenRefusal::NoDifferentChoice)
+    );
+    let refused = runner.act(shorten);
+    assert!(
+        matches!(&refused, Err(EngineError::InvalidAction(message))
+            if message.contains(ShortenRefusal::NoDifferentChoice.reason())),
+        "the committed Shorten names its refusal: {refused:?}"
+    );
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::RespondToShortcut { player, .. } if player == P2),
+        "the refusal writes nothing, so P2 can still answer"
+    );
+}
+
+/// CR 732.2a: the AI's legality pipeline issues the proposer's recorded declaration from the
+/// offer's measured evidence, without the clone-and-apply probe, and that declaration commits.
+#[test]
+fn the_ai_issues_a_recorded_declaration_without_simulating_it() {
+    let (mut runner, kickoff) = setup_3p_optional_cascade(LoopDetectionMode::Interactive);
+    let _ = runner.cast(kickoff).resolve();
+    let (_events, wf) = drive_collect(&mut runner, 500);
+    assert!(
+        matches!(wf, WaitingFor::LoopShortcut { .. }),
+        "REACH-GUARD: the offer must fire, got {wf:?}"
+    );
+    let count = offered(runner.state()).1;
+    let validation_before = engine::game::perf_counters::snapshot().raw_validation_state_clones;
+    let actions = engine::ai_support::legal_actions(runner.state());
+    let validation_clones =
+        engine::game::perf_counters::snapshot().raw_validation_state_clones - validation_before;
+    let declare = actions
+        .iter()
+        .find(|action| matches!(action, GameAction::DeclareShortcut { count: issued, .. } if *issued == count))
+        .cloned()
+        .unwrap_or_else(|| panic!("REACH-GUARD: the declaration is issued, got {actions:?}"));
+    assert_eq!(
+        actions,
+        [declare.clone(), GameAction::DeclineShortcut],
+        "REACH-GUARD: the offer issues its declaration and the decline"
+    );
+    assert!(
+        !engine::ai_support::structurally_valid_prompt_answer(
+            runner.state(),
+            &GameAction::DeclineShortcut
+        ),
+        "REACH-GUARD: no hatch decides the decline, so the counter is live"
+    );
+    assert_eq!(
+        validation_clones, 1,
+        "the decline's simulation is the only clone: the declaration adds none"
+    );
+    runner.act(declare).expect("the issued declaration commits");
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::RespondToShortcut { player, .. } if player == P1),
+        "P1 answers the proposal, got {:?}",
+        runner.state().waiting_for
+    );
+}
+
+/// CR 732.2b/c: a responder's answer is previewed from the proposal alone, by the interaction
+/// previewer and the action previewer, so previewing the Accept that materializes the take takes
+/// nothing; committing it takes the shortcut. The first responder's Accept previews as the next
+/// responder's window.
+#[test]
+fn previewing_a_responders_accept_takes_nothing() {
+    use engine::game::interaction::{
+        bind_interaction_authority, derive_viewer_interaction, preview_interaction,
+    };
+    use engine::game::visibility::filter_state_for_viewer;
+    use engine::types::interaction::{
+        InteractionOpportunityResponse, InteractionOutcomeCode, InteractionPreview,
+        InteractionPreviewRequest, InteractionPreviewStatus, InteractionResponse,
+        InteractionResponseSpec, InteractionSessionId, InteractionShortcutReply, PreviewRequestId,
+    };
+    let preview_accept = |state: &GameState, seat: PlayerId| -> InteractionPreview {
+        let mut state = state.clone();
+        bind_interaction_authority(&mut state, InteractionSessionId("preview".to_string()))
+            .expect("bind");
+        let state = &state;
+        let filtered = filter_state_for_viewer(state, seat);
+        let interaction_id = derive_viewer_interaction(state, &filtered, seat)
+            .opportunities
+            .into_iter()
+            .find(|opportunity| {
+                matches!(
+                    &opportunity.response,
+                    InteractionOpportunityResponse::Schema {
+                        spec: InteractionResponseSpec::ShortcutReply { .. },
+                        ..
+                    }
+                )
+            })
+            .map(|opportunity| opportunity.interaction_id)
+            .expect("the responder window publishes a shortcut-reply opportunity");
+        preview_interaction(
+            state,
+            seat,
+            &InteractionPreviewRequest {
+                request_id: PreviewRequestId("accept".to_string()),
+                interaction_id,
+                response: InteractionResponse::ShortcutReply {
+                    reply: InteractionShortcutReply::Accept,
+                },
+            },
+        )
+    };
+    let (mut runner, kickoff) = setup_3p_optional_cascade(LoopDetectionMode::Interactive);
+    let _ = runner.cast(kickoff).resolve();
+    let (_events, wf) = drive_collect(&mut runner, 500);
+    assert!(
+        matches!(wf, WaitingFor::LoopShortcut { .. }),
+        "REACH-GUARD: the offer must fire, got {wf:?}"
+    );
+    runner
+        .act(GameAction::DeclareShortcut {
+            count: offered(runner.state()).1,
+            template: None,
+        })
+        .expect("P0 declares the shortcut");
+
+    let first = preview_accept(runner.state(), P1);
+    assert_eq!(first.status, InteractionPreviewStatus::Confirmable);
+    assert_eq!(first.outcome, InteractionOutcomeCode::Replaced);
+    runner
+        .act(GameAction::RespondToShortcut {
+            response: ShortcutResponse::Accept,
+        })
+        .expect("P1 accepts");
+
+    let before = take_cost_snapshot();
+    let last = preview_accept(runner.state(), P2);
+    let previewed = take_cost_snapshot().since(before);
+    assert_eq!(last.status, InteractionPreviewStatus::Confirmable);
+    assert_eq!(previewed.drive_snapshots, 0, "the preview takes nothing");
+
+    // The action previewer reads the same measured step: the last Accept and a Shorten at place 1
+    // preview no public delta and take nothing, and a seat the window does not wait on is refused.
+    let accept = GameAction::RespondToShortcut {
+        response: ShortcutResponse::Accept,
+    };
+    let shorten = GameAction::RespondToShortcut {
+        response: ShortcutResponse::Shorten { at_iteration: 1 },
+    };
+    let before = take_cost_snapshot();
+    for answer in [&accept, &shorten] {
+        let diff = engine::game::preview::preview_action(runner.state(), P2, answer);
+        assert!(
+            matches!(&diff, Ok(diff) if *diff == engine::game::preview::PreviewDiff::default()),
+            "{answer:?}: {diff:?}"
+        );
+    }
+    assert_eq!(
+        take_cost_snapshot().since(before).drive_snapshots,
+        0,
+        "the action preview takes nothing"
+    );
+    assert!(matches!(
+        engine::game::preview::preview_action(runner.state(), P1, &accept),
+        Err(EngineError::WrongPlayer)
+    ));
+
+    let before = take_cost_snapshot();
+    runner
+        .act(accept)
+        .expect("P2 accepts (last) → take the shortcut");
+    assert!(
+        take_cost_snapshot().since(before).drive_snapshots > 0,
+        "reach: the committed Accept takes the shortcut"
+    );
+    assert_eq!(
+        runner.state().waiting_for,
+        WaitingFor::GameOver { winner: Some(P0) }
+    );
 }
 
 /// CR 732.2a: a shortcut belongs to the player with priority, not necessarily the player whose loop
@@ -7329,7 +7501,8 @@ fn a_relic_holders_shortened_sprout_loop_is_performed_while_an_accepted_one_is_s
 
 /// CR 732.2b: a responder shortens by "naming a place where they will make a game choice that's
 /// different than what's been proposed". On the real 4p Sprout board P1 has no legal action but a
-/// pass at the place it names, so its `Shorten` is refused and its window survives; the same place
+/// pass at the place it names, so its committed `Shorten` is refused and its window survives, while
+/// the AI legality hatch, reading measured evidence only, admits it without a take; the same place
 /// on the same board with Relic of Progenitus on P1's battlefield is admitted.
 #[test]
 fn a_shorten_by_a_seat_with_no_other_choice_at_its_place_is_refused() {
@@ -7351,15 +7524,25 @@ fn a_shorten_by_a_seat_with_no_other_choice_at_its_place_is_refused() {
     };
     assert_eq!(player, P1, "reach: P1 answers first");
     assert_eq!(
-        shorten_refusal(&state, &proposal, P1, 1),
+        shorten_refusal(&state, &proposal, P1, 1, ShortcutEvidence::Performed),
         Some(ShortenRefusal::NoDifferentChoice)
     );
     let shorten_at_one = GameAction::RespondToShortcut {
         response: ShortcutResponse::Shorten { at_iteration: 1 },
     };
+    let before = take_cost_snapshot();
+    assert_eq!(
+        shorten_refusal(&state, &proposal, P1, 1, ShortcutEvidence::Measured),
+        None
+    );
     assert!(
-        !engine::ai_support::structurally_valid_prompt_answer(&state, &shorten_at_one),
-        "the AI legality hatch refuses the place the reducer refuses"
+        engine::ai_support::structurally_valid_prompt_answer(&state, &shorten_at_one),
+        "the AI legality hatch admits the place on measured evidence"
+    );
+    assert_eq!(
+        take_cost_snapshot().since(before).state_copies,
+        0,
+        "neither measured read takes the shortcut on a scratch state"
     );
     let refused = apply(
         &mut state,
@@ -7393,7 +7576,10 @@ fn a_shorten_by_a_seat_with_no_other_choice_at_its_place_is_refused() {
     let WaitingFor::RespondToShortcut { proposal, .. } = relic_board.waiting_for.clone() else {
         panic!("the declaration opens a responder window on the Relic board");
     };
-    assert_eq!(shorten_refusal(&relic_board, &proposal, P1, 1), None);
+    assert_eq!(
+        shorten_refusal(&relic_board, &proposal, P1, 1, ShortcutEvidence::Performed),
+        None
+    );
     assert!(
         engine::ai_support::structurally_valid_prompt_answer(&relic_board, &shorten_at_one),
         "the AI legality hatch admits the place the reducer admits"

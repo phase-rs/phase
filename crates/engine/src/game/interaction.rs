@@ -8290,6 +8290,7 @@ fn schema_witness_availability(
         filtered_state,
         interaction_id,
         &response,
+        crate::game::engine::ShortcutEvidence::Measured,
     ) else {
         return InteractionAvailability::InputRequired;
     };
@@ -11029,6 +11030,7 @@ fn materialize_number_response(
     ))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn materialize_loop_shortcut_response(
     interaction_id: &InteractionId,
     projection: &LoopShortcutProjection,
@@ -11041,6 +11043,7 @@ fn materialize_loop_shortcut_response(
     authoritative_schema: &crate::analysis::decision_template::ShortcutDecisionSchema,
     authoritative_state: &GameState,
     response: &InteractionResponse,
+    evidence: crate::game::engine::ShortcutEvidence,
 ) -> Result<(GameAction, InteractionProgress), InteractionReasonCode> {
     let InteractionResponse::Shortcut { decision, pins } = response else {
         return Err(InteractionReasonCode::MalformedResponse);
@@ -11301,8 +11304,9 @@ fn materialize_loop_shortcut_response(
         // from the SAME `authoritative_schema` this site already passed.
         //
         // CR 732.2a: the preview and the submit paths share this chokepoint, and it asks the
-        // declare handler's own question, so a declaration the handler would refuse fails here as
-        // this entry's `ConstraintUnsatisfied` rather than the handler's priority handback. Of
+        // declare handler's own question with the caller's evidence, so a declaration the handler
+        // would refuse on that evidence fails here as this entry's `ConstraintUnsatisfied` rather
+        // than the handler's priority handback. Of
         // `InteractionShortcutDecision`'s three variants, `AcceptSuggested` and `Fixed` both fall
         // through the pin loop above into this call — so the suggestion-count route is validated
         // here too — while `Decline` returns before any pin is read and reaches no conjunct.
@@ -11329,6 +11333,7 @@ fn materialize_loop_shortcut_response(
             period,
             template.as_ref(),
             &count,
+            evidence,
         )
     {
         return Err(InteractionReasonCode::ConstraintUnsatisfied);
@@ -11654,6 +11659,7 @@ fn materialize_response(
     filtered_state: &GameState,
     interaction_id: &InteractionId,
     response: &InteractionResponse,
+    evidence: crate::game::engine::ShortcutEvidence,
 ) -> Result<(GameAction, InteractionProgress), InteractionReasonCode> {
     let semantic_owner = authoritative_state
         .active_interaction_slots
@@ -11780,6 +11786,7 @@ fn materialize_response(
                 schema,
                 authoritative_state,
                 completed.as_ref().unwrap_or(response),
+                evidence,
             );
         }
         HumanResponseModel::AmountAssignments => {
@@ -11857,6 +11864,33 @@ fn preview_outcome(
     }
 }
 
+/// What committing `action` would do, read off a throwaway authoritative clone. A loop-shortcut
+/// answer is read from the offer's measured evidence instead (CR 732.2a–c), so a preview never
+/// performs a repetition or takes the shortcut; it reports a take as advancing past the window,
+/// since only performing the take tells a game it ends from one it returns to priority.
+fn preview_action_outcome(
+    state: &GameState,
+    actor: PlayerId,
+    semantic_owner: PlayerId,
+    action: GameAction,
+    interaction_id: &InteractionId,
+) -> Result<InteractionOutcomeCode, EngineError> {
+    use crate::game::engine::{shortcut_step, ShortcutEvidence, ShortcutStep};
+    if let Some(step) = shortcut_step(state, &action, ShortcutEvidence::Measured) {
+        return step.map(|step| match (step, &state.waiting_for) {
+            (ShortcutStep::Polls { .. }, WaitingFor::RespondToShortcut { .. }) => {
+                InteractionOutcomeCode::Replaced
+            }
+            (ShortcutStep::HandsBack | ShortcutStep::Polls { .. } | ShortcutStep::Takes, _) => {
+                InteractionOutcomeCode::Advanced
+            }
+        });
+    }
+    let mut projected = state.clone();
+    apply_interaction_for_simulation(&mut projected, actor, semantic_owner, action)?;
+    Ok(preview_outcome(state, &projected, interaction_id))
+}
+
 /// Preview a response by materializing the exact engine action and applying it
 /// to a throwaway authoritative clone. No global-concede action is ever minted
 /// by the interaction candidate set, so it can never serve as a progress witness.
@@ -11890,14 +11924,24 @@ pub fn preview_interaction(
         Err(reason) => return rejected(reason, InteractionProgress::default()),
     };
     let filtered = visibility::filter_state_for_viewer(state, actor);
-    let (action, progress) =
-        match materialize_response(state, &filtered, &request.interaction_id, &request.response) {
-            Ok(materialized) => materialized,
-            Err(reason) => return rejected(reason, InteractionProgress::default()),
-        };
-    let mut projected = state.clone();
-    match apply_interaction_for_simulation(&mut projected, actor, semantic_owner, action) {
-        Ok(_) => InteractionPreview {
+    let (action, progress) = match materialize_response(
+        state,
+        &filtered,
+        &request.interaction_id,
+        &request.response,
+        crate::game::engine::ShortcutEvidence::Measured,
+    ) {
+        Ok(materialized) => materialized,
+        Err(reason) => return rejected(reason, InteractionProgress::default()),
+    };
+    match preview_action_outcome(
+        state,
+        actor,
+        semantic_owner,
+        action,
+        &request.interaction_id,
+    ) {
+        Ok(outcome) => InteractionPreview {
             request_id: request.request_id.clone(),
             interaction_id: request.interaction_id.clone(),
             status: InteractionPreviewStatus::Confirmable,
@@ -11905,7 +11949,7 @@ pub fn preview_interaction(
                 confirmable: true,
                 ..progress
             },
-            outcome: preview_outcome(state, &projected, &request.interaction_id),
+            outcome,
             summaries: vec![
                 InteractionSummaryCode::ConfirmAvailable,
                 InteractionSummaryCode::Progress,
@@ -11937,19 +11981,29 @@ pub fn preview_interaction_with_rejection(
         .map_err(action_rejection_for_interaction_reason)?
         .semantic_owner;
     let filtered = visibility::filter_state_for_viewer(state, actor);
-    let (action, progress) =
-        materialize_response(state, &filtered, &request.interaction_id, &request.response)
-            .map_err(action_rejection_for_interaction_reason)?;
+    let (action, progress) = materialize_response(
+        state,
+        &filtered,
+        &request.interaction_id,
+        &request.response,
+        crate::game::engine::ShortcutEvidence::Measured,
+    )
+    .map_err(action_rejection_for_interaction_reason)?;
     let related_object_ids = action.related_object_ids();
-    let mut projected = state.clone();
-    apply_interaction_for_simulation(&mut projected, actor, PlayerId(semantic_owner), action)
-        .map_err(|error| {
-            visibility::filter_action_rejection_for_viewer(
-                state,
-                actor,
-                &action_rejection_for_engine_error(&error, related_object_ids),
-            )
-        })?;
+    let outcome = preview_action_outcome(
+        state,
+        actor,
+        PlayerId(semantic_owner),
+        action,
+        &request.interaction_id,
+    )
+    .map_err(|error| {
+        visibility::filter_action_rejection_for_viewer(
+            state,
+            actor,
+            &action_rejection_for_engine_error(&error, related_object_ids),
+        )
+    })?;
     Ok(InteractionPreview {
         request_id: request.request_id.clone(),
         interaction_id: request.interaction_id.clone(),
@@ -11958,7 +12012,7 @@ pub fn preview_interaction_with_rejection(
             confirmable: true,
             ..progress
         },
-        outcome: preview_outcome(state, &projected, &request.interaction_id),
+        outcome,
         summaries: vec![
             InteractionSummaryCode::ConfirmAvailable,
             InteractionSummaryCode::Progress,
@@ -12001,6 +12055,7 @@ pub fn resolve_interaction_response(
         &filtered,
         &submission.interaction_id,
         &submission.response,
+        crate::game::engine::ShortcutEvidence::Performed,
     )?;
     Ok(action)
 }

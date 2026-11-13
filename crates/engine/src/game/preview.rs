@@ -17,8 +17,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::ai_support::legal_actions_for_viewer;
 use crate::game::engine::{
-    action_rejection_for_engine_error, apply_for_simulation, explicit_debug_permission_rejection,
-    preflight_debug_action_with_rejection, EngineError,
+    action_rejection_for_engine_error, apply_for_simulation, check_actor_authorization,
+    explicit_debug_permission_rejection, preflight_debug_action_with_rejection, shortcut_step,
+    EngineError, ShortcutEvidence,
 };
 use crate::game::visibility::filter_action_rejection_for_viewer;
 use crate::types::action_rejection::ActionRejection;
@@ -160,6 +161,12 @@ pub fn preview_action(
     actor: PlayerId,
     action: &GameAction,
 ) -> Result<PreviewDiff, EngineError> {
+    // CR 732.2a–c: a loop-shortcut answer is read from the offer's measured evidence, never
+    // performed or taken, so its preview carries no public delta.
+    if let Some(step) = shortcut_step(state, action, ShortcutEvidence::Measured) {
+        check_actor_authorization(state, actor, action)?;
+        return step.map(|_| PreviewDiff::default());
+    }
     let before = crate::game::visibility::filter_state_for_viewer(state, actor);
     let mut projected = state.clone();
     apply_for_simulation(&mut projected, actor, action.clone())?;

@@ -24782,15 +24782,52 @@ one on the bottom of your library.";
             assert_eq!(shortened.waiting_for, WaitingFor::Priority { player: P1 });
         }
 
-        /// R3. With Relic of Progenitus tapped P1 has no different choice at place 1, so the
-        /// reducer refuses the Shorten (CR 732.2b) and the issued domain is the Accept alone.
+        /// R3. With Relic of Progenitus tapped P1 has no different choice at place 1. Legality
+        /// reads the proposal alone, so the Shorten is issued; the committed Shorten is refused
+        /// (CR 732.2b) with P1's window kept, and the chooser accepts.
         #[test]
-        fn a_seat_with_no_different_choice_is_issued_only_the_accept() {
+        fn a_seat_with_no_different_choice_is_refused_the_shorten_and_accepts() {
             let mut state = familiar_window(12, tap_relic);
-            assert_eq!(contract_actions(&state, P1), vec![accept()]);
+            assert_eq!(contract_actions(&state, P1), vec![accept(), shorten_at(1)]);
             assert_eq!(answer(&state, AiDifficulty::Medium, 0), Some(accept()));
+            let mut refused = state.clone();
+            assert!(apply(&mut refused, P1, shorten_at(1)).is_err());
+            assert_eq!(refused.waiting_for, state.waiting_for);
             apply(&mut state, P1, accept()).expect("the Accept takes the shortcut");
             assert!(state.players[1].is_eliminated);
+        }
+
+        /// P0's declaration on its own offer passes the planner's legality gate from the offer's
+        /// measured evidence (CR 732.2a), without a state copy.
+        #[test]
+        fn the_planner_gate_admits_the_proposers_declaration_without_a_state_copy() {
+            use crate::planner::{
+                prepare_payment_candidates, PlannerServices, PromptAnswerValidation,
+            };
+            let state = familiar_offer_state();
+            let config = create_config(AiDifficulty::Medium, Platform::Native);
+            let policies = PolicyRegistry::default();
+            let mut services = PlannerServices::new_default(P0, &config, &policies);
+            services.prompt_answers = PromptAnswerValidation::AtSubmission;
+            let ctx = services.build_decision_context(&state);
+            let declarations: Vec<_> = prepare_payment_candidates(&state, ctx.candidates.clone())
+                .into_iter()
+                .filter(|entry| {
+                    matches!(entry.candidate.action, GameAction::DeclareShortcut { .. })
+                })
+                .collect();
+            assert_eq!(
+                declarations.len(),
+                1,
+                "reach-guard: the offer issues its declaration"
+            );
+            engine::game::perf_counters::reset();
+            let validated = services.validate_prepared_candidates(&state, declarations);
+            assert_eq!(validated.len(), 1, "the gate keeps the declaration");
+            assert_eq!(
+                engine::game::perf_counters::snapshot().state_clone_for_legality,
+                0
+            );
         }
 
         /// R4. A one-repetition proposal admits only place 0 (CR 732.2b), where the AI never

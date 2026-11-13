@@ -383,9 +383,10 @@ pub fn structurally_valid_prompt_answer(state: &GameState, action: &GameAction) 
         || structurally_valid_shortcut_response(state, action)
 }
 
-/// CR 732.2b/c: whether the pending loop-shortcut offer admits `action` as a responder's answer,
-/// decided without mutating the game. Every refusal the reducer makes is a `Shorten`; `Accept`
-/// names no place, so it passes every pre-take guard.
+/// CR 732.2a–c: whether the pending loop-shortcut window admits `action` as the proposer's
+/// declaration or a responder's answer, decided without mutating the game; a declaration handed
+/// back is not admitted. Every refusal of a responder's answer is a `Shorten`; `Accept` names no
+/// place, so it passes every pre-take guard.
 ///
 /// PRE-TAKE GUARDS ARE THE WHOLE CLAIM. An admitted answer can still fail when applied: a
 /// `Shorten` at place 0 elides the rest of the poll and takes it at once, the last responder's
@@ -400,31 +401,27 @@ pub fn structurally_valid_prompt_answer(state: &GameState, action: &GameAction) 
 /// `public_recorded_period_replay_rejects_later_life_counter_overflow_atomically`, whose hostile
 /// overflowing gain makes a public `Accept` return that error and restore its entry state.
 ///
-/// MIRRORS THE REDUCER'S ADMITTED SET BY CALLING ITS AUTHORITY, not by restating it: a `Shorten`
-/// is admitted exactly when [`crate::game::engine::shorten_refusal`], the refusal
-/// `handle_respond_to_shortcut` itself consults, has none. Its scratch take to the named place
-/// runs only for a `Shorten`; an `Accept` is admitted without one. That price is why the hatch
-/// exists: the probe APPLIES the answer, so for the last responder an `Accept` materializes the
-/// entire shortcut, which then materializes again when the real answer is applied (issue #10464).
+/// CALLS THE REDUCER'S OWN STEP AUTHORITY, not a restatement of it:
+/// [`crate::game::engine::shortcut_step`], which `handle_declare_shortcut` and
+/// `handle_respond_to_shortcut` take with performed evidence, read here with measured evidence, so
+/// the hatch performs no repetition and takes nothing. That price is why the hatch exists: the
+/// probe APPLIES the answer, so for the last responder an `Accept` materializes the entire
+/// shortcut, which then materializes again when the real answer is applied (issue #10464). A
+/// `Shorten` naming no different choice (CR 732.2b) is admitted here, since only the take decides
+/// it, and refused when committed.
 ///
 /// `false` for `WaitingFor::RespondToPrecastCopyShortcut`: that window carries no proposal summary,
 /// so there is no place and no counted take here to read, and it stays on the simulation path.
 pub(crate) fn structurally_valid_shortcut_response(state: &GameState, action: &GameAction) -> bool {
-    let (
-        WaitingFor::RespondToShortcut {
-            player, proposal, ..
-        },
-        GameAction::RespondToShortcut { response },
-    ) = (&state.waiting_for, action)
-    else {
-        return false;
-    };
-    match response {
-        crate::analysis::loop_check::ShortcutResponse::Accept => true,
-        crate::analysis::loop_check::ShortcutResponse::Shorten { at_iteration } => {
-            crate::game::engine::shorten_refusal(state, proposal, *player, *at_iteration).is_none()
-        }
-    }
+    matches!(
+        crate::game::engine::shortcut_step(
+            state,
+            action,
+            crate::game::engine::ShortcutEvidence::Measured
+        ),
+        Some(Ok(crate::game::engine::ShortcutStep::Polls { .. }
+            | crate::game::engine::ShortcutStep::Takes))
+    )
 }
 
 fn cheap_reject_candidate(state: &GameState, action: &GameAction) -> bool {
@@ -468,7 +465,14 @@ fn cheap_reject_candidate(state: &GameState, action: &GameAction) -> bool {
             GameAction::RespondToShortcut {
                 response: crate::analysis::loop_check::ShortcutResponse::Shorten { at_iteration },
             },
-        ) => crate::game::engine::shorten_refusal(state, proposal, *player, *at_iteration).is_some(),
+        ) => crate::game::engine::shorten_refusal(
+            state,
+            proposal,
+            *player,
+            *at_iteration,
+            crate::game::engine::ShortcutEvidence::Measured,
+        )
+        .is_some(),
         (WaitingFor::Priority { player }, _) if *player != acting_player => true,
         (WaitingFor::Priority { .. }, GameAction::CastSpell { object_id, .. })
         | (WaitingFor::Priority { .. }, GameAction::Foretell { object_id, .. })

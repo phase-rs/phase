@@ -3611,11 +3611,12 @@ mod tests {
     }
 
     /// The refused half of the same authority: a row per `Shorten` shape the reducer rejects on
-    /// a synthetic board (`NoDifferentChoice` needs a real take;
-    /// `loop_shortcut::a_shorten_by_a_seat_with_no_other_choice_at_its_place_is_refused` pins it),
-    /// paired with the probe. `cheap ⊆ sim` is pinned here in the direction that would otherwise
-    /// OFFER a place the reducer refuses — the failure the hatch would produce by admitting a
-    /// place after skipping the clone that used to reject it.
+    /// a synthetic board from measured evidence (`NoDifferentChoice` is decided only by the take,
+    /// so the hatch admits it and the committed answer refuses it;
+    /// `loop_shortcut::a_shorten_by_a_seat_with_no_other_choice_at_its_place_is_refused` pins
+    /// both), paired with the probe. `cheap ⊆ sim` is pinned here in the direction that would
+    /// otherwise OFFER a place the reducer refuses — the failure the hatch would produce by
+    /// admitting a place after skipping the clone that used to reject it.
     #[test]
     fn shortcut_response_authority_refuses_every_reducer_refusal() {
         let state_with = |count: IterationCount, counted_take: CountedTake| {

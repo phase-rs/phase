@@ -4150,7 +4150,7 @@ fn loop_shortcut_preview_never_routes_through_the_clone_apply_previewer() {
     );
     let response_attach = extract(
         answerer_scope,
-        "\n        Ok(_) => InteractionPreview {",
+        "\n        Ok(outcome) => InteractionPreview {",
         "\n        Err(_) =>",
     );
     assert!(
@@ -4159,9 +4159,9 @@ fn loop_shortcut_preview_never_routes_through_the_clone_apply_previewer() {
          else the ban is being applied to the wrong arm"
     );
     assert!(
-        response_attach.contains("state,"),
-        "constructibility, second half: the arm must actually USE that `&GameState` binding, so \
-         a clone is writable at the exact point the payload is minted"
+        response_attach.contains("filtered."),
+        "constructibility, second half: the arm must actually USE a `GameState` binding, so a \
+         clone is writable at the exact point the payload is minted"
     );
 
     // ── SPAN 4: the basis STRUCT and the domain STRUCT it folds in. A parameter list cannot
@@ -9709,6 +9709,58 @@ fn every_published_shortcut_element_round_trips_byte_equal() {
     }
 }
 
+/// CR 732.2a: an authored split the offer never performed is previewed from the offer's measured
+/// evidence alone, so the preview performs no repetition; submitting the same declaration performs
+/// it.
+#[test]
+fn previewing_an_unperformed_split_performs_no_repetition() {
+    use engine::game::perf_counters::play_trace_counters;
+
+    let (state, proposer) = f4_offer_board();
+    let view = viewer_interaction(&state, proposer);
+    let interaction_id = view.opportunities[0].interaction_id.clone();
+    let points = shortcut_points(&view);
+    let own = crate::fantastic_four_bounded_loop::published_declaration_count(&state);
+    let request = f4_request(
+        &interaction_id,
+        own,
+        f4_pins(&points, &[(0, own - 2), (1, 2)]),
+    );
+
+    let before = play_trace_counters();
+    let preview = preview_interaction(&state, proposer, &request);
+    let previewed = play_trace_counters().since(before);
+    assert_eq!(preview.status, InteractionPreviewStatus::Confirmable);
+    assert_eq!(
+        previewed.probe_entries, 0,
+        "the preview performs no repetition of a declaration the offer never recorded"
+    );
+    let before = play_trace_counters();
+    let rejecting = preview_interaction_with_rejection(&state, proposer, &request);
+    let previewed = play_trace_counters().since(before);
+    assert_eq!(
+        rejecting.map(|preview| preview.status),
+        Ok(InteractionPreviewStatus::Confirmable)
+    );
+    assert_eq!(previewed.probe_entries, 0, "the rejecting preview too");
+
+    let before = play_trace_counters();
+    let submitted = resolve_interaction_response(
+        &state,
+        proposer,
+        &InteractionSubmission {
+            interaction_id,
+            response: request.response,
+        },
+    );
+    let performed = play_trace_counters().since(before);
+    assert!(submitted.is_ok(), "{submitted:?}");
+    assert!(
+        performed.probe_entries > 0,
+        "reach: the submission performs the same declaration"
+    );
+}
+
 /// **Row 2** — an AUTHORED, non-canonical distribution is previewed per DECLARED seat, and the
 /// seat is resolved by `choice_id` rather than by position.
 ///
@@ -10083,8 +10135,8 @@ fn f4_announced_slot(state: &GameState) -> (DecisionSlot, Vec<PlayerId>) {
 ///   this leg is `Err` while leg 1 passes, which is the divergence itself;
 /// * leg 3 — mint anything but `canonical_allocation` over the domain's ids and the equality
 ///   against the offer's own published element fails;
-/// * leg 4 — drop the `min == 1` conjunct and the empty announcement is completed into an
-///   element that previews confirmable;
+/// * leg 4 — drop the `min == 1` conjunct and the empty announcement is completed, so the preview
+///   states the canonical split's element;
 /// * leg 5 — drop the sole-point conjunct and the answered-second member turns `Confirmable` and
 ///   submits, while the both-empty member stays refused either way.
 #[test]
@@ -10282,20 +10334,19 @@ fn a_nothing_naming_pin_is_completed_with_the_offers_canonical_split() {
         unsampled,
         optional_pins.clone(),
     );
-    // CR 601.2c + CR 603.3d: the take performs the empty announcement against Human Torch's
-    // printed "target opponent", which admits none while an opponent is a legal target.
+    // The offer never performed this declaration, so the preview, reading measured evidence
+    // only, cannot refuse it.
     assert_eq!(
         optional_preview.status,
-        InteractionPreviewStatus::Rejected {
-            reason: InteractionReasonCode::ConstraintUnsatisfied,
-        },
-        "an OPTIONAL announced point's empty pin is judged as the empty announcement it states"
+        InteractionPreviewStatus::Confirmable
     );
     assert!(
         optional_preview.shortcut_preview.is_none(),
         "CR 601.2c: at `min == 0` the empty pin already MEANS 'announce no target here', so \
          completing it would replace one stated declaration with a different one"
     );
+    // CR 601.2c + CR 603.3d: the commit performs the empty announcement against Human Torch's
+    // printed "target opponent", which admits none while an opponent is a legal target.
     let mut optional_submitted = optional_state.clone();
     assert!(
         submit_interaction(
@@ -10312,7 +10363,7 @@ fn a_nothing_naming_pin_is_completed_with_the_offers_canonical_split() {
             },
         )
         .is_err(),
-        "what previews rejected does not submit"
+        "an OPTIONAL announced point's empty pin is judged as the empty announcement it states"
     );
 
     // ── LEG 5: a SECOND announced-target point leaves the offer's one published split an

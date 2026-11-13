@@ -6879,6 +6879,32 @@ struct LoopShortcutOffer<'a> {
     period: &'a super::period_confirm::ConfirmedPeriod,
 }
 
+impl<'a> LoopShortcutOffer<'a> {
+    fn of(waiting_for: &'a WaitingFor) -> Option<Self> {
+        let WaitingFor::LoopShortcut {
+            proposer,
+            predicted_winner,
+            certificate,
+            schema,
+            declaration,
+            counted_take,
+            period,
+        } = waiting_for
+        else {
+            return None;
+        };
+        Some(Self {
+            proposer: *proposer,
+            predicted_winner: *predicted_winner,
+            certificate,
+            schema,
+            declaration: declaration.as_ref(),
+            counted_take: *counted_take,
+            period,
+        })
+    }
+}
+
 /// CR 732.2a + CR 800.4a: a shortcut that is not taken — declined, its declaration rejected,
 /// or its accepted proposal refused — returns priority to the player who suggested it, or, if
 /// that player has left the game, to the next player in turn order still in it. Read from the
@@ -6894,12 +6920,21 @@ fn hand_back_shortcut(state: &mut GameState, result: &mut ActionResult, proposer
     result.waiting_for = state.waiting_for.clone();
 }
 
+/// What a refusal of a loop-shortcut answer may read (CR 732.2a/b). `Measured` reads the offer's
+/// recorded performances and the proposal alone, so it never performs a repetition; `Performed`
+/// also performs the answer itself, which only the committed answer pays for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShortcutEvidence {
+    Measured,
+    Performed,
+}
+
 /// CR 732.2a + CR 603.3d + CR 601.2c + CR 608.2b: whether a declaration conforms to an offer
 /// whose period carries performances. The effective declaration (`declared`, else the offer's
 /// suggestion) conforms at `Fixed(n)` iff its pins conform and, performed forward from the offer
 /// frame, its proposer is still in the game after `n` repetitions: what it reaches is performed,
 /// not modelled. Its performance is read from the period's record when the offer already
-/// performed it.
+/// performed it; with no record, `Measured` evidence admits it and `Performed` performs it.
 pub(crate) fn performance_conforms(
     state: &GameState,
     schema: &crate::analysis::decision_template::ShortcutDecisionSchema,
@@ -6907,6 +6942,7 @@ pub(crate) fn performance_conforms(
     period: &super::period_confirm::ConfirmedPeriod,
     declared: Option<&crate::analysis::decision_template::DecisionTemplate>,
     count: &crate::analysis::decision_template::IterationCount,
+    evidence: ShortcutEvidence,
 ) -> bool {
     let (Some(declared), crate::analysis::decision_template::IterationCount::Fixed(n)) =
         (declared.or_else(|| schema.suggestion(aim.published)), count)
@@ -6924,8 +6960,10 @@ pub(crate) fn performance_conforms(
         .performed
         .iter()
         .find(|record| record.decisions == declared.decisions)
-        .map_or_else(
-            || {
+        .map(|record| record.reach)
+        .or_else(|| match evidence {
+            ShortcutEvidence::Measured => None,
+            ShortcutEvidence::Performed => Some(
                 super::period_confirm::perform_declared_on(
                     state,
                     period,
@@ -6933,24 +6971,74 @@ pub(crate) fn performance_conforms(
                     declared,
                     *n,
                 )
-                .reach
-            },
-            |record| record.reach,
-        )
-        >= *n
+                .reach,
+            ),
+        })
+        .is_none_or(|reach| reach >= *n)
 }
 
-/// CR 732.2a: the proposer declared the loop shortcut. Build the public proposal and open
-/// the APNAP accept-or-shorten window over the proposer's living opponents (turn order). No
-/// opponents (solitaire / all eliminated) ⇒ take the shortcut immediately.
-fn handle_declare_shortcut(
-    state: &mut GameState,
-    offer: LoopShortcutOffer<'_>,
-    count: crate::analysis::decision_template::IterationCount,
-    template: Option<crate::analysis::decision_template::DecisionTemplate>,
-    events: &mut Vec<GameEvent>,
-) -> Result<ActionResult, EngineError> {
-    let mut result = ActionResult::applied(std::mem::take(events), state.waiting_for.clone());
+/// What committing a loop-shortcut answer does next.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ShortcutStep {
+    /// CR 732.2a: the declaration is refused, and priority returns to its proposer.
+    HandsBack,
+    /// CR 732.2b: `next` answers the proposal, then each of `rest`.
+    Polls { next: PlayerId, rest: Vec<PlayerId> },
+    /// CR 732.2c: no responder is left to answer, so the shortcut is taken.
+    Takes,
+}
+
+/// The step committing `action` at `state` takes, read with `evidence`; `None` when `action`
+/// answers no pending loop-shortcut window.
+pub(crate) fn shortcut_step(
+    state: &GameState,
+    action: &GameAction,
+    evidence: ShortcutEvidence,
+) -> Option<Result<ShortcutStep, EngineError>> {
+    match (&state.waiting_for, action) {
+        (waiting_for, GameAction::DeclareShortcut { count, template }) => {
+            let offer = LoopShortcutOffer::of(waiting_for)?;
+            Some(
+                declare_step(state, &offer, count, template.as_ref(), evidence)
+                    .map(|(step, _)| step),
+            )
+        }
+        (
+            WaitingFor::RespondToShortcut {
+                player,
+                remaining_players,
+                proposal,
+            },
+            GameAction::RespondToShortcut { response },
+        ) => Some(respond_step(
+            state,
+            *player,
+            remaining_players,
+            proposal,
+            *response,
+            evidence,
+        )),
+        _ => None,
+    }
+}
+
+/// CR 732.2a: the step the proposer's declaration takes when committed: handed back when it does
+/// not conform, refused when its count is one the take cannot perform, else the APNAP
+/// accept-or-shorten window over the proposer's living opponents (turn order), or the take itself
+/// when there are none (solitaire / all eliminated).
+fn declare_step<'t>(
+    state: &GameState,
+    offer: &LoopShortcutOffer<'t>,
+    count: &crate::analysis::decision_template::IterationCount,
+    template: Option<&'t crate::analysis::decision_template::DecisionTemplate>,
+    evidence: ShortcutEvidence,
+) -> Result<
+    (
+        ShortcutStep,
+        Option<&'t crate::analysis::decision_template::DecisionTemplate>,
+    ),
+    EngineError,
+> {
     // CR 732.2a fail-closed firewall: validate the declared pins against the offered schema
     // BEFORE `template` is moved into `proposal` and BEFORE APNAP opens. Coverage
     // (`predictability_gate`) and value-legality (`validate_pins`) both consult the SAME
@@ -6991,12 +7079,11 @@ fn handle_declare_shortcut(
     // Exhaustive (no wildcard) so a future `IterationCount` variant — e.g. the reserved
     // `UntilResource`, which would carry its OWN unbounded count — build-breaks HERE and
     // forces a bound decision rather than silently regressing this cap.
-    match &count {
+    match count {
         crate::analysis::decision_template::IterationCount::Fixed(n)
             if *n > MAX_SHORTCUT_CYCLES =>
         {
-            hand_back_shortcut(state, &mut result, offer.proposer);
-            return Ok(result);
+            return Ok((ShortcutStep::HandsBack, template));
         }
         // CR 732.2a: the per-offer ceiling, enforced at the same single authority as the
         // global cap. A `Fixed(n)` above the capacity this offer published would contain a
@@ -7006,16 +7093,14 @@ fn handle_declare_shortcut(
         crate::analysis::decision_template::IterationCount::Fixed(n)
             if *n > offer.schema.deliverable_capacity =>
         {
-            hand_back_shortcut(state, &mut result, offer.proposer);
-            return Ok(result);
+            return Ok((ShortcutStep::HandsBack, template));
         }
         // CR 732.2a: a proposal without end is legal only on an offer that published one.
         crate::analysis::decision_template::IterationCount::WithoutEnd
             if offer.schema.iteration_count
                 != crate::analysis::decision_template::IterationCount::WithoutEnd =>
         {
-            hand_back_shortcut(state, &mut result, offer.proposer);
-            return Ok(result);
+            return Ok((ShortcutStep::HandsBack, template));
         }
         crate::analysis::decision_template::IterationCount::Fixed(_)
         | crate::analysis::decision_template::IterationCount::WithoutEnd => {}
@@ -7056,7 +7141,7 @@ fn handle_declare_shortcut(
     // `build_bounded_declaration` returns `None` on a missing answer or on a kind/value mismatch
     // even with a non-empty schema, both non-bounded mints hard-code `declaration: None`, and a
     // restored save may carry `None`.
-    let template = template.or_else(|| offer.schema.suggestion(offer.declaration).cloned());
+    let template = template.or_else(|| offer.schema.suggestion(offer.declaration));
     // CR 732.2a + CR 603.5: the declared template's `owner` is CLIENT-SUPPLIED — the
     // `GameAction::DeclareShortcut { template }` payload arrives here verbatim. Bind it to
     // the engine-issued seat here, at declare. `offer.proposer` is engine state,
@@ -7070,9 +7155,8 @@ fn handle_declare_shortcut(
     // that authority's doc anticipates. Defence in depth for the RESTORE ingress (a persisted
     // `WaitingFor::RespondToShortcut` never runs this handler) lives on
     // `apply_confirmed_shortcut`'s consumption guard.
-    if template.as_ref().is_some_and(|t| t.owner != offer.proposer) {
-        hand_back_shortcut(state, &mut result, offer.proposer);
-        return Ok(result);
+    if template.is_some_and(|t| t.owner != offer.proposer) {
+        return Ok((ShortcutStep::HandsBack, template));
     }
     // CR 732.2a: a declaration cannot pin choices the offer published none of. Every
     // `Some(t)` meets `declaration_conforms` whatever the schema published — its
@@ -7107,18 +7191,18 @@ fn handle_declare_shortcut(
             offer.schema,
             aim,
             offer.period,
-            template.as_ref(),
-            &count,
+            template,
+            count,
+            evidence,
         ) {
-            hand_back_shortcut(state, &mut result, offer.proposer);
-            return Ok(result);
+            return Ok((ShortcutStep::HandsBack, template));
         }
     } else {
-        match &template {
+        match template {
             Some(t) => {
                 // CR 732.2a: validate over the range the ACCEPTED COUNT will drive, not
                 // over the schedule's own period.
-                let validated_range = shortcut_validated_range(&count, Some(t));
+                let validated_range = shortcut_validated_range(count, Some(t));
                 // Coverage + value legality + aim survival via the shared authority the human ingress
                 // EMITS under; the publishers share its pin half. The range is this site's own.
                 //
@@ -7134,8 +7218,7 @@ fn handle_declare_shortcut(
                     offer.period.recorded_answers(),
                     state,
                 ) {
-                    hand_back_shortcut(state, &mut result, offer.proposer);
-                    return Ok(result);
+                    return Ok((ShortcutStep::HandsBack, template));
                 }
             }
             // CR 732.2a: a `template: None` declaration against a non-empty schema validates no
@@ -7143,15 +7226,14 @@ fn handle_declare_shortcut(
             // replays; without one a pin-consuming drive would run with no pins, so it fails closed
             // into the manual-play handback.
             None if !offer.schema.points.is_empty() && offer.period.is_empty() => {
-                hand_back_shortcut(state, &mut result, offer.proposer);
-                return Ok(result);
+                return Ok((ShortcutStep::HandsBack, template));
             }
             None => {}
         }
     }
     // Refused before any state write, so the proposer keeps the offer and can declare without
     // end or decline.
-    match &count {
+    match count {
         crate::analysis::decision_template::IterationCount::Fixed(n) => {
             if let Some(cause) = offer.counted_take.refusal(*n) {
                 return Err(EngineError::InvalidAction(cause.reason().to_string()));
@@ -7159,6 +7241,44 @@ fn handle_declare_shortcut(
         }
         crate::analysis::decision_template::IterationCount::WithoutEnd => {}
     }
+    // CR 732.2b: living opponents in APNAP turn order, starting after the proposer.
+    let mut opponents = crate::game::players::apnap_order_from(
+        state,
+        Some(crate::types::ability::ControllerRef::You),
+        offer.proposer,
+    )
+    .into_iter()
+    .filter(|&p| p != offer.proposer);
+    let step = match opponents.next() {
+        Some(next) => ShortcutStep::Polls {
+            next,
+            rest: opponents.collect(),
+        },
+        // CR 732.2c: nobody else to poll ⇒ take the shortcut.
+        None => ShortcutStep::Takes,
+    };
+    Ok((step, template))
+}
+
+/// CR 732.2a: the proposer declared the loop shortcut. Build the public proposal and open
+/// the APNAP accept-or-shorten window over the proposer's living opponents (turn order). No
+/// opponents (solitaire / all eliminated) ⇒ take the shortcut immediately.
+fn handle_declare_shortcut(
+    state: &mut GameState,
+    offer: LoopShortcutOffer<'_>,
+    count: crate::analysis::decision_template::IterationCount,
+    template: Option<crate::analysis::decision_template::DecisionTemplate>,
+    events: &mut Vec<GameEvent>,
+) -> Result<ActionResult, EngineError> {
+    let mut result = ActionResult::applied(std::mem::take(events), state.waiting_for.clone());
+    let (step, template) = declare_step(
+        state,
+        &offer,
+        &count,
+        template.as_ref(),
+        ShortcutEvidence::Performed,
+    )?;
+    let template = template.cloned();
     let proposal = crate::analysis::loop_check::ShortcutProposal {
         proposer: offer.proposer,
         predicted_winner: offer.predicted_winner,
@@ -7181,27 +7301,30 @@ fn handle_declare_shortcut(
         counted_take: offer.counted_take,
         period: offer.period.clone(),
     };
-    // CR 732.2b: living opponents in APNAP turn order, starting after the proposer.
-    let opps: Vec<PlayerId> = crate::game::players::apnap_order_from(
-        state,
-        Some(crate::types::ability::ControllerRef::You),
-        offer.proposer,
-    )
-    .into_iter()
-    .filter(|&p| p != offer.proposer)
-    .collect();
-    if let Some((&first, rest)) = opps.split_first() {
-        state.waiting_for = WaitingFor::RespondToShortcut {
-            player: first,
-            remaining_players: rest.to_vec(),
-            proposal,
-        };
-        result.waiting_for = state.waiting_for.clone();
-    } else {
-        // CR 732.2c: nobody else to poll ⇒ take the shortcut.
-        apply_confirmed_shortcut(state, &mut result, &proposal)?;
-    }
+    advance_shortcut(state, &mut result, proposal, step)?;
     Ok(result)
+}
+
+/// CR 732.2b/c: carry `proposal` to the step its last answer takes.
+fn advance_shortcut(
+    state: &mut GameState,
+    result: &mut ActionResult,
+    proposal: crate::analysis::loop_check::ShortcutProposal,
+    step: ShortcutStep,
+) -> Result<(), EngineError> {
+    match step {
+        ShortcutStep::HandsBack => hand_back_shortcut(state, result, proposal.proposer),
+        ShortcutStep::Polls { next, rest } => {
+            state.waiting_for = WaitingFor::RespondToShortcut {
+                player: next,
+                remaining_players: rest,
+                proposal,
+            };
+            result.waiting_for = state.waiting_for.clone();
+        }
+        ShortcutStep::Takes => apply_confirmed_shortcut(state, result, &proposal)?,
+    }
+    Ok(())
 }
 
 /// CR 732.2a: the priority holder MAY decline the auto-offered loop shortcut — "the player
@@ -7262,12 +7385,14 @@ impl ShortenRefusal {
 /// CR 732.2b: the refusal of `seat` shortening `proposal` at `place`, if any — "a place where they
 /// will make a game choice that's different than what's been proposed". A place is refused as
 /// naming no different choice only when the take there arms CR 732.2c's latch for `seat` and `seat`
-/// has no meaningful priority action; a place the take never reaches is admitted.
+/// has no meaningful priority action; a place the take never reaches is admitted. Only the take
+/// decides that, so `Measured` evidence never refuses a place as naming no different choice.
 pub fn shorten_refusal(
     state: &GameState,
     proposal: &crate::analysis::loop_check::ShortcutProposal,
     seat: PlayerId,
     place: u32,
+    evidence: ShortcutEvidence,
 ) -> Option<ShortenRefusal> {
     if let Some(cause) = proposal.counted_take.refusal(place) {
         return Some(ShortenRefusal::Unperformable(cause));
@@ -7280,8 +7405,12 @@ pub fn shorten_refusal(
     if !shortcut_count_is_drivable(state, proposal, place) {
         return Some(ShortenRefusal::Undrivable);
     }
-    (shortened_place_choice(state, proposal, seat, place) == Some(false))
-        .then_some(ShortenRefusal::NoDifferentChoice)
+    match evidence {
+        ShortcutEvidence::Measured => None,
+        ShortcutEvidence::Performed => (shortened_place_choice(state, proposal, seat, place)
+            == Some(false))
+        .then_some(ShortenRefusal::NoDifferentChoice),
+    }
 }
 
 /// Performs the take to `place` on scratch: `None` unless it arms the CR 732.2c latch for `seat`
@@ -7312,6 +7441,55 @@ fn shortened_place_choice(
     ))
 }
 
+/// CR 732.2b/c: the step one opponent's answer takes when committed: refused when it shortens at
+/// a place the responder cannot name, else the next living responder's poll, or the take once no
+/// responder is left.
+fn respond_step(
+    state: &GameState,
+    player: PlayerId,
+    remaining_players: &[PlayerId],
+    proposal: &crate::analysis::loop_check::ShortcutProposal,
+    response: crate::analysis::loop_check::ShortcutResponse,
+    evidence: ShortcutEvidence,
+) -> Result<ShortcutStep, EngineError> {
+    if let crate::analysis::loop_check::ShortcutResponse::Shorten { at_iteration } = response {
+        if let Some(refusal) = shorten_refusal(state, proposal, player, at_iteration, evidence) {
+            return Err(EngineError::InvalidAction(format!(
+                "Shortcut place {at_iteration}: {}",
+                refusal.reason()
+            )));
+        }
+    }
+    // CR 800.4a: never advance the offer onto a player who has left the game. A queued opponent
+    // can concede AFTER the window opened (Concede bypasses the `WaitingFor` dispatch, so
+    // `remaining_players` is never self-healed), so drop any departed seats before advancing.
+    // CR 732.2b: the queue is already in APNAP turn order, so the first surviving remainder is
+    // the next living opponent.
+    let mut living = remaining_players
+        .iter()
+        .copied()
+        .filter(|&p| crate::game::players::is_alive(state, p));
+    Ok(match (response, living.next()) {
+        // A place of zero rewrites the proposal to one whose range admits no place, so `Shorten`
+        // is refused for every seat still queued and `Accept` is the only answer left — and the
+        // last of those Accepts would reach this same take with this same proposal. Eliding the
+        // rest of the poll is that outcome rather than a policy. What it gives up is a window in
+        // which a queued concession could land before consumption, inert for a count that
+        // materializes nothing.
+        (crate::analysis::loop_check::ShortcutResponse::Shorten { at_iteration: 0 }, _) => {
+            ShortcutStep::Takes
+        }
+        // CR 732.2c: "Once the last player has either accepted or shortened the shortcut
+        // proposal, the shortcut is taken." (F1 re-validates the proposer's own liveness before
+        // crowning.)
+        (_, None) => ShortcutStep::Takes,
+        (_, Some(next)) => ShortcutStep::Polls {
+            next,
+            rest: living.collect(),
+        },
+    })
+}
+
 /// CR 732.2b/c: one opponent answered the shortcut offer. Mirrors the
 /// `OpponentMayChoice`/`UnlessPayment` APNAP fan-out (drain-one-advance via
 /// `remaining_players`). Both answers advance the same poll, and the last of them takes the
@@ -7322,81 +7500,31 @@ fn handle_respond_to_shortcut(
     state: &mut GameState,
     player: PlayerId,
     remaining_players: Vec<PlayerId>,
-    proposal: crate::analysis::loop_check::ShortcutProposal,
+    mut proposal: crate::analysis::loop_check::ShortcutProposal,
     response: crate::analysis::loop_check::ShortcutResponse,
     events: &mut Vec<GameEvent>,
 ) -> Result<ActionResult, EngineError> {
     // `apply()` is the boundary every emitter crosses, and this refusal precedes the event take
     // and every state write, so the responder keeps the window and can answer again.
-    if let crate::analysis::loop_check::ShortcutResponse::Shorten { at_iteration } = response {
-        if let Some(refusal) = shorten_refusal(state, &proposal, player, at_iteration) {
-            return Err(EngineError::InvalidAction(format!(
-                "Shortcut place {at_iteration}: {}",
-                refusal.reason()
-            )));
-        }
-    }
+    let step = respond_step(
+        state,
+        player,
+        &remaining_players,
+        &proposal,
+        response,
+        ShortcutEvidence::Performed,
+    )?;
     let mut result = ActionResult::applied(std::mem::take(events), state.waiting_for.clone());
-    match response {
-        crate::analysis::loop_check::ShortcutResponse::Accept => {
-            // CR 800.4a: never advance the offer onto a player who has left the game. A
-            // queued opponent can concede AFTER the window opened (Concede bypasses the
-            // `WaitingFor` dispatch, so `remaining_players` is never self-healed), so drop
-            // any departed seats before advancing. CR 732.2b: the queue is already in APNAP
-            // turn order, so the first surviving remainder is the next living opponent.
-            let mut living = remaining_players
-                .into_iter()
-                .filter(|&p| crate::game::players::is_alive(state, p));
-            if let Some(next) = living.next() {
-                state.waiting_for = WaitingFor::RespondToShortcut {
-                    player: next,
-                    remaining_players: living.collect(),
-                    proposal,
-                };
-                result.waiting_for = state.waiting_for.clone();
-            } else {
-                // CR 732.2c: the last living opponent accepted ⇒ take the shortcut
-                // (F1 re-validates the proposer's own liveness before crowning).
-                apply_confirmed_shortcut(state, &mut result, &proposal)?;
-            }
-        }
-        crate::analysis::loop_check::ShortcutResponse::Shorten { at_iteration } => {
-            // CR 732.2b: "This place becomes the new ending point of the proposed sequence." The
-            // count the rest of the table now answers is the place this responder named, and
-            // they are the seat CR 732.2c owes a different game choice at it. Nothing else on
-            // the proposal moves — the offer's own predicted winner rides it into consumption,
-            // so the seat the offer named is still on the record when the shortcut is taken.
-            let mut proposal = proposal;
-            proposal.count =
-                crate::analysis::decision_template::IterationCount::Fixed(at_iteration);
-            proposal.shortened_by = Some(player);
-            // CR 800.4a: never advance the offer onto a player who has left the game — the same
-            // departed-seat filter, and the same APNAP-ordered queue, the Accept arm drains.
-            let mut living = remaining_players
-                .into_iter()
-                .filter(|&p| crate::game::players::is_alive(state, p));
-            match (at_iteration, living.next()) {
-                // A place of zero rewrites the proposal to one whose range admits no place, so
-                // `Shorten` is refused for every seat still queued and `Accept` is the only
-                // answer left — and the last of those Accepts would reach this same call with
-                // this same proposal. Eliding the rest of the poll is that outcome rather than a
-                // policy. What it gives up is a window in which a queued concession could land
-                // before consumption, inert for a count that materializes nothing.
-                (0, _) => apply_confirmed_shortcut(state, &mut result, &proposal)?,
-                // CR 732.2c: "Once the last player has either accepted or shortened the shortcut
-                // proposal, the shortcut is taken."
-                (_, None) => apply_confirmed_shortcut(state, &mut result, &proposal)?,
-                (_, Some(next)) => {
-                    state.waiting_for = WaitingFor::RespondToShortcut {
-                        player: next,
-                        remaining_players: living.collect(),
-                        proposal,
-                    };
-                    result.waiting_for = state.waiting_for.clone();
-                }
-            }
-        }
+    if let crate::analysis::loop_check::ShortcutResponse::Shorten { at_iteration } = response {
+        // CR 732.2b: "This place becomes the new ending point of the proposed sequence." The
+        // count the rest of the table now answers is the place this responder named, and they
+        // are the seat CR 732.2c owes a different game choice at it. Nothing else on the
+        // proposal moves — the offer's own predicted winner rides it into consumption, so the
+        // seat the offer named is still on the record when the shortcut is taken.
+        proposal.count = crate::analysis::decision_template::IterationCount::Fixed(at_iteration);
+        proposal.shortened_by = Some(player);
     }
+    advance_shortcut(state, &mut result, proposal, step)?;
     Ok(result)
 }
 
@@ -7469,7 +7597,7 @@ fn remember_public_reveals(state: &mut GameState, events: &[GameEvent], journal_
 ///   `WaitingFor`. `SetAutoPass` is deliberately NOT exempt: its handler
 ///   stores the mode for the `WaitingFor::Priority` player and immediately
 ///   passes that priority, so it must come from the authorized submitter.
-fn check_actor_authorization(
+pub(crate) fn check_actor_authorization(
     state: &GameState,
     actor: PlayerId,
     action: &GameAction,
@@ -12773,37 +12901,13 @@ fn apply_non_priority_pass_action(
         // CR 732.2a: the proposer declares the loop shortcut. The offered `schema` (the
         // declared-choices contract the fail-closed firewall validates the pins against) is
         // threaded through — no longer dropped by `..`.
-        (
-            WaitingFor::LoopShortcut {
-                proposer,
-                predicted_winner,
-                certificate,
-                schema,
-                // Threaded: `handle_declare_shortcut` resolves a `template: None` declaration
-                // against the offer's own published declaration, so the manual ingress and
-                // `ai_support::candidates` (which reads this identical field) declare the SAME
-                // proposal against the SAME offer.
-                declaration,
-                counted_take,
-                period,
-            },
-            GameAction::DeclareShortcut { count, template },
-        ) => {
-            return handle_declare_shortcut(
-                state,
-                LoopShortcutOffer {
-                    proposer: *proposer,
-                    predicted_winner: *predicted_winner,
-                    certificate,
-                    schema,
-                    declaration: declaration.as_ref(),
-                    counted_take: *counted_take,
-                    period,
-                },
-                count,
-                template,
-                &mut events,
-            );
+        // Threaded: `handle_declare_shortcut` resolves a `template: None` declaration against the
+        // offer's own published declaration, so the manual ingress and `ai_support::candidates`
+        // (which reads this identical field) declare the SAME proposal against the SAME offer.
+        (waiting_for, GameAction::DeclareShortcut { count, template })
+            if let Some(offer) = LoopShortcutOffer::of(waiting_for) =>
+        {
+            return handle_declare_shortcut(state, offer, count, template, &mut events);
         }
         // CR 732.2a: the proposer DECLINES the offered shortcut (suggesting is optional).
         // Proposer-only authorization is enforced upstream by `check_actor_authorization`.

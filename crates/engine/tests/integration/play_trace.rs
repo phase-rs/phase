@@ -3563,6 +3563,87 @@ mod recorded_niv_table {
         ));
     }
 
+    /// CR 732.2a + CR 608.2b: the preview reads only what the offer measured, so a re-aimed
+    /// declaration it never recorded is confirmable there without a repetition performed. Its
+    /// submission through the ingress performs it, falls short of 14, and is refused before any
+    /// state write, so the window stays open and the proposer answers again with 13.
+    #[test]
+    fn a_re_aimed_declaration_is_previewed_unperformed_and_refused_when_submitted() {
+        use engine::game::interaction::{preview_interaction, submit_interaction};
+        use engine::types::interaction::{
+            InteractionPreviewRequest, InteractionPreviewStatus, InteractionReasonCode,
+            InteractionResponse, InteractionShortcutDecision, InteractionSubmission,
+            PreviewRequestId,
+        };
+        let Some(mut runner) = offered(&TABLE, &[], 0, false) else {
+            return;
+        };
+        let state = runner.state_mut();
+        let (interaction_id, pins) = shortcut_interaction(state, |_| vec![(P2, None)]);
+        let fixed = |iterations| InteractionResponse::Shortcut {
+            decision: InteractionShortcutDecision::Fixed { iterations },
+            pins: pins.clone(),
+        };
+
+        let before = play_trace_counters();
+        let preview = preview_interaction(
+            state,
+            P0,
+            &InteractionPreviewRequest {
+                request_id: PreviewRequestId("niv-table".to_string()),
+                interaction_id: interaction_id.clone(),
+                response: fixed(14),
+            },
+        );
+        assert_eq!(play_trace_counters().since(before).probe_entries, 0);
+        assert_eq!(preview.status, InteractionPreviewStatus::Confirmable);
+
+        let entry = serde_json::to_value(&*state).expect("the state serializes");
+        let before = play_trace_counters();
+        let submitted = submit_interaction(
+            state,
+            P0,
+            InteractionSubmission {
+                interaction_id: interaction_id.clone(),
+                response: fixed(14),
+            },
+        )
+        .map(drop)
+        .map_err(|error| error.code);
+        assert!(
+            play_trace_counters().since(before).probe_entries > 0,
+            "reach: the submission performs the declaration"
+        );
+        assert_eq!(submitted, Err(InteractionReasonCode::ConstraintUnsatisfied));
+        assert_eq!(
+            serde_json::to_value(&*state).expect("the state serializes"),
+            entry,
+            "the refused commit writes nothing"
+        );
+        assert!(matches!(state.waiting_for, WaitingFor::LoopShortcut { .. }));
+        assert!(
+            state
+                .active_interaction_slots
+                .iter()
+                .any(|slot| slot.interaction_id == interaction_id),
+            "the proposer's interaction slot is still open"
+        );
+
+        submit_interaction(
+            state,
+            P0,
+            InteractionSubmission {
+                interaction_id,
+                response: fixed(13),
+            },
+        )
+        .expect("the proposer answers again with the count its performance reaches");
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::RespondToShortcut { .. }
+        ));
+    }
+
     /// CR 732.2a: the suggestion of a period whose drain resolves before its pings is
     /// confirmable at the ingress and taken through it to the count the offer published.
     #[test]
