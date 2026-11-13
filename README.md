@@ -479,9 +479,12 @@ sockets (`nativeAi` / `nativePregame`), whose transport this change leaves as it
 was, and the attempts of an active initial-join fallback, which start only
 after the previous socket closed and have their own deadline. The interval
 reads each frame's tag from the canonical type-first envelope (the frames a
-candidate buffers before its setup settles are bounded at the adapter: 64
-frames and 16 MiB of expanded text, not counting the attachment's bootstrap, which is recognized by its tag wherever it sits behind a prefix of small frames, and a
-candidate that exceeds it is cut off and handled like a close); a frame whose
+candidate buffers are bounded at the adapter for as long as its buffering
+handler is installed, through the confirmation, the handoff callbacks and the
+drain: 64 frames and 16 MiB of expanded text, not counting the attachment's
+bootstrap, which is recognized by its tag wherever it sits behind a prefix of
+small frames; a candidate that exceeds it is cut off and handled like a close,
+and the excess is not replayed); a frame whose
 tag can settle it is parsed once there, must parse as that envelope, and is
 the envelope dispatched after adoption, so the bootstrap is parsed once.
 Frames already admitted for that candidate stay buffered through those
