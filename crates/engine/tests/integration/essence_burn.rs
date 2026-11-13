@@ -1432,7 +1432,7 @@ fn begin_real_rites_cost(
     assert!(
         matches!(&r.state().waiting_for, WaitingFor::PayCost { player: actual, choices, .. } if *actual == player && choices.contains(&host))
     );
-    // CR 601.2a precedes cost payment (601.2h); the real announcement is
+    // CR 601.2a precedes cost payment (CR 601.2h); the real announcement is
     // already on the stack while object storage remains in Hand until finalize.
     assert_eq!(r.state().stack.len(), 1);
     let entry = &r.state().stack[0];

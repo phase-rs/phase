@@ -265,7 +265,7 @@ pub fn apply_face_down_creature_characteristics(
     obj: &mut crate::game::game_object::GameObject,
     profile: &crate::types::ability::FaceDownProfile,
 ) {
-    // CR 708.2a: turning face down changes this same permanent's characteristics;
+    // CR 708.2: turning face down changes this same permanent's characteristics;
     // carry its still-live resolution effects across the rebaseline.
     let carried_live_replacements = obj.replacement_definitions.clone();
     obj.face_down = true;
