@@ -2295,6 +2295,7 @@ impl<'de> Deserialize<'de> for FormatConfig {
             // NoLooserThan, Derived, HostChoice, ShapeLocked, and
             // HostChoiceWithin). `built_in_axes_no_looser_than_rules`
             // re-derives the authoritative config via `FormatConfig::for_format`
+            // (for a Horde, `FormatConfig::horde` of its declared ruleset)
             // and checks every one of this struct's fields against it —
             // absorbing what was previously a single ad hoc
             // `default_deck_copy_limit` check as one of its rows, rather
