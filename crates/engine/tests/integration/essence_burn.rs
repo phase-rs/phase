@@ -1323,7 +1323,7 @@ fn essence_burn_survives_lazav_multifarious_copy() {
     // CR 707.2 + CR 707.4: Lazav's in-place copy leaves its existing rider in place.
     assert_eq!(copied.name, "Lazav, the Multifarious");
     assert_eq!((copied.power, copied.toughness), (Some(2), Some(2)));
-    assert_eq!(copied.colors, vec![ManaColor::Green]);
+    assert_eq!(copied.color, vec![ManaColor::Green]);
     assert_eq!(copied.incarnation, incarnation);
     assert_eq!(copied.damage_marked, 0);
     assert_eq!(live_resolution_count(&r, host), 1);
