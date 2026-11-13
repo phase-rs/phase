@@ -1739,6 +1739,16 @@ pub struct ZoneChangeRecord {
     /// accumulated event vector.
     #[serde(default)]
     pub co_departed: Vec<ObjectId>,
+    /// CR 603.6a: ObjectIds of the other objects the SAME event moved onto the battlefield (every
+    /// battlefield entry of one completed logical zone-change group: Storm of Souls' or Living
+    /// Death's mass return), excluding this object. Stamped only by
+    /// `LogicalZoneChangeGroup::stamp_battlefield_entries` when the group completes; empty for a
+    /// lone entry, an entry outside a group, and a group still paused. A newcomer listed here
+    /// observes this entry and its entry counter prefix (CR 122.6) although the group delivered
+    /// this object first; every other event keeps each newcomer's own entry boundary. This is the
+    /// authority for entry simultaneity: trigger collection must not infer it from event order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub co_entered: Vec<ObjectId>,
     /// CR 400.7: the entrant's incarnation captured AFTER its battlefield-entry
     /// bump, so a later leave + re-entry (same ObjectId, higher incarnation) is
     /// distinguishable from the original entrant at intervening-if recheck.
@@ -1885,6 +1895,8 @@ struct ZoneChangeRecordWire {
     #[serde(default)]
     co_departed: Vec<ObjectId>,
     #[serde(default)]
+    co_entered: Vec<ObjectId>,
+    #[serde(default)]
     entered_incarnation: Option<u64>,
     #[serde(default)]
     attached_to: Option<AttachTarget>,
@@ -1930,6 +1942,7 @@ impl From<ZoneChangeRecordWire> for ZoneChangeRecord {
             combat_status,
             block_pairs,
             co_departed,
+            co_entered,
             entered_incarnation,
             attached_to,
             turn_zone_change_index,
@@ -1966,6 +1979,7 @@ impl From<ZoneChangeRecordWire> for ZoneChangeRecord {
             combat_status,
             block_pairs,
             co_departed,
+            co_entered,
             entered_incarnation,
             attached_to,
             turn_zone_change_index,
@@ -2338,6 +2352,7 @@ impl ZoneChangeRecord {
             combat_status: ZoneChangeCombatStatus::default(),
             block_pairs: Vec::new(),
             co_departed: Vec::new(),
+            co_entered: Vec::new(),
             attached_to: None,
             entered_incarnation: None,
             turn_zone_change_index: 0,
@@ -4606,6 +4621,53 @@ impl LogicalZoneChangeGroup {
                 .collect();
         }
         Ok(())
+    }
+
+    /// CR 603.6a: stamp each battlefield entry of this completed group with the other objects the
+    /// group moved onto the battlefield, so trigger collection reads one event, not an order. The
+    /// group's entrants are its retained moves to the battlefield from another zone
+    /// (`from: Some(_)`). An object created on the battlefield while the group delivers
+    /// (`from: None`: CR 111.1, a token another effect puts onto the battlefield) is not one of
+    /// them. Fewer than two entrants stamp nothing.
+    pub fn stamp_battlefield_entries(&mut self) {
+        let mut entrant_ids: Vec<ObjectId> = Vec::new();
+        for occurrence in &self.all_origin_occurrences {
+            if let Some(object_id) = battlefield_entrant(&occurrence.event) {
+                if !entrant_ids.contains(&object_id) {
+                    entrant_ids.push(object_id);
+                }
+            }
+        }
+        if entrant_ids.len() < 2 {
+            return;
+        }
+        for occurrence in &mut self.all_origin_occurrences {
+            let Some(object_id) = battlefield_entrant(&occurrence.event) else {
+                continue;
+            };
+            let GameEvent::ZoneChanged { record, .. } = &mut occurrence.event else {
+                unreachable!("battlefield_entrant matches only ZoneChanged occurrences");
+            };
+            record.co_entered = entrant_ids
+                .iter()
+                .copied()
+                .filter(|entrant| *entrant != object_id)
+                .collect();
+        }
+    }
+}
+
+/// CR 603.6a: the object a retained group occurrence moved onto the battlefield from another zone,
+/// or `None` for any other occurrence (a departure, or an object created on the battlefield).
+fn battlefield_entrant(event: &GameEvent) -> Option<ObjectId> {
+    match event {
+        GameEvent::ZoneChanged {
+            object_id,
+            from: Some(_),
+            to: Zone::Battlefield,
+            ..
+        } => Some(*object_id),
+        _ => None,
     }
 }
 
@@ -36164,6 +36226,7 @@ impl GameState {
                 combat_status: _,
                 block_pairs,
                 co_departed: _,
+                co_entered: _,
                 entered_incarnation: _,
                 attached_to: _,
                 turn_zone_change_index: _,
@@ -43532,6 +43595,35 @@ mod tests {
             panic!("legacy deferred fixture retains its zone-change event");
         };
         assert_eq!(record.recorded_turn_number, 0);
+    }
+
+    /// CR 603.6a: `co_entered` is omitted when empty, a record without it (resolution wire v11)
+    /// decodes with no co-entrants, and a stamped record round-trips.
+    #[test]
+    fn zone_change_record_co_entered_is_omitted_when_empty_and_roundtrips() {
+        let lone = ZoneChangeRecord::test_minimal(
+            ObjectId(9_005),
+            Some(Zone::Graveyard),
+            Zone::Battlefield,
+        );
+        let wire = serde_json::to_value(&lone).expect("record serializes");
+        assert!(
+            wire.get("co_entered").is_none(),
+            "an empty co_entered is omitted: {wire}"
+        );
+        let decoded: ZoneChangeRecord =
+            serde_json::from_value(wire).expect("a record without co_entered decodes");
+        assert!(decoded.co_entered.is_empty());
+
+        let stamped = ZoneChangeRecord {
+            co_entered: vec![ObjectId(7)],
+            ..lone
+        };
+        let wire = serde_json::to_value(&stamped).expect("stamped record serializes");
+        assert_eq!(wire["co_entered"], serde_json::json!([7]));
+        let decoded: ZoneChangeRecord =
+            serde_json::from_value(wire).expect("stamped record decodes");
+        assert_eq!(decoded.co_entered, vec![ObjectId(7)]);
     }
 
     fn persisted_zone_change_record(
@@ -55357,6 +55449,85 @@ mod tests {
             assert_eq!(record.co_departed.len(), 1);
             assert_ne!(record.co_departed[0], *object_id);
         }
+    }
+
+    /// CR 603.6a: the entry stamp lists, on each retained move onto the battlefield from another
+    /// zone, the group's other such entrants. A departure and an object created on the
+    /// battlefield (CR 111.1) are not entrants and stay unstamped.
+    #[test]
+    fn logical_zone_change_group_stamps_battlefield_entries() {
+        fn graveyard_card(id: u64, name: &str) -> GameObject {
+            GameObject::new(
+                ObjectId(id),
+                CardId(id),
+                PlayerId(0),
+                name.to_string(),
+                Zone::Graveyard,
+            )
+        }
+        fn zone_changed(object: &GameObject, from: Option<Zone>, to: Zone) -> GameEvent {
+            GameEvent::ZoneChanged {
+                object_id: object.id,
+                from,
+                to,
+                record: Box::new(object.snapshot_for_zone_change(object.id, from, to)),
+            }
+        }
+        fn stamped_group(events: &[GameEvent]) -> LogicalZoneChangeGroup {
+            let mut group = LogicalZoneChangeGroup::new(LogicalZoneChangeGroupId(5), Vec::new());
+            group
+                .latch_immediately_before(Vec::new(), Vec::new())
+                .expect("test group owns an explicit pre-delivery latch");
+            group
+                .append_delivery_events(events)
+                .expect("append the group's occurrences");
+            group.stamp_battlefield_entries();
+            group
+        }
+        fn co_entered(group: &LogicalZoneChangeGroup) -> Vec<(ObjectId, Vec<ObjectId>)> {
+            group
+                .all_origin_occurrences
+                .iter()
+                .map(|occurrence| {
+                    let GameEvent::ZoneChanged {
+                        object_id, record, ..
+                    } = &occurrence.event
+                    else {
+                        unreachable!("test retained only zone changes");
+                    };
+                    (*object_id, record.co_entered.clone())
+                })
+                .collect()
+        }
+
+        let giant = graveyard_card(91, "Hill Giant");
+        let warden = graveyard_card(92, "Soul Warden");
+        let mut forest = graveyard_card(93, "Forest");
+        forest.zone = Zone::Battlefield;
+        let token = graveyard_card(94, "Spirit");
+
+        let group = stamped_group(&[
+            zone_changed(&giant, Some(Zone::Graveyard), Zone::Battlefield),
+            zone_changed(&forest, Some(Zone::Battlefield), Zone::Graveyard),
+            zone_changed(&token, None, Zone::Battlefield),
+            zone_changed(&warden, Some(Zone::Graveyard), Zone::Battlefield),
+        ]);
+        assert_eq!(
+            co_entered(&group),
+            vec![
+                (giant.id, vec![warden.id]),
+                (forest.id, Vec::new()),
+                (token.id, Vec::new()),
+                (warden.id, vec![giant.id]),
+            ]
+        );
+
+        let lone = stamped_group(&[zone_changed(
+            &giant,
+            Some(Zone::Graveyard),
+            Zone::Battlefield,
+        )]);
+        assert_eq!(co_entered(&lone), vec![(giant.id, Vec::new())]);
     }
 
     #[test]

@@ -4308,6 +4308,13 @@ impl ResolutionStack {
 /// parked ChangeZone (`PendingChangeZoneIteration.with_entry_effect`), a paused
 /// `ProposedEvent::ZoneChange` and `WaitingFor::EffectZoneChoice`, omitted when
 /// absent; earlier versions decode it as absent, which is what they meant.
+/// Version 12 also defines `ZoneChangeRecord.co_entered` (CR 603.6a: the other
+/// objects one logical zone-change group moved onto the battlefield), stamped
+/// when the group completes and omitted when empty. A paused group's retained
+/// occurrences carry it empty until completion, while every copy of a completed
+/// group's entry carries it: event buffers, parked trigger events, and the
+/// entry's row of the per-turn zone-change ledger, against which a restore binds
+/// the copies. Earlier versions decode it as empty.
 pub const RESOLUTION_STATE_WIRE_VERSION: u64 = 12;
 
 /// Historical full-state resolution wire version accepted only for migration.

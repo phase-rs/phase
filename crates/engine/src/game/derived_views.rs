@@ -6334,6 +6334,7 @@ mod tests {
                 combat_status: Default::default(),
                 block_pairs: Vec::new(),
                 co_departed: Vec::new(),
+                co_entered: Vec::new(),
                 attached_to: None,
                 entered_incarnation: None,
                 turn_zone_change_index: 0,

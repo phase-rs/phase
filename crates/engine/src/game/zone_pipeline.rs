@@ -1742,7 +1742,7 @@ pub(crate) fn drain_pending_batch_deliveries(state: &mut GameState, events: &mut
                     events,
                 )
                 .expect("completed batch drain owns every terminal zone-change outcome");
-                crate::game::triggers::sync_logical_zone_change_departure_stamps(
+                crate::game::triggers::sync_logical_zone_change_simultaneity_stamps(
                     &logical_zone_change_group,
                     &mut deferred_events,
                 );

@@ -3065,6 +3065,7 @@ impl GameObject {
             // (`combat::live_block_pairs_of`); the object alone cannot answer it.
             block_pairs: Vec::new(),
             co_departed: Vec::new(),
+            co_entered: Vec::new(),
             attached_to: self.attached_to,
             // CR 400.7: filled in by `move_to_zone` from the live object AFTER the
             // battlefield-entry incarnation bump; `None` here (pre-entry snapshot).

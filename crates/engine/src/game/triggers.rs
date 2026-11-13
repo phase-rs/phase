@@ -3839,66 +3839,186 @@ pub(crate) fn departure_observer_provably_excludes(
 /// that the SAME spell sacrificed before she was put back onto the
 /// battlefield).
 ///
-/// `battlefield_entry_index` maps each object to the observation boundary of
-/// its LAST `ZoneChanged { to: Battlefield }` in `events`. The boundary also
-/// includes contiguous same-object counter events published immediately before
-/// that entry record for "enters with counters" replacements. An object with
-/// no entry recorded was already on the battlefield before the batch began
-/// (the caller already restricts candidates to objects currently on the
-/// battlefield), so it is present for every event in the batch. An object
-/// that DID (re-)enter mid-batch is present only from that boundary onward —
-/// CR 400.7 treats a permanent that changes zones as a new object
-/// with no memory of its prior incarnation, so even an earlier temporary
-/// presence within the SAME batch (a blink-and-return) does not extend
-/// backward past the most recent entry. This subsumes the original
+/// `observations` maps each object that entered within the batch to its
+/// observation window: from the boundary of its LAST `ZoneChanged { to:
+/// Battlefield }` in `events` onward, plus the entry occurrences of the objects
+/// that entered in the same event as that entry (CR 603.6a; see
+/// [`battlefield_entry_observation_indices`]). The boundary also includes
+/// contiguous same-object counter events published immediately before that
+/// entry record for "enters with counters" replacements. An object with no
+/// entry recorded was already on the battlefield before the batch began (the
+/// caller already restricts candidates to objects currently on the
+/// battlefield), so it is present for every event in the batch. An object that
+/// DID (re-)enter mid-batch is present only from that boundary onward, and for
+/// its co-entrants' entries — CR 400.7 treats a permanent that changes zones as
+/// a new object with no memory of its prior incarnation, so even an earlier
+/// temporary presence within the SAME batch (a blink-and-return) does not
+/// extend backward past the most recent entry. This subsumes the original
 /// self-departure check: for a source that leaves and later re-enters within
 /// the same batch, its own departure index is always strictly less than its
 /// last-entry index, so it is correctly excluded.
 fn live_battlefield_source_was_present_at_event(
     event_idx: usize,
     source_id: ObjectId,
-    battlefield_entry_index: &std::collections::HashMap<ObjectId, usize>,
+    observations: &BattlefieldEntryObservations,
 ) -> bool {
-    battlefield_entry_index
+    observations
+        .by_object
         .get(&source_id)
-        .is_none_or(|&entry_idx| event_idx >= entry_idx)
+        .is_none_or(|observation| observation.observes(event_idx))
 }
 
-/// Return each entrant's observation boundary within a resolved event batch.
+/// The event indices of one resolved batch that an object entering the
+/// battlefield within it observes.
+struct EntryObservation {
+    /// Start of the object's LAST entry span: it observes every event from here on.
+    boundary: usize,
+    /// CR 603.6a: the entry spans of the other objects that entered in the same
+    /// event as that last entry.
+    co_entry_spans: Vec<std::ops::RangeInclusive<usize>>,
+}
+
+impl EntryObservation {
+    fn observes(&self, event_idx: usize) -> bool {
+        event_idx >= self.boundary
+            || self
+                .co_entry_spans
+                .iter()
+                .any(|span| span.contains(&event_idx))
+    }
+}
+
+/// Every object that entered the battlefield within one resolved batch, with
+/// the events it observes there.
+struct BattlefieldEntryObservations {
+    by_object: std::collections::HashMap<ObjectId, EntryObservation>,
+}
+
+/// One battlefield entry occurrence of a resolved batch.
+struct BatchEntry {
+    object_id: ObjectId,
+    span: std::ops::RangeInclusive<usize>,
+    /// The entrant and its CR 603.6a co-entrants, sorted and deduplicated.
+    members: Vec<ObjectId>,
+}
+
+/// Return each entrant's observation window within a resolved event batch.
+///
+/// CR 603.6a: "Each time an event puts one or more permanents onto the
+/// battlefield, all permanents on the battlefield (including the newcomers) are
+/// checked". The newcomers of one event therefore see that event's entries,
+/// each with its entry counter prefix (CR 122.6), whichever of them was
+/// delivered first. Which entries are one event is read from the stamped
+/// `ZoneChangeRecord::co_entered` fact, never from event order: entries whose
+/// member sets (the entrant plus its `co_entered`) are equal join one event,
+/// and a member seen again under the same set opens a new event (CR 400.7: an
+/// earlier entry of the same object is an earlier event). An unstamped entry
+/// is its own event.
+///
+/// CR 400.7 + issue #8160: every other event before an observer's own entry
+/// stays unseen, including one interleaved within the group's delivery before
+/// that entry, such as a sacrifice (a look-back trigger event, CR 603.10a).
 ///
 /// An "enters with counters" replacement is applied while the object enters,
 /// but token creation currently publishes those contiguous `CounterAdded`
 /// events immediately before its journaled `ZoneChanged` event. They are part
-/// of the entry lifetime, so the boundary includes that same-object counter
+/// of the entry lifetime, so an entry span includes that same-object counter
 /// prefix. It deliberately stops at the first different event, keeping an
 /// unrelated event that occurred before entry outside the observer's lifetime.
-fn battlefield_entry_observation_indices(
-    events: &[GameEvent],
-) -> std::collections::HashMap<ObjectId, usize> {
-    let mut boundaries = std::collections::HashMap::new();
-    for (entry_idx, event) in events.iter().enumerate() {
-        let GameEvent::ZoneChanged {
-            object_id,
-            to: Zone::Battlefield,
-            ..
-        } = event
-        else {
-            continue;
-        };
+///
+/// Known gaps: the reader reads the batch it is given. An entrant whose own
+/// entry occurrence is absent from that batch has no boundary there: the
+/// occurrence was claimed by its owner, captured for a mid-entry choice, or
+/// removed as a queued witness. A co-entrant delivered in another segment or
+/// action (a member resumed after a pause, or one delivered before it) is not
+/// observed.
+fn battlefield_entry_observation_indices(events: &[GameEvent]) -> BattlefieldEntryObservations {
+    let entries: Vec<BatchEntry> = events
+        .iter()
+        .enumerate()
+        .filter_map(|(entry_idx, event)| {
+            let GameEvent::ZoneChanged {
+                object_id,
+                to: Zone::Battlefield,
+                record,
+                ..
+            } = event
+            else {
+                return None;
+            };
+            let mut members = record.co_entered.clone();
+            members.push(*object_id);
+            members.sort_unstable();
+            members.dedup();
+            Some(BatchEntry {
+                object_id: *object_id,
+                span: entry_span_start(events, entry_idx, *object_id)..=entry_idx,
+                members,
+            })
+        })
+        .collect();
 
-        let mut boundary = entry_idx;
-        while boundary > 0
-            && matches!(
-                &events[boundary - 1],
-                GameEvent::CounterAdded { object_id: countered_id, .. }
-                    if countered_id == object_id
-            )
-        {
-            boundary -= 1;
-        }
-        boundaries.insert(*object_id, boundary);
+    // CR 603.6a + CR 400.7: group the entries into events. Per member set, the
+    // open event and the members already seen in it.
+    let mut entry_event: Vec<usize> = Vec::with_capacity(entries.len());
+    let mut event_entries: Vec<Vec<usize>> = Vec::new();
+    let mut open_events: std::collections::HashMap<&[ObjectId], (usize, Vec<ObjectId>)> =
+        std::collections::HashMap::new();
+    for (entry_ordinal, entry) in entries.iter().enumerate() {
+        let joined = match open_events.get_mut(entry.members.as_slice()) {
+            Some((event, seen)) if !seen.contains(&entry.object_id) => {
+                seen.push(entry.object_id);
+                Some(*event)
+            }
+            Some(_) | None => None,
+        };
+        let event = joined.unwrap_or_else(|| {
+            let event = event_entries.len();
+            event_entries.push(Vec::new());
+            open_events.insert(entry.members.as_slice(), (event, vec![entry.object_id]));
+            event
+        });
+        event_entries[event].push(entry_ordinal);
+        entry_event.push(event);
     }
-    boundaries
+
+    let mut last_entry: std::collections::HashMap<ObjectId, usize> =
+        std::collections::HashMap::new();
+    for (entry_ordinal, entry) in entries.iter().enumerate() {
+        last_entry.insert(entry.object_id, entry_ordinal);
+    }
+    let by_object = last_entry
+        .into_iter()
+        .map(|(object_id, entry_ordinal)| {
+            let co_entry_spans = event_entries[entry_event[entry_ordinal]]
+                .iter()
+                .filter(|&&co_entry| co_entry != entry_ordinal)
+                .map(|&co_entry| entries[co_entry].span.clone())
+                .collect();
+            let observation = EntryObservation {
+                boundary: *entries[entry_ordinal].span.start(),
+                co_entry_spans,
+            };
+            (object_id, observation)
+        })
+        .collect();
+    BattlefieldEntryObservations { by_object }
+}
+
+/// Start of the entry span of `object_id`'s battlefield entry at `entry_idx`: the entry itself
+/// and the contiguous same-object `CounterAdded` events published immediately before it.
+fn entry_span_start(events: &[GameEvent], entry_idx: usize, object_id: ObjectId) -> usize {
+    let mut start = entry_idx;
+    while start > 0
+        && matches!(
+            &events[start - 1],
+            GameEvent::CounterAdded { object_id: countered_id, .. }
+                if *countered_id == object_id
+        )
+    {
+        start -= 1;
+    }
+    start
 }
 
 fn storm_copy_count_before_cast(state: &GameState) -> i32 {
@@ -4801,15 +4921,38 @@ pub(crate) fn append_and_collect_logical_zone_trigger_segment_for(
     events: &[GameEvent],
     collector: EntryOccurrenceCollector,
 ) -> Result<(), String> {
+    append_logical_zone_trigger_segment(group, events)?;
+    collect_owner_logical_zone_trigger_segment(state, group, events, collector)
+}
+
+/// Retain every `ZoneChanged` occurrence of one delivery segment on its owner.
+fn append_logical_zone_trigger_segment(
+    group: &mut LogicalZoneChangeGroup,
+    events: &[GameEvent],
+) -> Result<(), String> {
     let zone_change_events: Vec<_> = events
         .iter()
         .filter(|event| matches!(event, GameEvent::ZoneChanged { .. }))
         .cloned()
         .collect();
-    group.append_delivery_events(&zone_change_events)?;
-    let owner_collected_events: Vec<_> = zone_change_events
-        .into_iter()
-        .filter(|event| owner_collects_occurrence(collector, event))
+    group.append_delivery_events(&zone_change_events)
+}
+
+/// Collect and park the ordinary triggers of one retained delivery segment's `ZoneChanged`
+/// occurrences that `collector` leaves with the owner.
+fn collect_owner_logical_zone_trigger_segment(
+    state: &mut GameState,
+    group: &LogicalZoneChangeGroup,
+    events: &[GameEvent],
+    collector: EntryOccurrenceCollector,
+) -> Result<(), String> {
+    let owner_collected_events: Vec<_> = events
+        .iter()
+        .filter(|event| {
+            matches!(event, GameEvent::ZoneChanged { .. })
+                && owner_collects_occurrence(collector, event)
+        })
+        .cloned()
         .collect();
     let pending = collect_logical_zone_trigger_segment(state, group, &owner_collected_events);
     resolve_and_apply_trigger_collection(
@@ -4928,7 +5071,8 @@ fn owner_collects_occurrence(collector: EntryOccurrenceCollector, event: &GameEv
 /// CR 603.10 observes ordinary triggers only after the final layer flush, while
 /// CR 603.10a uses each departed member's record-owned pre-event authority.
 /// This is the sole completion seam: it appends the final segment, latches the
-/// post-event authority, stamps only derived battlefield departures, and runs
+/// post-event authority, stamps the group's battlefield entries before its final
+/// segment is collected and its derived battlefield departures after it, and runs
 /// settlement exactly once before the caller emits its trailing completion.
 pub(crate) fn complete_logical_zone_trigger_collection(
     state: &mut GameState,
@@ -4962,7 +5106,18 @@ pub(crate) fn complete_logical_zone_trigger_collection_for(
     final_events: &mut [GameEvent],
     collector: EntryOccurrenceCollector,
 ) -> Result<(), String> {
-    append_and_collect_logical_zone_trigger_segment_for(state, group, final_events, collector)?;
+    // CR 603.6a: the group's entries are one event. Its final segment joins the owner, and every
+    // entry is stamped before any collector reads it, so the owner's own check, the post-action
+    // pass and a deferred-entry replay read the same simultaneity, and witnesses captured below
+    // equal the stamped buffer (CR 603.2c).
+    append_logical_zone_trigger_segment(group, final_events)?;
+    group.stamp_battlefield_entries();
+    sync_logical_zone_change_simultaneity_stamps(group, final_events);
+    sync_logical_zone_change_simultaneity_stamps(group, &mut state.deferred_entry_events);
+    // CR 400.7 + CR 603.2c: the entries' ledger rows and the parked copies carry the same stamp,
+    // so a restore binds every copy to its occurrence.
+    mirror_logical_zone_change_entry_stamps(state, group);
+    collect_owner_logical_zone_trigger_segment(state, group, final_events, collector)?;
     latch_logical_zone_change_group_immediately_after(state, group);
 
     let post_event_members: Vec<_> = group
@@ -4996,7 +5151,7 @@ pub(crate) fn complete_logical_zone_trigger_collection_for(
     }
 
     group.stamp_battlefield_departures()?;
-    sync_logical_zone_change_departure_stamps(group, final_events);
+    sync_logical_zone_change_simultaneity_stamps(group, final_events);
     let settlement = collect_logical_zone_trigger_settlement_for(state, group, collector)?;
     resolve_and_apply_trigger_collection(
         state,
@@ -5008,54 +5163,129 @@ pub(crate) fn complete_logical_zone_trigger_collection_for(
     Ok(())
 }
 
-/// Copy owner-derived CR 603.10a departure stamps onto any externally retained
-/// delivery output. A paused batch keeps earlier delivery events outside its
-/// final segment until it completes, but those events must expose the same
-/// derived `co_departed` projection as the owner's retained records.
-pub(crate) fn sync_logical_zone_change_departure_stamps(
+/// Copy the owner-derived simultaneity stamps, CR 603.10a `co_departed` and CR 603.6a
+/// `co_entered`, onto every copy of the group's occurrences held outside it: any externally
+/// retained delivery output. A paused batch keeps earlier delivery events outside its final
+/// segment until it completes, but those events must expose the same derived projections as
+/// the owner's retained records.
+pub(crate) fn sync_logical_zone_change_simultaneity_stamps(
     group: &LogicalZoneChangeGroup,
     events: &mut [GameEvent],
 ) {
     for event in events {
-        let GameEvent::ZoneChanged {
-            object_id,
-            from,
-            to,
-            record,
-        } = event
-        else {
+        let Some(retained_record) = retained_occurrence_record(group, event) else {
             continue;
         };
-        let Some(GameEvent::ZoneChanged {
-            record: retained_record,
-            ..
-        }) = group
-            .all_origin_occurrences
-            .iter()
-            .map(|occurrence| &occurrence.event)
-            .find(|retained| {
-                matches!(
-                    retained,
-                    GameEvent::ZoneChanged {
-                        object_id: retained_id,
-                        from: retained_from,
-                        to: retained_to,
-                        record: retained_record,
-                    } if retained_id == object_id
-                        && retained_from == from
-                        && retained_to == to
-                        && retained_record
-                            .trigger_source_context()
-                            .map(|context| context.identity.reference)
-                            == record
-                                .trigger_source_context()
-                                .map(|context| context.identity.reference)
-                )
-            })
-        else {
-            continue;
+        let GameEvent::ZoneChanged { record, .. } = event else {
+            unreachable!("retained_occurrence_record matches only ZoneChanged events");
         };
         record.co_departed = retained_record.co_departed.clone();
+        record.co_entered = retained_record.co_entered.clone();
+    }
+}
+
+/// The record of the group's retained occurrence that `event` is a copy of: the same object
+/// moved between the same zones under the same source-context reference. `None` for any other
+/// event.
+fn retained_occurrence_record<'g>(
+    group: &'g LogicalZoneChangeGroup,
+    event: &GameEvent,
+) -> Option<&'g crate::types::game_state::ZoneChangeRecord> {
+    let GameEvent::ZoneChanged {
+        object_id,
+        from,
+        to,
+        record,
+    } = event
+    else {
+        return None;
+    };
+    group
+        .all_origin_occurrences
+        .iter()
+        .find_map(|occurrence| match &occurrence.event {
+            GameEvent::ZoneChanged {
+                object_id: retained_id,
+                from: retained_from,
+                to: retained_to,
+                record: retained_record,
+            } if retained_id == object_id
+                && retained_from == from
+                && retained_to == to
+                && retained_record
+                    .trigger_source_context()
+                    .map(|context| context.identity.reference)
+                    == record
+                        .trigger_source_context()
+                        .map(|context| context.identity.reference) =>
+            {
+                Some(retained_record.as_ref())
+            }
+            _ => None,
+        })
+}
+
+/// CR 603.6a + CR 400.7 + CR 603.2c: copy each entry's `co_entered` stamp onto the copies of the
+/// group's entries that its completion does not otherwise produce. Each entry's per-turn ledger
+/// row was recorded at its move, possibly in an earlier action, and a trigger the owner collected
+/// from an earlier delivery segment is parked in `deferred_triggers` with an unstamped copy. A
+/// restore binds every live `ZoneChanged` record to its ledger row by the record's rules
+/// projection, `co_entered` included, so every copy must state the same event. The precedent is
+/// `zones::mark_simultaneous_departure_records`. `co_departed` is not mirrored here: the ledger's
+/// copy is read by `co_departed_observer_record` and a parked copy's by
+/// `source_was_not_co_departed_into_zone`.
+fn mirror_logical_zone_change_entry_stamps(state: &mut GameState, group: &LogicalZoneChangeGroup) {
+    for occurrence in &group.all_origin_occurrences {
+        let GameEvent::ZoneChanged {
+            object_id,
+            from: Some(from),
+            to: Zone::Battlefield,
+            record,
+        } = &occurrence.event
+        else {
+            continue;
+        };
+        if record.recorded_turn_number != state.turn_number {
+            continue;
+        }
+        let Some(row) = state
+            .zone_changes_this_turn
+            .get_mut(record.turn_zone_change_index)
+        else {
+            continue;
+        };
+        if row.object_id == *object_id
+            && row.from_zone == Some(*from)
+            && row.to_zone == Zone::Battlefield
+        {
+            row.co_entered = record.co_entered.clone();
+        }
+    }
+
+    for context in &mut state.deferred_triggers {
+        for event in context
+            .trigger_events
+            .iter_mut()
+            .chain(context.pending.trigger_event.iter_mut())
+        {
+            if !matches!(
+                event,
+                GameEvent::ZoneChanged {
+                    from: Some(_),
+                    to: Zone::Battlefield,
+                    ..
+                }
+            ) {
+                continue;
+            }
+            let Some(retained_record) = retained_occurrence_record(group, event) else {
+                continue;
+            };
+            let GameEvent::ZoneChanged { record, .. } = event else {
+                unreachable!("matched a battlefield ZoneChanged above");
+            };
+            record.co_entered = retained_record.co_entered.clone();
+        }
     }
 }
 
@@ -5529,8 +5759,10 @@ fn collect_pending_triggers_with_collection(
     // that had not yet (re-)entered the battlefield when that event happened —
     // otherwise a permanent returned to the battlefield later in the chain
     // retroactively "sees" a sacrifice/etc. that occurred earlier in the same
-    // chain, before it was there to observe it (issue #8160).
-    let battlefield_entry_index = battlefield_entry_observation_indices(events);
+    // chain, before it was there to observe it (issue #8160). The carrier also
+    // holds each entrant's co-entry spans: the entries of the objects that
+    // entered in the same event as that entry, which it observes (CR 603.6a).
+    let battlefield_entry_observations = battlefield_entry_observation_indices(events);
     // CR 603.10a: built on the first co-departure group this pass sees.
     let mut co_departure_index: Option<CoDepartureObserverIndex> = None;
 
@@ -5588,7 +5820,7 @@ fn collect_pending_triggers_with_collection(
             if !live_battlefield_source_was_present_at_event(
                 event_idx,
                 obj_id,
-                &battlefield_entry_index,
+                &battlefield_entry_observations,
             ) {
                 continue;
             }
@@ -6075,7 +6307,7 @@ fn collect_pending_triggers_with_collection(
                     if !live_battlefield_source_was_present_at_event(
                         event_idx,
                         obj_id,
-                        &battlefield_entry_index,
+                        &battlefield_entry_observations,
                     ) {
                         continue;
                     }
@@ -19870,6 +20102,350 @@ pub mod tests {
             saga,
             &boundaries
         ));
+    }
+
+    const OBSERVATION_GIANT: ObjectId = ObjectId(20);
+    const OBSERVATION_WARDEN: ObjectId = ObjectId(21);
+    const OBSERVATION_WORLDSIRE: ObjectId = ObjectId(22);
+    const OBSERVATION_CARMEN: ObjectId = ObjectId(23);
+    const OBSERVATION_FOREST: ObjectId = ObjectId(24);
+    const OBSERVATION_TOKEN: ObjectId = ObjectId(25);
+
+    /// A graveyard-to-battlefield entry of `object_id` stamped with `co_entered`.
+    fn observation_entry(object_id: ObjectId, co_entered: &[ObjectId]) -> GameEvent {
+        GameEvent::ZoneChanged {
+            object_id,
+            from: Some(Zone::Graveyard),
+            to: Zone::Battlefield,
+            record: Box::new(ZoneChangeRecord {
+                co_entered: co_entered.to_vec(),
+                ..ZoneChangeRecord::test_minimal(
+                    object_id,
+                    Some(Zone::Graveyard),
+                    Zone::Battlefield,
+                )
+            }),
+        }
+    }
+
+    fn observation_sacrifice(object_id: ObjectId) -> GameEvent {
+        GameEvent::PermanentSacrificed {
+            object_id,
+            player_id: PlayerId(0),
+        }
+    }
+
+    fn observation_counter(object_id: ObjectId) -> GameEvent {
+        GameEvent::CounterAdded {
+            object_id,
+            counter_type: CounterType::Plus1Plus1,
+            count: 1,
+            actor: PlayerId(0),
+        }
+    }
+
+    fn observes(events: &[GameEvent], observer: ObjectId, event_idx: usize) -> bool {
+        live_battlefield_source_was_present_at_event(
+            event_idx,
+            observer,
+            &battlefield_entry_observation_indices(events),
+        )
+    }
+
+    /// CR 603.6a: a newcomer observes a co-entrant's entry delivered before its own.
+    #[test]
+    fn battlefield_entry_observation_co_entrant_delivered_first() {
+        let events = [
+            observation_entry(OBSERVATION_GIANT, &[OBSERVATION_WARDEN]),
+            observation_entry(OBSERVATION_WARDEN, &[OBSERVATION_GIANT]),
+        ];
+        assert!(observes(&events, OBSERVATION_WARDEN, 0));
+    }
+
+    /// CR 603.6a + CR 122.6: a co-entrant's entry span includes its entry counter prefix.
+    #[test]
+    fn battlefield_entry_observation_includes_co_entrant_counter_prefix() {
+        let events = [
+            observation_counter(OBSERVATION_WORLDSIRE),
+            observation_entry(OBSERVATION_WORLDSIRE, &[OBSERVATION_CARMEN]),
+            observation_entry(OBSERVATION_CARMEN, &[OBSERVATION_WORLDSIRE]),
+        ];
+        assert!(observes(&events, OBSERVATION_CARMEN, 0));
+        assert!(observes(&events, OBSERVATION_CARMEN, 1));
+    }
+
+    /// CR 603.6a + CR 400.7 + CR 603.10a: a sacrifice interleaved within the group's delivery,
+    /// before the observer's entry, stays unseen while the co-entrants' entries around it are
+    /// seen.
+    #[test]
+    fn battlefield_entry_observation_excludes_interleaved_sacrifice() {
+        let events = [
+            observation_entry(
+                OBSERVATION_GIANT,
+                &[OBSERVATION_WORLDSIRE, OBSERVATION_CARMEN],
+            ),
+            observation_sacrifice(OBSERVATION_FOREST),
+            observation_counter(OBSERVATION_WORLDSIRE),
+            observation_entry(
+                OBSERVATION_WORLDSIRE,
+                &[OBSERVATION_GIANT, OBSERVATION_CARMEN],
+            ),
+            observation_entry(
+                OBSERVATION_CARMEN,
+                &[OBSERVATION_GIANT, OBSERVATION_WORLDSIRE],
+            ),
+        ];
+        assert!(observes(&events, OBSERVATION_CARMEN, 0));
+        assert!(!observes(&events, OBSERVATION_CARMEN, 1));
+        for event_idx in 2..=4 {
+            assert!(
+                observes(&events, OBSERVATION_CARMEN, event_idx),
+                "{event_idx}"
+            );
+        }
+    }
+
+    /// CR 400.7 + issue #8160: an event before the group stays unseen by its entrants.
+    #[test]
+    fn battlefield_entry_observation_excludes_event_before_the_group() {
+        let events = [
+            observation_sacrifice(OBSERVATION_FOREST),
+            observation_entry(OBSERVATION_GIANT, &[OBSERVATION_CARMEN]),
+            observation_entry(OBSERVATION_CARMEN, &[OBSERVATION_GIANT]),
+        ];
+        assert!(!observes(&events, OBSERVATION_CARMEN, 0));
+        assert!(observes(&events, OBSERVATION_CARMEN, 1));
+    }
+
+    /// CR 603.6a + CR 400.7: a member seen again under the same member set opens a new event, so
+    /// the observer's last entry sees only its own event's co-entrant.
+    #[test]
+    fn battlefield_entry_observation_repeated_members_open_a_new_event() {
+        let events = [
+            observation_entry(OBSERVATION_GIANT, &[OBSERVATION_WARDEN]),
+            observation_entry(OBSERVATION_WARDEN, &[OBSERVATION_GIANT]),
+            observation_entry(OBSERVATION_GIANT, &[OBSERVATION_WARDEN]),
+            observation_sacrifice(OBSERVATION_FOREST),
+            observation_entry(OBSERVATION_WARDEN, &[OBSERVATION_GIANT]),
+        ];
+        assert!(observes(&events, OBSERVATION_WARDEN, 2));
+        assert!(!observes(&events, OBSERVATION_WARDEN, 0));
+        assert!(!observes(&events, OBSERVATION_WARDEN, 3));
+    }
+
+    /// CR 400.7: unstamped entries keep each entrant's own boundary.
+    #[test]
+    fn battlefield_entry_observation_unstamped_entries_keep_own_boundary() {
+        let events = [
+            observation_entry(OBSERVATION_GIANT, &[]),
+            observation_entry(OBSERVATION_WARDEN, &[]),
+        ];
+        assert!(!observes(&events, OBSERVATION_WARDEN, 0));
+        assert!(observes(&events, OBSERVATION_WARDEN, 1));
+    }
+
+    /// CR 603.6a + CR 111.1: an entry inside the group's delivery span that is not one of its
+    /// members (a token created on the battlefield) is not a co-entrant.
+    #[test]
+    fn battlefield_entry_observation_excludes_non_member_entry() {
+        let events = [
+            observation_entry(OBSERVATION_GIANT, &[OBSERVATION_CARMEN]),
+            GameEvent::ZoneChanged {
+                object_id: OBSERVATION_TOKEN,
+                from: None,
+                to: Zone::Battlefield,
+                record: Box::new(ZoneChangeRecord::test_minimal(
+                    OBSERVATION_TOKEN,
+                    None,
+                    Zone::Battlefield,
+                )),
+            },
+            observation_entry(OBSERVATION_CARMEN, &[OBSERVATION_GIANT]),
+        ];
+        assert!(observes(&events, OBSERVATION_CARMEN, 0));
+        assert!(!observes(&events, OBSERVATION_CARMEN, 1));
+    }
+
+    const MIRROR_TURN: u32 = 2;
+
+    /// Key `event`'s record to ledger row `index` of `turn`.
+    fn keyed_occurrence(mut event: GameEvent, index: usize, turn: u32) -> GameEvent {
+        let GameEvent::ZoneChanged { record, .. } = &mut event else {
+            unreachable!("mirror fixtures key only zone changes");
+        };
+        record.turn_zone_change_index = index;
+        record.recorded_turn_number = turn;
+        event
+    }
+
+    /// Hill Giant's graveyard-to-battlefield entry, keyed to ledger row `index` of `turn`.
+    fn mirror_giant_entry(index: usize, turn: u32) -> GameEvent {
+        keyed_occurrence(observation_entry(OBSERVATION_GIANT, &[]), index, turn)
+    }
+
+    /// A state on turn 2 whose zone-change ledger holds rows 0: Hill Giant graveyard to
+    /// battlefield, 1: Forest battlefield to graveyard, 2: Soul Warden graveyard to battlefield,
+    /// 3: Carmen (outside the group) graveyard to battlefield. Two contexts are parked: one on an
+    /// unstamped copy of the Giant's entry, one on Carmen's entry.
+    fn mirror_state() -> GameState {
+        let mut state = setup();
+        state.turn_number = MIRROR_TURN;
+        let rows = [
+            mirror_giant_entry(0, MIRROR_TURN),
+            keyed_occurrence(mirror_forest_departure(), 1, MIRROR_TURN),
+            keyed_occurrence(observation_entry(OBSERVATION_WARDEN, &[]), 2, MIRROR_TURN),
+            keyed_occurrence(observation_entry(OBSERVATION_CARMEN, &[]), 3, MIRROR_TURN),
+        ];
+        state.zone_changes_this_turn = rows
+            .iter()
+            .map(|event| {
+                let GameEvent::ZoneChanged { record, .. } = event else {
+                    unreachable!("mirror rows are zone changes");
+                };
+                record.as_ref().clone()
+            })
+            .collect();
+        for (source, trigger_event) in [
+            (OBSERVATION_WARDEN, rows[0].clone()),
+            (OBSERVATION_WARDEN, rows[3].clone()),
+        ] {
+            state
+                .deferred_triggers
+                .push(PendingTriggerContext::single(PendingTrigger {
+                    trigger_event: Some(trigger_event),
+                    ..PendingTrigger::ordinary(
+                        source,
+                        PlayerId(0),
+                        None,
+                        Box::new(ResolvedAbility::new(
+                            Effect::GainLife {
+                                amount: QuantityExpr::Fixed { value: 1 },
+                                player: TargetFilter::Controller,
+                            },
+                            vec![],
+                            source,
+                            PlayerId(0),
+                        )),
+                        0,
+                    )
+                }));
+        }
+        state
+    }
+
+    /// The Forest's battlefield-to-graveyard departure.
+    fn mirror_forest_departure() -> GameEvent {
+        GameEvent::ZoneChanged {
+            object_id: OBSERVATION_FOREST,
+            from: Some(Zone::Battlefield),
+            to: Zone::Graveyard,
+            record: Box::new(ZoneChangeRecord::test_minimal(
+                OBSERVATION_FOREST,
+                Some(Zone::Battlefield),
+                Zone::Graveyard,
+            )),
+        }
+    }
+
+    /// A completed group that moved the Giant (retained as `giant_entry`), the Forest (row 1) and
+    /// Soul Warden (row 2), stamped.
+    fn mirror_group(state: &mut GameState, giant_entry: GameEvent) -> LogicalZoneChangeGroup {
+        let mut group = state.allocate_logical_zone_change_group(&[]);
+        group
+            .latch_immediately_before(Vec::new(), Vec::new())
+            .expect("test group owns an explicit pre-delivery latch");
+        group
+            .append_delivery_events(&[
+                giant_entry,
+                keyed_occurrence(mirror_forest_departure(), 1, MIRROR_TURN),
+                keyed_occurrence(observation_entry(OBSERVATION_WARDEN, &[]), 2, MIRROR_TURN),
+            ])
+            .expect("append the group's occurrences");
+        group.stamp_battlefield_entries();
+        group
+    }
+
+    fn ledger_co_entered(state: &GameState) -> Vec<Vec<ObjectId>> {
+        state
+            .zone_changes_this_turn
+            .iter()
+            .map(|row| row.co_entered.clone())
+            .collect()
+    }
+
+    fn parked_co_entered(state: &GameState) -> Vec<Vec<ObjectId>> {
+        state
+            .deferred_triggers
+            .iter()
+            .map(|context| {
+                let Some(GameEvent::ZoneChanged { record, .. }) = &context.pending.trigger_event
+                else {
+                    unreachable!("mirror contexts are parked on zone changes");
+                };
+                record.co_entered.clone()
+            })
+            .collect()
+    }
+
+    /// CR 603.6a + CR 400.7 + CR 603.2c: completion copies each entry's stamp onto its own ledger
+    /// row and onto a parked copy of it, and leaves a departure's row, an entry outside the group
+    /// and its parked copy unstamped.
+    #[test]
+    fn logical_zone_change_entry_mirror_stamps_ledger_rows_and_parked_copies() {
+        let mut state = mirror_state();
+        let group = mirror_group(&mut state, mirror_giant_entry(0, MIRROR_TURN));
+
+        mirror_logical_zone_change_entry_stamps(&mut state, &group);
+
+        assert_eq!(
+            ledger_co_entered(&state),
+            vec![
+                vec![OBSERVATION_WARDEN],
+                Vec::new(),
+                vec![OBSERVATION_GIANT],
+                Vec::new(),
+            ]
+        );
+        assert_eq!(
+            parked_co_entered(&state),
+            vec![vec![OBSERVATION_WARDEN], Vec::new()]
+        );
+        let giant_context = &state.deferred_triggers[0];
+        assert!(
+            giant_context.trigger_events.iter().all(|event| matches!(
+                event,
+                GameEvent::ZoneChanged { record, .. } if record.co_entered == [OBSERVATION_WARDEN]
+            )),
+            "the context's batch copy is stamped too"
+        );
+    }
+
+    /// CR 400.7: a retained entry whose key names another object's row (same zones) leaves that
+    /// row and its own unstamped, while the other entry's row is stamped.
+    #[test]
+    fn logical_zone_change_entry_mirror_leaves_a_row_another_object_owns() {
+        let mut state = mirror_state();
+        let group = mirror_group(&mut state, mirror_giant_entry(3, MIRROR_TURN));
+
+        mirror_logical_zone_change_entry_stamps(&mut state, &group);
+
+        let ledger = ledger_co_entered(&state);
+        assert!(ledger[0].is_empty(), "{ledger:?}");
+        assert!(ledger[3].is_empty(), "{ledger:?}");
+        assert_eq!(ledger[2], vec![OBSERVATION_GIANT]);
+    }
+
+    /// CR 400.7: a retained entry keyed to a previous turn names no row of this turn's ledger.
+    #[test]
+    fn logical_zone_change_entry_mirror_leaves_a_prior_turn_key() {
+        let mut state = mirror_state();
+        let group = mirror_group(&mut state, mirror_giant_entry(0, MIRROR_TURN - 1));
+
+        mirror_logical_zone_change_entry_stamps(&mut state, &group);
+
+        let ledger = ledger_co_entered(&state);
+        assert!(ledger[0].is_empty(), "{ledger:?}");
+        assert_eq!(ledger[2], vec![OBSERVATION_GIANT]);
     }
 
     #[test]

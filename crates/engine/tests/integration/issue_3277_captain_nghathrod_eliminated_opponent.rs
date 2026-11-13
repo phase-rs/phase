@@ -107,6 +107,7 @@ fn captain_nghathrod_end_step_skips_eliminated_opponent_graveyard() {
             combat_status: Default::default(),
             block_pairs: Vec::new(),
             co_departed: Vec::new(),
+            co_entered: Vec::new(),
             attached_to: None,
             entered_incarnation: None,
             turn_zone_change_index: 0,

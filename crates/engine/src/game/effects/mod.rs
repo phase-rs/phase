@@ -2847,8 +2847,8 @@ fn drain_pending_change_zone_iteration(state: &mut GameState, events: &mut Vec<G
             .expect("settled selected return publishes its exact result once");
         }
         // The resumed delivery preceded `events_before_drain`, so synchronize its
-        // completed-owner departure stamp alongside the final drain segment.
-        crate::game::triggers::sync_logical_zone_change_departure_stamps(
+        // completed-owner simultaneity stamps alongside the final drain segment.
+        crate::game::triggers::sync_logical_zone_change_simultaneity_stamps(
             &logical_zone_change_group,
             events,
         );

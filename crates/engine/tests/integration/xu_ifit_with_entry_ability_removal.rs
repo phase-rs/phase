@@ -46,6 +46,16 @@
 //! `EntersWithAdditionalCounters` statics read the entrant with the resolution's simultaneous
 //! is/has effect applied: R20–R29, R-L2, R-A, R9m, R8m.
 //!
+//! Consequence (d) — CR 603.6a: "Each time an event puts one or more permanents onto the
+//! battlefield, all permanents on the battlefield (including the newcomers) are checked". The
+//! entrants of one completed logical group (a handed-off Storm of Souls return or an
+//! owner-collected Living Death return) see each other's entries whichever was delivered first,
+//! and Impact Tremors still triggers once per entrant (CR 603.2c): R30a, R30b, R30o-a, R30o-b. A
+//! returned entrant still misses an event before its own entry (issue #8160, CR 603.10a), and its
+//! sacrifice trigger is live on the battlefield: R-8160m, R-8160p. A save taken while such a
+//! stamped entry is in a live carrier restores, because the entry's per-turn ledger row and every
+//! parked copy carry the stamp (CR 400.7 + CR 603.2c): R-P1, R-P2, R-P3.
+//!
 //! REVERT DISCRIMINATORS:
 //! - Reverting the collection hand-off (making `change_zone::resolve` call the `Owner` delegate)
 //!   halts R4 at `UnlessPayment` and leaves R8 at P0 +1, P1 0.
@@ -82,14 +92,31 @@
 //!   gives R28 1 counter.
 //! - Skipping the controller override on the projection's scratch gives R21h 1 counter and R21,
 //!   R-L2 and R-A 0.
+//! - Skipping `stamp_battlefield_entries`, or dropping the co-entry spans in
+//!   `battlefield_entry_observation_indices`, gives R30a and R30o-a P0 +0.
+//! - Stamping after the final segment's owner collection gives R30o-a P1 −4.
+//! - Dropping the `deferred_entry_events` sync is not covered by a row. No printed board observes
+//!   this sync. Metallic Mimic's "As this creature enters, choose a creature type." is a choice
+//!   made before it enters (CR 614.12a; `replacement::park_as_enters_named_choice`): `resolve_all`
+//!   pauses before Mimic moves (`ZoneMoveTerminalResult::NeedsChoice`), so nothing is captured
+//!   into `state.deferred_entry_events`. A mid-entry choice that does capture an entry (enter as a
+//!   copy, an enters-with-your-choice-of-counter branch, an exact-object as-enters `NamedChoice`)
+//!   also makes its delivery return `NeedsChoice` (`zone_pipeline::replacement_pause_delivery_result`),
+//!   and every multi-member owner pauses on it, so the group completes in a later action, whose
+//!   buffer never holds the captured occurrence. The sync keeps a still-parked deferred copy
+//!   stamped like the group's retained occurrence.
+//! - Deleting the ledger half of `mirror_logical_zone_change_entry_stamps` makes R-P1 and R-P2 fail
+//!   to restore with 'current-turn ZoneChanged record has no ledger occurrence'.
+//! - Deleting its parked-trigger half makes R-P3 fail to restore with the same error.
 //!
 //! R-L1: Lorcan, Warlock Collector's trigger return carries its Warlock rider through a CR 616.1
 //! ordering pause; removing the triggering-object reading of `MovedObjectsSource::of` leaves the
 //! parked proposal without it.
 
+use engine::game::coverage::unimplemented_mechanics;
 use engine::game::game_object::AttachTarget;
 use engine::game::layers::{flush_layers, mark_layers_full};
-use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
+use engine::game::scenario::{CastOutcome, GameRunner, GameScenario, P0, P1};
 use engine::types::ability::{
     ChosenAttribute, ContinuousModification, EffectKind, ExileConcealment,
 };
@@ -98,7 +125,9 @@ use engine::types::card_type::CoreType;
 use engine::types::counter::CounterType;
 use engine::types::events::GameEvent;
 use engine::types::game_state::{
-    CastPaymentMode, ExileLink, ExileLinkKind, ReplacementChoiceKind, WaitingFor,
+    CastPaymentMode, ExileLink, ExileLinkKind, GameState, PersistedGameState,
+    PersistedRestoreFinalization, ReplacementChoiceKind, StackEntryKind, WaitingFor,
+    ZoneChangeRecord,
 };
 use engine::types::identifiers::ObjectId;
 use engine::types::keywords::{Keyword, KeywordKind};
@@ -106,6 +135,7 @@ use engine::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 use engine::types::proposed_event::{EtbTapState, ProposedEvent, WithEntryEffect};
+use engine::types::triggers::TriggerMode;
 use engine::types::zones::Zone;
 
 /// Xu-Ifit, Osteoharmonist {1}{B}{B} Legendary Creature — Human Wizard 2/3 — verbatim.
@@ -2281,4 +2311,765 @@ fn bronzehide_lion_returns_untapped_past_imposing_sovereign() {
     assert_eq!(lion_obj.attached_to, Some(AttachTarget::Object(bears)));
     assert!(!lion_obj.tapped);
     assert_priority_with_empty_stack(&runner);
+}
+
+/// Living Death {3}{B}{B} Sorcery — verbatim.
+const LIVING_DEATH: &str = "Each player exiles all creature cards from their graveyard, then sacrifices all creatures they control, then puts all cards they exiled this way onto the battlefield.";
+/// Carmen, Cruel Skymarcher {3}{W}{B} Legendary Creature — Vampire Soldier 2/2 — verbatim.
+const CARMEN_CRUEL_SKYMARCHER: &str = "Flying\nWhenever a player sacrifices a permanent, put a +1/+1 counter on Carmen and you gain 1 life.\nWhenever Carmen attacks, return up to one target permanent card with mana value less than or equal to Carmen's power from your graveyard to the battlefield.";
+/// Impact Tremors {1}{R} Enchantment — verbatim.
+const IMPACT_TREMORS: &str =
+    "Whenever a creature you control enters, this enchantment deals 1 damage to each opponent.";
+/// Village Rites {B} Instant — verbatim.
+const VILLAGE_RITES: &str =
+    "As an additional cost to cast this spell, sacrifice a creature.\nDraw two cards.";
+
+/// A card a mass-return board stages in a graveyard.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum GraveyardCard {
+    HillGiant,
+    SoulWarden,
+    CarmenCruelSkymarcher,
+    FamishedWorldsire,
+}
+
+impl GraveyardCard {
+    /// Put this card into `player`'s graveyard and return its id.
+    fn add_to_graveyard(self, scenario: &mut GameScenario, player: PlayerId) -> ObjectId {
+        match self {
+            GraveyardCard::HillGiant => hill_giant_in_graveyard(scenario, player),
+            GraveyardCard::SoulWarden => scenario
+                .add_creature_to_graveyard(player, "Soul Warden", 1, 1)
+                .with_subtypes(vec!["Human", "Cleric"])
+                .from_oracle_text(SOUL_WARDEN)
+                .id(),
+            GraveyardCard::CarmenCruelSkymarcher => scenario
+                .add_creature_to_graveyard(player, "Carmen, Cruel Skymarcher", 2, 2)
+                .with_subtypes(vec!["Vampire", "Soldier"])
+                .from_oracle_text(CARMEN_CRUEL_SKYMARCHER)
+                .id(),
+            GraveyardCard::FamishedWorldsire => scenario
+                .add_creature_to_graveyard(player, "Famished Worldsire", 0, 0)
+                .with_subtypes(vec!["Leviathan"])
+                .from_oracle_text_with_keywords(&["Ward {3}", "Devour land 3"], FAMISHED_WORLDSIRE)
+                .id(),
+        }
+    }
+}
+
+/// The permanent a Living Death board puts on P0's battlefield before the cast.
+#[derive(Clone, Copy, Debug)]
+enum Resident {
+    ImpactTremors,
+    GrizzlyBears,
+}
+
+/// Position of `id`'s battlefield `ZoneChanged` in `events`.
+fn battlefield_entry_index(events: &[GameEvent], id: ObjectId) -> usize {
+    events
+        .iter()
+        .position(|event| {
+            matches!(
+                event,
+                GameEvent::ZoneChanged {
+                    object_id,
+                    to: Zone::Battlefield,
+                    ..
+                } if *object_id == id
+            )
+        })
+        .unwrap_or_else(|| panic!("{id:?} has no battlefield entry in {events:?}"))
+}
+
+/// Every ordering of `0..n`.
+fn index_permutations(n: usize) -> Vec<Vec<usize>> {
+    if n == 0 {
+        return vec![Vec::new()];
+    }
+    index_permutations(n - 1)
+        .into_iter()
+        .flat_map(|rest| {
+            (0..n).map(move |slot| {
+                let mut ordering = rest.clone();
+                ordering.insert(slot, n - 1);
+                ordering
+            })
+        })
+        .collect()
+}
+
+/// Where a driven board observed each card's battlefield entry.
+trait ObservedEntryOrder {
+    /// Position of `id`'s battlefield entry among the run's observed zone changes.
+    fn battlefield_entry_position(&self, id: ObjectId) -> usize;
+}
+
+impl ObservedEntryOrder for CastOutcome {
+    fn battlefield_entry_position(&self, id: ObjectId) -> usize {
+        battlefield_entry_index(self.events(), id)
+    }
+}
+
+/// A run stopped before its cast outcome exists reads the per-turn zone-change ledger.
+impl ObservedEntryOrder for GameRunner {
+    fn battlefield_entry_position(&self, id: ObjectId) -> usize {
+        ledger_battlefield_entry_position(self.state(), id)
+    }
+}
+
+/// Position of `id`'s first battlefield row in the per-turn zone-change ledger.
+fn ledger_battlefield_entry_position(state: &GameState, id: ObjectId) -> usize {
+    state
+        .zone_changes_this_turn
+        .iter()
+        .position(|record| record.object_id == id && record.to_zone == Zone::Battlefield)
+        .unwrap_or_else(|| panic!("{id:?} has no battlefield row in the zone-change ledger"))
+}
+
+/// `id`'s first battlefield row in the per-turn zone-change ledger.
+fn ledger_battlefield_entry(state: &GameState, id: ObjectId) -> &ZoneChangeRecord {
+    &state.zone_changes_this_turn[ledger_battlefield_entry_position(state, id)]
+}
+
+/// Run a mass-return board so its cards enter the battlefield in `order`.
+///
+/// The mass return delivers its cards in the object store's iteration order, which is fixed for
+/// a set of ids, so the creation order chooses which card holds which id. `run` stages the cards
+/// in the creation order it is given and returns their ids in that order. Every creation order is
+/// tried, and the first outcome whose observed battlefield entries follow `order` is returned,
+/// with the ids aligned to `order`.
+fn with_entry_order<const N: usize, R: ObservedEntryOrder>(
+    order: [GraveyardCard; N],
+    run: impl Fn([GraveyardCard; N]) -> (R, [ObjectId; N]),
+) -> (R, [ObjectId; N]) {
+    for ordering in index_permutations(N) {
+        let creation: [GraveyardCard; N] = std::array::from_fn(|k| order[ordering[k]]);
+        let (outcome, created) = run(creation);
+        let mut ids = created;
+        for (k, &slot) in ordering.iter().enumerate() {
+            ids[slot] = created[k];
+        }
+        let entries: Vec<usize> = ids
+            .iter()
+            .map(|&id| outcome.battlefield_entry_position(id))
+            .collect();
+        if entries.windows(2).all(|pair| pair[0] < pair[1]) {
+            return (outcome, ids);
+        }
+    }
+    panic!("no creation order delivered {order:?}");
+}
+
+/// Stage `creation` in P0's graveyard, in that order, and return their ids.
+fn stage_in_graveyard<const N: usize>(
+    scenario: &mut GameScenario,
+    creation: [GraveyardCard; N],
+) -> [ObjectId; N] {
+    creation.map(|card| card.add_to_graveyard(scenario, P0))
+}
+
+/// Storm of Souls in P0's hand and `creation` in P0's graveyard, on an empty battlefield. Returns
+/// the scenario, Storm of Souls and the staged ids.
+fn storm_scenario(creation: [GraveyardCard; 2]) -> (GameScenario, ObjectId, [ObjectId; 2]) {
+    let mut scenario = main_phase();
+    let ids = stage_in_graveyard(&mut scenario, creation);
+    let storm = scenario
+        .add_spell_to_hand_from_oracle(P0, "Storm of Souls", false, STORM_OF_SOULS)
+        .id();
+    (scenario, storm, ids)
+}
+
+/// Storm of Souls in P0's hand and `creation` in P0's graveyard, on an empty battlefield; cast
+/// and resolve it.
+fn storm_board(creation: [GraveyardCard; 2]) -> (CastOutcome, [ObjectId; 2]) {
+    let (scenario, storm, ids) = storm_scenario(creation);
+    let mut runner = scenario.build();
+    (runner.cast(storm).resolve(), ids)
+}
+
+/// Living Death in P0's hand, `creation` in P0's graveyard and `resident` on P0's battlefield.
+/// Returns the scenario, Living Death and the staged ids.
+fn living_death_scenario(
+    creation: [GraveyardCard; 2],
+    resident: Resident,
+) -> (GameScenario, ObjectId, [ObjectId; 2]) {
+    let mut scenario = main_phase();
+    let ids = stage_in_graveyard(&mut scenario, creation);
+    match resident {
+        Resident::ImpactTremors => {
+            scenario.add_enchantment_from_oracle(P0, "Impact Tremors", IMPACT_TREMORS);
+        }
+        Resident::GrizzlyBears => {
+            grizzly_bears_on_battlefield(&mut scenario, P0);
+        }
+    }
+    let living_death = scenario
+        .add_spell_to_hand_from_oracle(P0, "Living Death", false, LIVING_DEATH)
+        .id();
+    (scenario, living_death, ids)
+}
+
+/// Living Death in P0's hand, `creation` in P0's graveyard and `resident` on P0's battlefield;
+/// cast and resolve it.
+fn living_death_board(
+    creation: [GraveyardCard; 2],
+    resident: Resident,
+) -> (CastOutcome, [ObjectId; 2]) {
+    let (scenario, living_death, ids) = living_death_scenario(creation, resident);
+    let mut runner = scenario.build();
+    (runner.cast(living_death).resolve(), ids)
+}
+
+/// Pass priority one action at a time while `spell` is on the stack.
+fn pass_until_off_the_stack(runner: &mut GameRunner, spell: ObjectId) {
+    let spell_on_stack = |runner: &GameRunner| {
+        runner.state().stack.iter().any(|entry| {
+            matches!(entry.kind, StackEntryKind::Spell { .. }) && entry.source_id == spell
+        })
+    };
+    for _ in 0..4 {
+        if !spell_on_stack(runner) {
+            return;
+        }
+        runner
+            .act(GameAction::PassPriority)
+            .expect("priority passes while the spell is on the stack");
+    }
+    assert!(
+        !spell_on_stack(runner),
+        "{spell:?} is still on the stack: {:?}",
+        runner.state().waiting_for
+    );
+}
+
+/// Pass priority one action at a time until P0 is asked for a devour sacrifice.
+fn pass_until_devour_choice(runner: &mut GameRunner) {
+    let at_devour_choice = |runner: &GameRunner| {
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::EffectZoneChoice {
+                player: P0,
+                effect_kind: EffectKind::Sacrifice,
+                ..
+            }
+        )
+    };
+    for _ in 0..4 {
+        if at_devour_choice(runner) {
+            return;
+        }
+        runner
+            .act(GameAction::PassPriority)
+            .expect("priority passes before the devour choice");
+    }
+    assert!(
+        at_devour_choice(runner),
+        "no devour choice: {:?}",
+        runner.state().waiting_for
+    );
+}
+
+/// Serialize `state` as a raw or a trusted save and restore it.
+fn restore_round_trip(state: &GameState, trusted: bool) -> Result<GameState, String> {
+    let persisted = if trusted {
+        PersistedGameState::capture(state.clone())
+    } else {
+        PersistedGameState::Raw(Box::new(state.clone()))
+    };
+    let json = serde_json::to_string(&persisted).map_err(|error| error.to_string())?;
+    serde_json::from_str::<PersistedGameState>(&json)
+        .map_err(|error| error.to_string())?
+        .prepare_for_restore(PersistedRestoreFinalization::DeferUntilRehydrated)
+        .map_err(|error| error.to_string())?
+        .finalize_after_rehydration(|_| Ok(()))
+        .map_err(|error| error.to_string())
+}
+
+/// The record of the battlefield entry that caused the stack's only entry, a triggered ability
+/// of `source`.
+fn sole_trigger_event_record(state: &GameState, source: ObjectId) -> &ZoneChangeRecord {
+    assert_eq!(state.stack.len(), 1, "stack: {:?}", state.stack);
+    match &state.stack[0].kind {
+        StackEntryKind::TriggeredAbility {
+            source_id,
+            trigger_event:
+                Some(GameEvent::ZoneChanged {
+                    to: Zone::Battlefield,
+                    record,
+                    ..
+                }),
+            ..
+        } if *source_id == source => record,
+        other => panic!("expected {source:?}'s entry trigger, got {other:?}"),
+    }
+}
+
+fn assert_outcome_priority_with_empty_stack(outcome: &CastOutcome) {
+    assert!(
+        matches!(outcome.final_waiting_for(), WaitingFor::Priority { .. }),
+        "waiting_for: {:?}",
+        outcome.final_waiting_for()
+    );
+    assert!(outcome.state().stack.is_empty(), "stack must be empty");
+}
+
+/// Storm of Souls' returned cards are on the battlefield as Spirits (its rider applied), and
+/// they entered in the listed order.
+fn assert_storm_returned_in_order(outcome: &CastOutcome, ids: [ObjectId; 2]) {
+    for id in ids {
+        let obj = &outcome.state().objects[&id];
+        assert_eq!(obj.zone, Zone::Battlefield, "{}", obj.name);
+        assert!(
+            obj.card_types.subtypes.iter().any(|s| s == "Spirit"),
+            "{}: {:?}",
+            obj.name,
+            obj.card_types.subtypes
+        );
+    }
+    assert!(
+        battlefield_entry_index(outcome.events(), ids[0])
+            < battlefield_entry_index(outcome.events(), ids[1])
+    );
+}
+
+/// R30a — CR 603.6a: Storm of Souls returns Hill Giant and Soul Warden in one event. Soul Warden
+/// is among the newcomers checked for that event, so it sees the Giant's entry although the
+/// Giant was delivered first: P0 +1.
+#[test]
+fn storm_of_souls_soul_warden_sees_hill_giant_entering_first() {
+    let (outcome, ids) = with_entry_order(
+        [GraveyardCard::HillGiant, GraveyardCard::SoulWarden],
+        storm_board,
+    );
+
+    assert_storm_returned_in_order(&outcome, ids);
+    assert_eq!(
+        outcome.life_delta(P0),
+        1,
+        "Soul Warden saw Hill Giant enter"
+    );
+    assert_outcome_priority_with_empty_stack(&outcome);
+}
+
+/// R30b — CR 603.6a, control order: Soul Warden delivered first sees Hill Giant: P0 +1.
+#[test]
+fn storm_of_souls_soul_warden_sees_hill_giant_entering_second() {
+    let (outcome, ids) = with_entry_order(
+        [GraveyardCard::SoulWarden, GraveyardCard::HillGiant],
+        storm_board,
+    );
+
+    assert_storm_returned_in_order(&outcome, ids);
+    assert_eq!(
+        outcome.life_delta(P0),
+        1,
+        "Soul Warden saw Hill Giant enter"
+    );
+    assert_outcome_priority_with_empty_stack(&outcome);
+}
+
+/// Living Death's returned cards and Impact Tremors are on the battlefield, and the cards
+/// entered in the listed order.
+fn assert_living_death_returned_in_order(outcome: &CastOutcome, ids: [ObjectId; 2]) {
+    for id in ids {
+        let obj = &outcome.state().objects[&id];
+        assert_eq!(obj.zone, Zone::Battlefield, "{}", obj.name);
+    }
+    let tremors = outcome
+        .find_object(|obj| obj.name == "Impact Tremors")
+        .expect("Impact Tremors is staged");
+    assert_eq!(outcome.state().objects[&tremors].zone, Zone::Battlefield);
+    assert!(
+        battlefield_entry_index(outcome.events(), ids[0])
+            < battlefield_entry_index(outcome.events(), ids[1])
+    );
+}
+
+/// R30o-a — CR 603.6a + CR 603.2c, owner-collected route: Living Death returns Hill Giant and
+/// Soul Warden in one event, the Giant delivered first. Soul Warden sees the Giant (P0 +1), and
+/// Impact Tremors triggers once for each creature that entered (P1 −2).
+#[test]
+fn living_death_soul_warden_sees_hill_giant_entering_first() {
+    let (outcome, ids) = with_entry_order(
+        [GraveyardCard::HillGiant, GraveyardCard::SoulWarden],
+        |creation| living_death_board(creation, Resident::ImpactTremors),
+    );
+
+    assert_living_death_returned_in_order(&outcome, ids);
+    assert_eq!(
+        outcome.life_delta(P0),
+        1,
+        "Soul Warden saw Hill Giant enter"
+    );
+    assert_eq!(
+        outcome.life_delta(P1),
+        -2,
+        "Impact Tremors once per entrant"
+    );
+    assert_outcome_priority_with_empty_stack(&outcome);
+}
+
+/// R30o-b — CR 603.6a + CR 603.2c, owner control order: Soul Warden delivered first: P0 +1 and
+/// P1 −2.
+#[test]
+fn living_death_soul_warden_sees_hill_giant_entering_second() {
+    let (outcome, ids) = with_entry_order(
+        [GraveyardCard::SoulWarden, GraveyardCard::HillGiant],
+        |creation| living_death_board(creation, Resident::ImpactTremors),
+    );
+
+    assert_living_death_returned_in_order(&outcome, ids);
+    assert_eq!(
+        outcome.life_delta(P0),
+        1,
+        "Soul Warden saw Hill Giant enter"
+    );
+    assert_eq!(
+        outcome.life_delta(P1),
+        -2,
+        "Impact Tremors once per entrant"
+    );
+    assert_outcome_priority_with_empty_stack(&outcome);
+}
+
+/// R-8160m — CR 608.2c + CR 113.6 + CR 603.10a, issue #8160 with a two-entrant group: Living
+/// Death sacrifices Grizzly Bears before it returns Carmen and Hill Giant together, so Carmen was
+/// not on the battlefield for the sacrifice and gains no counter, in either delivery order.
+#[test]
+fn living_death_returned_carmen_misses_the_earlier_sacrifice_in_either_order() {
+    for order in [
+        [
+            GraveyardCard::CarmenCruelSkymarcher,
+            GraveyardCard::HillGiant,
+        ],
+        [
+            GraveyardCard::HillGiant,
+            GraveyardCard::CarmenCruelSkymarcher,
+        ],
+    ] {
+        let (outcome, ids) = with_entry_order(order, |creation| {
+            living_death_board(creation, Resident::GrizzlyBears)
+        });
+        let carmen = ids[order
+            .iter()
+            .position(|&card| card == GraveyardCard::CarmenCruelSkymarcher)
+            .expect("Carmen is staged")];
+
+        // Reach: the sacrifice happened, and both cards returned in the requested order.
+        let bears = outcome
+            .find_object(|obj| obj.name == "Grizzly Bears")
+            .expect("Grizzly Bears is staged");
+        assert_eq!(outcome.state().objects[&bears].zone, Zone::Graveyard);
+        for id in ids {
+            assert_eq!(outcome.state().objects[&id].zone, Zone::Battlefield);
+        }
+        assert!(
+            battlefield_entry_index(outcome.events(), ids[0])
+                < battlefield_entry_index(outcome.events(), ids[1])
+        );
+        // Reach: the returned Carmen's sacrifice trigger is live in this construction.
+        let carmen_obj = &outcome.state().objects[&carmen];
+        assert_eq!(
+            carmen_obj
+                .trigger_definitions
+                .iter_unchecked()
+                .filter(|trigger| trigger.definition.mode == TriggerMode::Sacrificed)
+                .count(),
+            1
+        );
+        assert!(
+            !carmen_obj.has_unimplemented_mechanics(),
+            "{:?}",
+            unimplemented_mechanics(carmen_obj)
+        );
+
+        assert_eq!(
+            outcome.counters(carmen, CounterType::Plus1Plus1),
+            0,
+            "{order:?}"
+        );
+        assert_eq!(outcome.life_delta(P0), 0, "{order:?}");
+        assert_outcome_priority_with_empty_stack(&outcome);
+    }
+}
+
+/// R-8160p — CR 113.6 + CR 603.10a, positive control for R-8160m: Carmen is on the battlefield
+/// when Village Rites' additional cost sacrifices Grizzly Bears, so her trigger gives her one
+/// counter and P0 1 life.
+#[test]
+fn carmen_on_the_battlefield_gains_a_counter_for_a_sacrifice() {
+    let mut scenario = main_phase();
+    let carmen = scenario
+        .add_creature_from_oracle(
+            P0,
+            "Carmen, Cruel Skymarcher",
+            2,
+            2,
+            CARMEN_CRUEL_SKYMARCHER,
+        )
+        .id();
+    let bears = grizzly_bears_on_battlefield(&mut scenario, P0);
+    let rites = scenario
+        .add_spell_to_hand_from_oracle(P0, "Village Rites", true, VILLAGE_RITES)
+        .id();
+    scenario.with_mana_pool(P0, mana(ManaType::Black, 1));
+    // The draw must not empty P0's library.
+    scenario.add_card_to_library_top(P0, "Plains");
+    scenario.add_card_to_library_top(P0, "Plains");
+    let mut runner = scenario.build();
+
+    let outcome = runner.cast(rites).sacrifice_with(&[bears]).resolve();
+
+    // Reach: the cost was paid, with Carmen on the battlefield.
+    assert_eq!(outcome.state().objects[&bears].zone, Zone::Graveyard);
+    assert_eq!(outcome.state().objects[&carmen].zone, Zone::Battlefield);
+    assert_eq!(outcome.counters(carmen, CounterType::Plus1Plus1), 1);
+    assert_eq!(outcome.life_delta(P0), 1);
+    assert_outcome_priority_with_empty_stack(&outcome);
+}
+
+/// Cast and commit `spell` from the staged board, then pass priority until it has resolved.
+fn resolve_off_the_stack(scenario: GameScenario, spell: ObjectId) -> GameRunner {
+    let mut runner = scenario.build();
+    runner.cast(spell).commit();
+    pass_until_off_the_stack(&mut runner, spell);
+    runner
+}
+
+/// The ids of Hill Giant and Soul Warden among `ids`, staged in `order`.
+fn giant_and_warden(order: [GraveyardCard; 2], ids: [ObjectId; 2]) -> (ObjectId, ObjectId) {
+    let id_of = |card: GraveyardCard| {
+        ids[order
+            .iter()
+            .position(|&staged| staged == card)
+            .expect("the card is staged")]
+    };
+    (
+        id_of(GraveyardCard::HillGiant),
+        id_of(GraveyardCard::SoulWarden),
+    )
+}
+
+/// CR 400.7 + CR 603.2c + CR 603.6a: Soul Warden's trigger for Hill Giant is on the stack with a
+/// copy of the Giant's entry stamped with its co-entrant. A raw and a trusted save of that state
+/// restore, the restored ledger row and stack copy keep the stamp, and the trigger then resolves
+/// as it would have: P0 +1.
+fn assert_save_with_soul_wardens_trigger_restores(
+    runner: &GameRunner,
+    giant: ObjectId,
+    warden: ObjectId,
+) {
+    // Reach: a stamped copy of the Giant's entry is in a live carrier, the stack.
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+        "waiting_for: {:?}",
+        runner.state().waiting_for
+    );
+    let trigger_record = sole_trigger_event_record(runner.state(), warden);
+    assert_eq!(trigger_record.object_id, giant);
+    assert_eq!(trigger_record.co_entered, vec![warden]);
+    let life_at_save = runner.life(P0);
+
+    for trusted in [false, true] {
+        let restored = restore_round_trip(runner.state(), trusted)
+            .unwrap_or_else(|error| panic!("trusted {trusted}: {error}"));
+        assert_eq!(
+            ledger_battlefield_entry(&restored, giant).co_entered,
+            vec![warden],
+            "trusted {trusted}"
+        );
+        assert_eq!(
+            sole_trigger_event_record(&restored, warden).co_entered,
+            vec![warden],
+            "trusted {trusted}"
+        );
+        let mut restored = GameRunner::from_state(restored);
+        restored.advance_until_stack_empty();
+        assert_eq!(
+            restored.life(P0) - life_at_save,
+            1,
+            "Soul Warden's trigger resolves after the restore (trusted {trusted})"
+        );
+        assert_priority_with_empty_stack(&restored);
+    }
+}
+
+/// R-P1 — CR 400.7 + CR 603.2c + CR 603.6a, handed-off route: Storm of Souls returns Hill Giant
+/// and Soul Warden in one event and the game is saved with Soul Warden's trigger for the Giant on
+/// the stack. The save restores in either delivery order, because the Giant's per-turn ledger row
+/// carries the same `co_entered` stamp as the trigger's copy of its entry.
+#[test]
+fn storm_of_souls_save_with_soul_wardens_trigger_on_the_stack_restores() {
+    for order in [
+        [GraveyardCard::HillGiant, GraveyardCard::SoulWarden],
+        [GraveyardCard::SoulWarden, GraveyardCard::HillGiant],
+    ] {
+        let (runner, ids) = with_entry_order(order, |creation| {
+            let (scenario, storm, ids) = storm_scenario(creation);
+            (resolve_off_the_stack(scenario, storm), ids)
+        });
+        let (giant, warden) = giant_and_warden(order, ids);
+        assert_save_with_soul_wardens_trigger_restores(&runner, giant, warden);
+    }
+}
+
+/// R-P2 — CR 400.7 + CR 603.2c + CR 603.6a, owner route: Living Death sacrifices Grizzly Bears,
+/// then returns Hill Giant and Soul Warden in one event. The owner's final segment collects Soul
+/// Warden's trigger after the entries are stamped and parks it, and the game is saved with that
+/// stamped trigger on the stack. The save restores in either delivery order.
+#[test]
+fn living_death_save_with_soul_wardens_trigger_on_the_stack_restores() {
+    for order in [
+        [GraveyardCard::HillGiant, GraveyardCard::SoulWarden],
+        [GraveyardCard::SoulWarden, GraveyardCard::HillGiant],
+    ] {
+        let (runner, ids) = with_entry_order(order, |creation| {
+            let (scenario, living_death, ids) =
+                living_death_scenario(creation, Resident::GrizzlyBears);
+            (resolve_off_the_stack(scenario, living_death), ids)
+        });
+        let (giant, warden) = giant_and_warden(order, ids);
+
+        // Reach: Living Death's own step sacrificed the Bears.
+        let bears = runner
+            .state()
+            .objects
+            .values()
+            .find(|obj| obj.name == "Grizzly Bears")
+            .expect("Grizzly Bears is staged");
+        assert_eq!(bears.zone, Zone::Graveyard);
+        assert_save_with_soul_wardens_trigger_restores(&runner, giant, warden);
+    }
+}
+
+/// A Living Death run stopped at the next decision after P0 answered the Worldsire's devour
+/// choice, with what it recorded at the devour pause.
+struct DevourPauseRun {
+    runner: GameRunner,
+    /// Hill Giant's zone at the devour pause.
+    giant_zone_at_pause: Zone,
+    /// Each parked context whose event is Hill Giant's battlefield entry, as its source and the
+    /// record of that entry, at the devour pause.
+    giant_entry_parked_at_pause: Vec<(ObjectId, ZoneChangeRecord)>,
+}
+
+impl ObservedEntryOrder for DevourPauseRun {
+    fn battlefield_entry_position(&self, id: ObjectId) -> usize {
+        self.runner.battlefield_entry_position(id)
+    }
+}
+
+/// Living Death in P0's hand; Impact Tremors and two Forests on P0's battlefield; `creation` in
+/// P0's graveyard. Cast it, pass to the Worldsire's devour choice, record the pause, sacrifice
+/// both Forests and stop at the next decision.
+fn devour_pause_run(creation: [GraveyardCard; 2]) -> (DevourPauseRun, [ObjectId; 2]) {
+    let (mut scenario, living_death, ids) =
+        living_death_scenario(creation, Resident::ImpactTremors);
+    let forests = vec![
+        scenario.add_basic_land(P0, ManaColor::Green),
+        scenario.add_basic_land(P0, ManaColor::Green),
+    ];
+    let giant = ids[creation
+        .iter()
+        .position(|&staged| staged == GraveyardCard::HillGiant)
+        .expect("Hill Giant is staged")];
+    let mut runner = scenario.build();
+    runner.cast(living_death).commit();
+    pass_until_devour_choice(&mut runner);
+
+    let state = runner.state();
+    let giant_zone_at_pause = state.objects[&giant].zone;
+    let giant_entry_parked_at_pause = state
+        .deferred_triggers
+        .iter()
+        .filter_map(|context| match &context.pending.trigger_event {
+            Some(GameEvent::ZoneChanged {
+                object_id,
+                to: Zone::Battlefield,
+                record,
+                ..
+            }) if *object_id == giant => Some((context.pending.source_id, record.as_ref().clone())),
+            _ => None,
+        })
+        .collect();
+
+    runner
+        .act(GameAction::SelectCards { cards: forests })
+        .expect("P0 devours both Forests");
+    (
+        DevourPauseRun {
+            runner,
+            giant_zone_at_pause,
+            giant_entry_parked_at_pause,
+        },
+        ids,
+    )
+}
+
+/// R-P3 — CR 400.7 + CR 603.2c + CR 603.6a: Living Death returns Hill Giant, then pauses on
+/// Famished Worldsire's devour choice (CR 614.12a), which it makes before the Worldsire enters.
+/// Impact Tremors' trigger for the Giant is parked in the first action with an unstamped copy of
+/// the Giant's entry; the answer completes the group, and the parked copy gets the same stamp as
+/// the Giant's ledger row. A raw and a trusted save after the answer restore, and the game then
+/// finishes resolving: the Worldsire has 6 counters.
+///
+/// Pre-existing defect outside this row's claim: the devour route delivers the Worldsire before
+/// its devour choice and collects its entry twice (Impact Tremors triggers three times and the
+/// Worldsire's own enters trigger twice, at base too), so this row asserts neither the
+/// Worldsire's zone at the pause nor P1's life total.
+#[test]
+fn living_death_save_after_the_devour_pause_restores_the_parked_tremors_trigger() {
+    let (run, [giant, worldsire]) = with_entry_order(
+        [GraveyardCard::HillGiant, GraveyardCard::FamishedWorldsire],
+        devour_pause_run,
+    );
+
+    // Reach, at the pause: the Giant has entered, and Impact Tremors' trigger for the Giant is
+    // parked on an unstamped copy.
+    let state = run.runner.state();
+    let tremors = state
+        .objects
+        .values()
+        .find(|obj| obj.name == "Impact Tremors")
+        .expect("Impact Tremors is staged")
+        .id;
+    assert_eq!(run.giant_zone_at_pause, Zone::Battlefield);
+    assert_eq!(
+        run.giant_entry_parked_at_pause.len(),
+        1,
+        "{:?}",
+        run.giant_entry_parked_at_pause
+    );
+    let (parked_source, parked_record) = &run.giant_entry_parked_at_pause[0];
+    assert_eq!(*parked_source, tremors);
+    assert!(parked_record.co_entered.is_empty(), "{parked_record:?}");
+    // Reach, after the answer: completion stamped the Giant's ledger row.
+    assert_eq!(
+        ledger_battlefield_entry(state, giant).co_entered,
+        vec![worldsire]
+    );
+    for trusted in [false, true] {
+        let restored = restore_round_trip(state, trusted)
+            .unwrap_or_else(|error| panic!("trusted {trusted}: {error}"));
+        let mut restored = GameRunner::from_state(restored);
+        restored.advance_until_stack_empty();
+
+        assert_eq!(plus_one_counters(&restored, worldsire), 6);
+        let forest_zones: Vec<Zone> = restored
+            .state()
+            .objects
+            .values()
+            .filter(|obj| obj.name == "Forest")
+            .map(|obj| obj.zone)
+            .collect();
+        assert_eq!(
+            forest_zones,
+            vec![Zone::Graveyard; 2],
+            "both Forests were devoured (trusted {trusted})"
+        );
+        for id in [giant, worldsire] {
+            assert_eq!(restored.state().objects[&id].zone, Zone::Battlefield);
+        }
+        assert_priority_with_empty_stack(&restored);
+    }
 }
