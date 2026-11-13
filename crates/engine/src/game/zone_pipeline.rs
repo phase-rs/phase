@@ -2828,9 +2828,10 @@ pub(crate) fn hold_answer_repark(
 
 /// Checked restore of the replacement-choice scheduler (CR 616.1 + CR 101.4):
 /// every held decision has a chooser in seat range and a present subject that
-/// no other held decision is about, an as-enters prompt is still live for its
-/// pending replacement, the asking member has a published decision, held
-/// decisions are outstanding only while something is asked, every blocked
+/// no other held decision is about, its pause boundary is the event its
+/// replacement parked on, an as-enters prompt is still live for its pending
+/// replacement, the asking member has a published decision, held decisions
+/// are outstanding only while something is asked, every blocked
 /// member waits on an outstanding decision, and a selection prompt offers
 /// exactly its APNAP-first chooser's held decisions.
 ///
@@ -2858,6 +2859,17 @@ pub(crate) fn validate_restored_staged_scheduler(state: &GameState) -> Result<()
                 .insert(decision_subject(&decision.pending).unwrap_or(member.identity.object_id))
             {
                 return Err("two held staged decisions are about the same object".to_string());
+            }
+            // The held replacement answers to its own pause boundary, the key
+            // its answer is handed back to the member on.
+            if decision
+                .boundary
+                .as_ref()
+                .is_some_and(|boundary| !decision.pending.parks_delivery(&boundary.expected_event))
+            {
+                return Err(
+                    "a held staged decision's boundary is not its replacement's".to_string()
+                );
             }
             if decision.chooser.0 as usize >= state.players.len()
                 || (!published && !crate::game::players::is_alive(state, decision.chooser))

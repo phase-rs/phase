@@ -1920,9 +1920,10 @@ fn edit_objects(
 /// prompt (Wrath of God over P1's two creatures, each wearing Hyena Umbra and
 /// Felidar Umbra) whose held decisions do not agree with the game: a selection
 /// that omits one of its chooser's decisions, a held decision whose chooser is
-/// no seat, two held decisions about one object, held decisions with nothing
-/// asked, and an asking member that still holds its decision. The untouched
-/// save restores.
+/// no seat, two held decisions about one object, a held decision whose pause
+/// boundary is not the event its replacement parked on, held decisions with
+/// nothing asked, and an asking member that still holds its decision. The
+/// untouched save restores.
 #[test]
 fn a_selection_save_with_inconsistent_held_decisions_is_refused() {
     let mut scenario = GameScenario::new();
@@ -1955,7 +1956,7 @@ fn a_selection_save_with_inconsistent_held_decisions_is_refused() {
     restore_fixture(&saved.to_string()).expect("the untouched save restores");
 
     type Edit = fn(&mut serde_json::Map<String, serde_json::Value>, &mut Vec<serde_json::Value>);
-    let cases: [(&str, Edit, &str); 5] = [
+    let cases: [(&str, Edit, &str); 6] = [
         (
             "the selection omits a decision",
             |map, _| {
@@ -1992,6 +1993,20 @@ fn a_selection_save_with_inconsistent_held_decisions_is_refused() {
                 }
             },
             "two held staged decisions are about the same object",
+        ),
+        (
+            "a held boundary names another source",
+            |map, seen| {
+                if let Some(decision) = map
+                    .get_mut("held_decision")
+                    .filter(|held| held.is_object() && seen.is_empty())
+                {
+                    let destroy = &mut decision["boundary"]["expected_event"]["Destroy"];
+                    seen.push(destroy["source"].clone());
+                    destroy["source"] = destroy["object_id"].clone();
+                }
+            },
+            "a held staged decision's boundary is not its replacement's",
         ),
         (
             "nothing is asked",
