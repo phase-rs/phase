@@ -1996,8 +1996,7 @@ fn format_config_deserialization_accepts_commander_damage_threshold_house_rules(
 }
 
 /// (b) `None` is rejected on a format that uses the SBA (paired with a
-/// self-consistent forgery that also flips `uses_commander: false`, which the
-/// `Derived` `uses_commander` row alone does NOT catch); `Some` is rejected
+/// forgery that also flips `uses_commander: false`); `Some` is rejected
 /// on a format that does not use the SBA at all.
 #[test]
 fn format_config_deserialization_rejects_commander_damage_threshold_shape_mismatches() {
@@ -2710,9 +2709,8 @@ fn lobby_save_round_trips_every_structural_field_back_through_the_resolver() {
     assert_eq!(resolved.range_of_influence, source.range_of_influence);
     assert_eq!(resolved.sideboard_policy, SideboardPolicy::Limited(10));
     assert_eq!(resolved.default_deck_copy_limit, DeckCopyLimit::UpTo(1));
-    // CR 903.10a / CR 704.6c: a command zone with no commander-damage
-    // threshold is a real format class — uses_commander must stay false
-    // rather than being forced true by `Enabled` alone.
+    // Tiny Leaders is not a CR 903 format, so its eligibility rule keeps
+    // uses_commander false rather than `Enabled` forcing it true.
     assert!(resolved.command_zone);
     assert_eq!(resolved.commander_damage_threshold, None);
     assert!(!resolved.uses_commander);
@@ -2728,19 +2726,32 @@ fn lobby_save_round_trips_every_structural_field_back_through_the_resolver() {
 }
 
 #[test]
-fn resolver_derives_uses_commander_from_the_declared_damage_threshold() {
-    // The paired half of the Tiny-Leaders case above: the same Enabled
-    // variant WITH a threshold must resolve to uses_commander: true, so the
-    // assertion above cannot be satisfied by hardcoding false.
+fn resolver_derives_uses_commander_from_the_eligibility_rule() {
     let mut rules = sample_rules(5);
-    rules.structural.command_zone_mode = CommandZoneMode::Enabled {
-        commander_damage_threshold: Some(21),
-        eligibility_rule: CommanderEligibilityRule::Standard,
-    };
-    let resolved = FormatConfig::for_custom_rules(&rules);
-    assert!(resolved.command_zone);
-    assert_eq!(resolved.commander_damage_threshold, Some(21));
-    assert!(resolved.uses_commander);
+    for (threshold, eligibility_rule, expected) in [
+        (Some(21), CommanderEligibilityRule::Standard, true),
+        // CR 903.12h: a Commander variant without the CR 704.6c loss.
+        (None, CommanderEligibilityRule::Standard, true),
+        (None, CommanderEligibilityRule::BrawlColorIdentity, true),
+        (Some(21), CommanderEligibilityRule::TinyLeaders, false),
+        (
+            Some(21),
+            CommanderEligibilityRule::OathbreakerSignatureSpell,
+            false,
+        ),
+    ] {
+        rules.structural.command_zone_mode = CommandZoneMode::Enabled {
+            commander_damage_threshold: threshold,
+            eligibility_rule,
+        };
+        let resolved = FormatConfig::for_custom_rules(&rules);
+        assert!(resolved.command_zone);
+        assert_eq!(resolved.commander_damage_threshold, threshold);
+        assert_eq!(
+            resolved.uses_commander, expected,
+            "{eligibility_rule:?} with {threshold:?}"
+        );
+    }
 
     rules.structural.command_zone_mode = CommandZoneMode::Disabled;
     let resolved = FormatConfig::for_custom_rules(&rules);
@@ -2763,6 +2774,8 @@ fn a_lobby_save_resolves_to_a_config_the_deserialize_boundary_accepts() {
         // structural shape none of the other sources below exercise.
         FormatConfig::commander_draft(),
         FormatConfig::tiny_leaders(),
+        FormatConfig::brawl(),
+        FormatConfig::historic_brawl(),
         FormatConfig::two_headed_giant(),
         FormatConfig::limited(),
     ] {

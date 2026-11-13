@@ -173,6 +173,14 @@ describe("GameSetupPage — commander damage", () => {
     expect(await screen.findByLabelText("Starting Life")).toBeInTheDocument();
     expect(screen.queryByLabelText("Commander Damage")).not.toBeInTheDocument();
   });
+
+  // CR 903.12h: Brawl games do not use the CR 704.6c commander-damage loss.
+  it.each(["Brawl", "HistoricBrawl"])("offers no commander damage editor in %s", async (format) => {
+    renderSetup(`/game-setup?format=${format}`);
+
+    expect(await screen.findByLabelText("Starting Life")).toHaveValue(25);
+    expect(screen.queryByLabelText("Commander Damage")).not.toBeInTheDocument();
+  });
 });
 
 describe("GameSetupPage — poison counters", () => {

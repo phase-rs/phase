@@ -1561,11 +1561,10 @@ pub struct FormatConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub archenemy_player: Option<PlayerId>,
     /// Engine-derived predicate (mirrors `GameFormat::uses_commander`): true
-    /// when the format uses a commander card and the commander-damage
-    /// state-based action (CR 903.10a / CR 704.6c) — every format whose
-    /// `command_zone` is true and whose `commander_damage_threshold` is
-    /// non-`None`. The frontend consumes this directly — it must never
-    /// re-list commander-style formats client-side.
+    /// when the format is a Commander variant (CR 903), independent of
+    /// `commander_damage_threshold` (CR 903.12h: Brawl keeps the family
+    /// without the CR 704.6c loss). The frontend consumes this directly — it
+    /// must never re-list commander-style formats client-side.
     pub uses_commander: bool,
     /// Engine-derived predicate (mirrors `GameFormat::supplies_fixed_deck`):
     /// true when the engine supplies the format's deck or a default for it, so
@@ -1962,10 +1961,8 @@ fn built_in_axes_no_looser_than_rules(config: &FormatConfig) -> Result<(), Strin
     // The SHAPE is the rules fact (CR 903.10a / CR 704.6c): either the format
     // has the commander-damage state-based action or it does not. `None` is
     // not a "looser threshold" — it DELETES the SBA (the commander-damage
-    // loss collectors both return early on `None`) and flips the Derived
-    // `uses_commander` row below, so a payload declaring both `None` and
-    // `uses_commander: false` would otherwise be self-consistent and slip
-    // past every other row. A payload may neither invent nor delete it.
+    // loss collectors both return early on `None`). A payload may neither
+    // invent nor delete it.
     //
     // The MAGNITUDE is a house-rule dial, exposed by the shipped host UI
     // whenever the format has a threshold at all and unvalidated on this path
@@ -2091,20 +2088,14 @@ fn built_in_axes_no_looser_than_rules(config: &FormatConfig) -> Result<(), Strin
         ));
     }
 
-    // uses_commander: Derived — command_zone && commander_damage_threshold
-    // is_some(), both Locked above, so for a built-in the derivation
-    // coincides with registry equality. No serde default, so no legacy
-    // concern.
-    let derived_uses_commander = config.command_zone && config.commander_damage_threshold.is_some();
+    // uses_commander: Derived from format — independent of the threshold
+    // (CR 903.12h: Brawl stays a Commander variant without CR 704.6c).
+    let derived_uses_commander = config.format.uses_commander().map_err(|e| e.0)?;
     if config.uses_commander != derived_uses_commander {
         return Err(format!(
-            "FormatConfig.uses_commander is {}, but command_zone ({}) and \
-             commander_damage_threshold ({:?}) derive {} — uses_commander must always equal that \
-             derivation",
-            config.uses_commander,
-            config.command_zone,
-            config.commander_damage_threshold,
-            derived_uses_commander,
+            "FormatConfig.uses_commander is {}, but {} derives {} — uses_commander must always \
+             equal that derivation",
+            config.uses_commander, config.format, derived_uses_commander,
         ));
     }
 
@@ -2980,10 +2971,8 @@ impl GameFormat {
         )
     }
 
-    /// Whether this format uses a commander card and the commander-damage
-    /// state-based action (CR 903.10a / CR 704.6c). True for every format
-    /// whose `FormatConfig` has both `command_zone: true` and a non-`None`
-    /// `commander_damage_threshold`. The frontend consumes the derived
+    /// Whether this format is a Commander variant (CR 903), independent of
+    /// its commander-damage threshold (CR 903.12h). The frontend consumes the derived
     /// `FormatConfig::uses_commander` field rather than re-listing the
     /// commander-style variants client-side.
     ///
@@ -3008,9 +2997,6 @@ impl GameFormat {
             | GameFormat::Brawl
             | GameFormat::HistoricBrawl
             | GameFormat::PlanechaseCommander
-            // `command_zone: true` and
-            // `commander_damage_threshold: Some(21)` travel together for this
-            // format — `Derived` in `built_in_axes_no_looser_than_rules`.
             | GameFormat::FreeformCommander
             // CR 903.13g: Commander Draft games follow the same rules as
             // Commander games, so CR 903.10a's commander-damage SBA applies.
@@ -3053,11 +3039,9 @@ impl GameFormat {
     /// `FormatConfig::command_zone`. The three predicates answer different
     /// questions and their answers genuinely differ:
     ///
-    /// - `uses_commander` is `command_zone && commander_damage_threshold`, so
-    ///   it means "CR 903.10a commander damage applies". Tiny Leaders and
-    ///   Oathbreaker put a real card in the command zone but declare no
-    ///   damage threshold, so they answer `false` there while answering
-    ///   `true` here.
+    /// - `uses_commander` marks a CR 903 Commander variant. Tiny Leaders and
+    ///   Oathbreaker put a real card in the command zone but are not CR 903
+    ///   formats, so they answer `false` there while answering `true` here.
     /// - `command_zone` is true for Archenemy (CR 904.3 + CR 904.4: the
     ///   supplementary scheme deck, which remains in the command zone) and
     ///   Momir (its emblem), whose zones hold no decklist card at all, so
@@ -3105,8 +3089,7 @@ impl GameFormat {
             | GameFormat::CommanderDraft
             | GameFormat::FreeformCommander
             // Tiny Leaders and Oathbreaker seat a decklist card in the command
-            // zone without a commander-damage threshold, which is precisely the
-            // case `uses_commander` cannot express.
+            // zone but are not CR 903 formats, so `uses_commander` is false.
             | GameFormat::TinyLeaders
             | GameFormat::Oathbreaker => Ok(true),
             // Archenemy's scheme deck (CR 904.3: the supplementary deck;
@@ -4557,7 +4540,8 @@ impl FormatConfig {
             deck_size: DeckSizeRule::Exactly(60),
             singleton: true,
             command_zone: true,
-            commander_damage_threshold: Some(21),
+            // CR 903.12h: Brawl games do not use CR 704.6c's commander-damage loss.
+            commander_damage_threshold: None,
             poison_counter_threshold: GameFormat::Brawl.default_poison_counter_threshold(),
             range_of_influence: None,
             team_based: false,
@@ -4954,10 +4938,8 @@ impl FormatConfig {
     /// the config was actually built with.
     ///
     /// Custom is answered from `CommandZoneMode`, NOT from `uses_commander`.
-    /// `for_custom_rules` derives `uses_commander` from the declared
-    /// `commander_damage_threshold` alone, so a custom format shaped like
-    /// Oathbreaker or Tiny Leaders — `CommandZoneMode::Enabled` with a
-    /// `CommanderEligibilityRule` and NO damage threshold — has
+    /// A custom format shaped like Oathbreaker or Tiny Leaders —
+    /// `CommandZoneMode::Enabled` with that `CommanderEligibilityRule` — has
     /// `uses_commander: false` while still designating a decklist commander.
     /// Falling back to `uses_commander` would strand that commander in the
     /// library exactly the way the built-in formats did before this predicate
@@ -5084,12 +5066,9 @@ impl FormatConfig {
     /// - `CommandZoneMode`-derived (CR 408.1 / CR 903.10a): `Disabled` gives
     ///   `command_zone: false`, `commander_damage_threshold: None`,
     ///   `uses_commander: false`. `Enabled` gives `command_zone: true`, the
-    ///   declared threshold unchanged, and `uses_commander:
-    ///   threshold.is_some()` — NOT unconditionally `true`, because a command
-    ///   zone without a commander-damage threshold is a real, supported
-    ///   format class (Tiny Leaders, Oathbreaker), and `uses_commander`'s own
-    ///   contract is `command_zone && commander_damage_threshold.is_some()`.
-    ///   `eligibility_rule` is not mirrored at all: `FormatConfig` has no
+    ///   declared threshold unchanged, and `uses_commander` from the
+    ///   eligibility rule's family (Tiny Leaders and Oathbreaker shapes stay
+    ///   `false`). `eligibility_rule` is not otherwise mirrored: `FormatConfig` has no
     ///   such field, and the commander-eligibility check reads it from
     ///   `custom_rules.structural` directly.
     /// - Fixed: `format`/`custom_rules` are set consistently (satisfying
@@ -5101,13 +5080,18 @@ impl FormatConfig {
     ///   orthogonal to format — apply `with_sandbox()` afterwards).
     pub fn for_custom_rules(rules: &CustomFormatRules) -> FormatConfig {
         let structural = &rules.structural;
-        let (command_zone, commander_damage_threshold) = match structural.command_zone_mode {
-            CommandZoneMode::Disabled => (false, None),
-            CommandZoneMode::Enabled {
-                commander_damage_threshold,
-                ..
-            } => (true, commander_damage_threshold),
-        };
+        let (command_zone, commander_damage_threshold, uses_commander) =
+            match structural.command_zone_mode {
+                CommandZoneMode::Disabled => (false, None, false),
+                CommandZoneMode::Enabled {
+                    commander_damage_threshold,
+                    eligibility_rule,
+                } => (
+                    true,
+                    commander_damage_threshold,
+                    eligibility_rule.uses_commander(),
+                ),
+            };
         FormatConfig {
             format: GameFormat::Custom(rules.id),
             starting_life: structural.starting_life,
@@ -5123,9 +5107,7 @@ impl FormatConfig {
             range_of_influence: structural.range_of_influence.clone(),
             team_based: structural.team_based,
             archenemy_player: None,
-            // CR 903.10a / CR 704.6c: the commander-damage SBA exists only
-            // when a threshold does.
-            uses_commander: command_zone && commander_damage_threshold.is_some(),
+            uses_commander,
             supplies_fixed_deck: false,
             sideboard_policy: structural.sideboard_policy,
             default_deck_copy_limit: structural.default_deck_copy_limit,
@@ -5444,7 +5426,32 @@ mod tests {
         assert_eq!(historic.starting_life, brawl.starting_life);
         assert!(historic.singleton);
         assert!(historic.command_zone);
-        assert_eq!(historic.commander_damage_threshold, Some(21));
+        assert_eq!(historic.commander_damage_threshold, None);
+        assert!(historic.uses_commander);
+    }
+
+    /// CR 903.12a + CR 903.12h: a Brawl-family payload is a Commander variant
+    /// with no commander-damage threshold, and the boundary rejects either
+    /// half being forged back.
+    #[test]
+    fn brawl_family_round_trips_without_a_commander_damage_threshold() {
+        let round_trip = |config: &FormatConfig| {
+            serde_json::from_value::<FormatConfig>(serde_json::to_value(config).unwrap())
+        };
+        for config in [FormatConfig::brawl(), FormatConfig::historic_brawl()] {
+            assert_eq!(round_trip(&config).unwrap(), config);
+
+            let mut stale = config.clone();
+            stale.commander_damage_threshold = Some(21);
+            assert!(round_trip(&stale).is_err(), "{:?}", config.format);
+
+            let mut forged = config.clone();
+            forged.uses_commander = false;
+            assert!(round_trip(&forged).is_err(), "{:?}", config.format);
+        }
+        let mut commander = FormatConfig::commander();
+        commander.uses_commander = false;
+        assert!(round_trip(&commander).is_err());
     }
 
     #[test]
@@ -6076,7 +6083,7 @@ mod tests {
     }
 
     /// `command_zone_holds_decklist_commander` is a strictly weaker condition
-    /// than `uses_commander` (commander damage implies a decklist commander,
+    /// than `uses_commander` (a Commander variant implies a decklist commander,
     /// never the reverse) and strictly stronger than `command_zone` (a zone
     /// can hold schemes or an emblem instead). Pinning both directions is what
     /// keeps a future variant from being added to only one of the three.
@@ -6089,7 +6096,7 @@ mod tests {
             if config.uses_commander {
                 assert!(
                     holds,
-                    "{:?}: commander damage (CR 903.10a) requires a decklist commander",
+                    "{:?}: a Commander variant (CR 903) requires a decklist commander",
                     meta.format
                 );
             }
@@ -6112,11 +6119,10 @@ mod tests {
     /// silently starting a game one card short or one card long.
     /// A custom format shaped like Oathbreaker or Tiny Leaders — an enabled
     /// command zone with an eligibility rule but NO commander-damage threshold
-    /// — still designates a decklist commander. `for_custom_rules` derives
-    /// `uses_commander` from the threshold alone, so reading that field would
-    /// answer `false` here and strand the commander in the library, which is
-    /// the same class of bug this predicate exists to prevent for the built-in
-    /// formats. Resolve Custom from `CommandZoneMode` instead.
+    /// — still designates a decklist commander. Its `uses_commander` is
+    /// `false`, so reading that field would answer `false` here and strand the
+    /// commander in the library, which is the same class of bug this predicate
+    /// exists to prevent for the built-in formats. Resolve Custom from `CommandZoneMode` instead.
     #[test]
     fn custom_command_zone_without_a_damage_threshold_still_holds_a_decklist_commander() {
         use crate::types::custom_format::{
@@ -6323,10 +6329,7 @@ mod tests {
     }
 
     #[test]
-    fn uses_commander_matches_default_config_and_threshold() {
-        // The `GameFormat::uses_commander()` predicate, the derived
-        // `FormatConfig::uses_commander` field, and the existence of a
-        // commander-damage threshold must all agree for every variant.
+    fn uses_commander_and_threshold_match_the_registry() {
         for meta in GameFormat::registry() {
             let expected = meta.format.uses_commander().unwrap();
             assert_eq!(
@@ -6334,10 +6337,11 @@ mod tests {
                 "{:?}: registry default disagrees with predicate",
                 meta.format
             );
+            // CR 704.6c applies to every Commander variant except Brawl (CR 903.12h).
             assert_eq!(
                 meta.default_config.commander_damage_threshold.is_some(),
-                expected,
-                "{:?}: commander_damage_threshold presence must match uses_commander",
+                expected && !matches!(meta.format, GameFormat::Brawl | GameFormat::HistoricBrawl),
+                "{:?}: commander_damage_threshold presence",
                 meta.format
             );
             // The derived `supplies_fixed_deck` field must agree with the

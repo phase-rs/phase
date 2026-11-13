@@ -1,0 +1,8 @@
+{
+  "surfaces": [
+    "full",
+    "lobby",
+    "wire"
+  ],
+  "reason": "Brawl and Historic Brawl FormatConfig drop commander_damage_threshold (CR 903.12h) while keeping uses_commander; an older peer rejects a Brawl config with a null threshold and a newer one rejects Some(21), in game state, P2P envelopes and lobby create frames"
+}
