@@ -2570,10 +2570,8 @@ fn settle_resolution_resumed_after_departure(
     state: &mut GameState,
     events: &mut Vec<GameEvent>,
     scan_from: usize,
-    departure: &super::elimination::DepartureOutcome,
 ) {
     let mut resumed = Vec::new();
-    let queued_before_resume = state.deferred_triggers.len();
     if let Err(error) = resume_pending_continuation_if_priority(state, &mut resumed) {
         tracing::error!(%error, "a resolution resumed after a departure did not finish");
         debug_assert!(
@@ -2581,16 +2579,6 @@ fn settle_resolution_resumed_after_departure(
             "a resolution resumed after a departure did not finish: {error}"
         );
     }
-    // CR 603.10a + CR 603.3a + CR 800.4d: the departures the resumed owner had
-    // already performed were collected only now, after the leaver's control
-    // effects ended; what a source the leaver controlled triggered for them is
-    // the leaver's, and leaves with them.
-    super::elimination::retire_retained_departure_triggers(
-        state,
-        queued_before_resume,
-        departure.first_zone_change_record,
-        &departure.controlled_by_leavers,
-    );
     events.append(&mut resumed);
     let provisional = state.waiting_for.clone();
     match super::engine_priority::run_post_action_pipeline_from(
@@ -2641,15 +2629,10 @@ fn reconcile_terminal_sba(state: &mut GameState, result: &mut ActionResult) {
         // its events (CR 603.10a, CR 603.2c), so the settlement's scan from
         // `departure_start` takes only what happened after it.
         let departure_start = result.events.len();
-        let departure =
-            sba::check_state_based_actions_reporting_departure(state, &mut result.events);
-        if departure.resume == super::elimination::DepartureResume::ParkedZoneChangeTail {
-            settle_resolution_resumed_after_departure(
-                state,
-                &mut result.events,
-                departure_start,
-                &departure,
-            );
+        if sba::check_state_based_actions_reporting_departure(state, &mut result.events)
+            == super::elimination::DepartureResume::ParkedZoneChangeTail
+        {
+            settle_resolution_resumed_after_departure(state, &mut result.events, departure_start);
         }
         // SBA may have advanced waiting_for (e.g., GameOver, or Priority for
         // the next living player). Sync the result.
@@ -12719,12 +12702,7 @@ fn apply_action(
             // abilities the departure queued together with the resumed ones.
             super::elimination::DepartureResume::ParkedZoneChangeTail => {
                 let scan_from = events.len();
-                settle_resolution_resumed_after_departure(
-                    state,
-                    &mut events,
-                    scan_from,
-                    &departure,
-                );
+                settle_resolution_resumed_after_departure(state, &mut events, scan_from);
             }
         }
         return Ok(ActionResult::applied(events, state.waiting_for.clone()));

@@ -255,15 +255,24 @@ fn shredder_triggers(state: &GameState) -> usize {
         .count()
 }
 
-/// CR 603.10a + CR 800.4d: P1 steals `target` with a real control-changing
-/// spell: P0, the active player, passes priority; P1 casts `spell` and it
-/// resolves back to P0. At P1's later departure the stolen permanent is P1's.
-fn steal_for_p1(runner: &mut GameRunner, spell: ObjectId, target: ObjectId) {
-    runner
-        .act(GameAction::PassPriority)
-        .expect("priority passes to P1");
+/// CR 603.10a + CR 800.4d: `thief` steals `target` with a real control-changing
+/// spell: priority passes from the active player P0 to `thief`, who casts
+/// `spell`, and it resolves back to P0. At the thief's later departure the
+/// stolen permanent is the thief's.
+fn steal_for(runner: &mut GameRunner, thief: PlayerId, spell: ObjectId, target: ObjectId) {
+    for _ in 0..3 {
+        if matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { player } if player == thief
+        ) {
+            break;
+        }
+        runner
+            .act(GameAction::PassPriority)
+            .expect("priority passes toward the thief");
+    }
     runner.cast(spell).target_object(target).resolve();
-    assert_eq!(runner.state().objects[&target].controller, P1);
+    assert_eq!(runner.state().objects[&target].controller, thief);
     assert_eq!(
         runner.state().waiting_for,
         WaitingFor::Priority { player: P0 },
@@ -554,7 +563,7 @@ fn rebuking_ceremony_concession_during_the_prompt_places_the_surviving_artifact_
         let mut runner = scenario.build();
         let pile = merge_pile(&mut runner, pile_shape, mender, brokkos, true);
         let label = format!("{pile_shape:?}");
-        steal_for_p1(&mut runner, turn_against, stolen_demon);
+        steal_for(&mut runner, P1, turn_against, stolen_demon);
 
         // Rebuking Ceremony's top-of-library placement delivers its targets
         // last first, so the merged permanent (second target) moves before the
@@ -902,7 +911,7 @@ fn player_loss_during_the_prompt_finishes_the_resolution_before_priority() {
     let pile = merge_pile(&mut runner, Pile::BrokkosUnderMender, mender, brokkos, true);
     assert_eq!(runner.state().objects[&lord].toughness, Some(1));
 
-    steal_for_p1(&mut runner, turn_against, stolen_demon);
+    steal_for(&mut runner, P1, turn_against, stolen_demon);
 
     cast_until_resolved_or_asked(&mut runner, ceremony, &[pile.survivor, angel]);
     // CR 401.4: both cards go on top of P1's library, so P1 arranges them.
@@ -970,6 +979,66 @@ fn player_loss_during_the_prompt_finishes_the_resolution_before_priority() {
          source P1 controlled for the merged permanent's departure, which the resumed owner \
          collected after P1 left, and for the Patrol that left with P1, so those triggers were \
          P1's and left with P1"
+    );
+}
+
+/// CR 704.5a + CR 603.3 + CR 117.5 + CR 603.6c: a player-loss state-based action
+/// in the pass that follows a completed choice, with nothing parked to resume.
+/// P1 is at 0 life with Platinum Angel and owns an unmerged Circuit Mender and a
+/// Ninth Bridge Patrol. Rebuking Ceremony puts the Angel and the Mender on top
+/// of P1's library and P1 arranges them (CR 401.4); the Angel leaves and P1 loses
+/// in that action's pass. The abilities the departure triggered, P0's Super
+/// Shredder seeing the Patrol leave the game with P1, are on the stack before P0
+/// has priority, with the Shredder's triggers for the Angel and the Mender. A
+/// regression pin for the in-pass route (the departure's queued triggers join the
+/// boundary's one batch); it does not discriminate the origin stamp.
+#[test]
+fn player_loss_after_a_completed_choice_puts_the_departure_triggers_on_the_stack() {
+    let db = shared_card_db().expect("integration card fixture must load");
+    let mut scenario = GameScenario::new_with_format(FormatConfig::commander(), 3, 7);
+    scenario.at_phase(Phase::PreCombatMain);
+    let angel = scenario.add_real_card(P1, "Platinum Angel", Zone::Battlefield, db);
+    let mender = scenario.add_real_card(P1, "Circuit Mender", Zone::Battlefield, db);
+    let patrol = scenario.add_real_card(P1, "Ninth Bridge Patrol", Zone::Battlefield, db);
+    scenario.add_real_card(P0, "Super Shredder", Zone::Battlefield, db);
+    let ceremony = scenario.add_real_card(P0, "Rebuking Ceremony", Zone::Hand, db);
+    scenario.with_life(P1, 0);
+    scenario.with_mana_pool(P0, mana(ManaType::Green, 5));
+    let mut runner = scenario.build();
+
+    cast_until_resolved_or_asked(&mut runner, ceremony, &[angel, mender]);
+    let WaitingFor::EffectZoneChoice {
+        player: P1, cards, ..
+    } = &runner.state().waiting_for
+    else {
+        panic!("{:?}", runner.state().waiting_for);
+    };
+    assert_eq!(cards.len(), 2);
+    runner
+        .act(GameAction::SelectCards {
+            cards: vec![angel, mender],
+        })
+        .expect("P1 arranges the two cards");
+
+    assert!(runner.state().players[1].is_eliminated);
+    assert_eq!(runner.state().objects[&patrol].zone, Zone::Exile);
+    assert!(
+        runner.state().deferred_triggers.is_empty(),
+        "the departure's triggers are not left waiting"
+    );
+    assert_eq!(
+        runner
+            .state()
+            .stack
+            .iter()
+            .filter(
+                |entry| matches!(&entry.kind, StackEntryKind::TriggeredAbility {
+                description: Some(text), ..
+            } if text.contains("another permanent leaves"))
+            )
+            .count(),
+        3,
+        "Super Shredder saw the Angel, the Mender and the Patrol leave, once each, on the stack"
     );
 }
 
@@ -1179,12 +1248,16 @@ fn another_seat_concession_leaves_the_commander_prompt_and_its_owner_intact() {
         scenario.at_phase(Phase::PreCombatMain);
         let (mender, brokkos) = add_pile(&mut scenario, P1);
         let surviving = scenario.add_real_card(P2, "Circuit Mender", Zone::Battlefield, db);
+        let stolen_demon = scenario.add_real_card(P0, "Extractor Demon", Zone::Battlefield, db);
+        let turn_against = scenario.add_real_card(P2, "Turn Against", Zone::Hand, db);
         let ceremony = scenario.add_real_card(P0, "Rebuking Ceremony", Zone::Hand, db);
         scenario.with_library_top(P1, &["Library Card A"]);
         scenario.with_mana_pool(P0, mana(ManaType::Green, 5));
+        scenario.with_mana_pool(P2, mana(ManaType::Red, 5));
         let mut runner = scenario.build();
         let pile = merge_pile(&mut runner, Pile::BrokkosUnderMender, mender, brokkos, true);
         let label = format!("answer {answer_index}");
+        steal_for(&mut runner, P2, turn_against, stolen_demon);
 
         cast_until_resolved_or_asked(&mut runner, ceremony, &[surviving, pile.survivor]);
         assert_commander_prompt(runner.state(), P1, pile.brokkos);
@@ -1212,6 +1285,13 @@ fn another_seat_concession_leaves_the_commander_prompt_and_its_owner_intact() {
             mender_departure_triggers(runner.state()),
             vec![P1],
             "{label}: one merged permanent left, so its ability triggers once"
+        );
+        assert_eq!(
+            demon_triggers(runner.state()),
+            0,
+            "{label}: CR 603.10a + CR 800.4d: P2 conceded while P1's prompt was parked, so the \
+             Extractor Demon P2 had stolen looked back to a source P2 controlled for the merged \
+             permanent's retained departure, which P1's answer collected after P2 left"
         );
     }
 }

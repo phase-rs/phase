@@ -1842,6 +1842,19 @@ pub struct LeavingGameDeparture {
     pub departure: ZoneDeparture,
 }
 
+/// CR 603.10a + CR 603.3a + CR 800.4d: the permanents the players who left the
+/// game controlled immediately before they left, and how many zone changes had
+/// been recorded this turn when they left (`GameState::departed_control`). A
+/// logical zone-change owner that retained a departure it performed before the
+/// loss collects it only when its tail finishes, after the leavers' control
+/// effects ended; what these sources triggered for such an earlier zone change
+/// was the leaver's trigger and leaves with them.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DepartedControl {
+    pub sources: Vec<ObjectId>,
+    pub first_zone_change_record: usize,
+}
+
 /// Deserialization shape of [`ZoneChangeRecord`]; a record saved without `arrival` loads with arrival equal to departure.
 #[derive(Deserialize)]
 struct ZoneChangeRecordWire {
@@ -25642,6 +25655,12 @@ declare_game_state! {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub leaving_game_departure: Option<LeavingGameDeparture>,
 
+    /// CR 603.10a + CR 800.4d: the control the players who left this turn held
+    /// over permanents immediately before they left (see [`DepartedControl`]).
+    /// Cleared with the turn's zone-change records it indexes.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub departed_control: Vec<DepartedControl>,
+
     /// CR 705.2: Result of the most recent coin flip in the current resolution,
     /// carrying the flipper so `AbilityCondition::CoinFlipOutcome` is
     /// controller-relative. Written by the flip authority and read when a
@@ -34678,6 +34697,7 @@ impl GameState {
             resolving_created_token_seats: None,
             merged_card_component_route: None,
             leaving_game_departure: None,
+            departed_control: Vec::new(),
             resolution_coin_flip: None,
             repeat_process_requested: None,
             pending_player_scope_sacrifice_choice: None,
@@ -38639,6 +38659,7 @@ fn _gamestate_partition_is_total(s: &GameState) {
         resolving_created_token_seats: _,
         merged_card_component_route: _,
         leaving_game_departure: _,
+        departed_control: _,
         resolution_coin_flip: _,
         repeat_process_requested: _,
         may_trigger_auto_choices: _,

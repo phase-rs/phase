@@ -497,6 +497,7 @@ fn run_post_action_pipeline_core(
     // the loss without sending the still-entering permanent to the graveyard.
     while matches!(state.waiting_for, WaitingFor::Priority { .. }) {
         let events_before = events.len();
+        let deferred_before_sba = state.deferred_triggers.len();
         sba::check_state_based_actions_in_pass(state, events);
         if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
             // CR 603.3b + CR 903.9a: an SBA batch can open a resumable
@@ -527,6 +528,13 @@ fn run_post_action_pipeline_core(
                     events,
                     events_before,
                     &consumed_trigger_events,
+                );
+                // A player's departure in that batch queued its own triggers
+                // (CR 603.10a); they wait behind the choice under the batch's origin.
+                triggers::stamp_deferred_triggers_from(
+                    state,
+                    deferred_before_sba.min(state.deferred_triggers.len()),
+                    origin,
                 );
                 triggers::collect_parked_triggers_into_deferred(state, &sba_events, origin);
                 // Logical zone-change owners collect ordinary observers only.
@@ -565,6 +573,15 @@ fn run_post_action_pipeline_core(
             {
                 triggers::collect_triggers_into_deferred(state, &sba_events);
             } else {
+                // A player's departure in that batch queued its own triggers
+                // (CR 603.10a); they join the boundary's one batch like the rest.
+                if !super::stack::resolving_spell_owes_final_part(state) {
+                    triggers::stamp_deferred_triggers_from(
+                        state,
+                        deferred_before_sba.min(state.deferred_triggers.len()),
+                        triggers::DeferredTriggerBatchOrigin::PriorityBoundary,
+                    );
+                }
                 hold_pass_triggers(state, &sba_events);
             }
             if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {

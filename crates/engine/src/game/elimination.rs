@@ -236,67 +236,7 @@ pub(crate) enum DepartureTriggers {
 #[must_use]
 pub(crate) struct DepartureOutcome {
     pub(crate) resume: DepartureResume,
-    /// CR 603.10a + CR 603.3a: the permanents a leaving player controlled
-    /// immediately before the departure. A parked owner's tail collects the
-    /// departures it retained before the loss only after the leaver's control
-    /// effects ended; the triggers of these sources are the leaver's, and leave
-    /// with them (CR 800.4d). See [`retire_retained_departure_triggers`].
-    pub(crate) controlled_by_leavers: Vec<ObjectId>,
-    /// How many zone changes this turn had been recorded when the departure
-    /// began: those at or past this index are the departure's and later.
-    pub(crate) first_zone_change_record: usize,
     pub(crate) looked_back: Option<LookedBackDeparture>,
-}
-
-/// CR 603.10a + CR 603.3a + CR 800.4d: a parked owner (a batch delivery or a
-/// `ChangeZone` iteration) retains the departures it already performed and
-/// collects them when its tail finishes. When a player's loss or concession
-/// resumes that tail, the collection happens after the leaver's control effects
-/// ended, but each retained departure happened while the leaver controlled
-/// `controlled_by_leavers`. Retire the queued triggers from `first_queued` on
-/// that those sources triggered for zone changes recorded before the departure
-/// began (`first_zone_change_record`), exactly as the departure's own look-back
-/// events are.
-pub(crate) fn retire_retained_departure_triggers(
-    state: &mut GameState,
-    first_queued: usize,
-    first_zone_change_record: usize,
-    controlled_by_leavers: &[ObjectId],
-) {
-    let queued = state
-        .deferred_triggers
-        .split_off(first_queued.min(state.deferred_triggers.len()));
-    let performed_before_departure = |event: &GameEvent| match event {
-        GameEvent::ZoneChanged {
-            object_id,
-            from,
-            to,
-            ..
-        } => state
-            .zone_changes_this_turn
-            .iter()
-            .enumerate()
-            .filter(|(_, record)| {
-                record.object_id == *object_id && record.from_zone == *from && record.to_zone == *to
-            })
-            .last()
-            .is_some_and(|(index, _)| index < first_zone_change_record),
-        _ => false,
-    };
-    let retained: Vec<super::triggers::PendingTriggerContext> = queued
-        .into_iter()
-        .filter(|context| {
-            let mut events = context
-                .trigger_events
-                .iter()
-                .chain(context.pending.trigger_event.iter())
-                .peekable();
-            let retained_event =
-                events.peek().is_some() && events.all(|event| performed_before_departure(event));
-            !(retained_event && controlled_by_leavers.contains(&context.pending.source_id))
-        })
-        .collect();
-    state.deferred_triggers.extend(retained);
 }
 
 /// CR 603.10a + CR 603.2c: a departure's look-back collection, held by a caller
@@ -462,6 +402,8 @@ pub(crate) fn eliminate_players(
     // ability reads its source as it was immediately before that event, so an
     // observer a leaving player stole triggers under that player and is retired
     // with them (CR 800.4d) rather than handed to its owner.
+    // CR 603.10a + CR 800.4d: the permanents the leavers control right now, before
+    // their control effects end, for a parked owner's later collection.
     let controlled_by_leavers: Vec<ObjectId> = state
         .battlefield
         .iter()
@@ -473,6 +415,14 @@ pub(crate) fn eliminate_players(
                 .is_some_and(|object| leaving_set.contains(&object.controller))
         })
         .collect();
+    if !controlled_by_leavers.is_empty() {
+        state
+            .departed_control
+            .push(crate::types::game_state::DepartedControl {
+                sources: controlled_by_leavers,
+                first_zone_change_record: first_record,
+            });
+    }
     let mut looked_back_observers = (!leaving_set.is_empty())
         .then(|| super::triggers::ImmediatelyBeforeObservers::latch(state));
 
@@ -502,8 +452,6 @@ pub(crate) fn eliminate_players(
     if !eliminated_any {
         return DepartureOutcome {
             resume,
-            controlled_by_leavers: Vec::new(),
-            first_zone_change_record: first_record,
             looked_back: None,
         };
     }
@@ -961,8 +909,6 @@ pub(crate) fn eliminate_players(
         });
     DepartureOutcome {
         resume,
-        controlled_by_leavers,
-        first_zone_change_record: first_record,
         looked_back,
     }
 }

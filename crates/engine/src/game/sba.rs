@@ -18,9 +18,7 @@ use crate::types::proposed_event::ProposedEvent;
 use crate::types::statics::{StaticMode, StaticModeKind};
 use crate::types::zones::Zone;
 
-use super::elimination::{
-    DepartureOutcome, DepartureResume, DepartureTriggers, LookedBackDeparture,
-};
+use super::elimination::{DepartureResume, DepartureTriggers, LookedBackDeparture};
 use super::filter::{matches_target_filter, FilterContext};
 use super::players::PoisonLossMeasure;
 use super::speed::{controls_start_your_engines_in, set_speed};
@@ -111,7 +109,7 @@ pub fn check_state_based_actions(state: &mut GameState, events: &mut Vec<GameEve
 pub(crate) fn check_state_based_actions_reporting_departure(
     state: &mut GameState,
     events: &mut Vec<GameEvent>,
-) -> DepartureOutcome {
+) -> DepartureResume {
     run_state_based_actions(state, events, &[], DepartureTriggers::ScannedByCaller)
 }
 
@@ -143,19 +141,10 @@ fn run_state_based_actions(
     events: &mut Vec<GameEvent>,
     waiting: &[crate::game::triggers::PendingTriggerContext],
     departures: DepartureTriggers,
-) -> DepartureOutcome {
+) -> DepartureResume {
     let mut departed = Vec::new();
-    let mut controlled_by_leavers = Vec::new();
-    let mut first_zone_change_record = state.zone_changes_this_turn.len();
-    let resume = run_state_based_action_iterations(
-        state,
-        events,
-        waiting,
-        departures,
-        &mut departed,
-        &mut controlled_by_leavers,
-        &mut first_zone_change_record,
-    );
+    let resume =
+        run_state_based_action_iterations(state, events, waiting, departures, &mut departed);
     // CR 704.3 + CR 603.10a: the state-based-action event is complete and stamped
     // as one simultaneous event, so the abilities a player's departure in it
     // triggered are collected now, once, against the observers latched before
@@ -163,12 +152,7 @@ fn run_state_based_actions(
     for departure in departed {
         departure.collect(state, events);
     }
-    DepartureOutcome {
-        resume,
-        controlled_by_leavers,
-        first_zone_change_record,
-        looked_back: None,
-    }
+    resume
 }
 
 fn run_state_based_action_iterations(
@@ -177,8 +161,6 @@ fn run_state_based_action_iterations(
     waiting: &[crate::game::triggers::PendingTriggerContext],
     departures: DepartureTriggers,
     departed: &mut Vec<LookedBackDeparture>,
-    controlled_by_leavers: &mut Vec<ObjectId>,
-    first_zone_change_record: &mut usize,
 ) -> DepartureResume {
     // CR 604.2: Re-evaluate layers so computed P/T reflects current static abilities.
     if state.layers_dirty.is_dirty() {
@@ -251,9 +233,6 @@ fn run_state_based_action_iterations(
             let outcome = super::elimination::eliminate_players(state, &losers, departures, events);
             let resume = outcome.resume;
             departed.extend(outcome.looked_back);
-            controlled_by_leavers.extend(outcome.controlled_by_leavers);
-            *first_zone_change_record =
-                (*first_zone_change_record).min(outcome.first_zone_change_record);
 
             // If the game ended (a sole winner or a CR 104.4a draw), stop now.
             if matches!(state.waiting_for, WaitingFor::GameOver { .. }) {

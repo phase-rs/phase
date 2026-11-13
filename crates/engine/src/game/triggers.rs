@@ -7391,6 +7391,7 @@ fn collect_pending_triggers_with_collection(
     // CR 800.4d: a departing permanent's own leaves-the-battlefield abilities
     // look back to a controller who may have left with it (CR 603.10a).
     let mut pending = retire_departed_controller_contexts(state, pending);
+    pending = retire_departed_control_contexts(state, pending);
 
     // CR 603.3b + CR 101.4 + CR 805.6/805.7: Stack-placement order is full
     // APNAP turn order. Shared-team-turn formats rank/order by team while
@@ -9209,6 +9210,62 @@ pub(crate) fn retire_departed_controller_contexts(
     let (live, departed): (Vec<_>, Vec<_>) = contexts
         .into_iter()
         .partition(|context| super::players::is_alive(state, context.pending.controller));
+    for context in departed {
+        crate::game::lifecycle::record_delayed_terminal(
+            context.firing(),
+            crate::game::lifecycle::DelayedTerminalDisposition::Eliminated,
+        );
+    }
+    live
+}
+
+/// CR 603.10a + CR 603.3a + CR 800.4d: a logical zone-change owner collects the
+/// departures it retained only when its tail finishes, which can be after a
+/// player left the game and their control effects ended. What a permanent that
+/// player controlled immediately before leaving triggered for a zone change
+/// recorded before they left was that player's trigger when it triggered, and
+/// leaves with them: retire it as `Eliminated`, like the departure's own
+/// look-back triggers. See [`DepartedControl`].
+fn retire_departed_control_contexts(
+    state: &GameState,
+    contexts: Vec<PendingTriggerContext>,
+) -> Vec<PendingTriggerContext> {
+    if state.departed_control.is_empty() {
+        return contexts;
+    }
+    let performed_before_departure = |event: &GameEvent, first_record: usize| match event {
+        GameEvent::ZoneChanged {
+            object_id,
+            from,
+            to,
+            ..
+        } => state
+            .zone_changes_this_turn
+            .iter()
+            .enumerate()
+            .filter(|(_, record)| {
+                record.object_id == *object_id && record.from_zone == *from && record.to_zone == *to
+            })
+            .last()
+            .is_some_and(|(index, _)| index < first_record),
+        _ => false,
+    };
+    let (live, departed): (Vec<_>, Vec<_>) = contexts.into_iter().partition(|context| {
+        let mut events = context
+            .trigger_events
+            .iter()
+            .chain(context.pending.trigger_event.iter())
+            .peekable();
+        let has_events = events.peek().is_some();
+        let events: Vec<&GameEvent> = events.collect();
+        !has_events
+            || !state.departed_control.iter().any(|departed| {
+                departed.sources.contains(&context.pending.source_id)
+                    && events.iter().all(|event| {
+                        performed_before_departure(event, departed.first_zone_change_record)
+                    })
+            })
+    });
     for context in departed {
         crate::game::lifecycle::record_delayed_terminal(
             context.firing(),
