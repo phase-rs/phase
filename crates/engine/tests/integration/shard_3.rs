@@ -327,6 +327,7 @@ mod horde_spine_runtime;
 mod horde_tokens;
 mod horde_win_loss;
 mod horobi_becomes_target_battlefield_only;
+mod house_rule_poison_threshold;
 mod howlsquad_max_speed_reads_controller;
 mod human_torch_combat_damage_redirect;
 mod hundred_battle_veteran_counter_kind_gate;

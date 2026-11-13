@@ -574,7 +574,9 @@
     "dungeonTooltip": "Aventurándose en {{name}}",
     "poisonAriaLabel_one": "{{count}} contador de veneno",
     "poisonAriaLabel_other": "{{count}} contadores de veneno",
-    "poisonTooltip": "Contadores de veneno: {{count}}\nUn jugador con diez o más contadores de veneno pierde la partida.",
+    "poisonTooltip": "Contadores de veneno: {{count}}",
+    "poisonLossPlayer": "Un jugador con {{threshold}} o más contadores de veneno pierde la partida.",
+    "poisonLossTeam": "Un equipo con {{threshold}} o más contadores de veneno pierde la partida.",
     "energyAriaLabel_one": "{{count}} contador de energía",
     "energyAriaLabel_other": "{{count}} contadores de energía",
     "energyTooltip": "Contadores de energía: {{count}}\nLos contadores de energía son un recurso del jugador que las habilidades de cartas pueden gastar.",
@@ -1184,6 +1186,11 @@
       "drawFirst": "Robar primero",
       "drawFirstDescription": "Toma el robo extra en tu primer turno"
     },
+    "startingPlayer": {
+      "title": "Elige quién juega primero",
+      "playerPlaysFirst": "{{name}} juega primero",
+      "opponentChoosing": "{{name}} está eligiendo quién juega primero…"
+    },
     "mulligan": {
       "opponentDeciding": "El oponente está decidiendo su mano inicial…",
       "londonTitle": "Mulligan de Londres ({{count}} tomados)",
@@ -1422,6 +1429,7 @@
     "config": {
       "startingLife": "Vida inicial",
       "commanderDamage": "Daño de comandante",
+      "poisonCounters": "Contadores de veneno",
       "players": "Jugadores",
       "whoGoesFirst": "Quién empieza",
       "firstPlayer": {

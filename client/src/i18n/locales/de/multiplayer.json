@@ -253,6 +253,7 @@
     "bo3": "BO3",
     "bo3Note": "BO3 ist nur für 2-Spieler-Partien verfügbar.",
     "commanderDamage": "Kommandeurschaden",
+    "poisonCounters": "Giftmarken",
     "playerSeats": "Spielerplätze",
     "seat": "Platz {{number}}",
     "youHost": "Du (Host)",

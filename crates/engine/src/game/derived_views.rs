@@ -24,6 +24,7 @@ use crate::game::combat_damage::combat_damage_to_defender;
 use crate::game::effects::deal_damage::DamageContext;
 use crate::game::filter::{matches_target_filter, FilterContext};
 use crate::game::game_object::{AttachTarget, DisplaySource, GameObject};
+use crate::game::players::{poison_loss_measure, PoisonLossScope};
 use crate::game::stack::{
     effective_stack_ability, stack_display_groups, stack_display_groups_revealing,
     stack_revealed_card_names, StackDisplayGroup,
@@ -809,6 +810,14 @@ pub struct DerivedViews {
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub dungeon_rooms: BTreeMap<PlayerId, DungeonRoomView>,
 
+    /// CR 704.5c / CR 704.6b + CR 810.8d / CR 904.13c: the poison-loss rule each
+    /// player with a nonzero poison-loss count is measured against, so the HUD
+    /// states the threshold the SBA actually uses (a house-rule dial, or the
+    /// shared fifteen) instead of a client literal. Keyed by PlayerId; omitted
+    /// when nobody is poisoned. Poison counters and the format are public.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub poison_loss: BTreeMap<PlayerId, PoisonLossView>,
+
     /// Engine-authored coalesced view of the stack. Adjacent entries with
     /// the same (source, kind, description, targets) signature collapse
     /// into one `StackDisplayGroup` with a `count`. Empty when the stack
@@ -1426,6 +1435,60 @@ fn dungeon_rooms(state: &GameState) -> BTreeMap<PlayerId, DungeonRoomView> {
         .collect()
 }
 
+/// The poison-loss rule one player is measured against, projected from
+/// `players::poison_loss_measure` — the authority the poison SBA reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PoisonLossView {
+    pub scope: PoisonLossScope,
+    pub threshold: u32,
+    pub proximity: PoisonLossProximity,
+}
+
+/// Display classification (no CR): how close a player's poison-loss count is
+/// to its threshold, which the HUD badge styles from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PoisonLossProximity {
+    /// More than `POISON_NEAR_LETHAL_MARGIN` counters short of the threshold.
+    Normal,
+    /// Within `POISON_NEAR_LETHAL_MARGIN` counters of the threshold.
+    NearLethal,
+}
+
+/// Display-only: how many counters short of the loss threshold the HUD starts
+/// warning. 2 reproduces the badge's pre-dial `value >= 8` at the CR default
+/// of ten. No CR governs it.
+const POISON_NEAR_LETHAL_MARGIN: u32 = 2;
+
+/// CR 704.5c / CR 704.6b + CR 810.8d: the poison-loss rule for every player
+/// with a nonzero poison-loss count, read from the same measure the SBA uses.
+/// Empty (and omitted from the wire) when nobody is poisoned.
+fn poison_loss(state: &GameState) -> BTreeMap<PlayerId, PoisonLossView> {
+    state
+        .players
+        .iter()
+        .filter_map(|player| {
+            let measure = poison_loss_measure(state, player)?;
+            (measure.count > 0).then(|| {
+                let proximity = if measure.count.saturating_add(POISON_NEAR_LETHAL_MARGIN)
+                    >= measure.threshold
+                {
+                    PoisonLossProximity::NearLethal
+                } else {
+                    PoisonLossProximity::Normal
+                };
+                (
+                    player.id,
+                    PoisonLossView {
+                        scope: measure.scope,
+                        threshold: measure.threshold,
+                        proximity,
+                    },
+                )
+            })
+        })
+        .collect()
+}
+
 /// CR 115.1 + CR 601.2c: classify what the LIVE target announcement is offering
 /// the announcing player, so the client can name the choice instead of
 /// re-deriving it from raw object fields.
@@ -1680,6 +1743,7 @@ pub fn derive_views(state: &GameState, viewer: Option<PlayerId>) -> DerivedViews
         shared_piles: shared_piles(state),
         current_target_kind: current_target_kind(state),
         dungeon_rooms: dungeon_rooms(state),
+        poison_loss: poison_loss(state),
         storm_count: storm_count(state),
         unblocked_attack_previews: unblocked_attack_previews(state),
         attack_targets: attack_targets(state),
@@ -2560,18 +2624,7 @@ fn turn_order_views(
         return (Vec::new(), None);
     }
 
-    let mut seen = BTreeSet::new();
-    let representatives: Vec<PlayerId> = state
-        .seat_order
-        .iter()
-        .copied()
-        .filter(|&player| crate::game::players::is_alive(state, player))
-        .filter_map(|player| {
-            let representative =
-                crate::game::topology::normalize_shared_turn_recipient(state, player);
-            seen.insert(representative).then_some(representative)
-        })
-        .collect();
+    let representatives = crate::game::topology::turn_representatives(state);
 
     if representatives.len() <= 2 {
         return (Vec::new(), None);
