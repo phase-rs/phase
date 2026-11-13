@@ -13,15 +13,16 @@ use crate::game::replacement::{self, ReplacementResult};
 use crate::types::ability::{
     names_resolution_chosen_recipient, quantity_expr_uses_recipient, DamageContextSnapshot,
     DamageSource, DeferredDamageChoice, EachDamageRecipient, Effect, EffectError, EffectKind,
-    ExcessRecipient, PlayerFilter, QuantityExpr, RawDamagePortion, ReplacedDamagePortion,
-    ResolvedAbility, SubAbilityLink, TargetChoiceTiming, TargetDamageSourceBinding, TargetFilter,
-    TargetRef,
+    ExcessRecipient, ParkedDamageBatch, PlayerFilter, QuantityExpr, RawDamagePortion,
+    ReplacedDamagePortion, ResolvedAbility, SubAbilityLink, TargetChoiceTiming,
+    TargetDamageSourceBinding, TargetFilter, TargetRef,
 };
 use crate::types::card_type::CoreType;
 use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
-    DamageRecord, DistributionScope, GameState, PendingContinuation, TriggerSourceRead,
+    DamageBatchLedger, DamageRecord, DistributionScope, GameState, HeldBatchRider,
+    PendingContinuation, ResidentDrainPolicy, TriggerSourceRead, WaitingFor,
 };
 use crate::types::identifiers::ObjectId;
 use crate::types::keywords::{Keyword, KeywordKind};
@@ -1426,15 +1427,21 @@ fn run_damage_batch(
     kind: EffectKind,
     mut replaced: Vec<(DamageContext, ProposedEvent)>,
     portions: Vec<BatchPortion>,
-    mut deferred: Vec<DeferredDamageChoice>,
+    parked: ParkedDamageBatch,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
+    let ParkedDamageBatch { mut deferred, held } = parked;
     // CR 104.1: "A game ends immediately when a player wins": a batch resumed after the game
     // ended has nothing left to replace, deal or complete.
     if state.game_end.is_some() {
         return Ok(());
     }
     let boundary = state.resolution_stack.capture_child_boundary();
+    // CR 614.6 + CR 615.5 + CR 616.1: while the batch settles its original replacement choices,
+    // a replacement's action or rider is held in the batch's ledger, not run between them.
+    if let Some(ledger) = state.damage_batch_ledger.as_mut() {
+        ledger.held_riders = Some(held);
+    }
     let order = crate::game::players::apnap_order(state);
     let mut portions: std::collections::VecDeque<BatchPortion> =
         in_apnap_order(state, portions).into();
@@ -1507,8 +1514,16 @@ fn run_damage_batch(
                 // the batch behind its answer.
                 if replacement::damage_batch_has_paused_rider(state) {
                     let remaining = portions.iter().filter_map(BatchPortion::raw).collect();
+                    let held = take_held_riders(state);
                     park_damage_batch(
-                        state, ability, kind, &replaced, remaining, None, deferred, boundary,
+                        state,
+                        ability,
+                        kind,
+                        &replaced,
+                        remaining,
+                        None,
+                        ParkedDamageBatch { deferred, held },
+                        boundary,
                     )?;
                     return Ok(());
                 }
@@ -1531,13 +1546,23 @@ fn run_damage_batch(
                 // which finishes the other portions' replacement before any delivery.
                 state.waiting_for = replacement::replacement_choice_waiting_for(player, state);
                 let remaining = portions.iter().filter_map(BatchPortion::raw).collect();
+                let held = take_held_riders(state);
                 park_damage_batch(
-                    state, ability, kind, &replaced, remaining, awaiting, deferred, boundary,
+                    state,
+                    ability,
+                    kind,
+                    &replaced,
+                    remaining,
+                    awaiting,
+                    ParkedDamageBatch { deferred, held },
+                    boundary,
                 )?;
                 return Ok(());
             }
         }
     }
+    // CR 616.1: every original choice is made; what the batch held runs after its damage.
+    let held = take_held_riders(state);
     // Phase C: delivery (CR 120.4c). A delivery that waits on a choice (a lifelink gain's
     // replacements) parks the survivors after it; the parked batch still owns the completion.
     for (index, (ctx, event)) in replaced.iter().enumerate() {
@@ -1560,7 +1585,10 @@ fn run_damage_batch(
                 &replaced[index + 1..],
                 Vec::new(),
                 None,
-                Vec::new(),
+                ParkedDamageBatch {
+                    deferred: Vec::new(),
+                    held,
+                },
                 boundary,
             )?;
             return Ok(());
@@ -1569,12 +1597,56 @@ fn run_damage_batch(
     if state.game_end.is_some() {
         return Ok(());
     }
+    // Phase D: the held work, after the damage. CR 614.6: a substitution's action is the
+    // modified event (Dralnu, Lich Lord's sacrifice), so the substitution actions come first;
+    // CR 615.5: a prevention's additional effect follows "immediately afterward" (Test of
+    // Faith's counters). Within each, CR 101.4: APNAP order of the affected player.
+    let mut held: std::collections::VecDeque<HeldBatchRider> = {
+        let mut held = held;
+        held.sort_by_key(|rider| (rider.timing, player_rank(&order, rider.authority)));
+        held.into()
+    };
+    while let Some(rider) = held.pop_front() {
+        state.install_post_replacement_drain(rider.drain, ResidentDrainPolicy::KeepResident);
+        replacement::drain_damage_rider(state, events);
+        // CR 104.1: a rider that ended the game ends the batch.
+        if state.game_end.is_some() {
+            return Ok(());
+        }
+        // CR 608.2c: the rider left its prompt standing; the rest of the batch waits beneath it.
+        if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+            park_damage_batch(
+                state,
+                ability,
+                kind,
+                &[],
+                Vec::new(),
+                None,
+                ParkedDamageBatch {
+                    deferred: Vec::new(),
+                    held: held.into(),
+                },
+                boundary,
+            )?;
+            return Ok(());
+        }
+    }
     events.push(GameEvent::EffectResolved {
         kind,
         source_id: ability.source_id,
         subject: None,
     });
     Ok(())
+}
+
+/// CR 616.1: the riders the batch's ledger held while its original choices were made, and stop
+/// holding. Empty outside a batch.
+fn take_held_riders(state: &mut GameState) -> Vec<HeldBatchRider> {
+    state
+        .damage_batch_ledger
+        .as_mut()
+        .and_then(|ledger| ledger.held_riders.take())
+        .unwrap_or_default()
 }
 
 /// CR 120.4b + CR 120.4c: run `portions` (each source's context, recipient and amount) as one
@@ -1600,7 +1672,7 @@ pub(crate) fn run_object_damage_batch(
         kind,
         Vec::new(),
         portions,
-        Vec::new(),
+        ParkedDamageBatch::default(),
         events,
     )
 }
@@ -1726,9 +1798,9 @@ pub(crate) fn defer_choice_behind_earlier_players(
             frame
                 .chain
                 .context
-                .deferred_damage_choices
+                .parked_damage_batch
                 .iter()
-                .flat_map(|choices| choices.iter())
+                .flat_map(|parked| parked.deferred.iter())
                 .map(|choice| player_rank(&order, choice.chooser)),
         )
         .min();
@@ -1748,8 +1820,9 @@ pub(crate) fn defer_choice_behind_earlier_players(
         .pending
         .chain
         .context
-        .deferred_damage_choices
+        .parked_damage_batch
         .get_or_insert_with(Default::default)
+        .deferred
         .push(choice);
     true
 }
@@ -1798,7 +1871,7 @@ pub(crate) fn park_damage_batch(
     replaced: &[(DamageContext, ProposedEvent)],
     remaining: Vec<RawDamagePortion>,
     awaiting: Option<RawDamagePortion>,
-    deferred: Vec<DeferredDamageChoice>,
+    parked: ParkedDamageBatch,
     boundary: ChildStackDepth,
 ) -> Result<(), EffectError> {
     let replaced = replaced
@@ -1834,7 +1907,8 @@ pub(crate) fn park_damage_batch(
         ability,
     );
     let mut node = node;
-    node.context.deferred_damage_choices = (!deferred.is_empty()).then(|| Box::new(deferred));
+    node.context.parked_damage_batch =
+        (parked != ParkedDamageBatch::default()).then(|| Box::new(parked));
     let pending = PendingContinuation::new(Box::new(node), state);
     if state.resolution_stack.capture_child_boundary() > boundary {
         state
@@ -1857,6 +1931,80 @@ pub(crate) fn parked_batch_owns_tail(state: &GameState, ability: &ResolvedAbilit
         && state.active_ability_continuation().is_some_and(|pending| {
             matches!(pending.chain.effect, Effect::ResumeDamageBatch { .. })
                 && pending.chain.source_id == ability.source_id
+        })
+}
+
+/// CR 616.1 + CR 615.5: run `answer` (an order answer resuming the replacement pipeline) holding
+/// riders for the parked two-phase batch awaiting that event's portion: the answer is one of the
+/// batch's original choices, so the chosen replacement's action or rider joins the batch's held
+/// work (run after its damage) instead of running at the answer. Any other answer runs as is.
+pub(crate) fn hold_riders_for_awaited_portion<T>(
+    state: &mut GameState,
+    answer: impl FnOnce(&mut GameState) -> T,
+) -> T {
+    let Some(source) =
+        state
+            .pending_replacement
+            .as_ref()
+            .and_then(|pending| match &pending.proposed {
+                ProposedEvent::Damage { source_id, .. } => Some(*source_id),
+                _ => None,
+            })
+    else {
+        return answer(state);
+    };
+    if awaiting_batch(state, source).is_none() {
+        return answer(state);
+    }
+    // CR 608.2f + CR 700.1: the answer re-scans its portion under the guards its batch read
+    // (`replacement::continue_replacement` reads them off the parked record only when no ledger
+    // is open, so this one carries them).
+    let saved = state.damage_batch_ledger.take();
+    let ledger = match saved.clone() {
+        Some(ledger) => ledger,
+        None => DamageBatchLedger {
+            settled_guards: state
+                .pending_replacement
+                .as_ref()
+                .map(|pending| pending.settled_damage_guards.clone())
+                .unwrap_or_default(),
+            ..DamageBatchLedger::default()
+        },
+    };
+    state.damage_batch_ledger = Some(DamageBatchLedger {
+        held_riders: Some(Vec::new()),
+        ..ledger
+    });
+    let result = answer(state);
+    let held = take_held_riders(state);
+    state.damage_batch_ledger = saved;
+    if !held.is_empty() {
+        if let Some(batch) = awaiting_batch(state, source) {
+            batch
+                .context
+                .parked_damage_batch
+                .get_or_insert_with(Default::default)
+                .held
+                .extend(held);
+        }
+    }
+    result
+}
+
+/// CR 120.1: the topmost parked two-phase batch awaiting the portion `source` deals.
+fn awaiting_batch(state: &mut GameState, source: ObjectId) -> Option<&mut ResolvedAbility> {
+    state
+        .resolution_stack
+        .ability_continuations_from_top_mut()
+        .map(|pending| pending.chain.as_mut())
+        .find(|chain| {
+            matches!(
+                &chain.effect,
+                Effect::ResumeDamageBatch {
+                    awaiting: Some(portion),
+                    ..
+                } if portion.source == source
+            )
         })
 }
 
@@ -1955,14 +2103,14 @@ pub fn resolve_resume_damage_batch(
         })
         .collect();
     let kind = *kind;
-    let deferred = ability
+    let parked = ability
         .context
-        .deferred_damage_choices
+        .parked_damage_batch
         .as_deref()
         .cloned()
         .unwrap_or_default();
     replacement::with_damage_batch(state, ability, |state| {
-        run_damage_batch(state, ability, kind, replaced, portions, deferred, events)
+        run_damage_batch(state, ability, kind, replaced, portions, parked, events)
     })
 }
 
@@ -2082,8 +2230,9 @@ fn keep_chain_identity(
     // CR 608.2f + CR 700.1: a remaining portion of a simultaneous batch keeps the guards
     // the batch read; nothing else is such a portion (`apply_parent_chain_context`).
     node.context.settled_damage_guards = replacement::settled_damage_guards(state);
-    // CR 616.1 + CR 101.4: deferred choices belong to the batch that parks them only.
-    node.context.deferred_damage_choices = None;
+    // CR 616.1 + CR 101.4: deferred choices and held riders belong to the batch that parks
+    // them only.
+    node.context.parked_damage_batch = None;
     node
 }
 
@@ -3011,7 +3160,7 @@ fn resolve_each_target_power_damage(
         EffectKind::from(&ability.effect),
         Vec::new(),
         portions,
-        Vec::new(),
+        ParkedDamageBatch::default(),
         events,
     )
 }
@@ -3996,7 +4145,7 @@ fn resolve_each_deals_equal_to_power_portions(
         EffectKind::from(&ability.effect),
         Vec::new(),
         portions,
-        Vec::new(),
+        ParkedDamageBatch::default(),
         events,
     )
 }
@@ -4183,7 +4332,7 @@ fn resolve_each_source_deals_damage_portions(
         EffectKind::from(&ability.effect),
         Vec::new(),
         portions,
-        Vec::new(),
+        ParkedDamageBatch::default(),
         events,
     )
 }
@@ -4728,9 +4877,9 @@ mod tests {
         let deferred: Vec<ObjectId> = cont
             .chain
             .context
-            .deferred_damage_choices
+            .parked_damage_batch
             .iter()
-            .flat_map(|choices| choices.iter().map(|choice| choice.source))
+            .flat_map(|parked| parked.deferred.iter().map(|choice| choice.source))
             .collect();
         let asked = awaiting.as_ref().map(|portion| portion.source);
         let mut both: Vec<ObjectId> = deferred.iter().copied().chain(asked).collect();

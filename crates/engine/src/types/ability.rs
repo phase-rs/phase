@@ -1842,6 +1842,20 @@ pub struct DeferredDamageChoice {
     pub lifelink_bonus: u32,
 }
 
+/// CR 616.1 + CR 615.5: a parked two-phase damage batch's outstanding work besides its
+/// portions. Owned by the batch's continuation, so it goes wherever that continuation goes
+/// (resumed, or abandoned with it).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ParkedDamageBatch {
+    /// CR 616.1 + CR 101.4: choices deferred behind an earlier player's outstanding choice.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub deferred: Vec<DeferredDamageChoice>,
+    /// CR 614.6 + CR 615.5: substitution actions and prevention riders held until the batch's
+    /// damage is dealt.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub held: Vec<crate::types::game_state::HeldBatchRider>,
+}
+
 /// Casting-time facts that flow with a spell from casting through resolution.
 /// Conditions in the sub_ability chain are evaluated against this context.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -1850,13 +1864,14 @@ pub struct SpellContext {
     /// remaining portion of. Node-local: a later instruction reads live (CR 700.1).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub settled_damage_guards: Vec<SettledDamageGuard>,
-    /// CR 616.1 + CR 101.4: the replacement choices a parked two-phase damage batch
-    /// (`Effect::ResumeDamageBatch`) deferred behind earlier players' outstanding choices.
+    /// CR 616.1 + CR 101.4 + CR 615.5: what a parked two-phase damage batch
+    /// (`Effect::ResumeDamageBatch`) carries besides its portions: the choices it deferred behind
+    /// earlier players' outstanding ones, and the riders it holds until its damage is dealt.
     /// Node-local, like `settled_damage_guards`. Boxed so the common empty case keeps every
-    /// `ResolvedAbility` one pointer wider, not a whole `Vec` (deep resolution chains carry
-    /// many of them on the stack).
+    /// `ResolvedAbility` one pointer wider (deep resolution chains carry many of them on the
+    /// stack).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub deferred_damage_choices: Option<Box<Vec<DeferredDamageChoice>>>,
+    pub parked_damage_batch: Option<Box<ParkedDamageBatch>>,
     /// Typed SearchLibrary intent for a face-down Exile destination.
     /// This is carried in the existing resolution context so it survives
     /// ordinary ability-chain handoffs without widening every ability literal.

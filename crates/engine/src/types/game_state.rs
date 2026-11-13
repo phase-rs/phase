@@ -23677,6 +23677,29 @@ pub struct TrackedMemberOrigin {
     pub departure_incarnation: u64,
 }
 
+/// CR 614.6 + CR 615.5: when a damage batch's held rider runs, relative to the damage.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub enum RiderTiming {
+    /// CR 614.6: a substitution's action is the modified event itself (Dralnu, Lich Lord's
+    /// sacrifice), so it happens with the batch's damage.
+    WithEvent,
+    /// CR 615.5: a prevention's additional effect "takes place immediately afterward" (Test of
+    /// Faith's counters), after the batch's damage.
+    AfterEvent,
+}
+
+/// CR 614.6 + CR 615.5 + CR 616.1: a damage batch's substitution action or prevention rider,
+/// held until every portion's original replacement choice in that batch is made, then run
+/// after the batch's damage is dealt. `authority` is the affected player once the event's
+/// redirects applied (the recipient, or its controller); held riders run in APNAP order of it,
+/// substitution actions first.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HeldBatchRider {
+    pub authority: crate::types::player::PlayerId,
+    pub timing: RiderTiming,
+    pub drain: PostReplacementDrain,
+}
+
 /// Declares the runtime state and its private serde-only raw mirror from one
 /// field list. Keeping the field declaration single-sourced makes persistence
 /// ingress exhaustive whenever `GameState` evolves.
@@ -28630,7 +28653,7 @@ pub struct PendingConniveReentry {
 /// clearing the event fields late — an interleaving that no type enforced and
 /// every caller had to respect. Here it is a state transition:
 /// `Ready(work)` → `Dispatching` → `Paused` → popped.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DrainStatus {
     /// Not yet run. `Template` is an AST resolved against `source`; `Resolved`
     /// carries targets captured at shield-install time.
@@ -28664,7 +28687,7 @@ pub struct PostReplacementDrainDispatch {
     depth: usize,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PostReplacementDrain {
     /// The work to run, and whether it has been taken yet.
     pub status: DrainStatus,
@@ -29751,6 +29774,11 @@ pub(crate) struct DamageBatchLedger {
     /// (`replacement::damage_rider_placement`). Combat settles every rider pause in the batch
     /// (`drain_combat_damage_rider`), so it is never set there.
     pub(crate) paused_rider: Option<PostReplacementFrameId>,
+    /// CR 614.6 + CR 615.5 + CR 616.1: `Some` while a two-phase noncombat batch is settling its
+    /// original replacement choices. A damage replacement's action or rider is held here
+    /// (`replacement::hold_damage_rider`) instead of running between those choices; the batch
+    /// runs them after its damage. `None` everywhere else, where riders run at once.
+    pub(crate) held_riders: Option<Vec<HeldBatchRider>>,
 }
 
 /// Who owns a player-resource change (life, player counter, energy) whose final

@@ -669,9 +669,14 @@ mod tests {
                 let waiting: Vec<(ObjectId, u32)> = cont
                     .chain
                     .context
-                    .deferred_damage_choices
+                    .parked_damage_batch
                     .iter()
-                    .flat_map(|choices| choices.iter().map(|choice| (choice.source, choice.amount)))
+                    .flat_map(|parked| {
+                        parked
+                            .deferred
+                            .iter()
+                            .map(|choice| (choice.source, choice.amount))
+                    })
                     .collect();
                 assert_eq!(
                     waiting,

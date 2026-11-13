@@ -430,7 +430,11 @@ fn handle_replacement_choice_inner(
         .pending_replacement
         .as_ref()
         .is_some_and(|pending| matches!(pending.proposed, ProposedEvent::BeginPhase { .. }));
-    let result = super::replacement::continue_replacement(state, index, events);
+    // CR 616.1 + CR 615.5: an answer a parked damage batch awaits is one of its original
+    // choices, so the chosen replacement's action or rider waits with the batch's held work.
+    let result = super::effects::deal_damage::hold_riders_for_awaited_portion(state, |state| {
+        super::replacement::continue_replacement(state, index, events)
+    });
     // CR 614.12a: an optional `MayCost` accept whose payment surfaced an
     // interactive sub-choice (e.g. Mox Diamond's "discard a land card" with
     // multiple eligible lands) re-parked the pending replacement with

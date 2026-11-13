@@ -1178,9 +1178,11 @@ fn a_last_sources_rider_prompt_survives_an_earlier_lifelink_choice() {
 /// prevention effects that interact with damage"; CR 120.4c then processes it "into its
 /// results"), and a pause keeps that order. P0's Rhox Faithmender (lifelink) is first: its
 /// portion survives, and its gain will meet Rhox Faithmender and Leyline of Hope. P1's Bear is
-/// next: Nefarious Lich asks which card to exile. P2's Hill Giant is last: P2's 1 meets Force
-/// Bubble and Delaying Shield, an order P2 chooses (CR 616.1). The prompts come in that order,
-/// no damage is dealt before P2's answer, and the instruction completes once, after the last.
+/// next: Nefarious Lich replaces its damage. P2's Hill Giant is last: P2's 1 meets Force Bubble
+/// and Delaying Shield, an order P2 chooses (CR 616.1). P2's order, an original choice, is asked
+/// first; then, with the damage, P0's gain choice and the Lich's exile (its substitution's
+/// action, CR 614.6), in APNAP order (CR 101.4). No damage is dealt before P2's answer, and the
+/// instruction completes once, after the last.
 #[test]
 fn a_paused_batch_finishes_its_replacements_before_dealing_damage() {
     let p2 = PlayerId(2);
@@ -1227,7 +1229,7 @@ fn a_paused_batch_finishes_its_replacements_before_dealing_damage() {
         }
     }
 
-    assert_eq!(prompts, vec![("exile", P1), ("order", p2), ("gain", P0)]);
+    assert_eq!(prompts, vec![("order", p2), ("gain", P0), ("exile", P1)]);
     assert_eq!(dealt_before_last_replacement_answer, 0);
     assert_eq!(dealt(&events), 1, "only Rhox Faithmender's 1 is dealt");
     assert_eq!(counters(&runner, bubble, &depletion()), 1);
@@ -1328,10 +1330,12 @@ fn cast_rakdos_charm_damage_mode(runner: &mut GameRunner, charm: ObjectId) -> Ve
     events
 }
 
-/// CR 104.1: a loss during replacement discards even an earlier cached survivor.
-/// Exercises run_damage_batch's post-replacement/post-rider terminal guards.
+/// CR 614.6 + CR 104.1: Nefarious Lich's "If you can't, you lose the game" is its substitution's
+/// action, part of the batch's one simultaneous event, so P0's cached survivor is dealt with it
+/// (Dralnu ruling: "dealt damage at the same time"). The loss then ends the game: nothing after
+/// it, and no completion. Exercises run_damage_batch's post-rider terminal guard.
 #[test]
-fn a_batch_stops_cached_damage_when_a_replacement_ends_the_game() {
+fn a_substitution_loss_comes_with_the_batchs_damage() {
     let mut scenario = scenario();
     let cached =
         super::unpreventable_damage_prevention_effects::faithmender_and_leyline(&mut scenario);
@@ -1356,15 +1360,17 @@ fn a_batch_stops_cached_damage_when_a_replacement_ends_the_game() {
     let over = events
         .iter()
         .position(|e| matches!(e, GameEvent::GameOver { winner: Some(P0) }))
-        .expect("P0 won during replacement");
+        .expect("P0 won with the batch's damage");
     assert!(!events[over + 1..]
         .iter()
         .any(|e| matches!(e, GameEvent::DamageDealt { .. })));
-    assert!(!events
+    assert!(events[..over]
         .iter()
         .any(|e| matches!(e, GameEvent::DamageDealt { source_id, .. } if *source_id == cached)));
     assert!(completions(&events, EffectKind::EachSourceDealsDamage, charm).is_empty());
-    assert_eq!(life(&runner, P0), 20);
+    // P0's 1 and its doubled lifelink gain (Rhox Faithmender, Leyline of Hope).
+    let p0 = life(&runner, P0);
+    assert!([22, 23].contains(&p0), "got {p0}");
 }
 
 /// CR 104.1 + CR 120.3f: lifelink can end the game during the first delivery.
@@ -1419,8 +1425,8 @@ fn a_batch_stops_its_second_source_when_lifelink_wins_the_game() {
     assert!(completions(&events, EffectKind::EachDealsDamageEqualToPower, spell).is_empty());
 }
 
-/// CR 800.4a: a departing recipient is skipped while the other players' batch continues.
-/// Exercises recipient_present with a second portion addressed to the departed player.
+/// CR 800.4a: P1 loses to Nefarious Lich's substitution action, which comes with the batch's
+/// damage (CR 614.6); the other players' portions are dealt and the batch completes for them.
 #[test]
 fn a_batch_continues_for_survivors_after_one_of_three_players_loses() {
     let mut scenario = GameScenario::new_n_player(3, 11);
@@ -1440,17 +1446,19 @@ fn a_batch_continues_for_survivors_after_one_of_three_players_loses() {
     let lost = events
         .iter()
         .position(|e| matches!(e, GameEvent::PlayerEliminated { player_id } if *player_id == P1))
-        .expect("P1 lost inside replacement");
+        .expect("P1 lost with the batch's damage");
     assert!(!engine::game::players::is_alive(runner.state(), P1));
     assert!(runner.state().game_end.is_none());
     assert!(!events
         .iter()
         .any(|e| matches!(e, GameEvent::GameOver { .. })));
+    // CR 614.6: the Lich's loss is its substitution's action, with the batch's damage: the
+    // survivors' portions are dealt, P1's never is.
     for (source, recipient) in [(cached, P0), (survivor, P2)] {
-        assert!(events[lost + 1..].iter().any(|e| matches!(e, GameEvent::DamageDealt { source_id, target: TargetRef::Player(player), amount: 1, .. } if *source_id == source && *player == recipient)));
+        assert!(events[..lost].iter().any(|e| matches!(e, GameEvent::DamageDealt { source_id, target: TargetRef::Player(player), amount: 1, .. } if *source_id == source && *player == recipient)));
     }
     assert_eq!(life(&runner, P2), 19);
-    assert!(!events[lost + 1..].iter().any(|e| matches!(e, GameEvent::DamageDealt { source_id, target, .. } if *source_id == departed || *target == player_target(P1))));
+    assert!(!events.iter().any(|e| matches!(e, GameEvent::DamageDealt { source_id, target, .. } if *source_id == departed || *target == player_target(P1))));
     assert_completes_once_after_its_damage(&events, EffectKind::EachSourceDealsDamage, charm);
     assert_at_rest(&runner);
 }
@@ -1521,9 +1529,10 @@ fn a_batchs_delivery_choices_keep_its_single_completion() {
 }
 
 /// Rakdos Charm: P0's Rhox Faithmender survives first. P1's Bear meets P1's Nefarious Lich and
-/// Force Bubble; P1 orders the Lich first, so its exile asks which card next (CR 616.1, CR
-/// 615.5). P2's Hill Giant, last, still goes through replacement before anything is dealt.
-/// With P2 under Force Bubble and Delaying Shield too, P2 orders after P1 (two order choices).
+/// Force Bubble; P1 orders the Lich first (CR 616.1). P2's Hill Giant, last, still goes through
+/// replacement before anything is dealt. With P2 under Force Bubble and Delaying Shield too, P2
+/// orders after P1 (two order choices). The Lich's exile, its substitution's action, comes with
+/// the batch's damage (CR 614.6), after P0's gain choice (CR 101.4).
 #[test]
 fn a_batch_keeps_its_order_through_an_answer_that_pauses_again() {
     for p2_orders in [false, true] {
@@ -1553,13 +1562,16 @@ fn a_batch_keeps_its_order_through_an_answer_that_pauses_again() {
             }
         });
 
-        let mut expected: Vec<(&str, PlayerId, usize)> = vec![("order", P1, 0), ("exile", P1, 0)];
+        let mut expected: Vec<(&str, PlayerId, usize)> = vec![("order", P1, 0)];
         if p2_orders {
             expected.push(("order", p2, 0));
         }
         // Rhox Faithmender's gain is asked in delivery, after every replacement answer, once
-        // its own 1 is dealt.
+        // its own 1 is dealt. The Lich's exile is its substitution's action, which happens with
+        // the batch's damage (CR 614.6), after the gain in APNAP order (CR 101.4).
         expected.push(("order", P0, 1));
+        // By then P0's 1 is dealt, and P2's 3 too unless P2's shields replaced it.
+        expected.push(("exile", P1, if p2_orders { 1 } else { 2 }));
         assert_eq!(prompts, expected, "p2 orders {p2_orders}");
         assert_eq!(player(&runner, P1).graveyard.len(), 2);
         assert_completes_once_after_its_damage(&events, EffectKind::EachSourceDealsDamage, charm);
@@ -3939,6 +3951,160 @@ fn a_fights_two_directions_ask_their_choices_in_apnap_order() {
     assert_at_rest(&runner);
 }
 
+/// CR 616.1 + CR 615.5: a fight's original replacement choices are all made before any
+/// prevention after-effect. Pit Fight, P0 active. P0's 1/1 fighter is under Test of Faith and
+/// Mending Hands (two prevention shields on the reverse hit, so P0 orders them). P1's fighter is
+/// under one Test of Faith, with Hardened Scales and Doubling Season, so the counters it puts
+/// meet two counter replacements and P1 orders those. P0's shield order comes before P1's counter
+/// order (CR 101.4), and the fight completes once.
+#[test]
+fn a_fight_settles_original_choices_before_a_counter_rider() {
+    let mut scenario = scenario();
+    let ours = scenario.add_creature(P0, "Goblin", 1, 1).id();
+    let theirs = scenario.add_creature(P1, "Grizzly Bears", 2, 2).id();
+    let faith_ours = instant(&mut scenario, "Test of Faith", TEST_OF_FAITH);
+    let hands = instant(&mut scenario, "Mending Hands", MENDING_HANDS);
+    let faith_theirs = instant(&mut scenario, "Test of Faith", TEST_OF_FAITH);
+    scenario.add_enchantment_from_oracle(P1, "Hardened Scales", HARDENED_SCALES);
+    scenario.add_enchantment_from_oracle(P1, "Doubling Season", DOUBLING_SEASON);
+    let pit_fight = instant(&mut scenario, "Pit Fight", PIT_FIGHT);
+    let mut runner = scenario.build();
+    cast(&mut runner, faith_ours, vec![object_target(ours)]);
+    cast(&mut runner, hands, vec![object_target(ours)]);
+    cast(&mut runner, faith_theirs, vec![object_target(theirs)]);
+    let mut events = cast(
+        &mut runner,
+        pit_fight,
+        vec![object_target(ours), object_target(theirs)],
+    );
+
+    let prompts = answer_batch_prompts(&mut runner, &mut events, |_, _| None);
+
+    let players: Vec<PlayerId> = prompts
+        .iter()
+        .filter(|(kind, _, _)| *kind == "order")
+        .map(|(_, player, _)| *player)
+        .collect();
+    let p0_last = players.iter().rposition(|p| *p == P0);
+    let p1_first = players.iter().position(|p| *p == P1);
+    assert!(
+        matches!((p0_last, p1_first), (Some(last), Some(first)) if last < first),
+        "P0's shield order before P1's counter order: {prompts:?}"
+    );
+    assert_completes_once_after_its_damage(&events, EffectKind::Fight, pit_fight);
+    assert_at_rest(&runner);
+}
+
+/// The F2 board with the seats reversed and counter replacements on both sides: P0's fighter has
+/// one Test of Faith, P1's has Test of Faith and Mending Hands, and each player controls Hardened
+/// Scales and Doubling Season. P0's shield applies on its own and its counters wait; P1 orders
+/// its shields (choosing Test of Faith), and that answer's counters wait too (CR 616.1: it is one
+/// of the fight's original choices). After the damage, the counters come in APNAP order
+/// (CR 615.5 + CR 101.4): P0 orders its counter replacements before P1 does. Before the hold,
+/// P1's counters were asked at P1's answer, ahead of P0's.
+fn reversed_seat_fight() -> (GameRunner, Vec<GameEvent>, [ObjectId; 3]) {
+    let mut scenario = scenario();
+    let ours = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
+    let theirs = scenario.add_creature(P1, "Goblin", 1, 1).id();
+    let faith_ours = instant(&mut scenario, "Test of Faith", TEST_OF_FAITH);
+    let faith_theirs = instant(&mut scenario, "Test of Faith", TEST_OF_FAITH);
+    let hands = instant(&mut scenario, "Mending Hands", MENDING_HANDS);
+    for player in [P0, P1] {
+        scenario.add_enchantment_from_oracle(player, "Hardened Scales", HARDENED_SCALES);
+        scenario.add_enchantment_from_oracle(player, "Doubling Season", DOUBLING_SEASON);
+    }
+    let pit_fight = instant(&mut scenario, "Pit Fight", PIT_FIGHT);
+    let mut runner = scenario.build();
+    cast(&mut runner, faith_ours, vec![object_target(ours)]);
+    cast(&mut runner, faith_theirs, vec![object_target(theirs)]);
+    cast(&mut runner, hands, vec![object_target(theirs)]);
+    let events = cast(
+        &mut runner,
+        pit_fight,
+        vec![object_target(ours), object_target(theirs)],
+    );
+    (runner, events, [ours, theirs, pit_fight])
+}
+
+#[test]
+fn a_fight_holds_an_answered_shields_rider_for_apnap_order() {
+    let (mut runner, mut events, [ours, theirs, pit_fight]) = reversed_seat_fight();
+
+    // Each first candidate: P1's Test of Faith (cast before Mending Hands, CR 616.1).
+    let players: Vec<PlayerId> = answer_batch_prompts(&mut runner, &mut events, |_, _| None)
+        .into_iter()
+        .filter(|(kind, _, _)| *kind == "order")
+        .map(|(_, player, _)| player)
+        .collect();
+
+    // P1's shield order first; then every counter order of P0's before any of P1's.
+    assert_eq!(players.first(), Some(&P1), "got {players:?}");
+    let counter_orders = &players[1..];
+    let p0_last = counter_orders.iter().rposition(|p| *p == P0);
+    let p1_first = counter_orders.iter().position(|p| *p == P1);
+    assert!(
+        matches!((p0_last, p1_first), (Some(last), Some(first)) if last < first),
+        "P0's counters before P1's: {players:?}"
+    );
+    // P1's 1 to P0's Bears and P0's 2 to P1's Goblin are prevented; each 1 counter becomes 3 or
+    // 4 under Hardened Scales and Doubling Season, depending on the order.
+    assert_eq!(damage(&runner, ours), 0);
+    assert_eq!(damage(&runner, theirs), 0);
+    assert!(
+        [3, 4].contains(&plus_counters(&runner, ours)),
+        "got {}",
+        plus_counters(&runner, ours)
+    );
+    assert!(
+        [5, 6].contains(&plus_counters(&runner, theirs)),
+        "got {}",
+        plus_counters(&runner, theirs)
+    );
+    assert_completes_once_after_its_damage(&events, EffectKind::Fight, pit_fight);
+    assert_at_rest(&runner);
+}
+
+/// CR 104.1 + CR 800.4a: a fight parked on a held rider's prompt ends with the game. On the
+/// reversed-seat board, P1 concedes at P0's counter prompt: the game is over and nothing of the
+/// batch is left to resume.
+#[test]
+fn a_fight_parked_on_a_held_rider_ends_with_the_game() {
+    let (mut runner, mut events, _) = reversed_seat_fight();
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::ReplacementChoice { player: P1, .. }
+        ),
+        "reach: P1 orders its shields, got {:?}",
+        runner.state().waiting_for
+    );
+    // The first candidate: Test of Faith, cast before Mending Hands.
+    answer(
+        &mut runner,
+        GameAction::ChooseReplacement { index: 0 },
+        &mut events,
+    );
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::ReplacementChoice { player: P0, .. }
+        ),
+        "reach: the batch is parked on P0's counter order, got {:?}",
+        runner.state().waiting_for
+    );
+
+    runner
+        .act(GameAction::Concede { player_id: P1 })
+        .expect("P1 concedes");
+
+    assert!(runner.state().game_end.is_some());
+    assert_eq!(
+        runner.state().resolution_stack.len(),
+        0,
+        "no damage batch is left to resume"
+    );
+}
+
 /// CR 616.1 + CR 101.4: P2's outstanding order precedes a new P3 order after redirect.
 #[test]
 fn redirected_damage_choices_follow_four_player_apnap_order() {
@@ -3987,10 +4153,12 @@ fn redirected_damage_choices_follow_four_player_apnap_order() {
     assert_at_rest(&runner);
 }
 
-/// CR 104.1: a terminal replacement ANSWER suppresses pending sources and completion.
-/// This checks the public terminal boundary; the answer itself can stop before batch re-entry.
+/// CR 616.1 + CR 614.6 + CR 104.1: a terminal substitution chosen by an ANSWER waits for the
+/// batch's other original choices and happens with its damage. P1 orders Nefarious Lich over
+/// Force Bubble for each Bear; the loss comes after the second answer, with P0's Cadet's 1, and
+/// the batch never completes.
 #[test]
-fn terminal_replacement_answer_suppresses_later_batch_sources() {
+fn a_terminal_substitution_answer_waits_for_the_batch() {
     let mut scenario = scenario();
     let cached = scenario.add_creature(P0, "Eager Cadet", 1, 1).id();
     let first = scenario.add_creature(P1, "Grizzly Bears", 2, 2).id();
@@ -4011,15 +4179,24 @@ fn terminal_replacement_answer_suppresses_later_batch_sources() {
     assert!(self::player(&runner, P1).graveyard.is_empty());
     assert_eq!(dealt(&events), 0);
     choose_source(&mut runner, &mut events, lich);
+    assert!(
+        runner.state().game_end.is_none(),
+        "the first answer's loss waits for the batch"
+    );
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::ReplacementChoice { player: P1, .. }
+    ));
+    choose_source(&mut runner, &mut events, lich);
     assert_game_over(&runner, P0);
     assert!(events.iter().any(
         |e| matches!(e, GameEvent::ReplacementApplied { source_id, .. } if *source_id == lich)
     ));
     assert!(!events.iter().any(|e| matches!(e, GameEvent::DamageDealt { source_id, .. } if *source_id == first || *source_id == later)));
-    assert!(!events
+    assert!(events
         .iter()
         .any(|e| matches!(e, GameEvent::DamageDealt { source_id, .. } if *source_id == cached)));
-    assert_eq!(life(&runner, P0), 20);
+    assert_eq!(life(&runner, P0), 19);
     assert!(completions(&events, EffectKind::EachSourceDealsDamage, charm).is_empty());
 }
 
@@ -4144,9 +4321,9 @@ fn deferred_damage_queue_survives_game_state_serde_round_trip() {
             .unwrap()
             .chain
             .context
-            .deferred_damage_choices
+            .parked_damage_batch
             .as_ref()
-            .map_or(0, |choices| choices.len()),
+            .map_or(0, |parked| parked.deferred.len()),
         1,
         "reach: a choice is deferred"
     );
