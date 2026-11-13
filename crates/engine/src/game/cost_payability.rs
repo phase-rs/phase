@@ -22,8 +22,8 @@
 use crate::types::ability::{
     is_variable_remove_counter_cost_count, AbilityCost, CardSelectionMode, Comparator,
     CounterCostSelection, DiscardSelfScope, FilterProp, NinjutsuVariant, PlayerFilter,
-    QuantityExpr, QuantityRef, SacrificeCost, SharedQuality, TapCreaturesAggregateStat,
-    TapCreaturesRequirement, TargetFilter, TypedFilter, EXILE_COST_X,
+    PlayerRecipientCost, QuantityExpr, QuantityRef, SacrificeCost, SharedQuality,
+    TapCreaturesAggregateStat, TapCreaturesRequirement, TargetFilter, TypedFilter, EXILE_COST_X,
 };
 use crate::types::card_type::CoreType;
 use crate::types::game_state::{CostResume, PayCostKind, WaitingFor};
@@ -1936,9 +1936,30 @@ impl AbilityCostLegPayability for AbilityCost {
                 !super::keywords::returnable_creatures_for_variant(state, player, variant)
                     .is_empty()
             }
-            // CR 118.3: Effect-as-cost is conservatively treated as payable.
-            // Runtime resolution determines actual outcome.
-            AbilityCost::EffectCost { .. } => true,
+            // CR 118.3: Effect-as-cost is conservatively payable (runtime resolution
+            // determines the actual outcome), except a life-gain cost that has
+            // other players gain life (CR 118.9 + CR 119.7): payable only when its
+            // recipients can gain life now (the spell offer also admits a lock a
+            // CR 601.2g mana ability may remove; see
+            // `casting_costs::spell_alternative_cost_is_payable`). A life-gain
+            // effect-cost the recipient view does not recognize has no payer, so
+            // it is never offered (CR 601.2h: unpayable costs can't be paid).
+            AbilityCost::EffectCost { effect } => match self.player_recipient_cost() {
+                Some(PlayerRecipientCost::GainLife {
+                    recipient,
+                    selection,
+                    ..
+                }) => !matches!(
+                    super::life_costs::life_gain_cost_recipients(
+                        state, player, source, recipient, selection,
+                    ),
+                    super::life_costs::LifeGainCostRecipients::Unpayable
+                ),
+                None => !matches!(
+                    effect.as_ref(),
+                    crate::types::ability::Effect::GainLife { .. }
+                ),
+            },
             // CR 601.2b: Unimplemented costs are conservatively treated as payable
             // so the existing `Unimplemented` fallback paths are not further gated.
             AbilityCost::Unimplemented { .. } => true,

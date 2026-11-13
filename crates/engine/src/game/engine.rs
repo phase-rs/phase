@@ -10264,8 +10264,9 @@ fn drain_pending_deferred_life_cost_resume(
                     }
                 }
                 if pending.prepaid_actual_mana_spent.is_some() {
-                    state.pending_cast = Some(pending);
-                    super::casting_costs::finalize_automatic_mana_payment(state, player, events)
+                    super::casting_costs::resume_cast_after_deferred_life_cost(
+                        state, player, *pending, events,
+                    )
                 } else {
                     super::casting_costs::finish_pending_cost_or_cast(
                         state, player, *pending, events,
@@ -15425,12 +15426,13 @@ fn apply_non_priority_pass_action(
             }
             casting_costs::begin_deferred_target_selection(state, caster, pending, &mut events)?
         }
-        // CR 702.174a: Caster chose which opponent receives the promised Gift.
+        // CR 601.2 + CR 115.10a: caster chose the opponent for the prompt's purpose.
         (
             WaitingFor::ChooseGiftRecipient {
                 player,
                 candidates,
                 pending_cast,
+                purpose,
                 ..
             },
             GameAction::ChooseGiftRecipient { opponent },
@@ -15442,6 +15444,7 @@ fn apply_non_priority_pass_action(
                 (**pending_cast).clone(),
                 opponent,
                 candidates,
+                purpose,
                 &mut events,
             )?
         }
