@@ -80674,6 +80674,32 @@ fn bare_choose_feeding_a_printed_target_through_the_chosen_object_keeps_stack_ti
         "{text}: {def:#?}"
     );
 
+    // A player-only declaration is a `TargetOnly` too and names no object either
+    // (CR 109.1). Synthetic: Guard Dogs' text with Thought-Stalker Warlock's
+    // printed "choose target opponent" interposed.
+    let text = "Choose a permanent you control. Choose target opponent. Prevent all combat damage target creature would deal this turn if it shares a color with that permanent.";
+    let def = parse_effect_chain(text, AbilityKind::Spell);
+    let player_declaration = def
+        .sub_ability
+        .as_deref()
+        .expect("the interposed player declaration");
+    assert!(
+        matches!(
+            player_declaration.effect.as_ref(),
+            Effect::TargetOnly { target } if target.denotes_player_target()
+        ),
+        "{text}: reach guard for the interposed player-only TargetOnly: {def:#?}"
+    );
+    assert!(
+        matches!(def.effect.as_ref(), Effect::TargetOnly { target } if !target.denotes_player_target()),
+        "{text}: reach guard for the bare permanent choice: {def:#?}"
+    );
+    assert_eq!(
+        def.target_choice_timing,
+        TargetChoiceTiming::Stack,
+        "{text}: the permanent choice is withheld: {def:#?}"
+    );
+
     // A compound continuation's choice is an antecedent too ("... and choose a
     // creature you control."), and keeps the `Stack` it lowered to before the
     // producer existed when the next sentence's printed target is rebound to it.
