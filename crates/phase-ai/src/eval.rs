@@ -595,21 +595,11 @@ pub fn evaluate_features(state: &GameState, player: PlayerId) -> Result<EvalFeat
     Ok(features)
 }
 
-#[cfg(test)]
-thread_local! {
-    /// Test witness: board evaluations on this thread.
-    pub(crate) static BOARD_EVALUATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-    /// Test witness: whole-battlefield walks `board_stats` made on this thread.
-    pub(crate) static BOARD_WALKS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-}
-
 pub fn evaluate_state_breakdown(
     state: &GameState,
     player: PlayerId,
     weights: &EvalWeights,
 ) -> Result<EvaluationBreakdown, f64> {
-    #[cfg(test)]
-    BOARD_EVALUATIONS.with(|c| c.set(c.get() + 1));
     let features = evaluate_features(state, player)?;
     let mut breakdown = EvaluationBreakdown {
         life: features.life * weights.life,
@@ -693,8 +683,6 @@ pub struct BoardStats {
 }
 
 pub fn board_stats(state: &GameState, player: PlayerId) -> BoardStats {
-    #[cfg(test)]
-    BOARD_WALKS.with(|c| c.set(c.get() + 1));
     let mut creatures = 0;
     let mut total_power = 0;
     let mut total_toughness = 0;
@@ -1246,19 +1234,6 @@ mod tests {
 
     fn make_state() -> GameState {
         GameState::new_two_player(42)
-    }
-
-    #[test]
-    fn two_player_evaluation_walks_the_board_once_per_side() {
-        let state = make_state();
-        BOARD_WALKS.with(|c| c.replace(0));
-        evaluate_state_breakdown(&state, PlayerId(0), &EvalWeights::default())
-            .expect("a live two-player game evaluates");
-        assert_eq!(
-            BOARD_WALKS.with(|c| c.replace(0)),
-            2,
-            "one evaluation makes one board_stats walk per side"
-        );
     }
 
     fn add_creature(

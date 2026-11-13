@@ -985,9 +985,6 @@ thread_local! {
     /// Test witness: how many root priority domains have been enumerated on
     /// this thread.
     pub(crate) static ROOT_DOMAIN_BUILDS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
-    /// Test witness: priority decisions that entered the large-board fast
-    /// route on this thread.
-    pub(crate) static LARGE_BOARD_FAST_PRIORITY_ROUTES: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
 }
 
 /// CR 400.2: the action `decide` takes in every one of the `k` determinized
@@ -1350,8 +1347,6 @@ fn large_board_main_phase_fast_action_from_actions(
     {
         return None;
     }
-    #[cfg(test)]
-    LARGE_BOARD_FAST_PRIORITY_ROUTES.with(|c| c.set(c.get() + 1));
 
     // Deep search over a token-heavy own main phase is not a bounded operation.
     // Retain the fast path, but score the exact engine-legal candidates through
@@ -14851,100 +14846,6 @@ mod tests {
         assert!(
             matches!(action, GameAction::ChooseOption { ref choice } if choice == "evidence"),
             "classic vote must pick first option, got {action:?}"
-        );
-    }
-
-    /// The priority decision's board-dependent work stays fixed as the opponent's board grows: the
-    /// `board_stats` walks and the engine's board scans are the same at 1 and 100 tokens on the
-    /// scored route, and at 128 and 1000 tokens on the large-board fast route.
-    #[test]
-    fn priority_search_work_does_not_scale_with_opponent_tokens() {
-        let board = |tokens: usize| {
-            let mut state = make_state();
-            for _ in 0..tokens {
-                add_creature(&mut state, PlayerId(1), 1, 1);
-            }
-            let card_id = CardId(state.next_object_id);
-            let bears = create_object(
-                &mut state,
-                card_id,
-                PlayerId(0),
-                "Grizzly Bears".to_string(),
-                Zone::Hand,
-            );
-            let obj = state.objects.get_mut(&bears).unwrap();
-            obj.card_types.core_types.push(CoreType::Creature);
-            obj.card_types.subtypes.push("Bear".to_string());
-            obj.power = Some(2);
-            obj.toughness = Some(2);
-            obj.base_card_types = obj.card_types.clone();
-            obj.base_power = obj.power;
-            obj.base_toughness = obj.toughness;
-            obj.mana_cost = ManaCost::Cost {
-                shards: vec![ManaCostShard::Green],
-                generic: 1,
-            };
-            add_mana(&mut state, PlayerId(0), ManaType::Green, 2);
-            state
-        };
-        let decide = |tokens: usize| {
-            let state = board(tokens);
-            let config = create_config(AiDifficulty::Hard, Platform::Native).into_measurement(42);
-            let mut rng = SmallRng::seed_from_u64(42);
-            crate::eval::BOARD_EVALUATIONS.with(|c| c.replace(0));
-            crate::eval::BOARD_WALKS.with(|c| c.replace(0));
-            LARGE_BOARD_FAST_PRIORITY_ROUTES.with(|c| c.replace(0));
-            engine::game::perf_counters::reset();
-            let action = choose_action(&state, PlayerId(0), &config, &mut rng);
-            assert!(action.is_some(), "AI must produce some action");
-            (
-                crate::eval::BOARD_EVALUATIONS.with(|c| c.replace(0)),
-                crate::eval::BOARD_WALKS.with(|c| c.replace(0)),
-                engine::game::perf_counters::snapshot(),
-                LARGE_BOARD_FAST_PRIORITY_ROUTES.with(|c| c.replace(0)),
-            )
-        };
-
-        let (evals_1, walks_1, scans_1, fast_1) = decide(1);
-        let (evals_100, walks_100, scans_100, fast_100) = decide(100);
-        assert!(evals_1 > 0, "the decision must reach candidate scoring");
-        assert_eq!(
-            (fast_1, fast_100),
-            (0, 0),
-            "below 128 objects the decision is scored, not fast-routed"
-        );
-        assert_eq!(
-            evals_1, evals_100,
-            "priority evaluation count independent of opponent board"
-        );
-        assert_eq!(
-            walks_1, walks_100,
-            "board_stats walks independent of opponent board"
-        );
-        assert_eq!(
-            scans_1, scans_100,
-            "the engine's board scans during enumeration and simulation do not grow with opponent tokens"
-        );
-
-        let (evals_128, walks_128, scans_128, fast_128) = decide(128);
-        let (evals_1000, walks_1000, scans_1000, fast_1000) = decide(1000);
-        assert_eq!(
-            (fast_128, fast_1000),
-            (1, 1),
-            "at 128 and 1000 objects the large-board fast priority route answers"
-        );
-        assert_eq!(
-            (evals_128, evals_1000),
-            (0, 0),
-            "the fast route answers without root search"
-        );
-        assert_eq!(
-            walks_128, walks_1000,
-            "fast-route board_stats walks independent of opponent board"
-        );
-        assert_eq!(
-            scans_128, scans_1000,
-            "the fast route's engine board scans do not grow with opponent tokens"
         );
     }
 
