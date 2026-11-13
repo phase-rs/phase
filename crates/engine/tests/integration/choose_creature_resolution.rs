@@ -10,7 +10,9 @@ use engine::types::ability::{Effect, TargetChoiceTiming, TargetRef};
 use engine::types::actions::GameAction;
 use engine::types::card_type::Supertype;
 use engine::types::counter::CounterType;
-use engine::types::game_state::{CastPaymentMode, WaitingFor};
+use engine::types::game_state::{
+    CastPaymentMode, PersistedGameState, PersistedRestoreFinalization, WaitingFor,
+};
 use engine::types::identifiers::ObjectId;
 use engine::types::keywords::Keyword;
 use engine::types::mana::{parse_mtgjson_mana_cost, ManaColor};
@@ -2152,12 +2154,26 @@ fn bare_choice_feeding_a_delayed_sacrifice_binds_the_chosen_creature() {
 // controlling a creature P1 owns.
 // ---------------------------------------------------------------------------
 
+const P2: PlayerId = PlayerId(2);
+
 /// Casts Final Showdown's second mode for P0 and passes priority until the
 /// resolution-time creature choice is open. P0 controls `own` creatures it owns
 /// and one creature that P1 owns.
 fn final_showdown_choice_with_a_borrowed_creature(
     own: usize,
 ) -> (GameRunner, ObjectId, Vec<ObjectId>, ObjectId) {
+    let (runner, spell, own_ids, borrowed, _) =
+        final_showdown_choice_in_a_three_player_game(own, &[1], |_| Vec::new());
+    (runner, spell, own_ids, borrowed)
+}
+
+/// As above, choosing `modes` (0-based) and adding whatever `extra` puts on the
+/// battlefield, whose ids are returned last.
+fn final_showdown_choice_in_a_three_player_game(
+    own: usize,
+    modes: &[usize],
+    extra: impl FnOnce(&mut GameScenario) -> Vec<ObjectId>,
+) -> (GameRunner, ObjectId, Vec<ObjectId>, ObjectId, Vec<ObjectId>) {
     let mut scenario = GameScenario::new_n_player(3, 7);
     scenario.at_phase(Phase::PreCombatMain);
     let own_ids: Vec<ObjectId> = (0..own)
@@ -2171,8 +2187,10 @@ fn final_showdown_choice_with_a_borrowed_creature(
         .add_creature(P1, "Borrowed creature", 3, 3)
         .controlled_by(P0)
         .id();
-    scenario.add_basic_land(P0, ManaColor::White);
-    scenario.add_basic_land(P0, ManaColor::White);
+    let extra_ids = extra(&mut scenario);
+    for _ in 0..7 {
+        scenario.add_basic_land(P0, ManaColor::White);
+    }
     let spell = scenario
         .add_spell_to_hand_from_oracle(P0, "Final Showdown", true, FINAL_SHOWDOWN)
         .with_mana_cost(parse_mtgjson_mana_cost("{W}"))
@@ -2188,7 +2206,9 @@ fn final_showdown_choice_with_a_borrowed_creature(
         })
         .unwrap();
     runner
-        .act(GameAction::SelectModes { indices: vec![1] })
+        .act(GameAction::SelectModes {
+            indices: modes.to_vec(),
+        })
         .unwrap();
     pass_priority_to_prompt(&mut runner, "Final Showdown's creature choice");
     let WaitingFor::ChooseFromZoneChoice { player, cards, .. } = &runner.state().waiting_for else {
@@ -2205,7 +2225,7 @@ fn final_showdown_choice_with_a_borrowed_creature(
         id_set(&offered),
         "reach guard: the borrowed creature is offered while its owner is in the game"
     );
-    (runner, spell, own_ids, borrowed)
+    (runner, spell, own_ids, borrowed, extra_ids)
 }
 
 /// With one other candidate left, the departure settles the choice: the remaining
@@ -2302,4 +2322,109 @@ fn final_showdown_choice_rejects_a_stored_candidate_that_is_no_longer_eligible()
         })
         .unwrap();
     assert!(runner.state().objects[&own[1]].has_keyword(&Keyword::Indestructible));
+}
+
+const ZULAPORT_CUTTHROAT: &str = "Whenever this creature or another creature you control dies, each opponent loses 1 life and you gain 1 life.";
+
+/// CR 603.2 + CR 608.2m: when the departure settles the choice, the spell's
+/// remaining instructions run inside the concession and their events still
+/// trigger. Final Showdown with modes 2 and 3 ("Destroy all creatures."): P1
+/// concedes at P0's choice, P0's remaining creature becomes indestructible, and
+/// P2's Zulaport Cutthroat and its other creature die, triggering the Cutthroat
+/// twice.
+#[test]
+fn final_showdown_settled_by_a_concession_still_triggers_on_the_destruction() {
+    let (mut runner, spell, own, _, extra) =
+        final_showdown_choice_in_a_three_player_game(1, &[1, 2], |scenario| {
+            let cutthroat = scenario
+                .add_creature_from_oracle(P2, "Zulaport Cutthroat", 1, 1, ZULAPORT_CUTTHROAT)
+                .id();
+            let other = scenario.add_creature(P2, "Other P2 creature", 2, 2).id();
+            vec![cutthroat, other]
+        });
+    let life =
+        |runner: &GameRunner, player: PlayerId| runner.state().players[player.0 as usize].life;
+    let (p0_life, p2_life) = (life(&runner, P0), life(&runner, P2));
+    runner.act(GameAction::Concede { player_id: P1 }).unwrap();
+    assert!(runner.state().objects[&own[0]].has_keyword(&Keyword::Indestructible));
+    assert_eq!(runner.state().objects[&own[0]].zone, Zone::Battlefield);
+    for id in &extra {
+        assert_eq!(
+            runner.state().objects[id].zone,
+            Zone::Graveyard,
+            "P2's creatures are destroyed"
+        );
+    }
+    assert_eq!(runner.state().objects[&spell].zone, Zone::Graveyard);
+    // The two death triggers are put on the stack and resolve.
+    for _ in 0..12 {
+        if runner.state().stack.is_empty()
+            && matches!(runner.state().waiting_for, WaitingFor::Priority { .. })
+            && life(&runner, P2) != p2_life
+        {
+            break;
+        }
+        if runner.act(GameAction::PassPriority).is_err() {
+            break;
+        }
+    }
+    assert_eq!(
+        life(&runner, P2),
+        p2_life + 2,
+        "Zulaport Cutthroat triggered twice"
+    );
+    assert_eq!(
+        life(&runner, P0),
+        p0_life - 2,
+        "each remaining opponent lost 1 life twice"
+    );
+    assert_resolution_settled(&runner, "Final Showdown after the concession");
+}
+
+/// CR 608.2m + CR 800.4a + CR 117.2e: when the chooser leaves at their own
+/// resolution-time choice, they control nothing, so the choice names nothing and
+/// the spell's remaining instructions still run before anyone gets priority.
+/// Final Showdown with modes 2 and 3: P0 concedes at the choice and the other
+/// players' creatures are destroyed. The resulting state survives the engine's
+/// save and restore.
+#[test]
+fn final_showdown_finishes_resolving_when_its_chooser_concedes() {
+    let (mut runner, _, _, borrowed, extra) =
+        final_showdown_choice_in_a_three_player_game(2, &[1, 2], |scenario| {
+            vec![
+                scenario.add_creature(P1, "P1 creature", 2, 2).id(),
+                scenario.add_creature(P2, "P2 creature", 2, 2).id(),
+            ]
+        });
+    runner.act(GameAction::Concede { player_id: P0 }).unwrap();
+    assert!(runner.state().players[0].is_eliminated);
+    for id in &extra {
+        assert_eq!(
+            runner.state().objects[id].zone,
+            Zone::Graveyard,
+            "the remaining players' creatures are destroyed"
+        );
+    }
+    // CR 800.4a: the creature P0 still controlled when leaving is exiled.
+    assert_eq!(runner.state().objects[&borrowed].zone, Zone::Exile);
+    assert!(runner.state().stack.is_empty());
+    assert!(
+        runner.state().active_ability_continuation_frame().is_none(),
+        "the parked choice is retired"
+    );
+    let WaitingFor::Priority { player } = runner.state().waiting_for else {
+        panic!(
+            "a living player has priority: {:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert_ne!(player, P0);
+    let json = serde_json::to_string(&PersistedGameState::capture(runner.state().clone()))
+        .expect("state serializes");
+    serde_json::from_str::<PersistedGameState>(&json)
+        .expect("persisted state decodes")
+        .prepare_for_restore(PersistedRestoreFinalization::DeferUntilRehydrated)
+        .expect("persisted state is admissible")
+        .finalize_after_rehydration(|_| Ok(()))
+        .expect("restored state is publishable");
 }

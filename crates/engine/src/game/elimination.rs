@@ -557,6 +557,31 @@ pub(crate) fn eliminate_players(
                 }
             };
 
+        // CR 800.4a + CR 608.2d + CR 608.2m: an open resolution-time object choice
+        // ("choose a creature you control") stored its candidates when it was
+        // raised. The departure removed the leaving player's objects and ended
+        // their control effects, so the choice is re-offered against the objects
+        // eligible now, or settled (one or no candidate left, or the chooser
+        // left) and the resolution's remaining instructions run. Runs before
+        // `drain_or_clear_deferred_triggers_after_elimination`, which places the
+        // triggers those instructions queued (CR 603.3), and before the generic
+        // dead-actor repoint, which would otherwise give priority while the
+        // resolution is unfinished (CR 117.2e).
+        let resolution_object_choice =
+            match super::engine_resolution_choices::settle_resolution_object_choice_after_departure(
+                state, events,
+            ) {
+                Ok(settlement) => settlement,
+                Err(error) => {
+                    tracing::error!(%error, "resolution object choice was not reconciled after a departure");
+                    debug_assert!(
+                        false,
+                        "resolution object choice was not reconciled after a departure: {error}"
+                    );
+                    super::engine_resolution_choices::DepartureSettlement::NotSettled
+                }
+            };
+
         if let Some(frame) = staged_optional_sacrifice_decline {
             state.push_optional_effect_frame(frame);
             super::engine_payment_choices::handle_optional_effect_choice(state, false, events)
@@ -657,17 +682,6 @@ pub(crate) fn eliminate_players(
             }
         }
 
-        // CR 800.4a + CR 608.2d: an open resolution-time object choice ("choose a
-        // creature you control") stored its candidates when it was raised. The
-        // departure removed the leaving player's objects and ended their control
-        // effects, so the choice is re-offered, bound or settled against the
-        // objects that are eligible now.
-        if let Err(error) =
-            super::effects::reconcile_resolution_object_choice_after_departure(state, events)
-        {
-            tracing::error!(%error, "resolution object choice was not reconciled after a departure");
-        }
-
         // CR 800.4f + CR 805.6 + CR 118.12: an in-progress collective
         // tap-creatures payment is reconciled with the surviving heroes
         // (pruned session, next contributor, or explicit settlement) before
@@ -711,6 +725,10 @@ pub(crate) fn eliminate_players(
                 )
                 && matches!(
                     player_scope_sacrifice,
+                    super::engine_resolution_choices::DepartureSettlement::NotSettled
+                )
+                && matches!(
+                    resolution_object_choice,
                     super::engine_resolution_choices::DepartureSettlement::NotSettled
                 )
                 && state

@@ -376,6 +376,63 @@ pub(crate) fn settle_player_scope_sacrifice_after_departure(
     }
 }
 
+/// CR 800.4a + CR 608.2d + CR 608.2m: after a player leaves, bring an open
+/// resolution-time object choice ("choose a creature you control") back in line
+/// with the game. The candidates stored on the prompt were scanned when it was
+/// raised; the leaving player's objects are gone and their control effects have
+/// ended, and a player can't choose an illegal or impossible option.
+///
+/// - The chooser is still in the game and two or more objects are eligible: the
+///   prompt is re-offered with the current set.
+/// - The chooser is still in the game and one or no object is eligible: the
+///   parked instruction runs again, binding the only candidate or recording that
+///   the choice named nothing, exactly as when it is first reached.
+/// - The chooser left: the parked instruction runs again for them; they control
+///   nothing now, so it records that the choice named nothing.
+///
+/// In the last two cases the resolution's remaining instructions run here, and
+/// the events they emit are collected for triggers (a concession is not scanned
+/// by the post-action pipeline). Reports whether it settled, so a departed
+/// controller's spell this continued is not retired as eliminated.
+pub(crate) fn settle_resolution_object_choice_after_departure(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+) -> Result<DepartureSettlement, EngineError> {
+    let Some(current) = effects::open_resolution_object_choice_candidates(state) else {
+        return Ok(DepartureSettlement::NotSettled);
+    };
+    let WaitingFor::ChooseFromZoneChoice { player, cards, .. } = &state.waiting_for else {
+        return Ok(DepartureSettlement::NotSettled);
+    };
+    let chooser = *player;
+    if super::players::is_alive(state, chooser) {
+        if cards.len() == current.len() && current.iter().all(|id| cards.contains(id)) {
+            return Ok(DepartureSettlement::NotSettled);
+        }
+        if current.len() >= 2 {
+            if let WaitingFor::ChooseFromZoneChoice { cards, .. } = &mut state.waiting_for {
+                *cards = current;
+            }
+            return Ok(DepartureSettlement::NotSettled);
+        }
+        set_priority(state, chooser);
+    } else {
+        // CR 800.4a: priority never names a player who has left the game.
+        set_priority(state, super::players::next_player(state, chooser));
+    }
+    // CR 603.10a: the departure's own zone changes are not part of the resumed
+    // instructions' event span.
+    let base = events.len();
+    resume_with_error_propagation(state, events)?;
+    // CR 603.2: collect the resumed instructions' observers ("whenever a creature
+    // dies") through the authority the answered route uses.
+    let end = events.len();
+    if let Some(outcome) = batch_or_drain_observer_triggers(state, events, base, end, false) {
+        adopt_departure_choice_outcome(state, events, outcome);
+    }
+    Ok(DepartureSettlement::Settled)
+}
+
 /// CR 800.4a + CR 603.3d + CR 601.2c: a departure answers or settles an open
 /// resolution choice inside the concession, whose reducer adopts no handler
 /// outcome. Adopt the outcome exactly as the resolution-choice arm of
