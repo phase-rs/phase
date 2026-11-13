@@ -4691,15 +4691,16 @@ impl LogicalZoneChangeGroup {
 /// CR 603.6a: the object a retained group occurrence moved onto the battlefield from another zone,
 /// or `None` for any other occurrence (a departure, or an object created on the battlefield).
 fn battlefield_entrant(event: &GameEvent) -> Option<ObjectId> {
-    match event {
-        GameEvent::ZoneChanged {
-            object_id,
-            from: Some(_),
-            to: Zone::Battlefield,
-            ..
-        } => Some(*object_id),
-        _ => None,
-    }
+    let GameEvent::ZoneChanged {
+        object_id,
+        from: Some(_),
+        to: Zone::Battlefield,
+        ..
+    } = event
+    else {
+        return None;
+    };
+    Some(*object_id)
 }
 
 /// The one zone-change delivery currently paused inside a logical owner.

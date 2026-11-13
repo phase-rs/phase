@@ -5206,29 +5206,31 @@ fn retained_occurrence_record<'g>(
     else {
         return None;
     };
-    group
-        .all_origin_occurrences
-        .iter()
-        .find_map(|occurrence| match &occurrence.event {
-            GameEvent::ZoneChanged {
-                object_id: retained_id,
-                from: retained_from,
-                to: retained_to,
-                record: retained_record,
-            } if retained_id == object_id
-                && retained_from == from
-                && retained_to == to
-                && retained_record
+    group.all_origin_occurrences.iter().find_map(|occurrence| {
+        let GameEvent::ZoneChanged {
+            object_id: retained_id,
+            from: retained_from,
+            to: retained_to,
+            record: retained_record,
+        } = &occurrence.event
+        else {
+            return None;
+        };
+        if retained_id == object_id
+            && retained_from == from
+            && retained_to == to
+            && retained_record
+                .trigger_source_context()
+                .map(|context| context.identity.reference)
+                == record
                     .trigger_source_context()
                     .map(|context| context.identity.reference)
-                    == record
-                        .trigger_source_context()
-                        .map(|context| context.identity.reference) =>
-            {
-                Some(retained_record.as_ref())
-            }
-            _ => None,
-        })
+        {
+            Some(retained_record.as_ref())
+        } else {
+            None
+        }
+    })
 }
 
 /// CR 603.6a + CR 400.7 + CR 603.2c: copy each entry's `co_entered` stamp onto the copies of the
