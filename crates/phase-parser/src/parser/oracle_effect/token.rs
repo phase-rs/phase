@@ -1484,9 +1484,10 @@ fn push_parsed_statics(
         let token_refs = granting_self_reference_count(&normalized).saturating_sub(creator_refs);
         (normalized, token_refs)
     };
-    let mut defs = parse_static_line_multi(&static_text);
+    let static_text = static_text.trim().trim_end_matches(',').trim();
+    let mut defs = parse_static_line_multi(static_text);
     if defs.is_empty() {
-        let modifications = classify_quoted_inner(&static_text);
+        let modifications = classify_quoted_inner(static_text);
         if !modifications.is_empty() {
             defs.push(
                 StaticDefinition::continuous()
@@ -4859,5 +4860,76 @@ mod token_attachment_connector_tests {
                 "{text:?} host binding mismatch, got {attach_to:?}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod vren_token_dynamic_pt_tests {
+    use super::*;
+
+    const VREN_TOKEN_TEXT: &str = "Create X 1/1 black Rat creature tokens with \"This token gets +1/+1 for each other Rat you control,\" where X is the number of creatures that were exiled under your opponents' control this turn.";
+
+    fn assert_other_rat_count(value: &QuantityExpr) {
+        let QuantityExpr::Ref {
+            qty:
+                QuantityRef::ObjectCount {
+                    filter: TargetFilter::Typed(filter),
+                },
+        } = value
+        else {
+            panic!("expected ObjectCount over a typed Rat filter, got {value:?}");
+        };
+        assert_eq!(filter.controller, Some(ControllerRef::You));
+        assert!(
+            filter
+                .type_filters
+                .contains(&TypeFilter::Subtype("Rat".to_string())),
+            "count must be restricted to the Rat subtype: {:?}",
+            filter.type_filters
+        );
+        assert!(filter.properties.contains(&FilterProp::Another));
+    }
+
+    /// CR 613.4c: Vren's token modifier scales dynamically with other Rats.
+    #[test]
+    fn vren_token_static_counts_other_rats_for_dynamic_power_and_toughness() {
+        let effect = try_parse_token(
+            &VREN_TOKEN_TEXT.to_lowercase(),
+            VREN_TOKEN_TEXT,
+            &mut ParseContext::default(),
+        )
+        .expect("Vren's token creation clause must parse");
+        let Effect::Token {
+            static_abilities, ..
+        } = effect
+        else {
+            panic!("expected token effect");
+        };
+        assert_eq!(static_abilities.len(), 1);
+        let modifications = &static_abilities[0].modifications;
+        let dynamic_power = modifications
+            .iter()
+            .find_map(|modification| match modification {
+                ContinuousModification::AddDynamicPower { value } => Some(value),
+                _ => None,
+            })
+            .expect("expected dynamic power");
+        let dynamic_toughness = modifications
+            .iter()
+            .find_map(|modification| match modification {
+                ContinuousModification::AddDynamicToughness { value } => Some(value),
+                _ => None,
+            })
+            .expect("expected dynamic toughness");
+        assert_other_rat_count(dynamic_power);
+        assert_other_rat_count(dynamic_toughness);
+        assert!(
+            !modifications.iter().any(|modification| matches!(
+                modification,
+                ContinuousModification::AddPower { .. }
+                    | ContinuousModification::AddToughness { .. }
+            )),
+            "the quoted +1/+1 must not fall back to fixed modifiers: {modifications:?}"
+        );
     }
 }
