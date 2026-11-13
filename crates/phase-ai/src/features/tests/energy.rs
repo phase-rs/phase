@@ -188,6 +188,7 @@ fn mill_effect_is_not_energy_gain() {
         count: QuantityExpr::Fixed { value: 3 },
         target: TargetFilter::Player,
         destination: Zone::Graveyard,
+        position: engine::types::ability::LibraryPosition::Top,
     };
     assert!(!effect_is_energy_gain(&e));
 }

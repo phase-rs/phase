@@ -83,6 +83,7 @@ fn mill_honors_rest_in_peace_graveyard_to_exile_redirect() {
             count: QuantityExpr::Fixed { value: 3 },
             target: TargetFilter::Any,
             destination: Zone::Graveyard,
+            position: engine::types::ability::LibraryPosition::Top,
         },
         vec![TargetRef::Player(P1)],
         // Mill source: an arbitrary object id; mill attribution anchors on the

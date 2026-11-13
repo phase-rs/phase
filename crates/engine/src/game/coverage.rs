@@ -3366,11 +3366,15 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             count,
             target,
             destination,
+            position,
         } => {
             d.push(("count".into(), fmt_quantity(count)));
             d.push(("target".into(), fmt_target(target)));
             if *destination != Zone::Graveyard {
                 d.push(("destination".into(), format!("{destination:?}")));
+            }
+            if !position.is_top() {
+                d.push(("position".into(), format!("{position:?}")));
             }
         }
         Effect::Scry { count, .. } | Effect::Surveil { count, .. } => {

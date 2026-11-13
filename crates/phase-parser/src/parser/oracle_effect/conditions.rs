@@ -1899,6 +1899,23 @@ fn parse_revealed_card_gate_suffix<'a>(
         let leading_ws = after_type.len() - after_type.trim_start().len();
         return (&after_type[leading_ws + consumed..], Some(prop));
     }
+    // CR 208.1 + CR 608.2c: a power/toughness bound on the revealed or
+    // just-moved card — "creature card with power less than or equal to
+    // Grenzo's power" (Grenzo, Dungeon Warden) — carried as the same
+    // `PtComparison` property the filter grammar already produces, so the
+    // threshold can be a dynamic characteristic of the ability's source. Only
+    // the printed "with …" suffix form is claimed here.
+    let trimmed = after_type.trim_start();
+    if tag::<_, _, OracleError<'_>>("with ").parse(trimmed).is_ok() {
+        if let Ok((rest, prop)) = crate::parser::oracle_nom::filter::parse_pt_comparison(trimmed) {
+            if matches!(
+                prop,
+                FilterProp::PtComparison { .. } | FilterProp::AnyOf { .. }
+            ) {
+                return (rest, Some(prop));
+            }
+        }
+    }
     // CR 205.3m + CR 608.2c: postnominal shared-quality relative clause on a
     // revealed/exiled card gate — "creature card that shares a creature type
     // with a creature you control" (Descendants' Path). Delegates to the shared
@@ -14131,6 +14148,41 @@ mod tests {
             })
         );
         assert!(subtype_filter.is_none());
+    }
+
+    /// CR 208.1 + CR 608.2c: the revealed/moved-card gate suffix must carry a
+    /// power comparison whose threshold is a dynamic characteristic of the
+    /// ability's source (Grenzo, Dungeon Warden: "creature card with power less
+    /// than or equal to ~'s power").
+    #[test]
+    fn strip_card_type_conditional_creature_with_source_power_bound() {
+        let (cond, body) = strip_card_type_conditional(
+            "If it's a creature card with power less than or equal to ~'s power, \
+             put it onto the battlefield.",
+        );
+        assert_eq!(body, "put it onto the battlefield.");
+        let Some(AbilityCondition::RevealedHasCardType {
+            card_types,
+            additional_filter,
+            ..
+        }) = cond
+        else {
+            panic!("expected RevealedHasCardType, got {cond:?}");
+        };
+        assert_eq!(card_types, vec![CoreType::Creature]);
+        assert_eq!(
+            additional_filter,
+            Some(FilterProp::PtComparison {
+                stat: crate::types::ability::PtStat::Power,
+                scope: crate::types::ability::PtValueScope::Current,
+                comparator: Comparator::LE,
+                value: QuantityExpr::Ref {
+                    qty: QuantityRef::Power {
+                        scope: crate::types::ability::ObjectScope::Source,
+                    },
+                },
+            })
+        );
     }
 
     /// CR 205.3m + CR 608.2c (Verification row 3): Descendants' Path —

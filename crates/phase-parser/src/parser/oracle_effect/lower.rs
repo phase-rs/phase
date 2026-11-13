@@ -3108,6 +3108,47 @@ pub(super) fn rebind_zone_changed_this_way_pronoun_to_moved_object(def: &mut Abi
     }
 }
 
+/// CR 608.2c: A leading "If it's a [type] card, …" rider on a single-card mill
+/// names the card that mill just moved. The clause parser lowers the body's bare
+/// "it" to the generic `TargetFilter::ParentTarget` fallback, but `Mill`
+/// declares no object target, so `ParentTarget` names nothing and the body
+/// silently no-ops. Rebind it to `TargetFilter::LastZoneChanged` — the same
+/// referent `RevealedHasCardType` itself reads after a move — so "…, put it onto
+/// the battlefield" (Grenzo, Dungeon Warden) acts on the milled card.
+///
+/// Gated on `Fixed(1)`: with any other count the condition still checks the
+/// first moved card while "it" would name a population, so a multi-card mill
+/// remains an honest gap instead of moving an arbitrary member.
+pub(super) fn rebind_revealed_card_type_pronoun_to_moved_object(def: &mut AbilityDefinition) {
+    let parent_mills_one_card = matches!(
+        &*def.effect,
+        Effect::Mill {
+            count: QuantityExpr::Fixed { value: 1 },
+            ..
+        }
+    );
+    if parent_mills_one_card {
+        if let Some(sub) = def.sub_ability.as_deref_mut() {
+            if matches!(
+                sub.condition.as_ref(),
+                Some(AbilityCondition::RevealedHasCardType { .. })
+            ) {
+                if let Effect::ChangeZone { target, .. } = sub.effect.as_mut() {
+                    if *target == TargetFilter::ParentTarget {
+                        *target = TargetFilter::LastZoneChanged;
+                    }
+                }
+            }
+        }
+    }
+    if let Some(sub) = def.sub_ability.as_deref_mut() {
+        rebind_revealed_card_type_pronoun_to_moved_object(sub);
+    }
+    if let Some(els) = def.else_ability.as_deref_mut() {
+        rebind_revealed_card_type_pronoun_to_moved_object(els);
+    }
+}
+
 /// Which reflexive-gate-producing verb (if any) `def.effect` is, for
 /// `rebind_zone_changed_this_way_pronoun_to_moved_object`'s parent/gate
 /// pairing check. Discard and Sacrifice are cause-bound — CR 701.9a makes the

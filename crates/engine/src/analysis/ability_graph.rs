@@ -2932,6 +2932,7 @@ mod tests {
             count,
             target: TargetFilter::Player, // not Controller/SelfRef ⇒ OPPONENT
             destination: Zone::Graveyard,
+            position: crate::types::ability::LibraryPosition::Top,
         }
     }
     fn gain_life(amount: QuantityExpr) -> Effect {

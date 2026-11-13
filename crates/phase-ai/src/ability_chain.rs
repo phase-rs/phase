@@ -325,6 +325,7 @@ mod tests {
             count: QuantityExpr::Fixed { value: 2 },
             target: TargetFilter::Controller,
             destination: Zone::Graveyard,
+            position: engine::types::ability::LibraryPosition::Top,
         };
         assert_eq!(source_at(&[token(), mill, deathtouch], 2), Some(0));
     }

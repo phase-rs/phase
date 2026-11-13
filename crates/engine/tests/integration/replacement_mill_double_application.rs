@@ -251,6 +251,7 @@ fn mill_replacement_with_rider_still_stashes_a_continuation() {
                 count: QuantityExpr::Fixed { value: 3 },
                 target: TargetFilter::Controller,
                 destination: Zone::Graveyard,
+                position: engine::types::ability::LibraryPosition::Top,
             },
         )
         // THE AXIS UNDER TEST: `sub_ability` present => the escape fires.

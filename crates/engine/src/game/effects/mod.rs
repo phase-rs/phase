@@ -34240,6 +34240,7 @@ mod tests {
             count: QuantityExpr::Fixed { value: 1 },
             destination,
             target: TargetFilter::Any,
+            position: crate::types::ability::LibraryPosition::Top,
         };
         assert_eq!(
             this_way_cause_for_effect(&mill(Zone::Hand)),
@@ -37617,6 +37618,7 @@ mod tests {
                 count: QuantityExpr::Fixed { value: 3 },
                 target: TargetFilter::Controller,
                 destination: Zone::Graveyard,
+                position: crate::types::ability::LibraryPosition::Top,
             },
             vec![],
             source_id,
@@ -52636,6 +52638,7 @@ mod tests {
                 },
                 target: TargetFilter::Controller,
                 destination: Zone::Graveyard,
+                position: crate::types::ability::LibraryPosition::Top,
             },
             vec![],
             ObjectId(100),

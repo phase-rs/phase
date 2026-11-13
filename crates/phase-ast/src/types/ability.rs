@@ -22175,6 +22175,14 @@ pub enum Effect {
         /// top-of-library mechanics with a different destination.
         #[serde(default = "default_zone_graveyard")]
         destination: Zone,
+        /// CR 401.2 + CR 701.17a: Which edge of the library the cards are taken
+        /// from. `Top` is the printed mill form — the only edge CR 701.17a
+        /// defines as milling, so only a top-edge move publishes `Milled`.
+        /// `Bottom` covers the printed "put the bottom card of your library into
+        /// your graveyard" class (Grenzo, Dungeon Warden; Cellar Door), which is
+        /// a plain library→zone move rather than a mill.
+        #[serde(default, skip_serializing_if = "LibraryPosition::is_top")]
+        position: LibraryPosition,
     },
     /// CR 701.22a: Scry N — look at the top N cards, then put any number on
     /// the bottom in any order and the rest on top in any order.
@@ -26166,7 +26174,23 @@ pub fn extract_target_filter_from_effect(effect: &Effect) -> Option<&TargetFilte
     {
         return None;
     }
-    effect.target_filter().filter(|t| !t.is_context_ref())
+    // CR 608.2c + CR 115.1: resolution-local anaphors ("the card milled this
+    // way", "the revealed card") are filled from the event ledger
+    // (`last_zone_changed_ids` / `last_revealed_ids`) as the resolution
+    // proceeds. They are never announced as targets, and the ledger is empty at
+    // announcement time, so a slot built from one always finds zero legal
+    // candidates and drops the whole ability before it resolves (Grenzo,
+    // Dungeon Warden's milled-card rider). `is_context_ref` deliberately
+    // excludes these two because it also drives
+    // `ability_with_event_context_targets`; exclude them at this seam instead,
+    // mirroring `attach_host_filter_needs_target_slot`.
+    effect.target_filter().filter(|t| {
+        !t.is_context_ref()
+            && !matches!(
+                t,
+                TargetFilter::LastRevealed | TargetFilter::LastZoneChanged
+            )
+    })
 }
 
 pub fn move_counter_stack_target_filters<'a>(

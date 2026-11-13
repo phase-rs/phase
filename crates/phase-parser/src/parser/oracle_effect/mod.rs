@@ -20609,10 +20609,12 @@ fn thread_for_each_subject(effect: Effect, original: &str, ctx: &mut ParseContex
             count,
             target: TargetFilter::Controller,
             destination,
+            position,
         } => Effect::Mill {
             count,
             target,
             destination,
+            position,
         },
         Effect::Draw {
             count,

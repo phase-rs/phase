@@ -1,7 +1,7 @@
 use crate::game::quantity::resolve_quantity_with_targets;
 use crate::game::replacement::{self, ReplacementResult};
 use crate::game::zone_pipeline::{self, BatchMoveResult, ZoneMoveRequest};
-use crate::types::ability::{Effect, EffectError, EffectKind, ResolvedAbility};
+use crate::types::ability::{Effect, EffectError, EffectKind, LibraryPosition, ResolvedAbility};
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
 use crate::types::identifiers::ObjectId;
@@ -16,11 +16,12 @@ pub fn resolve(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    let (num_cards, destination, target_player) = match &ability.effect {
+    let (num_cards, destination, target_player, position) = match &ability.effect {
         Effect::Mill {
             count,
             destination,
             target,
+            position,
         } => (
             // CR 107.1b: Resolve with full ability context so `QuantityRef::Variable { "X" }`
             // reads the caster-chosen X from the resolving ability, and clamp a
@@ -38,8 +39,14 @@ pub fn resolve(
             // `ability.targets`, so a Mill sub-ability chained off a Player-
             // targeted parent does not inherit the parent's chosen player.
             super::resolve_player_for_context_ref(state, ability, target),
+            position.clone(),
         ),
-        _ => (1, Zone::Graveyard, Some(ability.controller)),
+        _ => (
+            1,
+            Zone::Graveyard,
+            Some(ability.controller),
+            LibraryPosition::Top,
+        ),
     };
     // CR 608.2b: a declared player whose target was illegal is not milled.
     let Some(target_player) = target_player else {
@@ -48,7 +55,11 @@ pub fn resolve(
         return Ok(());
     };
 
-    if destination == Zone::Graveyard {
+    // CR 701.17a: mill is defined as putting the TOP cards of a library into
+    // their graveyard. A bottom-edge instruction is an ordinary library→zone
+    // move (Grenzo, Dungeon Warden; Cellar Door): it proposes no `Mill`
+    // replacement event and publishes no `Milled` event.
+    if destination == Zone::Graveyard && position == LibraryPosition::Top {
         let proposed = ProposedEvent::Mill {
             player_id: target_player,
             count: num_cards as u32,
@@ -74,14 +85,12 @@ pub fn resolve(
                 return Ok(());
             }
         }
-    } else if !apply_mill_after_replacement(
+    } else if !apply_library_edge_move(
         state,
-        ProposedEvent::Mill {
-            player_id: target_player,
-            count: num_cards as u32,
-            destination,
-            applied: Default::default(),
-        },
+        target_player,
+        num_cards as u32,
+        destination,
+        position,
         events,
     )? {
         // CR 616.1: per-card pause (see above) — bail before `EffectResolved`.
@@ -121,7 +130,33 @@ pub fn apply_mill_after_replacement(
     else {
         return Ok(true);
     };
+    // A resumed `Mill` event is always the top-edge form: a bottom-edge move
+    // never proposes one (see `resolve`).
+    apply_library_edge_move(
+        state,
+        player_id,
+        count,
+        destination,
+        LibraryPosition::Top,
+        events,
+    )
+}
 
+/// CR 401.2 + CR 608.2c: Move cards from a named library edge to `destination`.
+///
+/// `position` is the edge the instruction names. `Top` is the printed mill form
+/// (CR 701.17a); `Bottom` is the "put the bottom card of your library into your
+/// graveyard" class (Grenzo, Dungeon Warden; Cellar Door), a plain library→zone
+/// move that publishes no `Milled` event. A placement-only `LibraryPosition`
+/// names no edge to take cards from and fails closed.
+fn apply_library_edge_move(
+    state: &mut GameState,
+    player_id: crate::types::player::PlayerId,
+    count: u32,
+    destination: Zone,
+    position: LibraryPosition,
+    events: &mut Vec<GameEvent>,
+) -> Result<bool, EffectError> {
     let player = state
         .players
         .iter()
@@ -132,10 +167,19 @@ pub fn apply_mill_after_replacement(
     // if instructed to, they mill as many as possible.
     let library = state.library_of(player.id);
     let count = (count as usize).min(library.len());
-    let cards_to_mill: Vec<_> = library.iter().take(count).copied().collect();
+    // CR 401.2: the library is a single ordered pile; `library[0]` is the top,
+    // so the bottommost card is the last element.
+    let cards_to_mill: Vec<_> = match position {
+        LibraryPosition::Top => library.iter().take(count).copied().collect(),
+        LibraryPosition::Bottom => library.iter().rev().take(count).copied().collect(),
+        // CR 401.7: a placement-only position names no edge to take cards from.
+        LibraryPosition::NthFromTop { .. }
+        | LibraryPosition::BeneathTop { .. }
+        | LibraryPosition::RandomWithinTop { .. } => Vec::new(),
+    };
     state.last_effect_count = Some(cards_to_mill.len() as i32);
 
-    // CR 701.17a + CR 614.6: Route each milled card through the zone-change
+    // CR 701.17a + CR 614.6: Route each moved card through the zone-change
     // pipeline (the shared `zone_pipeline::move_objects_simultaneously` batch
     // entry) rather than a raw `zones::move_to_zone`. The raw move never
     // proposed a per-card ZoneChange, so `Moved` redirects ("if a card would be
@@ -144,7 +188,7 @@ pub fn apply_mill_after_replacement(
     // proposes each inner ZoneChange and consults those replacements before
     // delivery, fixing the known bug.
     //
-    // Attribution: the milled card itself anchors the `Effect` cause (mill to a
+    // Attribution: the moved card itself anchors the `Effect` cause (mill to a
     // graveyard creates no exile-link, and a `Moved` replacement's `valid_card`
     // is evaluated against the moved card, so this matches the pre-pipeline raw
     // behavior while enabling the replacement consult).
@@ -157,12 +201,12 @@ pub fn apply_mill_after_replacement(
         .iter()
         .map(|&obj_id| ZoneMoveRequest::effect(obj_id, destination, obj_id))
         .collect();
-    // CR 701.17a: milling is a move *toward the graveyard* — "that player puts
-    // that many cards from the top of their library into their graveyard".
-    // `Effect::Mill` with any other declared destination is the shared
-    // top-of-library move building block and is not a mill, so it emits nothing.
-    // `effects::this_way_cause_for_effect` is the sibling authority on the same
-    // predicate and is kept in step with this conjunct.
+    // CR 701.17a: milling is a move *toward the graveyard from the TOP* — "that
+    // player puts that many cards from the top of their library into their
+    // graveyard". A bottom-edge move, or any other declared destination, is the
+    // shared library→zone move building block and is not a mill, so it emits
+    // nothing. `effects::this_way_cause_for_effect` is the sibling authority on
+    // the same predicate and is kept in step with this conjunct.
     //
     // CR 603.2c + CR 616.1: the `Milled` events ride the batch completion rather
     // than a synchronous event window. A per-card ordering choice (two graveyard
@@ -171,12 +215,13 @@ pub fn apply_mill_after_replacement(
     // delivered after the pause, and those cards leave the library without ever
     // firing a milled trigger. The completion runs exactly once after the whole
     // batch settles, on the synchronous and the resumed path alike.
-    let completion = (destination == Zone::Graveyard).then(|| {
-        crate::types::game_state::BatchCompletion::MilledDeliveryComplete {
-            player_id,
-            cards: cards_to_mill.clone(),
-        }
-    });
+    let completion =
+        (destination == Zone::Graveyard && position == LibraryPosition::Top).then(|| {
+            crate::types::game_state::BatchCompletion::MilledDeliveryComplete {
+                player_id,
+                cards: cards_to_mill.clone(),
+            }
+        });
     let delivered = matches!(
         zone_pipeline::move_objects_simultaneously_then(state, reqs, completion, events),
         BatchMoveResult::Done
@@ -242,6 +287,7 @@ mod tests {
                 },
                 target: TargetFilter::Any,
                 destination,
+                position: crate::types::ability::LibraryPosition::Top,
             },
             targets,
             ObjectId(100),
@@ -471,6 +517,7 @@ mod tests {
                 count: QuantityExpr::Fixed { value: 3 },
                 target: TargetFilter::Controller,
                 destination: Zone::Graveyard,
+                position: crate::types::ability::LibraryPosition::Top,
             },
             vec![],
             ObjectId(100),
@@ -555,6 +602,7 @@ mod tests {
                         count: QuantityExpr::Fixed { value: 1 },
                         target: TargetFilter::Controller,
                         destination: Zone::Graveyard,
+                        position: crate::types::ability::LibraryPosition::Top,
                     },
                 )),
             )]
@@ -682,6 +730,44 @@ mod tests {
         }
     }
 
+    /// CR 401.2 + CR 701.17a: a bottom-edge move takes the LAST card of the
+    /// library and publishes no `Milled` event — only the top edge is a mill
+    /// (Grenzo, Dungeon Warden; Cellar Door).
+    #[test]
+    fn bottom_edge_mill_takes_bottom_card_and_publishes_no_milled_event() {
+        let mut state = GameState::new_two_player(42);
+        for i in 0..4 {
+            create_object(
+                &mut state,
+                CardId(i + 1),
+                PlayerId(0),
+                format!("Card {i}"),
+                Zone::Library,
+            );
+        }
+        let bottom = *state.players[0].library.last().unwrap();
+
+        let mut ability =
+            make_mill_ability(1, vec![TargetRef::Player(PlayerId(0))], Zone::Graveyard);
+        if let Effect::Mill { position, .. } = &mut ability.effect {
+            *position = LibraryPosition::Bottom;
+        }
+        let mut events = Vec::new();
+
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert!(
+            state.players[0].graveyard.contains(&bottom),
+            "the bottommost library card must be the one moved"
+        );
+        assert_eq!(state.players[0].library.len(), 3);
+        assert!(
+            milled_events(&events).is_empty(),
+            "a bottom-edge move is not a mill (CR 701.17a), got {:?}",
+            milled_events(&events)
+        );
+    }
+
     #[test]
     fn mill_with_empty_library_does_nothing() {
         let mut state = GameState::new_two_player(42);
@@ -739,6 +825,7 @@ mod tests {
                     },
                     target: TargetFilter::Controller,
                     destination: Zone::Graveyard,
+                    position: crate::types::ability::LibraryPosition::Top,
                 },
             ));
         replacement.valid_player = Some(ReplacementPlayerScope::Opponent);
@@ -787,6 +874,7 @@ mod tests {
                     },
                     target: TargetFilter::Controller,
                     destination: Zone::Graveyard,
+                    position: crate::types::ability::LibraryPosition::Top,
                 },
             ));
         replacement.valid_player = Some(ReplacementPlayerScope::Opponent);
@@ -844,6 +932,7 @@ mod tests {
                 count: QuantityExpr::Fixed { value: 3 },
                 target: TargetFilter::Controller,
                 destination: Zone::Graveyard,
+                position: crate::types::ability::LibraryPosition::Top,
             },
             vec![],
             ObjectId(100),
@@ -884,6 +973,7 @@ mod tests {
                 count: QuantityExpr::Fixed { value: 3 },
                 target: TargetFilter::Controller,
                 destination: Zone::Graveyard,
+                position: crate::types::ability::LibraryPosition::Top,
             },
             vec![],
             ObjectId(100),
@@ -960,6 +1050,7 @@ mod tests {
                 },
                 target: TargetFilter::Controller,
                 destination: Zone::Graveyard,
+                position: crate::types::ability::LibraryPosition::Top,
             },
             vec![],
             ObjectId(100),
@@ -1047,6 +1138,7 @@ mod tests {
                 },
                 target: TargetFilter::Controller,
                 destination: Zone::Graveyard,
+                position: crate::types::ability::LibraryPosition::Top,
             },
             vec![],
             ObjectId(100),
@@ -1091,6 +1183,7 @@ mod tests {
                 count: QuantityExpr::Fixed { value: 4 },
                 target: TargetFilter::Controller,
                 destination: Zone::Graveyard,
+                position: crate::types::ability::LibraryPosition::Top,
             },
             vec![TargetRef::Player(PlayerId(0))],
             ObjectId(100),
@@ -1246,6 +1339,7 @@ mod tests {
                 count,
                 target: TargetFilter::Controller,
                 destination: Zone::Graveyard,
+                position: crate::types::ability::LibraryPosition::Top,
             },
             vec![],
             ObjectId(100),

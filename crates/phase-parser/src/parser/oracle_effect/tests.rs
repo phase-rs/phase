@@ -980,6 +980,7 @@ fn scoped_reflexive_decline_preserves_controller_and_opponent_recipients() {
             count: QuantityExpr::Fixed { value: 2 },
             target: TargetFilter::Controller,
             destination: Zone::Graveyard,
+            position: LibraryPosition::Top,
         },
     )
     .condition(decline_condition())
@@ -33461,6 +33462,7 @@ fn cut_your_losses_mill_half_their_library_rounded_down() {
             count,
             target,
             destination,
+            ..
         } => {
             assert!(
                 matches!(target, TargetFilter::Player),
@@ -84740,7 +84742,7 @@ fn put_top_of_library_into_graveyard_carries_owner_and_count() {
         assert!(
             matches!(
                 def.effect.as_ref(),
-                Effect::Mill { count: c, target: t, destination: Zone::Graveyard }
+                Effect::Mill { count: c, target: t, destination: Zone::Graveyard, .. }
                     if *c == count && *t == target
             ),
             "{text}: {:?}",
@@ -84826,6 +84828,114 @@ fn put_top_of_library_into_graveyard_stays_mill() {
             def.effect
         );
     }
+}
+
+/// CR 401.2 + CR 701.17a + CR 608.2c: Grenzo, Dungeon Warden (issue #8989).
+/// The activated ability must take the BOTTOM card of the library — the generic
+/// zone-change fallback read it as a choose-any-card move — and the leading-if
+/// rider must carry the printed power bound and act on the moved card.
+#[test]
+fn grenzo_dungeon_warden_bottom_card_and_power_gate() {
+    const GRENZO: &str = "Grenzo enters with X +1/+1 counters on it.\n{2}: Put the bottom card of your library into your graveyard. If it's a creature card with power less than or equal to Grenzo's power, put it onto the battlefield.";
+    let parsed = parse_oracle_text(
+        GRENZO,
+        "Grenzo, Dungeon Warden",
+        &[],
+        &["Creature".to_string()],
+        &["Goblin".to_string(), "Rogue".to_string()],
+    );
+    let ability = parsed
+        .abilities
+        .first()
+        .expect("Grenzo has an activated ability");
+    assert!(matches!(ability.kind, AbilityKind::Activated));
+    let Effect::Mill {
+        count,
+        target,
+        destination,
+        position,
+    } = &*ability.effect
+    else {
+        panic!(
+            "the bottom-card move must lower to Mill, got {:?}",
+            ability.effect
+        );
+    };
+    assert_eq!(*count, QuantityExpr::Fixed { value: 1 });
+    assert_eq!(*target, TargetFilter::Controller);
+    assert_eq!(*destination, Zone::Graveyard);
+    assert_eq!(*position, LibraryPosition::Bottom);
+
+    let sub = ability
+        .sub_ability
+        .as_ref()
+        .expect("the conditional put must survive as a sub-ability");
+    let Some(AbilityCondition::RevealedHasCardType {
+        card_types,
+        additional_filter,
+        ..
+    }) = &sub.condition
+    else {
+        panic!("expected RevealedHasCardType gate, got {:?}", sub.condition);
+    };
+    assert_eq!(card_types, &vec![CoreType::Creature]);
+    assert_eq!(
+        additional_filter,
+        &Some(FilterProp::PtComparison {
+            stat: crate::types::ability::PtStat::Power,
+            scope: crate::types::ability::PtValueScope::Current,
+            comparator: Comparator::LE,
+            value: QuantityExpr::Ref {
+                qty: QuantityRef::Power {
+                    scope: crate::types::ability::ObjectScope::Source,
+                },
+            },
+        })
+    );
+    let Effect::ChangeZone {
+        destination,
+        target,
+        ..
+    } = &*sub.effect
+    else {
+        panic!(
+            "the rider must put the moved card onto the battlefield, got {:?}",
+            sub.effect
+        );
+    };
+    assert_eq!(*destination, Zone::Battlefield);
+    assert_eq!(*target, TargetFilter::LastZoneChanged);
+}
+
+/// CR 401.2 + CR 701.17a: the same bottom-edge class on a player-owned library —
+/// Cellar Door's "Target player puts the bottom card of their library into their
+/// graveyard" lowers to the bottom edge, and its rider still gates on the moved
+/// card's type.
+#[test]
+fn cellar_door_bottom_card_mill() {
+    const CELLAR_DOOR: &str = "{3}, {T}: Target player puts the bottom card of their library into their graveyard. If it's a creature card, you create a 2/2 black Zombie creature token.";
+    let parsed = parse_oracle_text(
+        CELLAR_DOOR,
+        "Cellar Door",
+        &[],
+        &["Artifact".to_string()],
+        &[],
+    );
+    let ability = parsed.abilities.first().expect("Cellar Door activates");
+    let Effect::Mill {
+        count, position, ..
+    } = &*ability.effect
+    else {
+        panic!("expected Mill, got {:?}", ability.effect);
+    };
+    assert_eq!(*count, QuantityExpr::Fixed { value: 1 });
+    assert_eq!(*position, LibraryPosition::Bottom);
+    let sub = ability.sub_ability.as_ref().expect("token rider");
+    assert!(matches!(
+        sub.condition,
+        Some(AbilityCondition::RevealedHasCardType { .. })
+    ));
+    assert!(matches!(&*sub.effect, Effect::Token { .. }));
 }
 
 /// A "perpetually get(s) ±" clause the fixed-delta effect cannot model (dynamic

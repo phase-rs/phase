@@ -128,6 +128,7 @@ fn harmful_classifications_unchanged() {
             count: QuantityExpr::Fixed { value: 1 },
             target: TargetFilter::Player,
             destination: Zone::Graveyard,
+            position: engine::types::ability::LibraryPosition::Top,
         }),
         EffectPolarity::Harmful
     );

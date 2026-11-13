@@ -101,6 +101,7 @@ fn self_mill_enabler(name: &str) -> CardFace {
             count: QuantityExpr::Fixed { value: 1 },
             target: TargetFilter::Controller,
             destination: Zone::Graveyard,
+            position: engine::types::ability::LibraryPosition::Top,
         },
     )];
     face
@@ -119,6 +120,7 @@ fn trigger_mill_enabler(name: &str) -> CardFace {
                     count: QuantityExpr::Fixed { value: 3 },
                     target: TargetFilter::Controller,
                     destination: Zone::Graveyard,
+                    position: engine::types::ability::LibraryPosition::Top,
                 },
             )),
         ];
@@ -498,6 +500,7 @@ fn opponent_mill_not_an_enabler() {
                 TypedFilter::creature().controller(ControllerRef::Opponent),
             ),
             destination: Zone::Graveyard,
+            position: engine::types::ability::LibraryPosition::Top,
         },
     )];
     let feature = detect(&[entry(face, 4)]);

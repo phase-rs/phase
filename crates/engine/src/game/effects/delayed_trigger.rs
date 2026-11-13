@@ -6565,6 +6565,7 @@ mod tests {
                 count: event_context_amount(),
                 target: TargetFilter::Controller,
                 destination: Zone::Graveyard,
+                position: crate::types::ability::LibraryPosition::Top,
             },
         )
     }
