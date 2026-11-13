@@ -4869,6 +4869,186 @@ mod restored_card_db_requirements_tests {
         );
         clear_game_state();
     }
+
+    /// CR 613.1f + CR 616.1: a recovery checkpoint parked on a replacement
+    /// choice is checked after its refreshed faces went through the layers.
+    /// Humility and Hullbreacher are printed objects of the test database
+    /// (verbatim Oracle texts): the face refresh gives Hullbreacher its
+    /// printed replacement back until Humility is applied again, and a restore
+    /// that checked the prompt before that refused the valid Dredge-only
+    /// choice as leaving Hullbreacher out.
+    ///
+    /// Synthetic: the `Composite[draw, draw]` cost is no printed card's.
+    #[test]
+    fn restore_applies_layers_to_a_checkpoint_before_checking_its_prompt() {
+        use engine::game::scenario::{GameScenario, P0, P1};
+        use engine::types::ability::{
+            AbilityCost, Effect, QuantityExpr, ResolvedAbility, TargetFilter,
+        };
+        use engine::types::card::{CardFace, PrintedCardRef};
+        use engine::types::zones::Zone;
+
+        let mut scenario = GameScenario::new_n_player(4, 42);
+        scenario.at_phase(Phase::PreCombatMain);
+        // Dredge 5 needs five cards to mill.
+        let library = [
+            "Library 1",
+            "Library 2",
+            "Library 3",
+            "Library 4",
+            "Library 5",
+            "Library 6",
+            "Library 7",
+        ];
+        for player in 0..4 {
+            scenario.with_library_top(PlayerId(player), &library);
+        }
+        let source = scenario.add_creature(P0, "Draw Cost Source", 1, 1).id();
+        scenario
+            .add_creature_to_graveyard(P0, "Stinkweed Imp", 1, 2)
+            .from_oracle_text(
+                "Flying\nWhenever this creature deals combat damage to a creature, destroy \
+                 that creature.\nDredge 5 (If you would draw a card, you may mill five cards \
+                 instead. If you do, return this card from your graveyard to your hand.)",
+            );
+        let hullbreacher = scenario
+            .add_creature_from_oracle(
+                P1,
+                "Hullbreacher",
+                3,
+                2,
+                "Flash\nIf an opponent would draw a card except the first one they draw in \
+                 each of their draw steps, instead you create a Treasure token. (It's an \
+                 artifact with \"{T}, Sacrifice this token: Add one mana of any color.\")",
+            )
+            .id();
+        let humility = scenario
+            .add_enchantment_from_oracle(
+                PlayerId(2),
+                "Humility",
+                "All creatures lose all abilities and have base power and toughness 1/1.",
+            )
+            .id();
+        let mut runner = scenario.build();
+        let state = runner.state_mut();
+
+        // Make the two interacting permanents printed objects of the database.
+        let mut printed_faces = std::collections::HashMap::new();
+        for (id, oracle_id) in [
+            (hullbreacher, "oracle-hullbreacher"),
+            (humility, "oracle-humility"),
+        ] {
+            let object = state.objects.get_mut(&id).expect("the permanent exists");
+            let face = CardFace {
+                name: object.name.clone(),
+                card_type: object.base_card_types.clone(),
+                power: object
+                    .base_power
+                    .map(engine::types::ability::PtValue::Fixed),
+                toughness: object
+                    .base_toughness
+                    .map(engine::types::ability::PtValue::Fixed),
+                keywords: object.base_keywords.clone(),
+                abilities: (*object.base_abilities).clone(),
+                triggers: (*object.base_trigger_definitions).clone(),
+                static_abilities: (*object.base_static_definitions).clone(),
+                replacements: (*object.base_replacement_definitions).clone(),
+                scryfall_oracle_id: Some(oracle_id.to_string()),
+                ..Default::default()
+            };
+            object.printed_ref = Some(PrintedCardRef {
+                oracle_id: oracle_id.to_string(),
+                face_name: face.name.clone(),
+            });
+            printed_faces.insert(face.name.to_lowercase(), face);
+        }
+        let db = std::sync::Arc::new(
+            CardDatabase::from_json_str(
+                &serde_json::to_string(&printed_faces).expect("the faces serialize"),
+            )
+            .expect("the test card database deserializes"),
+        );
+        CARD_DB.with(|cell| *cell.borrow_mut() = Some(std::sync::Arc::clone(&db)));
+        engine::game::layers::evaluate_layers(state);
+
+        let draw_leg = || AbilityCost::EffectCost {
+            effect: Box::new(Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            }),
+        };
+        let root = ResolvedAbility::new(
+            Effect::PayCost {
+                cost: AbilityCost::Composite {
+                    costs: vec![draw_leg(), draw_leg()],
+                },
+                scale: None,
+                payer: TargetFilter::Controller,
+            },
+            vec![],
+            source,
+            P0,
+        );
+        engine::game::effects::resolve_ability_chain(state, &root, &mut Vec::new(), 0)
+            .expect("the staged payment resolves");
+        apply(state, P0, GameAction::ChooseReplacement { index: 1 })
+            .expect("declining leg 1's Dredge accepts the draw");
+        assert!(
+            matches!(state.waiting_for, WaitingFor::ReplacementChoice { player, .. } if player == P0),
+            "reach: leg 2's Dredge is offered, got {:?}",
+            state.waiting_for
+        );
+        apply(
+            state,
+            PlayerId(3),
+            GameAction::Concede {
+                player_id: PlayerId(3),
+            },
+        )
+        .expect("a player can concede at any time");
+        let checkpoint = state
+            .payment_transaction
+            .as_ref()
+            .and_then(|transaction| transaction.recovered.as_ref())
+            .expect("reach: the concession parks the payment on a recovery checkpoint");
+        assert!(
+            matches!(
+                checkpoint.state.waiting_for,
+                WaitingFor::ReplacementChoice { .. }
+            ),
+            "reach: the checkpoint is parked on leg 2's Dredge choice"
+        );
+        let hand_before = state.players[0].hand.len();
+
+        let json = serde_json::to_string(&PersistedGameState::Raw(Box::new(state.clone())))
+            .expect("the state serializes");
+        let mut restored = decode_and_rehydrate_restored_game_state(&json, |_| Ok(()))
+            .expect("the Dredge-only prompt is the one the game offers under Humility")
+            .state;
+        apply(
+            &mut restored,
+            P0,
+            GameAction::ChooseReplacement { index: 1 },
+        )
+        .expect("the restored prompt is answered");
+        assert!(
+            restored.payment_transaction.is_none(),
+            "the payment settled"
+        );
+        assert_eq!(
+            restored.players[0].hand.len(),
+            hand_before + 2,
+            "both legs' cards were drawn"
+        );
+        assert!(
+            !restored
+                .objects
+                .values()
+                .any(|object| object.zone == Zone::Battlefield && object.name == "Treasure"),
+            "Hullbreacher stayed muted"
+        );
+        clear_game_state();
+    }
 }
 
 #[cfg(test)]

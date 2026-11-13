@@ -17151,6 +17151,18 @@ impl PreparedPersistedGameState {
     ) -> Result<GameState, PersistedRestoreError> {
         let mut state = self.state;
         rehydrate(&mut state).map_err(PersistedRestoreError::RehydrationFailed)?;
+        // CR 613.1f: a recovery checkpoint whose printed faces the host just
+        // refreshed carries each object's printed abilities until the layers
+        // are applied again; an ability-removing effect (Humility) decides
+        // which replacement effects its prompt has to offer (CR 616.1), so
+        // the layers are reconciled before that prompt is checked or used.
+        if let Some(checkpoint) = state
+            .payment_transaction
+            .as_deref_mut()
+            .and_then(|transaction| transaction.recovered.as_deref_mut())
+        {
+            crate::game::layers::flush_layers(&mut checkpoint.state);
+        }
         state
             .validate_recovered_prompt_answerable()
             .map_err(PersistedRestoreError::InvalidPaymentTransaction)?;
