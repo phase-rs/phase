@@ -2958,7 +2958,9 @@ pub(crate) fn lower_trigger_ir(ir: &TriggerIr) -> TriggerDefinition {
     // references ControllerRef::TargetPlayer, when the effect text names a
     // target opponent/player (Sméagol, Helpful Guide RingTemptsYou), or when a
     // RevealUntil names an opponent library without TargetPlayer binding.
-    if def.valid_target.is_none() {
+    // A phase trigger's `valid_target` scopes whose step it is, which a target in
+    // its effect does not.
+    if def.valid_target.is_none() && def.mode != TriggerMode::Phase {
         let effect_lower = modifiers.effect_lower.as_str();
         if scan_contains(effect_lower, "target opponent")
             || scan_contains(effect_lower, "target player")
@@ -20427,6 +20429,14 @@ fn try_parse_phase_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefinitio
     {
         def.valid_target = Some(TargetFilter::ParentTargetController);
     }
+    // CR 102.1 + CR 800.4j: "each player's [step]" is a step of a player's turn, a scope
+    // the unscoped "each [step]" does not carry.
+    if def.valid_target.is_none()
+        && nom_primitives::scan_at_word_boundaries(phase_text, parse_each_players_possessive)
+            .is_some()
+    {
+        def.valid_target = Some(TargetFilter::Player);
+    }
     if scan_contains(phase_text, "chosen player's")
         || scan_contains(phase_text, "chosen player\u{2019}s ")
         || scan_contains(phase_text, "chosen players ")
@@ -24561,6 +24571,18 @@ fn parse_turn_possessive_prefix(input: &str) -> OracleResult<'_, TriggerConstrai
 /// the possessive branch consumed `your ` and stranded `next end step`.
 fn parse_phase_determiner_prefix(input: &str) -> OracleResult<'_, ()> {
     value((), alt((tag("each player's "), tag("each "), tag("the ")))).parse(input)
+}
+
+fn parse_each_players_possessive(input: &str) -> OracleResult<'_, ()> {
+    value(
+        (),
+        alt((
+            tag("each player's "),
+            tag("each player\u{2019}s "),
+            tag("each players "),
+        )),
+    )
+    .parse(input)
 }
 
 /// CR 603.1 + CR 603.7: a triggered ability is printed as "[When/Whenever/At]

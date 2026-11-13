@@ -7,7 +7,7 @@ use engine::game::combat::AttackTarget;
 use engine::game::engine::EngineError;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::scenario_db::GameScenarioDbExt;
-use engine::types::ability::Duration;
+use engine::types::ability::{Duration, TargetRef};
 use engine::types::actions::GameAction;
 use engine::types::format::{ChallengeDeck, FormatConfig};
 use engine::types::game_state::{
@@ -968,4 +968,245 @@ fn a_departed_players_unanswered_mana_order_passes_to_the_next_ordering_player()
             1
         )
     );
+}
+
+fn counters(state: &GameState, id: ObjectId) -> u32 {
+    state.objects[&id].counters.values().sum()
+}
+
+/// What triggers while P0's turn runs to its end, answering every prompt: the names in the first
+/// `OrderTriggers` prompt, and every source put on the stack in the end step.
+fn end_step_triggers(runner: &mut GameRunner) -> (Vec<String>, Vec<String>) {
+    let mut ordered = Vec::new();
+    let mut stacked: Vec<String> = Vec::new();
+    for _ in 0..300 {
+        let state = runner.state();
+        if state.active_player != P0 {
+            break;
+        }
+        if state.phase == Phase::End {
+            for entry in &state.stack {
+                let name = &state.objects[&entry.source_id].name;
+                if !stacked.contains(name) {
+                    stacked.push(name.clone());
+                }
+            }
+        }
+        match &state.waiting_for {
+            WaitingFor::Priority { .. } => pass(runner),
+            WaitingFor::DeclareAttackers { .. } => {
+                runner
+                    .act(GameAction::DeclareAttackers {
+                        attacks: vec![],
+                        bands: vec![],
+                    })
+                    .expect("declare no attackers");
+            }
+            WaitingFor::OrderTriggers { triggers, .. } => {
+                if ordered.is_empty() {
+                    ordered = triggers.iter().map(|t| t.source_name.clone()).collect();
+                }
+                let order = (0..triggers.len()).collect();
+                runner
+                    .act(GameAction::OrderTriggers { order })
+                    .expect("CR 603.3b: order the triggers");
+            }
+            WaitingFor::TriggerTargetSelection { .. } => {
+                runner
+                    .choose_first_legal_target()
+                    .expect("choose a trigger target");
+            }
+            WaitingFor::OptionalEffectChoice { .. } => {
+                runner
+                    .act(GameAction::DecideOptionalEffect { accept: true })
+                    .expect("accept the optional effect");
+            }
+            other => panic!("unexpected prompt in P0's turn: {other:?}"),
+        }
+    }
+    (ordered, stacked)
+}
+
+/// CR 603.2b + CR 102.1 + CR 800.4j: a step of a player's turn ("each opponent's end step",
+/// "each player's end step") does not begin in a turn without an active player; an unscoped
+/// "each end step" does.
+#[test]
+fn a_step_scoped_to_a_players_turn_does_not_begin_without_one() {
+    let db = shared_card_db().expect("card db");
+    for leaves in [false, true] {
+        let mut scenario = free_for_all();
+        scenario.add_real_card(P1, "Archfiend of Depravity", Zone::Battlefield, db);
+        let luminarch = scenario.add_real_card(P1, "Luminarch Ascension", Zone::Battlefield, db);
+        let cinderhorn = scenario.add_real_card(P3, "Charging Cinderhorn", Zone::Battlefield, db);
+        scenario.add_real_card(P2, "Wound Reflection", Zone::Battlefield, db);
+        scenario.add_vanilla(P0, 2, 2);
+        scenario.add_vanilla(P0, 2, 2);
+        scenario.add_vanilla(P0, 2, 2);
+        let p2_creatures = [
+            scenario.add_vanilla(P2, 2, 2),
+            scenario.add_vanilla(P2, 2, 2),
+            scenario.add_vanilla(P2, 2, 2),
+        ];
+        let mut runner = scenario.build();
+        if leaves {
+            concede(&mut runner, P0);
+        }
+        let (ordered, stacked) = end_step_triggers(&mut runner);
+        let state = runner.state();
+        if leaves {
+            assert!(ordered.is_empty(), "{ordered:?}");
+            assert_eq!(stacked, ["Wound Reflection"]);
+            assert_eq!(counters(state, cinderhorn), 0);
+            assert_eq!(counters(state, luminarch), 0);
+            assert!(p2_creatures.iter().all(|id| state.battlefield.contains(id)));
+        } else {
+            assert_eq!(ordered, ["Archfiend of Depravity", "Luminarch Ascension"]);
+            for name in [
+                "Archfiend of Depravity",
+                "Luminarch Ascension",
+                "Wound Reflection",
+                "Charging Cinderhorn",
+            ] {
+                assert!(stacked.iter().any(|s| s == name), "{name}: {stacked:?}");
+            }
+            assert_eq!(counters(state, cinderhorn), 1);
+            assert_eq!(counters(state, luminarch), 1);
+        }
+    }
+}
+
+/// CR 102.3 + CR 800.4j: a turn without an active player is no player's turn, so it is not an
+/// opponent's turn for a casting restriction (Siren's Call), an activation restriction (Maddening
+/// Imp), or a trigger condition (Alela, Cunning Conqueror; Glen Elendra Pranksters).
+#[test]
+fn no_card_reads_a_turn_without_an_active_player_as_an_opponents() {
+    let db = shared_card_db().expect("card db");
+    for leaves in [false, true] {
+        let mut scenario = free_for_all();
+        let imp = scenario.add_real_card(P1, "Maddening Imp", Zone::Battlefield, db);
+        let sirens = scenario.add_real_card(P1, "Siren's Call", Zone::Hand, db);
+        scenario.add_real_card(P1, "Alela, Cunning Conqueror", Zone::Battlefield, db);
+        scenario.add_real_card(P1, "Glen Elendra Pranksters", Zone::Battlefield, db);
+        let bolt = scenario.add_real_card(P1, "Lightning Bolt", Zone::Hand, db);
+        scenario.with_mana_pool(P1, mana(&[ManaType::Blue, ManaType::Red]));
+        let mut runner = scenario.build();
+        if leaves {
+            concede(&mut runner, P0);
+        } else {
+            pass(&mut runner);
+        }
+        assert_eq!(priority_seat(&runner), Some(P1));
+        assert_eq!(runner.state().phase, Phase::PreCombatMain);
+
+        let actions = engine::ai_support::legal_actions(runner.state());
+        let sirens_legal = actions
+            .iter()
+            .any(|a| matches!(a, GameAction::CastSpell { object_id, .. } if *object_id == sirens));
+        let imp_legal = actions.iter().any(
+            |a| matches!(a, GameAction::ActivateAbility { source_id, .. } if *source_id == imp),
+        );
+        let imp_applies = engine::game::engine::apply(
+            &mut runner.state().clone(),
+            P1,
+            GameAction::ActivateAbility {
+                source_id: imp,
+                ability_index: 0,
+                payment_mode: Default::default(),
+            },
+        )
+        .is_ok();
+        assert_eq!(
+            (sirens_legal, imp_legal, imp_applies),
+            (!leaves, !leaves, !leaves)
+        );
+
+        let card_id = runner.state().objects[&bolt].card_id;
+        runner
+            .act(GameAction::CastSpell {
+                object_id: bolt,
+                card_id,
+                targets: vec![],
+                payment_mode: Default::default(),
+            })
+            .expect("CR 601.2: P1 casts Lightning Bolt");
+        let mut triggered = Vec::new();
+        loop {
+            match &runner.state().waiting_for {
+                WaitingFor::TargetSelection { .. } => {
+                    runner
+                        .act(GameAction::ChooseTarget {
+                            target: Some(TargetRef::Player(P2)),
+                        })
+                        .expect("CR 601.2c: Lightning Bolt targets P2");
+                }
+                WaitingFor::ManaPayment { .. } => pass(&mut runner),
+                WaitingFor::OrderTriggers { triggers, .. } => {
+                    triggered = triggers.iter().map(|t| t.source_name.clone()).collect();
+                    let order = (0..triggers.len()).collect();
+                    runner
+                        .act(GameAction::OrderTriggers { order })
+                        .expect("CR 603.3b: order the triggers");
+                }
+                WaitingFor::TriggerTargetSelection { .. } => {
+                    runner
+                        .choose_first_legal_target()
+                        .expect("choose a trigger target");
+                }
+                WaitingFor::Priority { .. } => break,
+                other => panic!("unexpected prompt casting Lightning Bolt: {other:?}"),
+            }
+        }
+        triggered.sort();
+        let stack = runner.stack_names();
+        assert_eq!(stack.first().map(String::as_str), Some("Lightning Bolt"));
+        if leaves {
+            assert!(triggered.is_empty(), "{triggered:?}");
+            assert_eq!(stack, ["Lightning Bolt"]);
+        } else {
+            assert_eq!(
+                triggered,
+                ["Alela, Cunning Conqueror", "Glen Elendra Pranksters"]
+            );
+            assert_eq!(stack.len(), 3, "{stack:?}");
+        }
+    }
+}
+
+/// CR 102.3 + CR 800.4j: an upkeep without an active player is not an opponent's upkeep, so
+/// Festival ("Cast this spell only during an opponent's upkeep.") cannot be cast in it.
+#[test]
+fn festival_is_not_cast_in_an_upkeep_without_an_active_player() {
+    let db = shared_card_db().expect("card db");
+    for leaves in [false, true] {
+        let mut scenario = free_for_all();
+        scenario.at_phase(Phase::Upkeep);
+        let festival = scenario.add_real_card(P1, "Festival", Zone::Hand, db);
+        scenario.with_mana_pool(P1, mana(&[ManaType::White]));
+        let mut runner = scenario.build();
+        if leaves {
+            concede(&mut runner, P0);
+        } else {
+            pass(&mut runner);
+        }
+        assert_eq!(priority_seat(&runner), Some(P1));
+        assert_eq!(runner.state().phase, Phase::Upkeep);
+        let castable = engine::ai_support::legal_actions(runner.state())
+            .iter()
+            .any(
+                |a| matches!(a, GameAction::CastSpell { object_id, .. } if *object_id == festival),
+            );
+        let card_id = runner.state().objects[&festival].card_id;
+        let applies = engine::game::engine::apply(
+            &mut runner.state().clone(),
+            P1,
+            GameAction::CastSpell {
+                object_id: festival,
+                card_id,
+                targets: vec![],
+                payment_mode: Default::default(),
+            },
+        )
+        .is_ok();
+        assert_eq!((castable, applies), (!leaves, !leaves), "leaves={leaves}");
+    }
 }

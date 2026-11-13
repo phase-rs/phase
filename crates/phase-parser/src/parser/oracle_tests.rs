@@ -13415,27 +13415,22 @@ fn super_intelligence_upkeep_scoped_to_enchanted_creature_controller() {
 }
 
 #[test]
-fn each_player_upkeep_phase_trigger_stays_unscoped() {
-    // Regression: a genuine "each player's upkeep" Howling-Mine trigger must keep
-    // firing on every player's upkeep (no valid_target), unaffected by the
-    // enchanted-creature's-controller scoping.
+fn each_players_upkeep_trigger_is_scoped_to_whose_turn_it_is() {
+    // CR 603.2b + CR 102.1: "each player's upkeep" is the upkeep of whoever's turn it is, so the trigger is Player-scoped, not Super Intelligence's ParentTargetController.
     let r = parse(
-        "At the beginning of each player's upkeep, that player draws a card.",
-        "Howling Mine Test",
-        &[],
-        &["Artifact"],
-        &[],
+        "Defender (This creature can't attack.)\nThis creature enters with a +1/+1 counter on it.\nAt the beginning of each player's upkeep, that player draws a card for each +1/+1 counter on this creature.\n{2}{W}{U}: Put a +1/+1 counter on this creature.",
+        "Walking Archive",
+        &[Keyword::Defender],
+        &["Artifact", "Creature"],
+        &["Golem"],
     );
     let trigger = r
         .triggers
         .iter()
         .find(|t| t.mode == TriggerMode::Phase)
         .expect("expected a Phase trigger");
-    assert_eq!(
-        trigger.valid_target, None,
-        "each-player's-upkeep must remain unscoped: {:?}",
-        trigger.valid_target
-    );
+    assert_eq!(trigger.phase, Some(Phase::Upkeep));
+    assert_eq!(trigger.valid_target, Some(TargetFilter::Player));
 }
 
 #[test]

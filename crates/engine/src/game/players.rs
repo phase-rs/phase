@@ -266,6 +266,19 @@ pub fn choosable_opponents(state: &GameState, player: PlayerId) -> Vec<PlayerId>
         .collect()
 }
 
+/// CR 102.1 + CR 800.4j: the player whose turn it is; `None` while a turn whose active player has
+/// left the game continues without one. `state.active_player` keeps naming that seat, because
+/// turn order still runs from it.
+pub fn active_player(state: &GameState) -> Option<PlayerId> {
+    is_alive(state, state.active_player).then_some(state.active_player)
+}
+
+/// CR 102.3 + CR 800.4j: whether it is an opponent's turn for `player`; a turn without an active
+/// player is no player's turn.
+pub fn is_opponents_turn(state: &GameState, player: PlayerId) -> bool {
+    active_player(state).is_some_and(|active| is_opponent(state, player, active))
+}
+
 /// CR 102.2 / CR 102.3: Whether `other` is an opponent of `player`.
 pub fn is_opponent(state: &GameState, player: PlayerId, other: PlayerId) -> bool {
     super::topology::is_opponent(state, player, other)

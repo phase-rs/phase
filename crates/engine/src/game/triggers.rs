@@ -16754,7 +16754,7 @@ fn check_trigger_constraint_with_ref(
         // test would over-fire. Same authority as
         // `ParsedCondition::IsOpponentsTurn`.
         TriggerConstraint::OnlyDuringOpponentsTurn => {
-            super::players::is_opponent(state, controller, state.active_player)
+            super::players::is_opponents_turn(state, controller)
         }
         TriggerConstraint::OncePerOpponentPerTurn => {
             // CR 603.2: The trigger event only matches the first life-loss event
@@ -17951,7 +17951,7 @@ fn evaluate_trigger_condition_with_source(
             // shared team turns, a teammate holding `active_player` remains on
             // the controller's active team and is not an opponent.
             PlayerFilter::Opponent => {
-                super::players::is_opponent(state, controller, state.active_player)
+                super::players::is_opponents_turn(state, controller)
             }
             // CR 603.4 + CR 102.1: "that player's turn" — the player named by
             // the trigger event (drawer / tapper / damaged player / etc.) is

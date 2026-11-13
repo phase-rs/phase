@@ -1512,7 +1512,7 @@ fn palantir_life_loss_uses_milled_chain_set_and_targeted_opponent() {
 
     let trigger = parsed.triggers.first().expect("Palantir end-step trigger");
     assert_eq!(trigger.mode, TriggerMode::Phase);
-    assert_eq!(trigger.valid_target, Some(TargetFilter::Player));
+    assert_eq!(trigger.valid_target, None);
     let put = trigger.execute.as_deref().expect("counter effect");
     assert!(matches!(put.effect.as_ref(), Effect::PutCounter { .. }));
     let scry = put.sub_ability.as_deref().expect("scry continuation");
@@ -23008,7 +23008,7 @@ fn phase_trigger_that_player_sacrifices_uses_scoped_player_not_target_player() {
 
     assert_eq!(def.mode, TriggerMode::Phase);
     assert_eq!(def.phase, Some(Phase::Upkeep));
-    assert_eq!(def.valid_target, None);
+    assert_eq!(def.valid_target, Some(TargetFilter::Player));
     match def.execute.as_ref().map(|ability| ability.effect.as_ref()) {
         Some(Effect::Sacrifice { target, .. }) => match target {
             TargetFilter::Typed(filter) => {
@@ -23017,6 +23017,39 @@ fn phase_trigger_that_player_sacrifices_uses_scoped_player_not_target_player() {
             other => panic!("expected typed sacrifice filter, got {other:?}"),
         },
         other => panic!("expected Sacrifice effect, got {other:?}"),
+    }
+}
+
+/// CR 102.1 + CR 800.4j: a phase trigger's `valid_target` names whose step it is: "each
+/// player's" step is a player's, "each" step is unscoped whatever its effect targets.
+#[test]
+fn a_phase_triggers_scope_is_whose_step_not_its_effects_target() {
+    for (name, line, scope) in [
+        (
+            "Charging Cinderhorn",
+            "At the beginning of each player's end step, if no creatures attacked this turn, put a fury counter on this creature. Then this creature deals damage equal to the number of fury counters on it to that player.",
+            Some(TargetFilter::Player),
+        ),
+        (
+            "Fevered Visions",
+            "At the beginning of each player's end step, that player draws a card. If the player is your opponent and has four or more cards in hand, this enchantment deals 2 damage to that player.",
+            Some(TargetFilter::Player),
+        ),
+        (
+            "Wound Reflection",
+            "At the beginning of each end step, each opponent loses life equal to the life they lost this turn. (Damage causes loss of life.)",
+            None,
+        ),
+        (
+            "The Caretaker",
+            "At the beginning of each end step, if you faced a dilemma this turn, target opponent exiles cards from the top of their library until they exile a nonland card. You may cast that card without paying its mana cost. (You face a dilemma as you choose one or more modes for a spell or ability.)",
+            None,
+        ),
+    ] {
+        let def = parse_trigger_line(line, name);
+        assert_eq!(def.mode, TriggerMode::Phase, "{name}");
+        assert_eq!(def.phase, Some(Phase::End), "{name}");
+        assert_eq!(def.valid_target, scope, "{name}");
     }
 }
 
