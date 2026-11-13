@@ -243,26 +243,25 @@ fn activation_opts_in_above_floor() {
 }
 
 #[test]
-fn closest_opponent_poison_loss_ignores_the_ai_itself() {
+fn opponent_poison_seats_ignores_the_ai_itself() {
     let mut state = state_with_players(2);
     state.players[0].poison_counters = 7;
     state.players[1].poison_counters = 3;
+    let seats = |me| {
+        opponent_poison_seats(&state, me)
+            .map(|(seat, m)| (seat, m.count))
+            .collect::<Vec<_>>()
+    };
     // The AI's own 7 poison must not be read as pressure it is applying.
-    assert_eq!(
-        closest_opponent_poison_loss(&state, AI).map(|m| m.count),
-        Some(3)
-    );
-    assert_eq!(
-        closest_opponent_poison_loss(&state, OPPONENT).map(|m| m.count),
-        Some(7)
-    );
+    assert_eq!(seats(AI), vec![(OPPONENT, 3)]);
+    assert_eq!(seats(OPPONENT), vec![(AI, 7)]);
 }
 
 /// CR 800.4: a multiplayer game continues after a player leaves, and the
 /// eliminated seat stays in
 /// `GameState.players`. Their counters must not produce phantom pressure.
 #[test]
-fn closest_opponent_poison_loss_ignores_eliminated_seats() {
+fn opponent_poison_seats_ignores_eliminated_seats() {
     let mut state = state_with_players(4);
     state.players[1].poison_counters = 9;
     state.players[1].is_eliminated = true;
@@ -270,8 +269,10 @@ fn closest_opponent_poison_loss_ignores_eliminated_seats() {
     state.players[3].poison_counters = 0;
 
     assert_eq!(
-        closest_opponent_poison_loss(&state, AI).map(|m| m.count),
-        Some(2),
+        opponent_poison_seats(&state, AI)
+            .map(|(seat, m)| (seat, m.count))
+            .collect::<Vec<_>>(),
+        vec![(PlayerId(2), 2), (PlayerId(3), 0)],
         "a dead seat at 9 poison must not read as one counter from lethal"
     );
     assert_eq!(live_opponent_poison(&state, AI, PlayerId(1)), None);
@@ -1454,4 +1455,140 @@ fn each_player_poison_spell_is_not_scored_as_lethal() {
         verdict_on(state, &cast_candidate(ids[1])).1.kind,
         "poison_clock_lethal"
     );
+}
+
+// ─── lethal claims read through the engine's replacement pipeline ───────────
+
+fn solemnity(scenario: &mut GameScenario) -> ObjectId {
+    scenario.add_real_card(
+        PlayerId(1),
+        "Solemnity",
+        Zone::Battlefield,
+        shared_integration_card_db(),
+    )
+}
+
+fn vorinclex(scenario: &mut GameScenario) -> ObjectId {
+    scenario.add_real_card(
+        AI,
+        "Vorinclex, Monstrous Raider",
+        Zone::Battlefield,
+        shared_integration_card_db(),
+    )
+}
+
+/// `card` cast on a board that also holds `extra`.
+fn cast_beside(
+    format: FormatConfig,
+    players: u8,
+    poison: &[(PlayerId, u32)],
+    card: fn(&mut GameScenario) -> ObjectId,
+    extra: fn(&mut GameScenario) -> ObjectId,
+) -> (f64, PolicyReason) {
+    let (runner, ids) = board(format, players, poison, |s| {
+        let id = card(s);
+        extra(s);
+        vec![id]
+    });
+    verdict_on(runner.state(), &cast_candidate(ids[0]))
+}
+
+/// CR 101.2 + CR 810.10: under Solemnity neither head gets Prologue's counter, so 13 stays 13.
+#[test]
+fn prevented_each_opponent_poison_is_not_lethal_in_two_headed_giant() {
+    let two_hg = FormatConfig::two_headed_giant;
+    let at_13 = [(PlayerId(2), 6), (PlayerId(3), 7)];
+    let (open_delta, open) = cast_on(two_hg(), 4, &at_13, prologue_to_phyresis);
+    assert_eq!(open.kind, "poison_clock_lethal");
+    assert_eq!(fact(&open, "poison_added"), Some(2));
+    assert!(open_delta > crate::policies::registry::STRONG_MAX);
+
+    let (delta, reason) = cast_beside(two_hg(), 4, &at_13, prologue_to_phyresis, solemnity);
+    assert_eq!(reason.kind, "poison_clock_no_poison_loss");
+    assert_eq!(delta, 0.0);
+}
+
+/// A sub-lethal estimate is scored without a preview, so it keeps its printed count.
+#[test]
+fn sub_lethal_poison_estimate_is_not_previewed() {
+    let (_, reason) = cast_beside(
+        FormatConfig::two_headed_giant(),
+        4,
+        &[(PlayerId(2), 6), (PlayerId(3), 6)],
+        prologue_to_phyresis,
+        solemnity,
+    );
+    assert_eq!(reason.kind, "poison_clock_pressure");
+    assert_eq!(fact(&reason, "poison_added"), Some(2));
+}
+
+/// CR 101.2 + CR 701.34b: Solemnity stops the team's proliferated counter.
+#[test]
+fn prevented_proliferate_is_not_lethal() {
+    let two_hg = FormatConfig::two_headed_giant;
+    let at_14 = [(PlayerId(2), 7), (PlayerId(3), 7)];
+    assert_eq!(
+        cast_on(two_hg(), 4, &at_14, steady_progress).1.kind,
+        "poison_clock_lethal"
+    );
+    let (delta, reason) = cast_beside(two_hg(), 4, &at_14, steady_progress, solemnity);
+    assert_eq!(reason.kind, "poison_clock_no_counters_to_proliferate");
+    assert_eq!(delta, 0.0);
+}
+
+/// CR 101.2 + CR 120.3b: infect damage to a player under Solemnity gives no poison counters.
+#[test]
+fn prevented_infect_attack_is_not_lethal() {
+    let standard = FormatConfig::standard;
+    assert_eq!(
+        elf_attack(standard(), 2, &[(OPPONENT, 9)], OPPONENT).1.kind,
+        "poison_clock_lethal"
+    );
+    let (runner, ids) = board(standard(), 2, &[(OPPONENT, 9)], |s| {
+        let elf = glistener_elf(s);
+        solemnity(s);
+        vec![elf]
+    });
+    let (delta, reason) = verdict_on(
+        runner.state(),
+        &attack_candidate(vec![(ids[0], AttackTarget::Player(OPPONENT))]),
+    );
+    assert_eq!(reason.kind, "poison_clock_na");
+    assert_eq!(delta, 0.0);
+}
+
+/// CR 101.2: a single opponent under Solemnity is not one counter from losing.
+#[test]
+fn prevented_poison_on_a_single_opponent_is_not_lethal() {
+    let standard = FormatConfig::standard;
+    assert_eq!(
+        cast_on(standard(), 2, &[(OPPONENT, 9)], prologue_to_phyresis)
+            .1
+            .kind,
+        "poison_clock_lethal"
+    );
+    let (delta, reason) = cast_beside(
+        standard(),
+        2,
+        &[(OPPONENT, 9)],
+        prologue_to_phyresis,
+        solemnity,
+    );
+    assert_eq!(reason.kind, "poison_clock_no_poison_loss");
+    assert_eq!(delta, 0.0);
+}
+
+/// CR 614.1: Vorinclex doubles each head's counter, so the lethal claim books four, not two.
+#[test]
+fn replaced_poison_count_is_the_one_scored() {
+    let (delta, reason) = cast_beside(
+        FormatConfig::two_headed_giant(),
+        4,
+        &[(PlayerId(2), 6), (PlayerId(3), 7)],
+        prologue_to_phyresis,
+        vorinclex,
+    );
+    assert_eq!(reason.kind, "poison_clock_lethal");
+    assert_eq!(fact(&reason, "poison_added"), Some(4));
+    assert!(delta > crate::policies::registry::STRONG_MAX);
 }

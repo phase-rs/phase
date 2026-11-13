@@ -751,36 +751,14 @@ pub(crate) fn available_mana_after_spell(ctx: &PolicyContext<'_>) -> u32 {
 fn total_poison_from_ward_cost(ctx: &PolicyContext<'_>, ward: &WardCost) -> Option<u32> {
     match ward {
         WardCost::GetPlayerCounters {
-            counter_kind: kind @ engine::types::player::PlayerCounterKind::Poison,
+            counter_kind: engine::types::player::PlayerCounterKind::Poison,
             count,
         } => {
-            match engine::game::effects::player_counter::preview_player_counter_addition(
-                ctx.state,
-                ctx.ai_player,
-                ctx.ai_player,
-                *kind,
-                *count,
-            ) {
-                engine::game::effects::player_counter::PlayerCounterAdditionPreview::Applied {
-                    count,
-                }
-                | engine::game::effects::player_counter::PlayerCounterAdditionPreview::Transformed {
-                    count,
-                } => Some(count),
-                // For poison-quantity projection only, prevention contributes zero counters.
-                // This does not mean the Ward cost is payable: `can_pay_ward_cost` separately
-                // rejects Prevented, ChoiceRequired, and Unsupported previews because the
-                // engine cannot successfully complete or safely project that payment.
-                engine::game::effects::player_counter::PlayerCounterAdditionPreview::Prevented => {
-                    Some(0)
-                }
-                engine::game::effects::player_counter::PlayerCounterAdditionPreview::ChoiceRequired {
-                    ..
-                }
-                | engine::game::effects::player_counter::PlayerCounterAdditionPreview::Unsupported => {
-                    None
-                }
-            }
+            // For poison-quantity projection only, prevention contributes zero counters.
+            // This does not mean the Ward cost is payable: `can_pay_ward_cost` separately
+            // rejects Prevented, ChoiceRequired, and Unsupported previews because the
+            // engine cannot successfully complete or safely project that payment.
+            super::poison::previewed_poison(ctx.state, ctx.ai_player, ctx.ai_player, *count)
         }
         WardCost::Compound(costs) => costs.iter().try_fold(0u32, |total, cost| {
             Some(total.saturating_add(total_poison_from_ward_cost(ctx, cost)?))
