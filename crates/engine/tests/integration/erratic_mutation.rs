@@ -1116,6 +1116,18 @@ fn library_redirect(
         .description(description.to_string())
 }
 
+/// The same synthetic redirect, restricted to one exact object's library move
+/// so a multi-card rest pile can keep its other members in the library.
+fn library_redirect_for_card(
+    description: &str,
+    destination: Zone,
+    id: ObjectId,
+) -> engine::types::ability::ReplacementDefinition {
+    let mut definition = library_redirect(description, destination);
+    definition.valid_card = Some(engine::types::ability::TargetFilter::SpecificObject { id });
+    definition
+}
+
 /// CR 614.6 + CR 616.1 + CR 401.4: "Put all cards revealed this way on the
 /// bottom of your library in any order." The owner's answer is a proposed
 /// library placement for every selected card, so it consults `Moved`
@@ -1409,19 +1421,32 @@ fn proteus_staff_paused_owner_order_still_settles_reorder() {
     let staff = scenario
         .add_artifact_from_oracle(P0, "Proteus Staff", PROTEUS_STAFF)
         .id();
+    // CR 614.6: redirect the bounced creature out of the library so the rest
+    // pile starts as the whole library and its deepest member can be placed in
+    // place. The redirects are object-scoped: the two cards that must stay in
+    // the library are not replacement targets.
+    let victim = scenario.add_creature(P0, "Redirected Victim", 2, 2).id();
     scenario
-        .add_creature(P0, "Redirect A", 1, 1)
+        .add_creature(P0, "Victim Redirect", 0, 1)
         .as_enchantment()
-        .with_replacement_definition(library_redirect("Redirect A", Zone::Exile));
-    scenario
-        .add_creature(P0, "Redirect B", 1, 1)
-        .as_enchantment()
-        .with_replacement_definition(library_redirect("Redirect B", Zone::Exile));
-    let victim = scenario.add_vanilla(P0, 2, 2);
-    let deep = scenario.add_card_to_library_top(P0, "Deep Card");
+        .with_replacement_definition(library_redirect_for_card(
+            "Victim redirect",
+            Zone::Exile,
+            victim,
+        ));
     let kept = scenario.add_card_to_library_top(P0, "Kept Creature");
     let miss_b = scenario.add_card_to_library_top(P0, "Miss B");
     let miss_a = scenario.add_card_to_library_top(P0, "Miss A");
+    let miss_pause = scenario.add_card_to_library_top(P0, "Miss Pause");
+    // Two competing object-scoped redirects for one rest-pile member: its
+    // library delivery pauses on `ReplacementChoice` while the other two members
+    // stay revealed in the library.
+    for label in ["Pause Redirect A", "Pause Redirect B"] {
+        scenario
+            .add_creature(P0, label, 0, 1)
+            .as_enchantment()
+            .with_replacement_definition(library_redirect_for_card(label, Zone::Exile, miss_pause));
+    }
     let mut runner = scenario.build();
     configure_kept_creature(runner.state_mut(), kept);
     let incarnations_before = [
@@ -1446,21 +1471,53 @@ fn proteus_staff_paused_owner_order_still_settles_reorder() {
             runner.state().waiting_for
         );
     };
-    assert_eq!(cards, vec![miss_a, miss_b]);
+    assert_eq!(cards, vec![miss_pause, miss_a, miss_b]);
+    // Deliver the paused member first and the two library-staying members in
+    // the order that leaves Miss B in place at its own delivery.
     runner
         .act(GameAction::SelectCards {
-            cards: vec![miss_b, miss_a],
+            cards: vec![miss_pause, miss_b, miss_a],
         })
         .expect("answer the owner's bottom order");
 
-    // CR 616.1: each rest-pile delivery pauses on the two competing replacements
-    // and resumes through the batch drain.
+    // CR 616.1: the paused member's delivery surfaces the competing redirects.
+    // Both other members are still revealed and still in the library when the
+    // prompt appears.
     let mut paused = 0;
     while matches!(
         runner.state().waiting_for,
         WaitingFor::ReplacementChoice { .. }
     ) {
         assert!(paused < 8, "the replacement choices are bounded");
+        if paused == 0 {
+            let state = runner.state();
+            for (id, label) in [(miss_a, "Miss A"), (miss_b, "Miss B")] {
+                assert_eq!(
+                    state.objects[&id].zone,
+                    Zone::Library,
+                    "{label} must still be in the library at the pause"
+                );
+                assert!(
+                    state.revealed_cards.contains(&id),
+                    "{label} must still be revealed at the pause"
+                );
+            }
+            assert_eq!(
+                state.players[P0.0 as usize]
+                    .library
+                    .iter()
+                    .copied()
+                    .collect::<Vec<_>>(),
+                vec![miss_pause, miss_a, miss_b],
+                "the paused member is still at the top of the rest pile"
+            );
+            assert!(
+                state
+                    .active_batch_delivery()
+                    .is_some_and(|pending| pending.library_reorder.is_some()),
+                "the whole-arrangement reorder must ride the paused batch"
+            );
+        }
         runner
             .act(GameAction::ChooseReplacement { index: 0 })
             .expect("answer the library modifier");
@@ -1472,25 +1529,19 @@ fn proteus_staff_paused_owner_order_still_settles_reorder() {
     );
 
     let state = runner.state();
-    for (id, label) in [
-        (victim, "the bounced creature"),
-        (miss_a, "Miss A"),
-        (miss_b, "Miss B"),
-    ] {
-        assert_eq!(
-            state.objects[&id].zone,
-            Zone::Exile,
-            "{label} must take the answered redirect instead of the library bottom"
-        );
-    }
+    assert_eq!(
+        state.objects[&miss_pause].zone,
+        Zone::Exile,
+        "the paused member takes the answered redirect"
+    );
     assert_eq!(
         state.players[P0.0 as usize]
             .library
             .iter()
             .copied()
             .collect::<Vec<_>>(),
-        vec![deep],
-        "only the unrevealed card is left in the library"
+        vec![miss_b, miss_a],
+        "both library-staying members keep the chosen bottom order"
     );
     assert_eq!(state.objects[&kept].zone, Zone::Battlefield);
     assert!(
@@ -1500,9 +1551,21 @@ fn proteus_staff_paused_owner_order_still_settles_reorder() {
     );
     assert!(state.active_batch_delivery().is_none());
     assert!(state.stack.is_empty());
-    assert!(
-        incarnations_before[0] < runner.state().objects[&miss_a].incarnation
-            || !state.revealed_cards.contains(&miss_a),
-        "the paused delivery still retires the revealed miss instead of leaving it public"
-    );
+    // CR 701.20d: the two selected members that stayed in the library are
+    // reordered occurrences, so each becomes exactly one new object and stops
+    // being revealed once the arrangement settles before the continuation.
+    for (id, label, incarnation_before) in [
+        (miss_a, "Miss A", incarnations_before[0]),
+        (miss_b, "Miss B", incarnations_before[1]),
+    ] {
+        assert_eq!(
+            state.objects[&id].incarnation,
+            incarnation_before + 1,
+            "{label} must become exactly one new object"
+        );
+        assert!(
+            !state.revealed_cards.contains(&id) && !state.public_revealed_cards.contains(&id),
+            "{label} must stop being revealed"
+        );
+    }
 }

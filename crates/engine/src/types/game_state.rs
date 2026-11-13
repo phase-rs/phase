@@ -7427,11 +7427,16 @@ pub enum BatchCompletion {
         /// determines the printed placement order and remains the
         /// selected-object tracked set / effect count.
         chosen: Vec<ObjectId>,
-        /// Selection members that were already in a library when the owner's
-        /// arrangement was answered. Retained for wire compatibility with a
-        /// completion parked by an older build; every selected member — this set
-        /// included — is delivered through the replacement-consulting batch
-        /// (CR 614.1 + CR 701.20d), so the tail no longer replays them.
+        /// CR 401.4: Selection members that were already in a library when the
+        /// owner's arrangement was answered, for a completion parked by a build
+        /// that queued only the non-library moves and left these members to be
+        /// repositioned by this tail. A current completion writes this empty
+        /// because every selected member — this set included — is delivered by
+        /// the replacement-consulting batch (CR 614.1 + CR 701.20d). A non-empty
+        /// restored set is therefore the migration marker for the legacy
+        /// arrange-then-reposition shape: the completion settles it through
+        /// [`super::game::engine_resolution_choices`]'s legacy reposition rather
+        /// than resuming the non-library moves and silently dropping the order.
         library_origin: Vec<ObjectId>,
         /// Normalized placement requested by the original instruction.
         library_position: LibraryPosition,

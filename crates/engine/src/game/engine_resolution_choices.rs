@@ -7773,16 +7773,6 @@ pub(super) fn handle_resolution_choice(
                         }
                         _ => LibraryPosition::Top,
                     };
-                    let library_origin: Vec<ObjectId> = chosen
-                        .iter()
-                        .copied()
-                        .filter(|card_id| {
-                            state
-                                .objects
-                                .get(card_id)
-                                .is_some_and(|object| object.zone == Zone::Library)
-                        })
-                        .collect();
                     // The selected EffectZoneChoice is now consumed. Clear it
                     // before the pipeline may park a CR 616.1 prompt; otherwise
                     // `park_waiting_for` intentionally preserves the stale
@@ -7814,7 +7804,12 @@ pub(super) fn handle_resolution_choice(
                             player,
                             source_id,
                             chosen: chosen.clone(),
-                            library_origin,
+                            // CR 401.4: this batch delivers every selected member,
+                            // library-origin included, so there is no legacy
+                            // reposition subset. A restored non-empty set belongs
+                            // to a completion parked by a build that queued only
+                            // the non-library moves.
+                            library_origin: Vec::new(),
                             library_position,
                         };
                     crate::game::zone_pipeline::move_objects_simultaneously_settling_then(
@@ -9754,6 +9749,107 @@ fn effect_zone_library_placement_order(
     }
 }
 
+/// CR 401.4 + CR 400.3: Reposition the selected members that a legacy
+/// `EffectZonePutAtLibraryPositionComplete` left in their library instead of
+/// queuing as deliveries.
+///
+/// This is the base build's completion behavior, retained only to settle a
+/// completion parked before the whole arrangement moved through the
+/// replacement-consulting batch. A current save writes `library_origin` empty,
+/// so a non-empty restored set is exactly an old mixed-origin arrangement.
+/// Reconstruct each affected library with the newly delivered cards removed,
+/// replay the original placement order using the selected members that actually
+/// landed in a library, then move only the library-origin members into their
+/// resulting slots. Those raw in-library moves are reorders, not zone changes
+/// (CR 401.4 + CR 614.1), and `reorder_within_library` retires an occurrence
+/// whose position actually changes (CR 701.20d).
+fn reposition_library_origins_after_batch_delivery(
+    state: &mut GameState,
+    chosen: &[ObjectId],
+    library_origin: &[ObjectId],
+    library_position: &LibraryPosition,
+    events: &mut Vec<GameEvent>,
+) {
+    let library_placed: Vec<_> = chosen
+        .iter()
+        .copied()
+        .filter(|card_id| {
+            state
+                .objects
+                .get(card_id)
+                .is_some_and(|object| object.zone == Zone::Library)
+        })
+        .collect();
+    for holder in library_holders_of(state, library_origin) {
+        let library = state
+            .library_of(holder)
+            .iter()
+            .copied()
+            .filter(|id| library_origin.contains(id) || !chosen.contains(id))
+            .collect();
+        let desired = replay_effect_zone_library_placement(
+            state,
+            holder,
+            library,
+            chosen,
+            &library_placed,
+            library_position,
+        );
+        for (index, &card_id) in desired.iter().enumerate().rev() {
+            if library_origin.contains(&card_id) {
+                // allow-raw-zone: in-library reposition is not a zone-change event (CR 401.4 + CR 614.1).
+                zones::move_to_library_at_index(state, card_id, Some(index), events);
+            }
+        }
+    }
+}
+
+/// Every library that holds one of `cards`, in first-seen order.
+fn library_holders_of(
+    state: &GameState,
+    cards: &[ObjectId],
+) -> Vec<crate::types::player::PlayerId> {
+    let mut holders = Vec::new();
+    for &card_id in cards {
+        let holder = state.zone_storage_seat(Zone::Library, state.objects[&card_id].owner);
+        if !holders.contains(&holder) {
+            holders.push(holder);
+        }
+    }
+    holders
+}
+
+/// Replay `chosen`'s placement order into one already-built library image,
+/// inserting only members recorded in `placed`.
+fn replay_effect_zone_library_placement(
+    state: &GameState,
+    holder: crate::types::player::PlayerId,
+    mut library: Vec<ObjectId>,
+    chosen: &[ObjectId],
+    placed: &[ObjectId],
+    library_position: &LibraryPosition,
+) -> Vec<ObjectId> {
+    for card_id in effect_zone_library_placement_order(chosen, library_position) {
+        let card_holder = state.zone_storage_seat(Zone::Library, state.objects[&card_id].owner);
+        if card_holder != holder || !placed.contains(&card_id) {
+            continue;
+        }
+        library.retain(|id| *id != card_id);
+        match library_position {
+            LibraryPosition::Top => library.insert(0, card_id),
+            LibraryPosition::Bottom => library.push(card_id),
+            LibraryPosition::NthFromTop { n } => {
+                let index = (n.saturating_sub(1) as usize).min(library.len());
+                library.insert(index, card_id);
+            }
+            LibraryPosition::BeneathTop { .. } | LibraryPosition::RandomWithinTop { .. } => {
+                unreachable!("EffectZoneChoice normalizes unsupported library positions to Top")
+            }
+        }
+    }
+    library
+}
+
 /// CR 401.4 + CR 101.4: the one completion of a (possibly multi-owner)
 /// arrangement: tracked set, count and EffectResolved cover the whole moved set.
 /// Every selected member — one that began in a library included — was delivered
@@ -10679,13 +10775,26 @@ pub(crate) fn run_batch_completion(
             player,
             source_id,
             chosen,
-            // CR 401.4: the recorded library-origin set stays on the wire for a
-            // completion parked by an older build. Every selected member is now
-            // delivered by the same replacement-consulting batch, so the tail no
-            // longer replays that subset separately.
-            library_origin: _,
+            library_origin,
             library_position,
         } => {
+            // CR 401.4 + CR 400.3 + CR 608.2c: A completion parked by a build
+            // that queued only the non-library moves carries those selected
+            // members in `library_origin` for this tail to reposition. A current
+            // completion writes it empty because the replacement-consulting batch
+            // delivers every selected member. Settle the legacy shape here so a
+            // restored save resumes to the complete chosen arrangement instead of
+            // draining its non-library moves and leaving the library-origin
+            // members in their old order.
+            if !library_origin.is_empty() {
+                reposition_library_origins_after_batch_delivery(
+                    state,
+                    &chosen,
+                    &library_origin,
+                    &library_position,
+                    events,
+                );
+            }
             finish_effect_zone_put_at_library_position(
                 state,
                 player,
@@ -15748,12 +15857,15 @@ mod tests {
 mod random_result_resolution_context_tests {
     use super::*;
     use crate::game::scenario::{GameRunner, GameScenario, P0};
+    use crate::game::zones::create_object;
     use crate::types::ability::{
         AbilityDefinition, AbilityKind, CoinFlipRun, DieResultBranch, EffectError, TargetFilter,
     };
     use crate::types::game_state::{
         GameRng, PersistedGameState, ResolvingTriggerContext, StackEntry, StackEntryKind,
     };
+    use crate::types::identifiers::CardId;
+    use crate::types::player::PlayerId;
     use crate::types::zones::EtbTapState;
 
     #[derive(Clone, Copy, Debug)]
@@ -16562,5 +16674,120 @@ mod random_result_resolution_context_tests {
                 }
             }
         }).unwrap().join().unwrap();
+    }
+
+    /// CR 401.4 + CR 400.3 + CR 608.2c: A completion parked by the base build
+    /// queued only the selected non-library members and serialized the
+    /// library-origin set for its tail to reposition. Restoring that shape and
+    /// resuming the batch must produce the complete chosen arrangement and run
+    /// the completion exactly once — not drain the non-library moves and leave
+    /// the library-origin members in their old order.
+    #[test]
+    fn restored_legacy_mixed_origin_completion_repositions_library_members() {
+        use crate::types::game_state::{
+            BatchCompletion, PendingBatchDeliveries, PersistedGameState, ZoneDeliveryExileTracking,
+        };
+
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Arrangement source".to_string(),
+            Zone::Battlefield,
+        );
+        let library_a = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Library A".to_string(),
+            Zone::Library,
+        );
+        let library_b = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Library B".to_string(),
+            Zone::Library,
+        );
+        let hand_card = create_object(
+            &mut state,
+            CardId(4),
+            PlayerId(0),
+            "Hand Card".to_string(),
+            Zone::Hand,
+        );
+        state.library_of_mut(PlayerId(0)).clear();
+        for card in [library_a, library_b] {
+            state.library_of_mut(PlayerId(0)).push_back(card);
+        }
+        let logical_zone_change_group =
+            crate::game::triggers::allocate_logical_zone_change_group(&mut state, &[hand_card]);
+        state.push_batch_delivery(PendingBatchDeliveries {
+            logical_zone_change_group,
+            paused_current: None,
+            remaining: vec![hand_card],
+            destination: Zone::Library,
+            source_id: Some(source),
+            enter_tapped: EtbTapState::Unspecified,
+            exile_tracking: ZoneDeliveryExileTracking::None,
+            library_placement: None,
+            completion: Some(BatchCompletion::EffectZonePutAtLibraryPositionComplete {
+                player: PlayerId(0),
+                source_id: source,
+                chosen: vec![library_a, hand_card, library_b],
+                library_origin: vec![library_a, library_b],
+                library_position: LibraryPosition::Bottom,
+            }),
+            replacement_applied: Default::default(),
+            requests: Vec::new(),
+            attempted: vec![hand_card],
+            zone_change_record_start: 0,
+            deferred_events: Vec::new(),
+            library_reorder: None,
+        });
+
+        let saved = serde_json::to_string(&PersistedGameState::capture(state))
+            .expect("legacy pending arrangement saves");
+        assert!(
+            !saved.contains("library_reorder"),
+            "the legacy shape predates the reorder carrier"
+        );
+        let mut restored = serde_json::from_str::<PersistedGameState>(&saved)
+            .expect("legacy pending arrangement decodes")
+            .into_game_state()
+            .expect("legacy pending arrangement restores");
+
+        let mut events = Vec::new();
+        crate::game::zone_pipeline::drain_pending_batch_deliveries(&mut restored, &mut events);
+
+        assert_eq!(
+            restored.players[0]
+                .library
+                .iter()
+                .copied()
+                .collect::<Vec<_>>(),
+            vec![library_a, hand_card, library_b],
+            "every selected member must occupy the complete chosen bottom order"
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(
+                    event,
+                    GameEvent::EffectResolved {
+                        kind: EffectKind::PutAtLibraryPosition,
+                        ..
+                    }
+                ))
+                .count(),
+            1,
+            "the restored completion must run exactly once"
+        );
+        assert!(matches!(
+            restored.waiting_for,
+            WaitingFor::Priority { player } if player == PlayerId(0)
+        ));
+        assert!(restored.active_batch_delivery().is_none());
     }
 }
