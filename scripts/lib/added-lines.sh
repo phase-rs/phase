@@ -33,7 +33,9 @@ added_lines_check_suite() {
 # $1 = base ref. A base that names no commit would leave the diff, and so the
 # verdict, empty. Exits 2 (no verdict) instead.
 added_lines_require_base() {
-    if ! git rev-parse --verify --quiet --end-of-options "$1^{commit}" >/dev/null 2>&1; then
+    local base_oid
+    if ! base_oid=$(git rev-parse --verify --quiet --end-of-options "$1" 2>/dev/null) \
+        || ! git cat-file -e "${base_oid}^{commit}" >/dev/null 2>&1; then
         echo "ERROR: base ref '$1' does not resolve to a commit; no verdict." >&2
         exit 2
     fi

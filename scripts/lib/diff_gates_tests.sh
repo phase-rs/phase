@@ -86,6 +86,15 @@ run_gate() {
 expect_base_refused() {
     local real="$BASE"
     run_gate; expect_rc "$1: the real base sees the planted line" 1
+    local expected_listed
+    expected_listed="$(listed)"
+    BASE=':/baseline'; run_gate
+    expect_rc "$1: a valid commit-message selector preserves the verdict" 1
+    if [ "$(listed)" = "$expected_listed" ]; then
+        ok "$1: a valid commit-message selector preserves the listed violation"
+    else
+        fail "$1: a valid commit-message selector preserves the listed violation"
+    fi
     BASE=nosuchref; run_gate
     expect_rc "$1: an unresolvable base fails closed" 2
     expect_out "$1: the refusal names the base" "base ref 'nosuchref' does not resolve to a commit"
