@@ -5491,10 +5491,10 @@ fn stack_pin_liveness(state: &mut GameState) -> Vec<(ObjectId, Vec<bool>)> {
 /// each pin it holds.
 type PinnedCarrier = ((ObjectId, usize), Vec<bool>);
 
-/// [`stack_pin_liveness`] with each entry keyed by carrier.
-fn pinned_carriers(state: &mut GameState) -> Vec<PinnedCarrier> {
+/// A stack's [`stack_pin_liveness`] with each entry keyed by carrier.
+fn pinned_carriers(liveness: Vec<(ObjectId, Vec<bool>)>) -> Vec<PinnedCarrier> {
     let mut seen: HashMap<ObjectId, usize> = HashMap::new();
-    stack_pin_liveness(state)
+    liveness
         .into_iter()
         .map(|(id, live)| {
             let occurrence = seen.entry(id).or_default();
@@ -5565,12 +5565,16 @@ fn stack_is_prior_plus_growth(prior: &[PinnedCarrier], current: &[PinnedCarrier]
 /// ([`stack_is_prior_plus_growth`]). Refusing can only miss a cover; accepting a pair that is
 /// not growth would certify a loop across a carrier that resolves differently.
 fn stack_pins_superseded_apart(prior: &mut GameState, current: &mut GameState) -> bool {
-    let (prior, current) = (pinned_carriers(prior), pinned_carriers(current));
-    let superseded = prior
+    let (prior, current) = (stack_pin_liveness(prior), stack_pin_liveness(current));
+    // The common case, every pin live, answers here, before any carrier is keyed.
+    if !prior
         .iter()
         .chain(current.iter())
-        .any(|(_, live)| live.iter().any(|live| !live));
-    superseded && !stack_is_prior_plus_growth(&prior, &current)
+        .any(|(_, live)| live.iter().any(|live| !live))
+    {
+        return false;
+    }
+    !stack_is_prior_plus_growth(&pinned_carriers(prior), &pinned_carriers(current))
 }
 
 /// A condition of [`loop_states_cover_modulo_fodder_growth`] that refused a frame pair, in the
@@ -11145,14 +11149,20 @@ mod tests {
         );
     }
 
-    /// The same alignment through the boundary of both covers that set the stack aside. A
-    /// steady inert-token engine grown by one token (the object-growth cover) and the fodder
-    /// cover's refusal list, each over the review's stacks and over the growth control.
+    /// The three controls of the stack-pin relation through the boundary of both covers that
+    /// set the stack aside, each on a pair the cover otherwise ADMITS, so the complete verdict
+    /// is asserted: the object-growth cover over a steady inert-token engine grown by one
+    /// token, and the fodder-growth cover over the tapped-split Saproling pair with a Saproling
+    /// as the class representative. Synthetic stacks ([`pinned_stack`]): entries A (id 1) and
+    /// B (id 2) stay on the stack, C (id 3) is put on it in between; a pin of 8 is live, 5 is
+    /// superseded.
     #[test]
     fn loop_growth_covers_refuse_a_carrier_whose_pin_changed_behind_a_grown_entry() {
-        let framed = |entries: &[(u64, u64)]| {
+        // Each base pair with the pinned recipient, its source and `entries` on the stack of
+        // the prior frame (`.0`) and of the current frame (`.1`).
+        let framed = |base: fn() -> (GameState, GameState), entries: &[(u64, u64)]| {
             let donor = pinned_stack(entries);
-            let (mut prior, mut current) = og_cover_base();
+            let (mut prior, mut current) = base();
             for frame in [&mut prior, &mut current] {
                 for id in [ObjectId(20), ObjectId(21)] {
                     frame.objects.insert(id, donor.objects[&id].clone());
@@ -11163,52 +11173,62 @@ mod tests {
             }
             (prior, current)
         };
-        let fodder = pinned_stack(&[]).objects[&ObjectId(20)].clone();
-        let fodder_refuses = |prior: &GameState, current: &GameState| {
-            fodder_growth_cover_refusals(prior, current, &fodder, PlayerId(0))
-                .0
-                .contains(&FodderCoverRefusal::SupersededStackPin)
+        let object_growth = |prior: &[(u64, u64)], current: &[(u64, u64)]| {
+            loop_states_cover_modulo_object_growth(
+                &framed(og_cover_base, prior).0,
+                &framed(og_cover_base, current).1,
+            )
         };
-        let (prior, _) = framed(&[(1, 8), (2, 5)]);
-        let (_, changed) = framed(&[(1, 5), (3, 8), (2, 5)]);
-        let (_, grown) = framed(&[(1, 8), (3, 8), (2, 5)]);
+        let fodder_refusals = |prior: &[(u64, u64)], current: &[(u64, u64)]| {
+            fodder_growth_cover_refusals(
+                &framed(fodder_cover_base, prior).0,
+                &framed(fodder_cover_base, current).1,
+                &saproling_class(),
+                PlayerId(0),
+            )
+            .0
+        };
+        let refused = vec![FodderCoverRefusal::SupersededStackPin];
+
+        // Unchanged carriers with growth: both covers accept, in full.
+        for (prior, grown) in [
+            (&[(1, 8), (2, 5)][..], &[(1, 8), (3, 8), (2, 5)][..]),
+            (&[(2, 5), (1, 8)][..], &[(2, 5), (1, 8), (3, 5)][..]),
+        ] {
+            assert!(
+                object_growth(prior, grown),
+                "object-growth cover: unchanged carriers with growth, {prior:?} to {grown:?}"
+            );
+            assert_eq!(
+                fodder_refusals(prior, grown),
+                vec![],
+                "fodder cover: unchanged carriers with growth, {prior:?} to {grown:?}"
+            );
+        }
+        // A shared carrier whose pin changed behind a grown entry.
+        let (prior, changed) = (&[(1, 8), (2, 5)][..], &[(1, 5), (3, 8), (2, 5)][..]);
         assert!(
-            loop_states_cover_modulo_object_growth(&prior, &grown),
-            "reach guard and positive control: growth with unchanged carriers covers"
-        );
-        assert!(
-            !loop_states_cover_modulo_object_growth(&prior, &changed),
+            !object_growth(prior, changed),
             "object-growth cover: A's pin changed behind the grown entry"
         );
-        assert!(
-            !fodder_refuses(&prior, &grown),
-            "fodder cover: growth with unchanged carriers is not refused on this ground"
-        );
-        assert!(
-            fodder_refuses(&prior, &changed),
-            "fodder cover: A's pin changed behind the grown entry"
+        assert_eq!(
+            fodder_refusals(prior, changed),
+            refused,
+            "fodder cover: A's pin changed behind the grown entry, and nothing else refuses"
         );
         // The cross-anchor case: bottom to top `[B stale, A live]`, then `[A live, C stale]`.
         // A stays; the stale entry moved from below it to above it, so the next entry to
         // resolve changed from live A to stale C (CR 405.5).
-        let (crossed_prior, _) = framed(&[(2, 5), (1, 8)]);
-        let (_, crossed) = framed(&[(1, 8), (3, 5)]);
-        let (_, grown_above) = framed(&[(2, 5), (1, 8), (3, 5)]);
-        assert!(
-            loop_states_cover_modulo_object_growth(&crossed_prior, &grown_above),
-            "reach guard: B and A unchanged with a stale entry grown above A still covers"
+        let (prior, crossed) = (&[(2, 5), (1, 8)][..], &[(1, 8), (3, 5)][..]);
+        assert_eq!(
+            fodder_refusals(prior, crossed),
+            refused,
+            "fodder cover: the stale entry crossed the surviving carrier A, and nothing else \
+             refuses"
         );
         assert!(
-            !loop_states_cover_modulo_object_growth(&crossed_prior, &crossed),
+            !object_growth(prior, crossed),
             "object-growth cover: the stale entry crossed the surviving carrier A"
-        );
-        assert!(
-            !fodder_refuses(&crossed_prior, &grown_above),
-            "fodder cover: unchanged carriers with growth above A is not refused on this ground"
-        );
-        assert!(
-            fodder_refuses(&crossed_prior, &crossed),
-            "fodder cover: the stale entry crossed the surviving carrier A"
         );
     }
 
