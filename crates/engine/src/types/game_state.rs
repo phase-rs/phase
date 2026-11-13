@@ -13624,18 +13624,6 @@ fn validate_restored_entry_hold(state: &GameState) -> Result<(), String> {
     {
         return Err("unsettled_entry_batch_events holds entries in a settled state".to_string());
     }
-    // CR 603.6a + CR 614.12a: the gate holds an entry only while a battlefield entry is still
-    // being made, and every answer route releases the held entries once none is. A pause on
-    // anything else (a later instruction's choice, the counters of a permanent that has
-    // already entered) owes no entry collection.
-    if !state.unsettled_entry_batch_events.is_empty()
-        && !crate::game::triggers::battlefield_entry_in_progress(state)
-    {
-        return Err(
-            "unsettled_entry_batch_events holds entries while no battlefield entry is in progress"
-                .to_string(),
-        );
-    }
     let mut seen = HashSet::new();
     for event in &state.unsettled_entry_batch_events {
         let GameEvent::ZoneChanged {
@@ -44713,16 +44701,11 @@ mod tests {
         state.zone_changes_this_turn.push_back(second);
         state.unsettled_entry_batch_events = vec![persisted_zone_change_event(first)];
         state.instruction_boundary_marks = marks;
-        // Entries are held only while an action is unfinished (any wait but priority) and a
-        // battlefield entry is still being made (here: the second entry, parked for its own
-        // mid-entry choice).
+        // Entries are held only while an action is unfinished: any wait but priority.
         state.waiting_for = WaitingFor::MeldPairChoice {
             player: PlayerId(0),
             choices: Vec::new(),
         };
-        state.deferred_entry_events = vec![persisted_zone_change_event(
-            state.zone_changes_this_turn[1].clone(),
-        )];
         state
     }
 

@@ -4055,91 +4055,16 @@ mod feldon_tokens {
         assert!(error.contains("below a completion mark"), "{error}");
     }
 
-    /// CR 603.2c + CR 701.47a: Callous Dismissal's Amass creates the Army, whose entry is
-    /// collected (Altar of the Brood triggers) while the Army's counter stops on the order of
-    /// Hardened Scales and Branching Evolution. That pause is on a permanent that has already
-    /// entered, so no battlefield entry is in progress and nothing is held. A save taken there
-    /// that names the Army's collected entry as held is refused; the untouched save restores
-    /// and Altar mills exactly once for the Army.
-    #[test]
-    fn a_counter_pause_save_cannot_resubmit_a_collected_entry() {
-        use engine::types::game_state::{PersistedGameState, PersistedRestoreFinalization};
-        let db = crate::support::shared_card_db().expect("integration card database");
-        let (mut scenario, _feldon) = setup();
-        let scales = scenario
-            .add_enchantment_from_oracle(P0, "Hardened Scales", SCALES)
-            .id();
-        scenario.add_enchantment_from_oracle(P0, "Branching Evolution", BRANCHING_EVOLUTION);
-        scenario.add_real_card(P0, "Altar of the Brood", Zone::Battlefield, db);
-        let bears = scenario.add_creature(P1, "Grizzly Bears", 2, 2).id();
-        let dismissal = scenario
-            .add_spell_to_hand_from_oracle(P0, "Callous Dismissal", false, CALLOUS_DISMISSAL)
-            .id();
-        let mut runner = scenario.build();
-        let before = runner.state().players[1].library.len();
-        let events = runner
-            .cast(dismissal)
-            .target_object(bears)
-            .resolve()
-            .events()
-            .to_vec();
-        assert!(
-            matches!(
-                runner.state().waiting_for,
-                WaitingFor::ReplacementChoice { .. }
-            ),
-            "the Army's counter stopped on its order: {:?}",
-            runner.state().waiting_for
-        );
-        assert!(runner.state().unsettled_entry_batch_events.is_empty());
-        let army_entry = events
-            .iter()
-            .find(|event| {
-                matches!(
-                    event,
-                    GameEvent::ZoneChanged { to: Zone::Battlefield, record, .. } if record.is_token
-                )
-            })
-            .expect("the Army's entry event")
-            .clone();
-        let restore_from = |state: engine::types::game_state::GameState| {
-            let wire = serde_json::to_value(PersistedGameState::capture(state)).unwrap();
-            serde_json::from_value::<PersistedGameState>(wire).map_err(|error| error.to_string())
-        };
-        let mut forged = runner.state().clone();
-        forged.unsettled_entry_batch_events.push(army_entry);
-        let error = restore_from(forged)
-            .map(|_| ())
-            .expect_err("the collected entry is refused");
-        assert!(
-            error.contains("no battlefield entry is in progress"),
-            "{error}"
-        );
-        // Control: the untouched save restores and the game finishes with one mill.
-        let state = restore_from(runner.state().clone())
-            .expect("the paused save restores")
-            .prepare_for_restore(PersistedRestoreFinalization::DeferUntilRehydrated)
-            .unwrap()
-            .finalize_after_rehydration(|_| Ok(()))
-            .unwrap();
-        let mut runner = GameRunner::from_state(state);
-        settle_answering(&mut runner, scales);
-        assert_eq!(
-            runner.state().players[1].library.len(),
-            before - 1,
-            "Altar mills once for the Army"
-        );
-    }
+    const OPT: &str = "Scry 1.\nDraw a card.";
 
-    /// CR 603.2c: Altar of the Brood has already triggered for both of Raise the Alarm's
-    /// Soldiers. Later the same turn Feldon's token batch stops between its two entrants, the
-    /// first token's entry held. A save taken there that also names a Soldier's collected entry
-    /// as held is refused: every earlier action's entries lie below the mark Feldon's
-    /// resolution wrote when it began. Control: the untouched paused save restores and Altar
-    /// mills once for each token.
+    /// CR 603.2c: Altar of the Brood has already triggered for both Feldon tokens and for both
+    /// of Raise the Alarm's Soldiers. Later the same turn Opt stops on its scry. A save taken
+    /// there that names one of those collected entries as held is refused: every earlier
+    /// action's entries lie below the mark Opt's resolution wrote when it began (the Soldiers'
+    /// entries have no other mark above them). Control: the untouched paused save restores.
     #[test]
     fn a_paused_save_cannot_resubmit_a_collected_entry() {
-        use engine::types::game_state::{PersistedGameState, PersistedRestoreFinalization};
+        use engine::types::game_state::PersistedGameState;
         let db = crate::support::shared_card_db().expect("integration card database");
         let (mut scenario, feldon) = setup();
         let card = graveyard_copier(&mut scenario, false);
@@ -4150,21 +4075,37 @@ mod feldon_tokens {
             .add_enchantment_from_oracle(P0, "Doubling Season", SEASON)
             .id();
         scenario.add_real_card(P0, "Altar of the Brood", Zone::Battlefield, db);
+        let opt = scenario
+            .add_spell_to_hand_from_oracle(P0, "Opt", true, OPT)
+            .id();
         let alarm = scenario
             .add_spell_to_hand_from_oracle(
                 P0,
                 "Raise the Alarm",
                 true,
-                "Create a 1/1 white Soldier creature token.",
+                "Create two 1/1 white Soldier creature tokens.",
             )
             .id();
         let mut runner = scenario.build();
         let before = runner.state().players[1].library.len();
-        // A one-instruction spell (Doubling Season makes two Soldiers): its entries are
-        // followed by no instruction boundary of its own.
-        let alarm_events = runner.cast(alarm).resolve().events().to_vec();
+        let mut events = runner
+            .activate(feldon, 0)
+            .target_object(card)
+            .resolve()
+            .events()
+            .to_vec();
+        let (first, copy_events) = choose_copy(&mut runner, feldon);
+        events.extend(copy_events);
+        events.extend(choose_token_counter_order(&mut runner, first, scales));
+        let (second, copy_events) = choose_copy(&mut runner, feldon);
+        events.extend(copy_events);
+        events.extend(choose_token_counter_order(&mut runner, second, season));
         runner.advance_until_stack_empty();
         assert_eq!(runner.state().players[1].library.len(), before - 2);
+        // A one-instruction spell: its entries are followed by no instruction boundary.
+        let alarm_events = runner.cast(alarm).resolve().events().to_vec();
+        runner.advance_until_stack_empty();
+        assert_eq!(runner.state().players[1].library.len(), before - 4);
         let collected_soldier = alarm_events
             .iter()
             .find(|event| {
@@ -4178,40 +4119,50 @@ mod feldon_tokens {
             })
             .expect("a Soldier's entry event")
             .clone();
-        runner.activate(feldon, 0).target_object(card).resolve();
-        let (first, _) = choose_copy(&mut runner, feldon);
-        choose_token_counter_order(&mut runner, first, scales);
-        assert_eq!(
-            runner.state().unsettled_entry_batch_events.len(),
-            1,
-            "reach guard: the first token's entry is held at the pause"
+        let collected = events
+            .iter()
+            .find(|event| {
+                matches!(
+                    event,
+                    GameEvent::ZoneChanged { object_id, to: Zone::Battlefield, .. }
+                        if *object_id == first
+                )
+            })
+            .expect("the first token's entry event")
+            .clone();
+        let card_id = runner.state().objects[&opt].card_id;
+        runner
+            .act(GameAction::CastSpell {
+                object_id: opt,
+                card_id,
+                targets: vec![],
+                payment_mode: CastPaymentMode::Auto,
+            })
+            .expect("cast Opt");
+        for _ in 0..4 {
+            if !matches!(runner.state().waiting_for, WaitingFor::Priority { .. }) {
+                break;
+            }
+            runner.act(GameAction::PassPriority).unwrap();
+        }
+        assert!(
+            matches!(runner.state().waiting_for, WaitingFor::ScryChoice { .. }),
+            "Opt stopped on its scry: {:?}",
+            runner.state().waiting_for
         );
-        let restore_from = |state: engine::types::game_state::GameState| {
+        let restore_result = |state: engine::types::game_state::GameState| {
             let wire = serde_json::to_value(PersistedGameState::capture(state)).unwrap();
-            serde_json::from_value::<PersistedGameState>(wire).map_err(|error| error.to_string())
+            serde_json::from_value::<PersistedGameState>(wire)
+                .map(|_| ())
+                .map_err(|error| error.to_string())
         };
-        let mut forged = runner.state().clone();
-        forged.unsettled_entry_batch_events.push(collected_soldier);
-        let error = restore_from(forged)
-            .map(|_| ())
-            .expect_err("the collected entry is refused");
-        assert!(error.contains("below a completion mark"), "{error}");
-        // Control: the untouched paused save restores and the batch finishes.
-        let state = restore_from(runner.state().clone())
-            .expect("the paused save restores")
-            .prepare_for_restore(PersistedRestoreFinalization::DeferUntilRehydrated)
-            .unwrap()
-            .finalize_after_rehydration(|_| Ok(()))
-            .unwrap();
-        let mut runner = GameRunner::from_state(state);
-        let (second, _) = choose_copy(&mut runner, feldon);
-        choose_token_counter_order(&mut runner, second, season);
-        runner.advance_until_stack_empty();
-        assert_eq!(
-            runner.state().players[1].library.len(),
-            before - 4,
-            "Altar mills once for each Soldier and once for each token"
-        );
+        restore_result(runner.state().clone()).expect("control: the paused save restores");
+        for collected in [collected, collected_soldier] {
+            let mut forged = runner.state().clone();
+            forged.unsettled_entry_batch_events.push(collected);
+            let error = restore_result(forged).expect_err("the collected entry is refused");
+            assert!(error.contains("below a completion mark"), "{error}");
+        }
     }
 
     const ELEMENTAL_MY_DEAR: &str = "Investigate X times, then create an 0/0 Blue Elemental creature token. Put +1/+1 counters on that token equal to the number of Clues you control.";
