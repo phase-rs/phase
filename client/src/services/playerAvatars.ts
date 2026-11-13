@@ -22,6 +22,20 @@ const PLANESWALKER_IDENTITIES: AvatarIdentity[] = [
   { name: "Vivien", cardName: "Vivien, Monsters' Advocate" },
 ];
 
+/**
+ * Survivor-seat identities for Turtle Team-Up Horde games, in seat order:
+ * the four Turtles, each pinned to a real `tmt` printing whose art resolves
+ * through the same card-name path as the planeswalker roster above. A name
+ * missing from an older local card database degrades to the initial tile —
+ * the same fallback every other name-based avatar already has.
+ */
+export const TURTLE_TEAMUP_SURVIVOR_IDENTITIES: readonly AvatarIdentity[] = [
+  { name: "Leonardo", cardName: "Leonardo, Sewer Samurai" },
+  { name: "Raphael", cardName: "Raphael, Ninja Destroyer" },
+  { name: "Donatello", cardName: "Donatello, Gadget Master" },
+  { name: "Michelangelo", cardName: "Michelangelo, Improviser" },
+];
+
 export interface PlayerAvatar {
   name: string;
   cardName: string;
@@ -57,6 +71,16 @@ export function assignAvatarForSeat(
 
 export function avatarCardNameForName(name: string): string | null {
   return PLANESWALKER_IDENTITIES.find((id) => id.name === name)?.cardName ?? null;
+}
+
+/**
+ * Direct art URL for a Scryfall printing id (a Boss avatar's pinned
+ * `token_image_ref`). Bosses are token-layout cards with no card-database
+ * entry, so the card-name path cannot resolve them — the printing id is the
+ * only art channel. `art_crop` matches the square avatar tile.
+ */
+export function scryfallPrintingImageUrl(scryfallId: string): string {
+  return `https://api.scryfall.com/cards/${scryfallId}?format=image&version=art_crop`;
 }
 
 function hashStringToSeed(s: string): number {

@@ -4041,6 +4041,9 @@ fn redact_printed_identity(obj: &mut crate::game::game_object::GameObject) {
     // public face while hidden.
     obj.is_token = false;
     obj.is_horde_deck_token = false;
+    // `display_source = Token` is token-ness by another name — reset it with
+    // the flags above so a hidden card's art routing leaks nothing either.
+    obj.display_source = crate::game::game_object::DisplaySource::Card;
     obj.horde_library_rarity = None;
     obj.specialize_faces = None;
     obj.cleave_variant = None;

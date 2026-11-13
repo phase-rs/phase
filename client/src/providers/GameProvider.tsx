@@ -97,8 +97,10 @@ import { useMultiplayerStore } from "../stores/multiplayerStore";
 import { useMultiplayerDraftStore } from "../stores/multiplayerDraftStore";
 import { isCoherentUnresolvedDraftStage } from "../stores/draftStore";
 import {
+  TURTLE_TEAMUP_SURVIVOR_IDENTITIES,
   assignRandomAvatars,
   avatarCardNameForName,
+  scryfallPrintingImageUrl,
 } from "../services/playerAvatars";
 import type { PlayerAvatarIdentity } from "../services/playerAvatars";
 
@@ -181,6 +183,65 @@ function setupCommanderAvatars(
   useMultiplayerStore.setState(
     preservePlayerNames ? { playerAvatars } : { playerNames: names, playerAvatars },
   );
+  return true;
+}
+
+/**
+ * Install Turtle Team-Up Horde seat identities, and report whether it did.
+ *
+ * Horde seats have no commander (boss-deck games are Constructed), so without
+ * this the random fallback `setupRandomAvatars` seeds names the TMNT villains
+ * after arbitrary planeswalkers ("Vivien") and gives survivors arbitrary
+ * avatar art ("Karn"). Horde seats take the deployed Boss's short name and
+ * pinned art instead; survivors take the Turtle roster in seat order. The
+ * Boss read is the command-zone list only — never the face-down Boss pile —
+ * so hidden Bosses cannot leak through the seat identity. Other challenge
+ * decks keep the existing random/commander identities.
+ *
+ * Like `setupCommanderAvatars`, writes NOTHING and answers `false` when this
+ * isn't a Turtle Team-Up game or no Boss is deployed yet, so the caller's
+ * fallback identities survive and the subscription keeps listening.
+ */
+function setupHordeAvatars(
+  gameState: {
+    format_config?: { format?: string; horde_ruleset?: { challenge_deck?: string } | null } | null;
+    horde_seats?: readonly number[];
+    command_zone?: readonly number[];
+    players: readonly { id: number }[];
+    objects: Record<number, { name: string; is_horde_deck_token?: boolean; token_image_ref?: { scryfall_id: string } | null }>;
+  },
+): boolean {
+  if (gameState.format_config?.format !== "Horde") return false;
+  if (gameState.format_config?.horde_ruleset?.challenge_deck !== "TurtleTeamUpHorde") {
+    return false;
+  }
+  const boss = (gameState.command_zone ?? [])
+    .map((id) => gameState.objects[id])
+    .find((obj) => obj?.is_horde_deck_token);
+  if (!boss) return false;
+  const hordeSeats = new Set(gameState.horde_seats ?? []);
+  const names = new Map<number, string>();
+  const playerAvatars = new Map<number, PlayerAvatarIdentity>();
+  const bossShortName = boss.name.split(",")[0].split(" //")[0];
+  const bossAvatar: PlayerAvatarIdentity | null = boss.token_image_ref?.scryfall_id
+    ? { kind: "external", url: scryfallPrintingImageUrl(boss.token_image_ref.scryfall_id) }
+    : null;
+  let survivorIndex = 0;
+  const seats = [...gameState.players].sort((a, b) => a.id - b.id);
+  for (const player of seats) {
+    if (hordeSeats.has(player.id)) {
+      names.set(player.id, bossShortName);
+      if (bossAvatar) playerAvatars.set(player.id, bossAvatar);
+      continue;
+    }
+    const turtle = TURTLE_TEAMUP_SURVIVOR_IDENTITIES[
+      survivorIndex % TURTLE_TEAMUP_SURVIVOR_IDENTITIES.length
+    ];
+    survivorIndex += 1;
+    names.set(player.id, turtle.name);
+    playerAvatars.set(player.id, { kind: "card", cardName: turtle.cardName });
+  }
+  useMultiplayerStore.setState({ playerNames: names, playerAvatars });
   return true;
 }
 
@@ -766,21 +827,29 @@ export function GameProvider({
   useEffect(() => {
     if (mode !== "ai") return;
     let applied = false;
-    // Applies as soon as the state carries a commander, in whatever zone it is
-    // in — see `setupCommanderAvatars` for why the command zone is the wrong
-    // gate. Waits (by answering `false`, so the subscription keeps listening)
+    // Horde games with themed seats take Horde identities; everything else
+    // falls through to the commander derivation. Applies as soon as the
+    // state carries a commander, in whatever zone it is in — see
+    // `setupCommanderAvatars` for why the command zone is the wrong gate.
+    // Waits (by answering `false`, so the subscription keeps listening)
     // until a commander object exists.
     const applyCommanderAvatars = (state: ReturnType<typeof useGameStore.getState>) => {
       if (state.gameId !== gameId || !state.gameState) return false;
       return setupCommanderAvatars(state.gameState);
     };
+    const applyHordeAvatars = (state: ReturnType<typeof useGameStore.getState>) => {
+      if (state.gameId !== gameId || !state.gameState) return false;
+      return setupHordeAvatars(state.gameState);
+    };
+    const applySeatIdentities = (state: ReturnType<typeof useGameStore.getState>) =>
+      applyHordeAvatars(state) || applyCommanderAvatars(state);
     const unsub = useGameStore.subscribe((state) => {
-      if (applied || !applyCommanderAvatars(state)) return;
+      if (applied || !applySeatIdentities(state)) return;
       applied = true;
       unsub();
     });
     const state = useGameStore.getState();
-    if (!applied && applyCommanderAvatars(state)) {
+    if (!applied && applySeatIdentities(state)) {
       applied = true;
       unsub();
     }
