@@ -148,11 +148,15 @@ fn self_poison_drawback_not_counted() {
     assert_eq!(feature.direct_count, 0);
 }
 
-/// CR 102.3 + CR 104.4a: a controller-recipient poison clause under a `player_scope` counts only
+/// CR 102.3: a controller-recipient poison clause under a `player_scope` counts only
 /// when the scope reaches opponents alone.
 #[test]
 fn scoped_poison_counts_only_for_opponent_only_scopes() {
-    use engine::types::ability::PlayerFilter;
+    use engine::types::ability::{PlayerFilter, PlayerRelation};
+    let all_except = |relation| PlayerFilter::AllExcept {
+        exclude: Box::new(PlayerFilter::ParentObjectTargetController),
+        relation,
+    };
     let cases = [
         (Some(PlayerFilter::Opponent), true),
         (Some(PlayerFilter::All), false),
@@ -170,9 +174,12 @@ fn scoped_poison_counts_only_for_opponent_only_scopes() {
             true,
         ),
         (Some(PlayerFilter::AnyOf { filters: vec![] }), false),
+        (Some(PlayerFilter::OpponentOtherThanTriggering), true),
+        (Some(all_except(PlayerRelation::Opponent)), true),
+        (Some(all_except(PlayerRelation::All)), false),
     ];
     for (player_scope, credited) in cases {
-        // No printed card has the `Controller` / `AnyOf` scope shapes; nearest printed: Prologue to Phyresis.
+        // No printed card has the `Controller` / `AnyOf` / `OpponentOtherThanTriggering` / `AllExcept` scope shapes; nearest printed: Prologue to Phyresis.
         let mut face = poison_spell("Scoped Poisoner", TargetFilter::Controller);
         face.abilities[0].player_scope = player_scope.clone();
         for scope in [AbilityScope::Potential, AbilityScope::Unconditional] {

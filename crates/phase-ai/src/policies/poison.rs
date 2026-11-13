@@ -149,8 +149,8 @@ where
 ///
 /// CR 702.90b / CR 702.164c / CR 702.70a all key on combat damage dealt **to a
 /// player**, so an attack aimed at a planeswalker or a battle adds nothing on
-/// this axis. Poison is summed per defending player — several
-/// infect creatures attacking the same seat share one clock — and the seat
+/// this axis. Poison is summed per poison clock — attackers on one seat, or on
+/// teammates who share poison (CR 810.10), share one clock — and the seat
 /// closest to its poison-loss threshold is the one scored.
 fn combat_contribution(
     ctx: &PolicyContext<'_>,

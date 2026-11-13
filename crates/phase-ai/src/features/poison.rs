@@ -36,7 +36,7 @@
 
 use engine::game::DeckEntry;
 use engine::types::ability::{
-    AbilityDefinition, ControllerRef, Effect, PlayerFilter, TargetFilter,
+    AbilityDefinition, ControllerRef, Effect, PlayerFilter, PlayerRelation, TargetFilter,
 };
 use engine::types::card_type::CoreType;
 use engine::types::keywords::Keyword;
@@ -226,7 +226,7 @@ fn recipients_can_include_opponent(target: &TargetFilter, scope: Option<&PlayerF
     }
 }
 
-/// CR 102.3 + CR 104.4a: whether a `player_scope` reaches only opponents of the
+/// CR 102.3: whether a `player_scope` reaches only opponents of the
 /// controller; a scope that can include the controller is not credited, because
 /// the AI does not weigh poison it gives itself.
 fn scope_reaches_only_opponents(scope: &PlayerFilter) -> bool {
@@ -236,11 +236,36 @@ fn scope_reaches_only_opponents(scope: &PlayerFilter) -> bool {
         | PlayerFilter::OpponentGainedLife
         | PlayerFilter::OpponentDealtDamage { .. }
         | PlayerFilter::OpponentAttacked { .. }
+        | PlayerFilter::OpponentAttackingEnchantedPlayer
+        | PlayerFilter::OpponentOtherThanTriggering
         | PlayerFilter::DefendingPlayer => true,
+        // These narrow the `relation` population, so an `Opponent` base stays opponent-only.
+        PlayerFilter::AllExcept { relation, .. }
+        | PlayerFilter::PerformedActionThisWay { relation, .. }
+        | PlayerFilter::ControlsCount { relation, .. }
+        | PlayerFilter::PlayerAttribute { relation, .. }
+        | PlayerFilter::TrackedSetPossessor { relation, .. } => {
+            matches!(relation, PlayerRelation::Opponent)
+        }
         PlayerFilter::AnyOf { filters } => {
             !filters.is_empty() && filters.iter().all(scope_reaches_only_opponents)
         }
-        _ => false,
+        // Each can name the controller, e.g. an opponent of a triggering opponent.
+        PlayerFilter::Controller
+        | PlayerFilter::All
+        | PlayerFilter::HasLostTheGame
+        | PlayerFilter::HighestSpeed
+        | PlayerFilter::ZoneChangedThisWay
+        | PlayerFilter::OwnersOfCardsExiledBySource
+        | PlayerFilter::TriggeringPlayer
+        | PlayerFilter::OpponentOfTriggeringPlayer
+        | PlayerFilter::OpponentOfTriggeringPlayerNotAttacked
+        | PlayerFilter::VotedFor { .. }
+        | PlayerFilter::ParentObjectTargetController
+        | PlayerFilter::ChosenPlayer { .. }
+        | PlayerFilter::ParentObjectTargetOwner
+        | PlayerFilter::GrantingObjectCaster
+        | PlayerFilter::TargetPlayer => false,
     }
 }
 
