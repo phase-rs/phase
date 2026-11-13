@@ -1373,56 +1373,223 @@ fn a_substitution_loss_comes_with_the_batchs_damage() {
     assert!([22, 23].contains(&p0), "got {p0}");
 }
 
-/// CR 104.1 + CR 120.3f: lifelink can end the game during the first delivery.
-/// Exercises run_damage_batch's terminal guard immediately after delivery.
+/// CR 120.4 + CR 702.15b + CR 104.4a: Allies at Last's two sources deal their damage as one
+/// simultaneous event. The Vampire's lifelink gain becomes a draw under Nefarious Lich and a win
+/// under Laboratory Maniac; that win settles when the event does, so the Bears' damage is dealt
+/// with it, one win is published, and nothing after it runs (CR 104.1). With Rhox Faithmender and
+/// Leyline of Hope too, P0 orders the gain's replacements and picks the Lich: the win then comes
+/// inside that answer, while the batch is parked, and still waits for the event.
 #[test]
-fn a_batch_stops_its_second_source_when_lifelink_wins_the_game() {
+fn a_lifelink_win_settles_with_the_batchs_damage() {
+    for ordered in [false, true] {
+        let mut scenario = scenario();
+        if ordered {
+            super::unpreventable_damage_prevention_effects::faithmender_and_leyline(&mut scenario);
+        }
+        let vampire = super::unpreventable_damage_prevention_effects::creature_with_keywords(
+        &mut scenario, P0, "Vampire of the Dire Moon", (1, 1),
+        &["Deathtouch", "Lifelink"],
+        "Deathtouch (Any amount of damage this deals to a creature is enough to destroy it.)\nLifelink (Damage dealt by this creature also causes you to gain that much life.)",
+    );
+        let second = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
+        let target = scenario.add_creature(P1, "Wall", 0, 20).id();
+        let lich = scenario
+            .add_enchantment_from_oracle(P0, "Nefarious Lich", NEFARIOUS_LICH)
+            .id();
+        let maniac = scenario.add_creature_from_oracle(P0, "Laboratory Maniac", 2, 2,
+        "If you would draw a card while your library has no cards in it, you win the game instead.").id();
+        let spell = sorcery(&mut scenario, "Allies at Last", ALLIES_AT_LAST);
+        let mut runner = scenario.build();
+        assert!(player(&runner, P0).library.is_empty());
+        let mut events = cast(
+            &mut runner,
+            spell,
+            vec![
+                object_target(vampire),
+                object_target(second),
+                object_target(target),
+            ],
+        );
+        let prompts = answer_batch_prompts(&mut runner, &mut events, |_, _| Some(lich));
+        if ordered {
+            assert!(
+                prompts
+                    .iter()
+                    .any(|(kind, player, _)| *kind == "order" && *player == P0),
+                "reach: P0 orders the gain replacements and picks the Lich: {prompts:?}"
+            );
+        }
+
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::GameOver { winner: Some(P0) }
+        ));
+        let over = events
+            .iter()
+            .position(|e| matches!(e, GameEvent::GameOver { winner: Some(P0) }))
+            .expect("P0 won during lifelink");
+        assert!(events[..over].iter().any(|e| matches!(e, GameEvent::DamageDealt { source_id, amount: 1, .. } if *source_id == vampire)));
+        for (source, kind) in [(lich, "GainLife"), (maniac, "Draw")] {
+            assert!(events[..over].iter().any(|e| matches!(e, GameEvent::ReplacementApplied { source_id, event_type } if *source_id == source && event_type == kind)));
+        }
+        assert!(events[..over].iter().any(
+        |e| matches!(e, GameEvent::DamageDealt { source_id, amount: 2, .. } if *source_id == second)
+    ));
+        assert_eq!(
+            events
+                .iter()
+                .filter(|e| matches!(e, GameEvent::GameOver { .. }))
+                .count(),
+            1
+        );
+        assert!(!events[over + 1..]
+            .iter()
+            .any(|e| matches!(e, GameEvent::DamageDealt { .. })));
+        assert!(completions(&events, EffectKind::EachDealsDamageEqualToPower, spell).is_empty());
+    }
+}
+
+/// CR 104.3f: a player who would both win and lose in one simultaneous event loses. Rakdos Charm's
+/// "Each creature deals 1 damage to its controller" with P0's Vampire of the Dire Moon (lifelink),
+/// Grizzly Bears, Laboratory Maniac, Nefarious Lich, and Pariah on P0's Wall; P0's library and
+/// graveyard are empty. P0 sends the Vampire's 1 to the Wall with Pariah, so its lifelink gain
+/// becomes the Lich's draw and Laboratory Maniac's win; the Bears' and the Maniac's damage meet
+/// the Lich, which can't exile, so P0 loses. P0 loses rather than winning, and P1 wins.
+#[test]
+fn a_player_who_wins_and_loses_in_one_batch_loses() {
     let mut scenario = scenario();
     let vampire = super::unpreventable_damage_prevention_effects::creature_with_keywords(
         &mut scenario, P0, "Vampire of the Dire Moon", (1, 1),
         &["Deathtouch", "Lifelink"],
         "Deathtouch (Any amount of damage this deals to a creature is enough to destroy it.)\nLifelink (Damage dealt by this creature also causes you to gain that much life.)",
     );
-    let second = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
-    let target = scenario.add_creature(P1, "Wall", 0, 20).id();
+    scenario.add_creature(P0, "Grizzly Bears", 2, 2);
+    scenario.add_creature_from_oracle(
+        P0,
+        "Laboratory Maniac",
+        2,
+        2,
+        "If you would draw a card while your library has no cards in it, you win the game instead.",
+    );
+    let wall = scenario.add_creature(P0, "Wall", 0, 20).id();
+    let pariah = scenario
+        .add_enchantment_from_oracle(P0, "Pariah", PARIAH)
+        .with_subtypes(vec!["Aura"])
+        .from_oracle_text_with_keywords(&["Enchant"], PARIAH)
+        .id();
     let lich = scenario
         .add_enchantment_from_oracle(P0, "Nefarious Lich", NEFARIOUS_LICH)
         .id();
-    let maniac = scenario.add_creature_from_oracle(P0, "Laboratory Maniac", 2, 2,
-        "If you would draw a card while your library has no cards in it, you win the game instead.").id();
-    let spell = sorcery(&mut scenario, "Allies at Last", ALLIES_AT_LAST);
+    let charm = instant(&mut scenario, "Rakdos Charm", RAKDOS_CHARM);
     let mut runner = scenario.build();
+    attach_to(runner.state_mut(), pariah, wall);
     assert!(player(&runner, P0).library.is_empty());
-    let mut events = cast(
-        &mut runner,
-        spell,
-        vec![
-            object_target(vampire),
-            object_target(second),
-            object_target(target),
-        ],
-    );
-    answer_batch_prompts(&mut runner, &mut events, |_, _| None);
+    let mut events = cast_rakdos_charm_damage_mode(&mut runner, charm);
 
-    assert!(matches!(
-        runner.state().waiting_for,
-        WaitingFor::GameOver { winner: Some(P0) }
-    ));
-    let over = events
+    // The Vampire's portion is asked first (it was created first): Pariah; the others: the Lich.
+    let pariah_picked = std::cell::Cell::new(false);
+    let prompts = answer_batch_prompts(&mut runner, &mut events, |_, candidates| {
+        if !pariah_picked.get() && candidates.iter().any(|c| c.source_id == pariah) {
+            pariah_picked.set(true);
+            Some(pariah)
+        } else {
+            Some(lich)
+        }
+    });
+
+    assert!(
+        events.iter().any(
+            |e| matches!(e, GameEvent::DamageDealt { source_id, .. } if *source_id == vampire)
+        ),
+        "reach: the Vampire's 1 is dealt to the Wall: {prompts:?}"
+    );
+    assert!(events
         .iter()
-        .position(|e| matches!(e, GameEvent::GameOver { winner: Some(P0) }))
-        .expect("P0 won during lifelink");
-    assert!(events[..over].iter().any(|e| matches!(e, GameEvent::DamageDealt { source_id, amount: 1, .. } if *source_id == vampire)));
-    for (source, kind) in [(lich, "GainLife"), (maniac, "Draw")] {
-        assert!(events[..over].iter().any(|e| matches!(e, GameEvent::ReplacementApplied { source_id, event_type } if *source_id == source && event_type == kind)));
-    }
+        .any(|e| matches!(e, GameEvent::PlayerEliminated { player_id } if *player_id == P0)));
     assert!(!events
         .iter()
-        .any(|e| matches!(e, GameEvent::DamageDealt { source_id, .. } if *source_id == second)));
-    assert!(!events[over + 1..]
-        .iter()
-        .any(|e| matches!(e, GameEvent::DamageDealt { .. })));
-    assert!(completions(&events, EffectKind::EachDealsDamageEqualToPower, spell).is_empty());
+        .any(|e| matches!(e, GameEvent::PlayerEliminated { player_id } if *player_id == P1)));
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::GameOver { winner: Some(P1) }
+    ));
+}
+
+/// Both players' Nefarious Lich, each with an empty graveyard, under Rakdos Charm's "Each creature
+/// deals 1 damage to its controller". `p0_cards` puts cards in P0's graveyard for P0's first
+/// exiles, so a substitution action pauses on an exile choice before P0's loss.
+fn two_lich_charm(
+    active: PlayerId,
+    p0_creatures: usize,
+    p0_cards: usize,
+) -> (GameRunner, Vec<GameEvent>) {
+    let mut scenario = scenario();
+    for index in 0..p0_creatures {
+        scenario.add_creature(P0, &format!("Bear {index}"), 2, 2);
+    }
+    for index in 0..p0_cards {
+        scenario.add_creature_to_graveyard(P0, &format!("Filler {index}"), 1, 1);
+    }
+    scenario.add_creature(P1, "Hill Giant", 3, 3);
+    for player in [P0, P1] {
+        scenario.add_enchantment_from_oracle(player, "Nefarious Lich", NEFARIOUS_LICH);
+    }
+    let charm = scenario
+        .add_spell_to_hand_from_oracle(active, "Rakdos Charm", true, RAKDOS_CHARM)
+        .id();
+    let mut runner = scenario.build();
+    runner.state_mut().active_player = active;
+    runner.state_mut().priority_player = active;
+    runner.state_mut().waiting_for = WaitingFor::Priority { player: active };
+    let action = cast_action(&runner, charm);
+    let mut events = runner.act(action).expect("cast Rakdos Charm").events;
+    answer(
+        &mut runner,
+        GameAction::SelectModes { indices: vec![2] },
+        &mut events,
+    );
+    (runner, events)
+}
+
+/// CR 614.6 + CR 101.4 + CR 104.4a: two Nefarious Lich substitutions in one batch are one
+/// simultaneous event, so both players lose together and the game is a draw, with either seat
+/// active. In the third case P1 is active and P0 has three creatures and two graveyard cards: P1's
+/// loss is recorded first, P0's first exile asks which card, so the event pauses there, and P0
+/// loses at its third exile.
+#[test]
+fn two_lich_losses_in_one_batch_are_a_draw() {
+    for (active, p0_creatures, p0_cards) in [(P0, 1, 0), (P1, 1, 0), (P1, 3, 2)] {
+        let (mut runner, mut events) = two_lich_charm(active, p0_creatures, p0_cards);
+        let prompts = answer_batch_prompts(&mut runner, &mut events, |_, _| None);
+
+        let case = (active, p0_creatures, p0_cards);
+        if p0_cards > 0 {
+            assert!(
+                prompts
+                    .iter()
+                    .any(|(kind, player, _)| *kind == "exile" && *player == P0),
+                "{case:?}: reach: P0's exile pauses the event: {prompts:?}"
+            );
+        }
+        for player in [P0, P1] {
+            assert!(
+                events.iter().any(|e| matches!(e, GameEvent::PlayerEliminated { player_id } if *player_id == player)),
+                "{case:?}: {player:?} lost"
+            );
+        }
+        let game_overs: Vec<_> = events
+            .iter()
+            .filter_map(|e| match e {
+                GameEvent::GameOver { winner } => Some(*winner),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(game_overs, vec![None], "{case:?}");
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::GameOver { winner: None }
+        ));
+    }
 }
 
 /// CR 800.4a: P1 loses to Nefarious Lich's substitution action, which comes with the batch's

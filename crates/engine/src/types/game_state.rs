@@ -26808,6 +26808,23 @@ declare_game_state! {
     /// to its remaining portions (`SpellContext::settled_damage_guards`).
     #[serde(skip)]
     pub(crate) damage_batch_ledger: Option<DamageBatchLedger>,
+    /// CR 104.4a + CR 614.6 + CR 120.4: how an effect-stated win or loss settles while a
+    /// two-phase damage batch runs (`elimination::event_outcomes`): recorded with the batch's one
+    /// simultaneous event (its damage and substitution actions), or at once. `None` outside a
+    /// running batch, where a paused batch's continuation owns the answer. Execution-local and
+    /// restored before the batch returns, so excluded from serialization and equality like the
+    /// ledger.
+    #[serde(skip)]
+    pub(crate) damage_event_losses: Option<EventLosses>,
+}
+
+/// CR 104.4a + CR 614.6: whether an effect-stated win or loss during a running damage batch waits
+/// for the batch's simultaneous event to settle (`Recording` it) or happens at once (`Immediate`:
+/// replacement choices, prevention after-effects).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum EventLosses {
+    Recording(crate::types::ability::EventOutcomes),
+    Immediate,
 }
 
 /// The map-backed history entries `copy` does not share with `original`, a nested causes map
@@ -34410,6 +34427,7 @@ impl GameState {
             initiative: None,
             combat_prevention_tally: None,
             damage_batch_ledger: None,
+            damage_event_losses: None,
             cancelled_casts: Vec::new(),
             pending_activations: Vec::new(),
             commander_declined_zone_return: HashSet::new(),
@@ -38373,6 +38391,7 @@ fn _gamestate_partition_is_total(s: &GameState) {
         initiative: _,
         combat_prevention_tally: _,
         damage_batch_ledger: _,
+        damage_event_losses: _,
         // Post-rebase upstream additions (v0.21.x: #5515 discover + liminal mechanic).
         // Strict-compared by eq_except_growable's GameState PartialEq reuse (fail-safe:
         // a differing value is correctly not a fixed-point repeat); object-growth loops

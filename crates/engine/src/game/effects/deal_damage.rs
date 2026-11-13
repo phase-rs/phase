@@ -13,16 +13,16 @@ use crate::game::replacement::{self, ReplacementResult};
 use crate::types::ability::{
     names_resolution_chosen_recipient, quantity_expr_uses_recipient, DamageContextSnapshot,
     DamageSource, DeferredDamageChoice, EachDamageRecipient, Effect, EffectError, EffectKind,
-    ExcessRecipient, ParkedDamageBatch, PlayerFilter, QuantityExpr, RawDamagePortion,
-    ReplacedDamagePortion, ResolvedAbility, SplitDamagePortion, SubAbilityLink, TargetChoiceTiming,
-    TargetDamageSourceBinding, TargetFilter, TargetRef,
+    EventOutcomes, ExcessRecipient, ParkedDamageBatch, PlayerFilter, QuantityExpr,
+    RawDamagePortion, ReplacedDamagePortion, ResolvedAbility, SplitDamagePortion, SubAbilityLink,
+    TargetChoiceTiming, TargetDamageSourceBinding, TargetFilter, TargetRef,
 };
 use crate::types::card_type::CoreType;
 use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
-    DamageBatchLedger, DamageRecord, DistributionScope, GameState, HeldBatchRider,
-    PendingContinuation, ResidentDrainPolicy, TriggerSourceRead, WaitingFor,
+    DamageBatchLedger, DamageRecord, DistributionScope, EventLosses, GameState, HeldBatchRider,
+    PendingContinuation, ResidentDrainPolicy, RiderTiming, TriggerSourceRead, WaitingFor,
 };
 use crate::types::identifiers::ObjectId;
 use crate::types::keywords::{Keyword, KeywordKind};
@@ -1425,6 +1425,24 @@ fn run_damage_batch(
     state: &mut GameState,
     ability: &ResolvedAbility,
     kind: EffectKind,
+    replaced: Vec<(DamageContext, ProposedEvent)>,
+    portions: Vec<BatchPortion>,
+    parked: ParkedDamageBatch,
+    events: &mut Vec<GameEvent>,
+) -> Result<(), EffectError> {
+    // CR 104.4a: this batch owns how an effect-stated loss settles while it runs; an enclosing
+    // batch's answer is restored when it returns.
+    let enclosing = state.damage_event_losses.replace(EventLosses::Immediate);
+    let result = run_damage_batch_phases(state, ability, kind, replaced, portions, parked, events);
+    state.damage_event_losses = enclosing;
+    result
+}
+
+/// The phases of [`run_damage_batch`].
+fn run_damage_batch_phases(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    kind: EffectKind,
     mut replaced: Vec<(DamageContext, ProposedEvent)>,
     portions: Vec<BatchPortion>,
     parked: ParkedDamageBatch,
@@ -1434,6 +1452,7 @@ fn run_damage_batch(
         mut deferred,
         held,
         split,
+        outcomes,
     } = parked;
     let mut split: std::collections::VecDeque<SplitDamagePortion> = split.into();
     // CR 104.1: "A game ends immediately when a player wins": a batch resumed after the game
@@ -1458,11 +1477,17 @@ fn run_damage_batch(
     loop {
         // CR 614.9: a capped redirect's split-off part (`SplitDamagePortion`) is a portion too,
         // carried through its automatic replacements before any choice is asked.
-        let next = portions.pop_front().or_else(|| {
-            split
-                .pop_front()
-                .map(|part| split_portion(state, ability, part))
-        });
+        let next = match portions.pop_front() {
+            Some(portion) => Some(portion),
+            None => match split.pop_front() {
+                Some(part) => match split_portion(state, ability, part, events) {
+                    Some(portion) => Some(portion),
+                    // CR 702.16e: the new recipient's protection prevented it.
+                    None => continue,
+                },
+                None => None,
+            },
+        };
         let (portion, asking) = match next {
             Some(portion) => (portion, false),
             None => {
@@ -1539,6 +1564,7 @@ fn run_damage_batch(
                             deferred,
                             held,
                             split: split.into(),
+                            outcomes: None,
                         },
                         boundary,
                     )?;
@@ -1575,6 +1601,7 @@ fn run_damage_batch(
                         deferred,
                         held,
                         split: split.into(),
+                        outcomes: None,
                     },
                     boundary,
                 )?;
@@ -1584,6 +1611,11 @@ fn run_damage_batch(
     }
     // CR 616.1: every original choice is made; what the batch held runs after its damage.
     let held = take_held_riders(state);
+    // CR 104.4a + CR 614.6 + CR 120.4: the damage and the substitution actions are one
+    // simultaneous event, so a player who loses to an effect in it (a lifelink gain drawn into
+    // Laboratory Maniac's win, Nefarious Lich's "If you can't, you lose the game") is recorded and
+    // eliminated with the event's other losers when it ends (`elimination::lose_by_effect`).
+    state.damage_event_losses = Some(EventLosses::Recording(outcomes.unwrap_or_default()));
     // Phase C: delivery (CR 120.4c). A delivery that waits on a choice (a lifelink gain's
     // replacements) parks the survivors after it; the parked batch still owns the completion.
     for (index, (ctx, event)) in replaced.iter().enumerate() {
@@ -1593,12 +1625,12 @@ fn run_damage_batch(
             }
         }
         let delivered = apply_damage_after_replacement(state, ctx, event.clone(), false, events);
-        // CR 104.1: a delivery that ended the game (lifelink's gain drawing from an empty library
-        // under Nefarious Lich and Laboratory Maniac) ends the batch.
+        // CR 104.1: a delivery that ended the game ends the batch.
         if state.game_end.is_some() {
             return Ok(());
         }
         if matches!(delivered, DamageResult::NeedsChoice) {
+            let outcomes = take_event_outcomes(state);
             park_damage_batch(
                 state,
                 ability,
@@ -1608,6 +1640,7 @@ fn run_damage_batch(
                 None,
                 ParkedDamageBatch {
                     held,
+                    outcomes,
                     ..ParkedDamageBatch::default()
                 },
                 boundary,
@@ -1615,19 +1648,24 @@ fn run_damage_batch(
             return Ok(());
         }
     }
-    if state.game_end.is_some() {
-        return Ok(());
-    }
     // Phase D: the held work, after the damage. CR 614.6: a substitution's action is the
-    // modified event (Dralnu, Lich Lord's sacrifice), so the substitution actions come first;
-    // CR 615.5: a prevention's additional effect follows "immediately afterward" (Test of
-    // Faith's counters). Within each, CR 101.4: APNAP order of the affected player.
+    // modified event (Dralnu, Lich Lord's sacrifice), so the substitution actions come first, in
+    // the event; CR 615.5: a prevention's additional effect follows "immediately afterward"
+    // (Test of Faith's counters), once the event has settled. Within each, CR 101.4: APNAP order
+    // of the affected player.
     let mut held: std::collections::VecDeque<HeldBatchRider> = {
         let mut held = held;
         held.sort_by_key(|rider| (rider.timing, player_rank(&order, rider.authority)));
         held.into()
     };
+    let mut settled = false;
     while let Some(rider) = held.pop_front() {
+        if rider.timing == RiderTiming::AfterEvent && !settled {
+            settled = true;
+            if settle_event_losses(state, events) {
+                return Ok(());
+            }
+        }
         state.install_post_replacement_drain(rider.drain, ResidentDrainPolicy::KeepResident);
         replacement::drain_damage_rider(state, events);
         // CR 104.1: a rider that ended the game ends the batch.
@@ -1636,6 +1674,7 @@ fn run_damage_batch(
         }
         // CR 608.2c: the rider left its prompt standing; the rest of the batch waits beneath it.
         if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+            let outcomes = take_event_outcomes(state);
             park_damage_batch(
                 state,
                 ability,
@@ -1645,6 +1684,7 @@ fn run_damage_batch(
                 None,
                 ParkedDamageBatch {
                     held: held.into(),
+                    outcomes,
                     ..ParkedDamageBatch::default()
                 },
                 boundary,
@@ -1652,12 +1692,34 @@ fn run_damage_batch(
             return Ok(());
         }
     }
+    if !settled && settle_event_losses(state, events) {
+        return Ok(());
+    }
     events.push(GameEvent::EffectResolved {
         kind,
         source_id: ability.source_id,
         subject: None,
     });
     Ok(())
+}
+
+/// CR 104.4a: the outcomes the batch's simultaneous event has recorded so far, to park with it
+/// while the event is under way (`None` once it has settled). Effect-stated wins and losses then
+/// happen at once until the batch resumes.
+fn take_event_outcomes(state: &mut GameState) -> Option<EventOutcomes> {
+    match state.damage_event_losses.replace(EventLosses::Immediate) {
+        Some(EventLosses::Recording(outcomes)) => Some(outcomes),
+        Some(EventLosses::Immediate) | None => None,
+    }
+}
+
+/// CR 104.3f + CR 104.4a: the batch's simultaneous event is over, so its effect-stated wins and
+/// losses settle together (`elimination::settle_event_outcomes`). `true` when that ended the game.
+fn settle_event_losses(state: &mut GameState, events: &mut Vec<GameEvent>) -> bool {
+    if let Some(outcomes) = take_event_outcomes(state) {
+        crate::game::elimination::settle_event_outcomes(state, outcomes, events);
+    }
+    state.game_end.is_some()
 }
 
 /// CR 614.9: the portions capped redirects split off into the batch's ledger since the last take.
@@ -1669,24 +1731,29 @@ fn take_split_portions(state: &mut GameState) -> Vec<SplitDamagePortion> {
         .unwrap_or_default()
 }
 
-/// CR 614.9 + CR 614.5: a split-off part as a portion already through the gate, keeping the
-/// replacements applied to it, dealt by its source as it is now (CR 609.6).
+/// CR 614.9 + CR 614.5: a split-off part as a portion, dealt by its source as it is now
+/// (CR 608.2h). It meets its new recipient's gate (CR 702.16e: protection from the source prevents
+/// it; `None` then) and keeps the replacements already applied to it.
 fn split_portion(
     state: &GameState,
     ability: &ResolvedAbility,
     part: SplitDamagePortion,
-) -> BatchPortion {
-    BatchPortion::Gated {
-        ctx: DamageContext::from_source(state, part.source)
-            .unwrap_or_else(|| DamageContext::fallback(part.source, ability.controller)),
-        event: ProposedEvent::Damage {
-            source_id: part.source,
-            target: part.target,
-            amount: part.amount,
-            is_combat: part.is_combat,
-            applied: part.applied.into_iter().collect(),
-        },
+    events: &mut Vec<GameEvent>,
+) -> Option<BatchPortion> {
+    let ctx = DamageContext::from_source(state, part.source)
+        .unwrap_or_else(|| DamageContext::fallback(part.source, ability.controller));
+    let mut event = pre_replacement_damage_gate(
+        state,
+        &ctx,
+        &part.target,
+        part.amount,
+        part.is_combat,
+        events,
+    )?;
+    if let ProposedEvent::Damage { applied, .. } = &mut event {
+        *applied = part.applied.into_iter().collect();
     }
+    Some(BatchPortion::Gated { ctx, event })
 }
 
 /// CR 616.1: the riders the batch's ledger held while its original choices were made, and stop

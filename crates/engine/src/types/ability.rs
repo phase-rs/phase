@@ -1858,6 +1858,22 @@ pub struct ParkedDamageBatch {
     /// through the batch's replacement.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub split: Vec<SplitDamagePortion>,
+    /// CR 104.4a + CR 614.6: `Some` while the batch's simultaneous event (its damage and
+    /// substitution actions) is under way: the effect-stated wins and losses in it so far, which
+    /// settle together when it ends (`elimination::settle_event_outcomes`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outcomes: Option<EventOutcomes>,
+}
+
+/// CR 104.3e + CR 104.3f + CR 104.4a: the effect-stated wins and losses of one simultaneous
+/// event, kept apart until it ends: a player who would both win and lose loses (CR 104.3f), so a
+/// win counts only for a winner who doesn't also lose.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EventOutcomes {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub losers: Vec<PlayerId>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub winners: Vec<PlayerId>,
 }
 
 /// CR 614.9 + CR 614.5: the part of a portion a capped redirect ("The next 1 damage that would be
