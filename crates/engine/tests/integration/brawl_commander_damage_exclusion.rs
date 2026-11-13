@@ -6,6 +6,7 @@ use std::sync::Arc;
 use engine::database::card_db::CardDatabase;
 use engine::game::combat::AttackTarget;
 use engine::game::deck_loading::{DeckList, PlayerDeckList};
+use engine::game::deck_validation::validate_name_deck_for_format_full;
 use engine::game::engine::apply;
 use engine::game::replay::{reconstruct_initial_state, ReplayPlayer};
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
@@ -15,7 +16,7 @@ use engine::types::game_state::{
     CastPaymentMode, CommanderDamageEntry, GameState, PersistedGameState, WaitingFor,
 };
 use engine::types::identifiers::ObjectId;
-use engine::types::match_config::MatchConfig;
+use engine::types::match_config::{MatchConfig, MatchType};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 use engine::types::replay::{ReplayHeader, ReplayLog};
@@ -270,12 +271,35 @@ fn fixture_db() -> Arc<CardDatabase> {
     )
 }
 
-fn mountain_deck(commander: Option<&str>, mountains: usize) -> PlayerDeckList {
+fn commander_deck(commander: &str, land: &str, lands: usize) -> PlayerDeckList {
     PlayerDeckList {
-        main_deck: vec!["Mountain".to_string(); mountains],
-        commander: commander.map(str::to_string).into_iter().collect(),
+        main_deck: vec![land.to_string(); lands],
+        commander: vec![commander.to_string()],
         ..Default::default()
     }
+}
+
+/// The per-seat deck gate a game passes before its replay header is recorded.
+fn validate_seat(
+    db: &CardDatabase,
+    deck: &PlayerDeckList,
+    format: &FormatConfig,
+) -> Result<(), String> {
+    validate_name_deck_for_format_full(
+        db,
+        &deck.main_deck,
+        &deck.sideboard,
+        &deck.commander,
+        &deck.companion,
+        &deck.planar_deck,
+        &deck.scheme_deck,
+        &deck.signature_spell,
+        &[],
+        format,
+        Some(MatchType::Bo1),
+        2,
+    )
+    .map_err(|err| format!("{err:?}"))
 }
 
 /// The actions a simple aggressive pilot tries, in preference order.
@@ -322,7 +346,10 @@ fn candidate_actions(state: &GameState) -> Vec<(PlayerId, GameAction)> {
             GameAction::DeclareAttackers {
                 attacks: valid_attacker_ids
                     .iter()
-                    .map(|&id| (id, AttackTarget::Player(P1)))
+                    .map(|&id| {
+                        let defender = if *player == P0 { P1 } else { P0 };
+                        (id, AttackTarget::Player(defender))
+                    })
                     .collect(),
                 bands: vec![],
             },
@@ -337,17 +364,31 @@ fn candidate_actions(state: &GameState) -> Vec<(PlayerId, GameAction)> {
     }
 }
 
-/// A Brawl game recorded while Brawl still carried a commander-damage threshold
-/// of 21: Zurgo Bellstriker attacks a player with no creatures until the game ends.
-fn record_legacy_brawl_game(db: &Arc<CardDatabase>) -> (ReplayLog, GameState) {
-    let mut legacy = FormatConfig::brawl();
-    legacy.commander_damage_threshold = Some(2);
+/// A game recorded while Brawl and Historic Brawl still carried CR 704.6c's 21,
+/// from decks the production deck gate accepts. Red Hulk attacks a player whose
+/// uncastable Ghalta leaves no blockers until the game ends.
+fn record_legacy_game(
+    db: &Arc<CardDatabase>,
+    mut format: FormatConfig,
+    lands: usize,
+) -> (ReplayLog, GameState) {
+    format.commander_damage_threshold = Some(21);
     let decks = DeckList {
-        player: mountain_deck(Some("Zurgo Bellstriker"), 59),
-        opponent: mountain_deck(None, 60),
+        player: commander_deck("Red Hulk", "Mountain", lands),
+        opponent: commander_deck("Ghalta, Primal Hunger", "Forest", lands),
         ..Default::default()
     };
-    let header = replay_header(legacy, Some(decks));
+    for deck in [&decks.player, &decks.opponent] {
+        validate_seat(db, deck, &format).unwrap();
+    }
+    // CR 903.12c: each Brawl deck designates a commander.
+    let commanderless = PlayerDeckList {
+        commander: Vec::new(),
+        ..decks.player.clone()
+    };
+    assert!(validate_seat(db, &commanderless, &format).is_err());
+
+    let header = replay_header(format, Some(decks));
     let mut live = reconstruct_initial_state(&header, Some(db)).unwrap();
     let mut log = ReplayLog::new(header);
     while !matches!(live.waiting_for, WaitingFor::GameOver { .. }) {
@@ -361,34 +402,58 @@ fn record_legacy_brawl_game(db: &Arc<CardDatabase>) -> (ReplayLog, GameState) {
     (log, live)
 }
 
+/// CR 903.12d: a Brawl deck is exactly 60 cards including its commander; Historic
+/// Brawl declares exactly 100.
 #[test]
 fn legacy_brawl_replay_reconstructs_its_commander_damage_loss() {
     let db = fixture_db();
-    let (log, live) = record_legacy_brawl_game(&db);
-    assert!(live.players[1].is_eliminated);
+    for (format, lands) in [
+        (FormatConfig::brawl(), 59),
+        (FormatConfig::historic_brawl(), 99),
+    ] {
+        let label = format.format;
+        let (log, live) = record_legacy_game(&db, format, lands);
+        assert!(
+            matches!(live.waiting_for, WaitingFor::GameOver { .. }),
+            "{label:?}"
+        );
+        assert!(live.players[1].is_eliminated, "{label:?}");
 
-    let mut recorded = load_replay(&serde_json::to_string(&log).unwrap(), Some(&db))
-        .expect("an exported legacy Brawl replay loads");
-    let end = recorded.len();
-    let state = recorded.seek(end).unwrap();
-    assert!(matches!(state.waiting_for, WaitingFor::GameOver { .. }));
-    assert!(state.players[1].is_eliminated);
-    assert!(state.players[1].life > 0, "the loss is not from life");
-    let tally: u32 = state
-        .commander_damage
-        .iter()
-        .filter(|entry| entry.player == P1)
-        .map(|entry| entry.damage)
-        .sum();
-    assert!(tally >= 2, "CR 704.6c: {tally} commander damage");
+        let mut recorded = load_replay(&serde_json::to_string(&log).unwrap(), Some(&db))
+            .expect("an exported legacy replay loads");
+        let end = recorded.len();
+        let state = recorded.seek(end).unwrap();
+        assert!(
+            matches!(state.waiting_for, WaitingFor::GameOver { .. }),
+            "{label:?}"
+        );
+        assert!(state.players[1].is_eliminated, "{label:?}");
+        assert!(
+            state.players[1].life > 0,
+            "{label:?}: the loss is not from life"
+        );
+        let tally: u32 = state
+            .commander_damage
+            .iter()
+            .filter(|entry| entry.player == P1)
+            .map(|entry| entry.damage)
+            .sum();
+        assert!(
+            tally >= 21,
+            "{label:?}: CR 704.6c: {tally} commander damage"
+        );
 
-    let mut current = load_replay(
-        &with_header_threshold(&log, serde_json::Value::Null),
-        Some(&db),
-    )
-    .expect("the same replay loads under current Brawl rules");
-    let end = current.len();
-    let state = current.seek(end).unwrap();
-    assert!(!matches!(state.waiting_for, WaitingFor::GameOver { .. }));
-    assert!(!state.players[1].is_eliminated);
+        let mut current = load_replay(
+            &with_header_threshold(&log, serde_json::Value::Null),
+            Some(&db),
+        )
+        .expect("the same replay loads under current Brawl rules");
+        let end = current.len();
+        let state = current.seek(end).unwrap();
+        assert!(
+            !matches!(state.waiting_for, WaitingFor::GameOver { .. }),
+            "{label:?}"
+        );
+        assert!(!state.players[1].is_eliminated, "{label:?}");
+    }
 }

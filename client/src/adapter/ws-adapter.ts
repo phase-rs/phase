@@ -1414,6 +1414,32 @@ export function lobbyProtocolRequiredForFormat(format: GameFormat): number | nul
   }
 }
 
+/**
+ * Lowest broker `LOBBY_PROTOCOL_VERSION` whose `FormatConfig` validator accepts
+ * a Brawl or Historic Brawl config with no commander-damage threshold
+ * (CR 903.12h) and today's Custom `uses_commander`; below it such a lobby
+ * frame is rejected as malformed.
+ *
+ * Frozen at 23 and written as a bare literal, never derived from
+ * LOBBY_PROTOCOL_VERSION, so a later bump cannot drag it forward and start
+ * refusing v23 brokers. `scripts/check-protocol-version.mjs` refuses a derived
+ * right-hand side for it.
+ */
+export const MIN_LOBBY_PROTOCOL_FOR_COMMANDER_CONFIG_RULES = 23;
+
+/**
+ * The lowest broker `LOBBY_PROTOCOL_VERSION` that accepts `config` in a lobby
+ * frame, or `null` when every broker this client connects to accepts it.
+ * Custom is gated as a whole: which Custom configs an older broker rejects is
+ * that broker's derivation, not one this client restates.
+ */
+export function lobbyProtocolRequiredForFormatConfig(config: FormatConfig): number | null {
+  if (isCustomGameFormat(config.format) || config.format === "Brawl" || config.format === "HistoricBrawl") {
+    return MIN_LOBBY_PROTOCOL_FOR_COMMANDER_CONFIG_RULES;
+  }
+  return lobbyProtocolRequiredForFormat(config.format);
+}
+
 /** Identity advertised by the server in its `ServerHello`. */
 export interface ServerInfo {
   version: string;

@@ -3875,9 +3875,9 @@ impl FormatConfig {
         Self::migrate_legacy_fields(config);
     }
 
-    /// `ReplayHeader` ingress: a replay reconstructs the game it recorded, so
-    /// legacy values survive the strict decode.
-    pub(crate) fn deserialize_recorded<'de, D: Deserializer<'de>>(
+    /// Ingress for a config an earlier engine wrote and this one must keep: a replay
+    /// header, and a lobby frame relayed to peers of its writer's build.
+    pub fn deserialize_recorded<'de, D: Deserializer<'de>>(
         deserializer: D,
     ) -> Result<FormatConfig, D::Error> {
         let mut value = serde_json::Value::deserialize(deserializer)?;
@@ -3893,8 +3893,29 @@ impl FormatConfig {
         Ok(config)
     }
 
-    /// Every persisted ingress routes here and network decode never does: the one
-    /// list of values earlier engines derived differently, swapped for today's.
+    /// `deserialize_recorded` for an optional field.
+    pub fn deserialize_recorded_option<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Option<FormatConfig>, D::Error> {
+        #[derive(Deserialize)]
+        struct Recorded(
+            #[serde(deserialize_with = "FormatConfig::deserialize_recorded")] FormatConfig,
+        );
+        Ok(Option::<Recorded>::deserialize(deserializer)?.map(|Recorded(config)| config))
+    }
+
+    /// The strict `Deserialize` gate, for a config decoded with `deserialize_recorded`
+    /// that today's engine is about to run.
+    pub fn check_strict_admission(&self) -> Result<(), String> {
+        let value = serde_json::to_value(self).map_err(|error| error.to_string())?;
+        serde_json::from_value::<FormatConfig>(value)
+            .map(|_| ())
+            .map_err(|error| error.to_string())
+    }
+
+    /// Every persisted ingress and every lobby-frame decode routes here; Full mode then
+    /// re-checks strictly (`check_strict_admission`). The one list of values earlier
+    /// engines derived differently, swapped for today's.
     fn migrate_legacy_fields(config: &mut serde_json::Value) -> LegacyFormatFields {
         let mut legacy = LegacyFormatFields::default();
         let is_brawl = config
