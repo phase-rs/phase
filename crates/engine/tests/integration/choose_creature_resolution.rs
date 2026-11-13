@@ -2946,8 +2946,11 @@ fn commandeered_final_showdown_at_the_thiefs_choice(
         .id();
     let commandeer = scenario
         .add_spell_to_hand_from_oracle(P1, "Commandeer", true, COMMANDEER)
-        .with_mana_cost(parse_mtgjson_mana_cost("{0}"))
+        .with_mana_cost(parse_mtgjson_mana_cost("{5}{U}{U}"))
         .id();
+    for _ in 0..7 {
+        scenario.add_basic_land(P1, ManaColor::Blue);
+    }
     let mut runner = scenario.build();
     let card_id = runner.state().objects[&spell].card_id;
     runner
@@ -2968,6 +2971,16 @@ fn commandeered_final_showdown_at_the_thiefs_choice(
         "reach guard: P1 responds with Final Showdown on the stack"
     );
     runner.cast(commandeer).target_object(spell).commit();
+    assert_eq!(
+        runner
+            .state()
+            .objects
+            .values()
+            .filter(|object| object.controller == P1 && object.tapped)
+            .count(),
+        7,
+        "reach guard: P1 paid Commandeer's printed mana cost with its seven lands"
+    );
     for _ in 0..12 {
         if runner.state().objects[&commandeer].zone != Zone::Stack {
             break;
