@@ -506,13 +506,15 @@ also settles that source's owned work before releasing it, including synchronous
 `serverHello` reentry and setup-send failure. The only new reply bound is the
 reconnect interval above; Create and Join keep waiting without one.
 
-A draft view on either socket completes a pick only when its inventory proves
-the exact newly selected instance from the complete selection offered in the
-original authoritative view. Reply ownership and pick counters alone are not
-outcome evidence. A replacement must also match the original draft code/token.
+A draft view completes a pick only when its inventory proves the exact newly
+selected instance. Reply ownership and pick counters alone are not outcome
+evidence. A pick backed by the complete selection offered in the original
+authoritative view can be completed by a replacement's view too, if the
+replacement matches the original draft code/token. A pick without that
+evidence can be completed only by its own sending socket; once a different
+socket is adopted it is retired as unconfirmed with a recoverable error.
 Retired views can settle their own permitted reply but cannot overwrite the
 current view, phase or credentials, or publish themselves as the current view.
-Without complete selection authority the original source retains the reply.
 This reports the selected-inventory outcome, not a new request-level
 acknowledgement: an automatic timer pick of the identical instance is
 indistinguishable on the existing wire.

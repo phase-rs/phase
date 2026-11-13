@@ -1412,7 +1412,15 @@ export class ServerDraftAdapter implements EngineAdapter {
             sourceSocket instanceof StateCodecSocket ? sourceSocket.decodeInFlight : null
           ));
         }
-        const framesBeforeWrite = setupMessages.length;
+        // Armed before the transport is invoked, because its send may deliver
+        // the answer synchronously. After the handshake the server speaks on
+        // this socket only in answer to the setup, so a frame received since
+        // the write proves it has the frame: the receipt, which the transport
+        // may still hold, is then not waited for, as on a confirmed reconnect.
+        let answered: Promise<true> | null = null;
+        if (confirmation === null) {
+          answered = new Promise<true>((resolve) => { noteSetupAnswer = () => resolve(true); });
+        }
         const write = writeSetupFrame(
           sourceSocket, setupFrame, attachment.controller.signal, (frame, target) => this.send(frame, target),
         );
@@ -1428,14 +1436,6 @@ export class ServerDraftAdapter implements EngineAdapter {
           // (disposal or supersession inside the receipt callback), before the
           // listener above existed: an aborted signal fires no later event.
           if (attachment.controller.signal.aborted) onAbort();
-          // After the handshake the server speaks on this socket only in answer
-          // to the setup, so a frame received since the write proves it has the
-          // frame: the receipt, which the transport may still hold, is then not
-          // waited for, as on a confirmed reattach.
-          const answered = new Promise<true>((resolve) => {
-            if (setupMessages.length > framesBeforeWrite) resolve(true);
-            else noteSetupAnswer = () => resolve(true);
-          });
           try {
             // The receipt belongs to the transport and may never settle on a
             // socket that stays open: past the bound the frame counts as unsent
@@ -1444,7 +1444,7 @@ export class ServerDraftAdapter implements EngineAdapter {
             written = sourceSocket.sendReceipt === undefined
               ? await write
               : await Promise.race([
-                settledWithin(write, SETUP_CONFIRMATION_TIMEOUT_MS, false), answered,
+                settledWithin(write, SETUP_CONFIRMATION_TIMEOUT_MS, false), answered!,
               ]);
           } finally {
             noteSetupAnswer = null;

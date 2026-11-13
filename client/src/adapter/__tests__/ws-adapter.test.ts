@@ -7528,6 +7528,37 @@ describe("WebSocketAdapter — acquired socket ownership", () => {
       },
     );
 
+    it("completes an initial spectate on a large bootstrap delivered inside the transport's setup send", async () => {
+      MockWebSocket.last = null;
+      const adapter = new WebSocketAdapter(
+        "wss://localhost:9374/ws", "spectate", { main_deck: [], sideboard: [] }, "GAME01",
+        undefined, undefined, undefined,
+        { stateCodecSessionProvider: () => Promise.resolve(null) },
+      );
+      const init = observe(adapter.initialize());
+      await vi.waitFor(() => expect(MockWebSocket.last).not.toBeNull());
+      const candidate = latestSocket();
+      const started = JSON.stringify(codecGameStarted(6, 6, { state: largeReconnectState(6) }));
+      expect(started.length).toBeGreaterThan(8_388_608);
+      // Snapshot-only transport: the send delivers the server's large answer
+      // synchronously, then returns a receipt that never settles.
+      candidate.sendReceipt = vi.fn(() => {
+        candidate.dispatchSynthetic("message", started);
+        return new Promise<void>(() => undefined);
+      });
+      try {
+        candidate.dispatchSynthetic("message", CODEC_SESSION_HELLO);
+        await vi.waitFor(() => expect(init.value()).toEqual({ resolvedWith: undefined }));
+        expect((await adapter.getSnapshot()).state.turn_number).toBe(6);
+        candidate.dispatchSynthetic("message", JSON.stringify(codecStateUpdate(7, 7)));
+        await vi.waitFor(async () => expect((await adapter.getSnapshot()).state.turn_number).toBe(7));
+        expect(candidate.close).not.toHaveBeenCalled();
+      } finally {
+        adapter.dispose();
+      }
+      expect(candidate.close).toHaveBeenCalledOnce();
+    });
+
     it("settles an initial join at once when its candidate closes inside the transport's setup send", async () => {
       MockWebSocket.last = null;
       const adapter = new WebSocketAdapter(

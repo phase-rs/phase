@@ -2784,8 +2784,15 @@ export class WebSocketAdapter implements EngineAdapter {
             transport instanceof StateCodecSocket ? transport.decodeInFlight : null
           ));
         }
-        const bufferedFrames = () => (setupMessages as MessageEvent<string>[] | null)?.length ?? 0;
-        const framesBeforeWrite = bufferedFrames();
+        // Armed before the transport is invoked, because its send may deliver
+        // the answer synchronously. After the handshake the server speaks on
+        // this socket only in answer to the setup, so a frame received since
+        // the write proves it has the frame: the receipt, which the transport
+        // may still hold, is then not waited for, as on a confirmed reconnect.
+        let answered: Promise<true> | null = null;
+        if (confirmation === null) {
+          answered = new Promise<true>((resolve) => { noteSetupAnswer = () => resolve(true); });
+        }
         // Armed before the transport is invoked: its send may deliver the
         // candidate's close synchronously, which must settle the attachment
         // then, not at the receipt's bound.
@@ -2807,14 +2814,6 @@ export class WebSocketAdapter implements EngineAdapter {
           // (disposal or supersession inside the receipt callback), before the
           // listener above existed: an aborted signal fires no later event.
           if (preparation.signal.aborted) onAbort();
-          // After the handshake the server speaks on this socket only in answer
-          // to the setup, so a frame received since the write proves it has the
-          // frame: the receipt, which the transport may still hold, is then not
-          // waited for, as on a confirmed reconnect.
-          const answered = new Promise<true>((resolve) => {
-            if (bufferedFrames() > framesBeforeWrite) resolve(true);
-            else noteSetupAnswer = () => resolve(true);
-          });
           try {
             // The receipt belongs to the transport and may never settle on a
             // socket that stays open: past the bound the frame counts as unsent
@@ -2823,7 +2822,7 @@ export class WebSocketAdapter implements EngineAdapter {
             written = socket.ws.sendReceipt === undefined
               ? await write
               : await Promise.race([
-                settledWithin(write, SETUP_CONFIRMATION_TIMEOUT_MS, false), answered,
+                settledWithin(write, SETUP_CONFIRMATION_TIMEOUT_MS, false), answered!,
               ]);
           } finally {
             writePending = false;

@@ -5257,6 +5257,38 @@ describe("ServerDraftAdapter — negotiated StateCodecV1", () => {
       },
     );
 
+    it("completes a join on a large answer delivered inside the transport's setup send", async () => {
+      vi.useFakeTimers();
+      const session = draftCodecSession(decodeEnvelope);
+      const { adapter, provider } = await startCodecDraft(session.session);
+      // Snapshot-only, so the raw transport delivers inside the send itself.
+      provider.mockResolvedValueOnce(null as never);
+      const joined = watch(adapter.joinDraft("DRAFT1", "Contender"));
+      await drainArt();
+      const candidate = MockWebSocket.last!;
+      // Above the backlog's 16 MiB text budget.
+      const answer = JSON.stringify({
+        type: "DraftJoined",
+        data: {
+          draft_code: "DRAFT1", player_token: "draft-token", seat_index: 1,
+          view: { ...createMockDraftView(), padding: "x".repeat(8_400_000) },
+        },
+      });
+      candidate.sendReceipt = vi.fn(() => {
+        candidate.dispatchSynthetic("message", answer);
+        return new Promise<void>(() => undefined);
+      });
+      try {
+        candidate.dispatchSynthetic("message", CODEC_SERVER_HELLO);
+        await vi.waitFor(() => expect(joined.value()).not.toBe("never settled"));
+        expect(joined.value()).not.toMatchObject({ code: expect.anything() });
+        expect(candidate.close).not.toHaveBeenCalled();
+      } finally {
+        adapter.dispose();
+        vi.useRealTimers();
+      }
+    });
+
     it.each(["create", "reattach"] as const)(
       "retires a %s candidate and its lease at once when a superseding create lands inside the transport's setup send",
       async (kind) => {
