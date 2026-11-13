@@ -29007,7 +29007,7 @@ library in a random order.";
     // The Dig resolver reads `QuantityRef::ManaSpentToCast { SelfObject, Total }`
     // which resolves via `obj.mana_spent_to_cast_amount` on the spell object.
     // If the payment-write seam fails to stamp that field, the count resolves
-    // to 0 and the Dig silently no-ops (CR 609.3 clamp → early return).
+    // to 0 and the Dig silently no-ops (zero-count early return).
     //
     // This test drives the REAL cast pipeline (`CastSpell` → mana payment →
     // stack resolution → `DigChoice`) to discriminate a payment-write defect
