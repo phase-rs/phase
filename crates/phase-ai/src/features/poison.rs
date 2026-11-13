@@ -203,7 +203,7 @@ pub(crate) enum PoisonRecipients {
     EachOpponent,
 }
 
-/// CR 122.1f: the widest opponent reach of the poison counters an ability tree
+/// CR 102.3: the widest opponent reach of the poison counters an ability tree
 /// gives, walked at `scope`; `None` when no recipient can be an opponent.
 ///
 /// Under a `player_scope` the resolver rebinds `Controller` to each scoped
