@@ -585,6 +585,7 @@ pub struct ParseWarningPattern {
     pub otherwise_supported_cards: usize,
     /// Existing unsupported cards where this warning is the only coverage gap.
     pub single_gap_cards: usize,
+    /// Per format, the single-gap cards with a single-gap face legal in it.
     pub single_gap_by_format: BTreeMap<String, usize>,
     pub example_cards: Vec<String>,
 }
@@ -594,8 +595,8 @@ struct ParseWarningPatternAccumulator {
     warning_count: usize,
     cards: HashSet<String>,
     otherwise_supported_cards: HashSet<String>,
-    single_gap_cards: HashSet<String>,
-    single_gap_by_format: BTreeMap<String, usize>,
+    /// Each single-gap card's legal formats, unioned over its single-gap faces.
+    single_gap_formats: HashMap<String, BTreeSet<&'static str>>,
     example_cards: Vec<String>,
 }
 
@@ -612,17 +613,23 @@ impl ParseWarningPatternAccumulator {
         if supported {
             self.otherwise_supported_cards.insert(card_name.to_string());
         }
-        if single_gap && self.single_gap_cards.insert(card_name.to_string()) {
-            for format in legal_formats {
-                *self
-                    .single_gap_by_format
-                    .entry((*format).to_string())
-                    .or_default() += 1;
-            }
+        if single_gap {
+            self.single_gap_formats
+                .entry(card_name.to_string())
+                .or_default()
+                .extend(legal_formats.iter().copied());
         }
         if self.example_cards.len() < 3 && !self.example_cards.iter().any(|c| c == card_name) {
             self.example_cards.push(card_name.to_string());
         }
+    }
+
+    fn single_gap_by_format(&self) -> BTreeMap<String, usize> {
+        let mut counts = BTreeMap::new();
+        for format in self.single_gap_formats.values().flatten() {
+            *counts.entry((*format).to_string()).or_default() += 1;
+        }
+        counts
     }
 }
 
@@ -7506,6 +7513,17 @@ pub fn analyze_coverage(card_db: &CardDatabase) -> CoverageSummary {
     // Internal frequency list — used to seed top_gaps but not stored on output
     let handler_frequency = rank_top_gap_handlers(freq);
 
+    // Same-name faces differ in legality, so a row reads its own face's.
+    let legal_in = |card: &CardCoverageResult, format: LegalityFormat| {
+        let key = card
+            .card_face_key
+            .as_deref()
+            .expect("every scanned row has a face key");
+        card_db
+            .legality_status(key, format)
+            .is_some_and(|status| status.is_legal())
+    };
+
     // Compute enriched top_gaps: single-gap counts, oracle patterns, co-occurrence
     let top_gaps = {
         // Single-gap card counts with format breakdown
@@ -7516,10 +7534,7 @@ pub fn analyze_coverage(card_db: &CardDatabase) -> CoverageSummary {
                 let entry = gap_data.entry(handler.clone()).or_default();
                 entry.0 += 1;
                 for format in LegalityFormat::ALL {
-                    if card_db
-                        .legality_status(&card.card_name, format)
-                        .is_some_and(|status| status.is_legal())
-                    {
+                    if legal_in(card, format) {
                         *entry.1.entry(format.as_key().to_string()).or_default() += 1;
                     }
                 }
@@ -7675,10 +7690,7 @@ pub fn analyze_coverage(card_db: &CardDatabase) -> CoverageSummary {
                 let entry = bundle_map.entry(handlers).or_default();
                 entry.0 += 1;
                 for format in LegalityFormat::ALL {
-                    if card_db
-                        .legality_status(&card.card_name, format)
-                        .is_some_and(|status| status.is_legal())
-                    {
+                    if legal_in(card, format) {
                         *entry.1.entry(format.as_key().to_string()).or_default() += 1;
                     }
                 }
@@ -7775,8 +7787,8 @@ pub fn analyze_coverage(card_db: &CardDatabase) -> CoverageSummary {
             warning_count: acc.warning_count,
             card_count: acc.cards.len(),
             otherwise_supported_cards: acc.otherwise_supported_cards.len(),
-            single_gap_cards: acc.single_gap_cards.len(),
-            single_gap_by_format: acc.single_gap_by_format,
+            single_gap_cards: acc.single_gap_formats.len(),
+            single_gap_by_format: acc.single_gap_by_format(),
             example_cards: acc.example_cards,
         })
         .collect();

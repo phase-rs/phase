@@ -100,9 +100,10 @@ fn main() {
 
     if let Some(fmt) = format_filter {
         let before = summary.cards.len();
-        summary
-            .cards
-            .retain(|c| db.legality_status(&c.card_name, fmt) == Some(LegalityStatus::Legal));
+        summary.cards.retain(|c| {
+            db.legality_status(c.card_face_key.as_deref().unwrap_or(&c.card_name), fmt)
+                == Some(LegalityStatus::Legal)
+        });
         eprintln!(
             "Filtered to {}: {} / {} cards retained",
             fmt.as_key(),

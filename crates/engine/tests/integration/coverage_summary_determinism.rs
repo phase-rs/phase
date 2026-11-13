@@ -1,6 +1,6 @@
 //! Identical card data yields byte-identical coverage and audit output.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use engine::database::CardDatabase;
 use engine::game::coverage::{
@@ -183,7 +183,21 @@ fn warning_drilldown_joins_by_face_key_and_breaks_name_ties_by_key() {
 
         let all = drill(None, usize::MAX);
         assert_eq!(all.matched_cards, 3);
-        assert_eq!(drill(Some("Condition_If"), usize::MAX).matched_cards, 2);
+        let swallowed = serde_json::to_value(drill(Some("Condition_If"), usize::MAX))
+            .expect("drilldown serializes");
+        assert_eq!(swallowed["matched_cards"], 2);
+        let rows = swallowed["cards"]
+            .as_array()
+            .expect("cards serialize as an array");
+        assert_eq!(
+            rows.iter()
+                .map(|card| (card["key"].clone(), card["supported"].clone()))
+                .collect::<Vec<_>>(),
+            [
+                (serde_json::json!(CHANNEL), serde_json::json!(false)),
+                (serde_json::json!(CHANNEL_PREPARE), serde_json::json!(false)),
+            ]
+        );
         let printings = |key: &str| {
             all.cards
                 .iter()
@@ -250,4 +264,180 @@ fn warning_drilldown_support_keeps_its_boolean_wire_shape() {
             support
         );
     }
+}
+
+const JUMP: &str = "jump";
+const JUMP_PREPARE: &str = "jump [d6accaed-ff35-4324-b31b-35e6837bc079]";
+
+/// Jump's exported face, shared by the standalone card and Encouraging Aviator's prepared face,
+/// carrying `warnings` copies of a synthetic `Duration_UntilEndOfTurn` swallowed clause.
+fn jump_face(oracle_id: &str, legalities: serde_json::Value, warnings: usize) -> serde_json::Value {
+    let warning = serde_json::json!({
+        "type": "SwallowedClause",
+        "detector": "Duration_UntilEndOfTurn",
+        "description": "until end of turn",
+        "line_index": 0
+    });
+    serde_json::json!({
+        "name": "Jump",
+        "mana_cost": { "type": "Cost", "shards": ["Blue"], "generic": 0 },
+        "card_type": { "supertypes": [], "core_types": ["Instant"], "subtypes": [] },
+        "power": null,
+        "toughness": null,
+        "loyalty": null,
+        "defense": null,
+        "oracle_text": "Target creature gains flying until end of turn.",
+        "non_ability_text": null,
+        "flavor_name": null,
+        "keywords": [],
+        "abilities": [{
+            "kind": "Spell",
+            "effect": {
+                "type": "GenericEffect",
+                "static_abilities": [{
+                    "mode": "Continuous",
+                    "affected": { "type": "ParentTarget" },
+                    "modifications": [{ "type": "AddKeyword", "keyword": "Flying" }],
+                    "condition": null,
+                    "affected_zone": null,
+                    "effect_zone": null,
+                    "active_zones": [],
+                    "characteristic_defining": false,
+                    "description": "gain flying"
+                }],
+                "duration": "UntilEndOfTurn",
+                "target": {
+                    "type": "Typed",
+                    "type_filters": ["Creature"],
+                    "controller": null,
+                    "properties": []
+                }
+            },
+            "cost": null,
+            "sub_ability": null,
+            "duration": "UntilEndOfTurn",
+            "description": "Target creature gains flying until end of turn.",
+            "target_prompt": null,
+            "condition": null,
+            "optional_targeting": false,
+            "optional": false,
+            "forward_result": false
+        }],
+        "triggers": [],
+        "static_abilities": [],
+        "replacements": [],
+        "color_override": null,
+        "scryfall_oracle_id": oracle_id,
+        "legalities": legalities,
+        "parse_warnings": vec![warning; warnings]
+    })
+}
+
+#[test]
+fn single_gap_formats_credit_every_same_name_face() {
+    let mut channel = channel_face("d1b815d1-2848-40d4-a555-66822d1becbc", &CHANNEL_PRINTINGS);
+    channel["legalities"] = serde_json::json!({
+        "brawl": "banned",
+        "commander": "banned",
+        "duel": "banned",
+        "historic": "banned",
+        "legacy": "banned",
+        "oathbreaker": "banned",
+        "premodern": "banned",
+        "timeless": "restricted",
+        "vintage": "restricted"
+    });
+    let mut channel_prepare = channel_face("d9068051-b51c-4700-b492-30b148e3a72c", &["SOC"]);
+    channel_prepare["legalities"] = serde_json::json!({
+        "commander": "legal",
+        "duel": "legal",
+        "legacy": "legal",
+        "oathbreaker": "legal",
+        "vintage": "legal"
+    });
+    let export = serde_json::Value::Object(serde_json::Map::from_iter([
+        (
+            JUMP.to_string(),
+            jump_face(
+                "f7518456-45ed-41d4-bd3c-5aacea28eb35",
+                serde_json::json!({
+                    "commander": "legal",
+                    "duel": "legal",
+                    "legacy": "legal",
+                    "modern": "legal",
+                    "oathbreaker": "legal",
+                    "pauper": "legal",
+                    "paupercommander": "legal",
+                    "premodern": "legal",
+                    "vintage": "legal"
+                }),
+                2,
+            ),
+        ),
+        (
+            JUMP_PREPARE.to_string(),
+            jump_face(
+                "d6accaed-ff35-4324-b31b-35e6837bc079",
+                serde_json::json!({
+                    "brawl": "legal",
+                    "commander": "legal",
+                    "duel": "legal",
+                    "historic": "legal",
+                    "legacy": "legal",
+                    "modern": "legal",
+                    "oathbreaker": "legal",
+                    "pioneer": "legal",
+                    "standard": "legal",
+                    "standardbrawl": "legal",
+                    "timeless": "legal",
+                    "vintage": "legal"
+                }),
+                1,
+            ),
+        ),
+        (CHANNEL.to_string(), channel),
+        (CHANNEL_PREPARE.to_string(), channel_prepare),
+    ]))
+    .to_string();
+    let summary =
+        analyze_coverage(&CardDatabase::from_json_str(&export).expect("test export deserializes"));
+    let count = |map: &BTreeMap<String, usize>, format: &str| map.get(format).copied().unwrap_or(0);
+
+    let pattern = summary
+        .parse_warning_patterns
+        .iter()
+        .find(|pattern| pattern.pattern.starts_with("Duration_UntilEndOfTurn:"))
+        .expect("the shared warning forms a pattern");
+    assert_eq!(pattern.warning_count, 3);
+    assert_eq!(pattern.single_gap_cards, 1);
+    assert_eq!(count(&pattern.single_gap_by_format, "pauper"), 1);
+    assert_eq!(count(&pattern.single_gap_by_format, "standard"), 1);
+    assert!(
+        pattern.single_gap_by_format.values().all(|&n| n == 1),
+        "{:?}",
+        pattern.single_gap_by_format
+    );
+
+    let top_gap = summary
+        .top_gaps
+        .iter()
+        .find(|gap| gap.handler == "Swallow:Duration_UntilEndOfTurn")
+        .expect("the shared warning is a top gap");
+    assert_eq!(top_gap.single_gap_cards, 2);
+    assert_eq!(count(&top_gap.single_gap_by_format, "pauper"), 1);
+    assert_eq!(count(&top_gap.single_gap_by_format, "standard"), 1);
+    assert_eq!(count(&top_gap.single_gap_by_format, "commander"), 2);
+
+    let bundle = summary
+        .gap_bundles
+        .iter()
+        .find(|bundle| bundle.handlers.iter().any(|h| h == "Swallow:Condition_If"))
+        .expect("Channel's gaps form a bundle");
+    assert_eq!(bundle.unlocked_cards, 2);
+    assert_eq!(
+        bundle.unlocked_by_format,
+        ["commander", "duel", "legacy", "oathbreaker", "vintage"]
+            .map(|format| (format.to_string(), 1))
+            .into()
+    );
 }
