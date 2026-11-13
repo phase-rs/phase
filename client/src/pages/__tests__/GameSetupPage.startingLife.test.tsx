@@ -174,7 +174,7 @@ describe("GameSetupPage — commander damage", () => {
     expect(screen.queryByLabelText("Commander Damage")).not.toBeInTheDocument();
   });
 
-  // CR 903.12h: Brawl games do not use the CR 704.6c commander-damage loss.
+  // Brawl formats have no commander-damage threshold, so the editor is hidden.
   it.each(["Brawl", "HistoricBrawl"])("offers no commander damage editor in %s", async (format) => {
     renderSetup(`/game-setup?format=${format}`);
 

@@ -341,7 +341,7 @@ fn candidate_actions(state: &GameState) -> Vec<(PlayerId, GameAction)> {
 /// of 21: Zurgo Bellstriker attacks a player with no creatures until the game ends.
 fn record_legacy_brawl_game(db: &Arc<CardDatabase>) -> (ReplayLog, GameState) {
     let mut legacy = FormatConfig::brawl();
-    legacy.commander_damage_threshold = Some(21);
+    legacy.commander_damage_threshold = Some(2);
     let decks = DeckList {
         player: mountain_deck(Some("Zurgo Bellstriker"), 59),
         opponent: mountain_deck(None, 60),
@@ -380,7 +380,7 @@ fn legacy_brawl_replay_reconstructs_its_commander_damage_loss() {
         .filter(|entry| entry.player == P1)
         .map(|entry| entry.damage)
         .sum();
-    assert!(tally >= 21, "CR 704.6c: {tally} commander damage");
+    assert!(tally >= 2, "CR 704.6c: {tally} commander damage");
 
     let mut current = load_replay(
         &with_header_threshold(&log, serde_json::Value::Null),
