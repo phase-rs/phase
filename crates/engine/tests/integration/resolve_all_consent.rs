@@ -21,23 +21,26 @@ use engine::game::scenario_db::GameScenarioDbExt;
 use engine::game::visibility::filter_state_for_viewer;
 use engine::game::zones::create_object;
 use engine::types::ability::{
-    ChoiceType, ControllerRef, CopyRetargetPermission, Effect, QuantityExpr, ResolvedAbility,
-    TargetFilter, TargetRef, TargetSelectionMode, TypedFilter,
+    ChoiceType, ControllerRef, CopyRetargetPermission, Effect, ResolvedAbility, TargetFilter,
+    TargetRef, TargetSelectionMode, TypedFilter,
 };
 use engine::types::actions::{GameAction, ResolveAllConsentDecision, ResolveAllScope};
 use engine::types::card_type::CoreType;
+use engine::types::counter::CounterType;
 use engine::types::events::GameEvent;
 use engine::types::format::FormatConfig;
 use engine::types::game_state::{
-    AutoPassMode, GameState, PersistedGameState, PriorityPassingMode, StackEntry, StackEntryKind,
-    StackResolutionAutoPassOverlay, StackResolutionBudget, StackResolutionEntryFence,
-    StackResolutionPolicy, StackResolutionSession, TurnBoundary, WaitingFor,
+    AutoPassMode, CastPaymentMode, GameState, PersistedGameState, PriorityPassingMode, StackEntry,
+    StackEntryKind, StackResolutionAutoPassOverlay, StackResolutionBudget,
+    StackResolutionEntryFence, StackResolutionPolicy, StackResolutionSession, TurnBoundary,
+    WaitingFor,
 };
 use engine::types::identifiers::{CardId, ObjectId};
 use engine::types::interaction::{
     InteractionOpportunityResponse, InteractionResponse, InteractionSessionId,
     InteractionSubmission,
 };
+use engine::types::mana::{ManaType, ManaUnit};
 use engine::types::phase::{Phase, PhaseStop, PhaseStopScope};
 use engine::types::player::PlayerId;
 use engine::types::resolved_commands::{
@@ -173,26 +176,106 @@ fn browser_partial_priority_equip_state() -> (GameState, ObjectId, ObjectId) {
     (state, equipment, creature)
 }
 
-/// A Resolve All batch whose first item resolves an unrepresentable life change
-/// rejects the public batch and restores the game exactly as the caller found it:
-/// the stack entry, the consent session, and the life total are all unchanged.
-#[test]
-fn resolve_all_rejects_unrepresentable_life_and_restores_the_batch_entry() {
-    let mut state = GameState::new_two_player(0x0A11_E0A2);
-    state.active_player = P0;
-    state.priority_player = P0;
-    state.waiting_for = WaitingFor::Priority { player: P0 };
-    state.players[P0.0 as usize].life = i32::MAX - 1;
-    state.stack = vec![ability_entry(
-        101,
-        P0,
-        Effect::GainLife {
-            amount: QuantityExpr::Fixed { value: 2 },
-            player: TargetFilter::Controller,
-        },
-        vec![],
-    )]
-    .into();
+/// A printed source of one of P0's stack items in a Resolve All batch.
+#[derive(Clone, Copy, Debug)]
+enum GainItem {
+    /// Lathnu Hellion's "When this creature enters, you get {E}{E} (two energy
+    /// counters).": P0 casts the Hellion and both players pass until it
+    /// resolves, which puts the trigger on the stack.
+    HellionEnergy,
+    /// Spike Feeder's "Remove a +1/+1 counter from this creature: You gain 2
+    /// life.", activated by P0.
+    FeederLife,
+}
+
+/// A two-player `Priority{P0}` board at `life` / `energy` with `items`' stack
+/// entries (bottom to top), each put there through the public actions, and a
+/// shared Resolve All begun by P0. Returns the board and the consent epoch P1's
+/// final grant answers.
+fn resolve_all_gain_batch(life: i32, energy: u32, items: &[GainItem]) -> (GameState, u64) {
+    let db = shared_card_db().expect("integration card fixture must load");
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_life(P0, life);
+    let mut sources = Vec::new();
+    for &item in items {
+        let source = match item {
+            GainItem::HellionEnergy => {
+                let red = || ManaUnit::new(ManaType::Red, ObjectId(9_999), false, Vec::new());
+                scenario.with_mana_pool(P0, vec![red(), red(), red()]);
+                scenario.add_real_card(P0, "Lathnu Hellion", Zone::Hand, db)
+            }
+            GainItem::FeederLife => {
+                let feeder = scenario.add_real_card(P0, "Spike Feeder", Zone::Battlefield, db);
+                // `add_real_card` does not run "This creature enters with two
+                // +1/+1 counters on it.", so the counters are placed here.
+                scenario.with_counter(feeder, CounterType::Plus1Plus1, 2);
+                feeder
+            }
+        };
+        sources.push((item, source));
+    }
+    let mut runner = scenario.build();
+    runner.state_mut().players[P0.0 as usize].energy = energy;
+    engine::game::layers::evaluate_layers(runner.state_mut());
+
+    for (item, source) in sources {
+        match item {
+            GainItem::HellionEnergy => {
+                runner.cast(source).commit();
+                for _ in 0..2 {
+                    runner
+                        .act(GameAction::PassPriority)
+                        .expect("both players pass Lathnu Hellion to resolution");
+                }
+                assert!(
+                    matches!(
+                        runner.state().stack.back(),
+                        Some(StackEntry {
+                            source_id,
+                            kind: StackEntryKind::TriggeredAbility { .. },
+                            ..
+                        }) if *source_id == source
+                    ),
+                    "reach guard: Lathnu Hellion's enter trigger is on top, got {:?}",
+                    runner.state().stack
+                );
+            }
+            GainItem::FeederLife => {
+                let gain = runner.state().objects[&source]
+                    .abilities
+                    .iter()
+                    .position(|ability| matches!(&*ability.effect, Effect::GainLife { .. }))
+                    .expect("reach guard: Spike Feeder's life-gain ability parses");
+                runner
+                    .act(GameAction::ActivateAbility {
+                        source_id: source,
+                        ability_index: gain,
+                        payment_mode: CastPaymentMode::Auto,
+                    })
+                    .expect("P0 activates Spike Feeder");
+                assert!(
+                    matches!(
+                        runner.state().stack.back(),
+                        Some(StackEntry {
+                            source_id,
+                            kind: StackEntryKind::ActivatedAbility { .. },
+                            ..
+                        }) if *source_id == source
+                    ),
+                    "reach guard: Spike Feeder's activation is on top, got {:?}",
+                    runner.state().stack
+                );
+            }
+        }
+        assert_eq!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { player: P0 },
+            "{item:?}: P0 holds priority"
+        );
+    }
+    assert_eq!(runner.state().stack.len(), items.len());
+    let mut state = runner.state().clone();
 
     apply(
         &mut state,
@@ -207,33 +290,130 @@ fn resolve_all_rejects_unrepresentable_life_and_restores_the_batch_entry() {
         WaitingFor::ResolveAllConsent { epoch, .. } => epoch,
         ref waiting_for => panic!("expected queued consent, got {waiting_for:?}"),
     };
-    let life_before = state.players[P0.0 as usize].life;
-    let stack_before = state.stack.clone();
-    let session_before = state.stack_resolution_session.clone();
-    let waiting_before = state.waiting_for.clone();
+    (state, epoch)
+}
 
-    // The final grant is the public action that materializes the run, so the
-    // unrepresentable gain rejects the grant itself and restores its snapshot.
-    let error = apply(
-        &mut state,
+/// P1's final grant: the public action that materializes the run.
+fn grant_resolve_all(
+    state: &mut GameState,
+    epoch: u64,
+) -> Result<engine::types::game_state::ActionResult, engine::game::engine::EngineError> {
+    apply(
+        state,
         P1,
         GameAction::RespondResolveAllConsent {
             epoch,
             decision: ResolveAllConsentDecision::Grant,
         },
     )
-    .expect_err("the unrepresentable gain must reject the public grant");
+}
+
+/// A Resolve All batch whose item gains life past `i32::MAX` finishes the public
+/// batch: the total lands on the limit, the gain reports the rules amount, and
+/// the run ends back at P0's priority with no session left. The item is Spike
+/// Feeder's "Remove a +1/+1 counter from this creature: You gain 2 life.",
+/// activated one below the cap.
+#[test]
+fn resolve_all_saturates_life_at_the_cap_and_finishes_the_batch() {
+    let (mut state, epoch) = resolve_all_gain_batch(i32::MAX - 1, 0, &[GainItem::FeederLife]);
+
+    let result = grant_resolve_all(&mut state, epoch)
+        .expect("the saturating gain completes the public grant");
+
+    assert_eq!(state.players[P0.0 as usize].life, i32::MAX);
+    assert_eq!(state.players[P0.0 as usize].life_gained_this_turn, 2);
+    assert!(state.stack.is_empty(), "the batch resolves");
+    assert_eq!(state.stack_resolution_session, None);
+    assert_eq!(state.waiting_for, WaitingFor::Priority { player: P0 });
+    assert!(
+        result.events.iter().any(|event| matches!(
+            event,
+            GameEvent::LifeChanged {
+                player_id,
+                amount: 2,
+                new_total,
+            } if *player_id == P0 && new_total.0 == Some(i32::MAX)
+        )),
+        "the grant reports the rules amount at the cap: {:?}",
+        result.events
+    );
+}
+
+/// A Resolve All batch whose first item resolves an unrepresentable energy
+/// change rejects the public batch and restores the game exactly as the caller
+/// found it: the stack entry, the consent session, and the energy total are all
+/// unchanged. A batch that saturates life before that energy change is rolled
+/// back with it, and with room for the energy both items resolve in order. The
+/// energy item is Lathnu Hellion's "When this creature enters, you get {E}{E}
+/// (two energy counters)." and the life item Spike Feeder's "Remove a +1/+1
+/// counter from this creature: You gain 2 life."
+#[test]
+fn resolve_all_rejects_unrepresentable_energy_and_restores_the_batch_entry() {
+    // Row A: the energy gain alone.
+    let (mut state, epoch) = resolve_all_gain_batch(20, u32::MAX - 1, &[GainItem::HellionEnergy]);
+    let energy_before = state.players[P0.0 as usize].energy;
+    let stack_before = state.stack.clone();
+    let session_before = state.stack_resolution_session.clone();
+    let waiting_before = state.waiting_for.clone();
+
+    // The final grant is the public action that materializes the run, so the
+    // unrepresentable gain rejects the grant itself and restores its snapshot.
+    let error = grant_resolve_all(&mut state, epoch)
+        .expect_err("the unrepresentable gain must reject the public grant");
     assert!(
         matches!(
             error,
-            engine::game::engine::EngineError::LifeChangeUnrepresentable { player } if player == P0
+            engine::game::engine::EngineError::PlayerResourceChangeUnrepresentable { player } if player == P0
         ),
-        "expected the typed unrepresentable-life rejection, got {error:?}"
+        "expected the typed unrepresentable rejection, got {error:?}"
     );
-    assert_eq!(state.players[P0.0 as usize].life, life_before);
+    assert_eq!(state.players[P0.0 as usize].energy, energy_before);
     assert_eq!(state.stack, stack_before, "the batch entry is restored");
     assert_eq!(state.stack_resolution_session, session_before);
     assert_eq!(state.waiting_for, waiting_before);
+
+    // Row B: a life gain that saturates at the cap resolves first (top), then
+    // the energy gain overflows; the whole grant is rolled back.
+    let (mut state, epoch) = resolve_all_gain_batch(
+        i32::MAX - 1,
+        u32::MAX - 1,
+        &[GainItem::HellionEnergy, GainItem::FeederLife],
+    );
+    let entry = state.clone();
+    let error = grant_resolve_all(&mut state, epoch)
+        .expect_err("the later energy overflow must reject the public grant");
+    assert!(
+        matches!(
+            error,
+            engine::game::engine::EngineError::PlayerResourceChangeUnrepresentable { player } if player == P0
+        ),
+        "expected the typed unrepresentable rejection, got {error:?}"
+    );
+    assert_eq!(
+        state, entry,
+        "the saturated life gain is rolled back with the batch"
+    );
+
+    // Row C (reach guard for row B): with room for the energy, the life item
+    // saturates first and the energy item then lands on the limit.
+    let (mut state, epoch) = resolve_all_gain_batch(
+        i32::MAX - 1,
+        u32::MAX - 2,
+        &[GainItem::HellionEnergy, GainItem::FeederLife],
+    );
+    let result = grant_resolve_all(&mut state, epoch).expect("both items resolve");
+    let changes: Vec<(&str, i32)> = result
+        .events
+        .iter()
+        .filter_map(|event| match event {
+            GameEvent::LifeChanged { amount, .. } => Some(("life", *amount)),
+            GameEvent::EnergyChanged { delta, .. } => Some(("energy", *delta)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(changes, vec![("life", 2), ("energy", 2)]);
+    assert_eq!(state.players[P0.0 as usize].life, i32::MAX);
+    assert_eq!(state.players[P0.0 as usize].energy, u32::MAX);
 }
 
 #[test]

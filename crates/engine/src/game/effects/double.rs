@@ -172,7 +172,7 @@ fn resolve_double_life(
         if crate::game::effects::life::apply_life_gain(
             state,
             player_id,
-            current_life as u32,
+            current_life.unsigned_abs(),
             events,
         )
         .is_err()
@@ -180,11 +180,12 @@ fn resolve_double_life(
             return Ok(());
         }
     } else if current_life < 0 {
-        // CR 701.10d: Lose |current_life| additional life so the new total is 2x.
+        // CR 701.10d: Lose |current_life| additional life so the new total is 2x;
+        // `unsigned_abs` keeps `i32::MIN`'s magnitude (2^31) representable.
         if crate::game::effects::life::apply_life_loss(
             state,
             player_id,
-            (-current_life) as u32,
+            current_life.unsigned_abs(),
             events,
         )
         .is_err()
@@ -1092,6 +1093,91 @@ mod tests {
 
         // CR 701.10d: 15 life → 30 life
         assert_eq!(state.players[0].life, 30);
+    }
+
+    /// Beacon of Immortality's verbatim Oracle text (not in the test fixture).
+    const BEACON_OF_IMMORTALITY: &str = "Double target player's life total. Shuffle Beacon of \
+                                         Immortality into its owner's library.";
+
+    /// Beacon of Immortality's spell ability, parsed from its Oracle text,
+    /// targeting P0. This module's `resolve` runs its head effect, the
+    /// doubling; the shuffle is its sub-ability and does not run here.
+    fn beacon_of_immortality_targeting_p0() -> ResolvedAbility {
+        let parsed = crate::parser::oracle::parse_oracle_text(
+            BEACON_OF_IMMORTALITY,
+            "Beacon of Immortality",
+            &[],
+            &["Instant".to_string()],
+            &[],
+        );
+        let spell = parsed
+            .abilities
+            .first()
+            .expect("Beacon of Immortality's spell ability parses");
+        assert!(
+            matches!(
+                &*spell.effect,
+                Effect::Double {
+                    target_kind: DoubleTarget::LifeTotal,
+                    ..
+                }
+            ),
+            "reach guard: Beacon of Immortality's head effect doubles a life total, got {:?}",
+            spell.effect
+        );
+        crate::game::ability_utils::build_resolved_from_def_with_targets(
+            spell,
+            ObjectId(100),
+            PlayerId(0),
+            vec![TargetRef::Player(PlayerId(0))],
+        )
+    }
+
+    /// CR 701.10d: doubling a negative life total loses its magnitude, so the
+    /// new total is twice the old one. The ability is Beacon of Immortality's
+    /// ("Double target player's life total. Shuffle Beacon of Immortality into
+    /// its owner's library."), targeting P0.
+    #[test]
+    fn double_negative_life_total_loses_its_magnitude() {
+        let mut state = GameState::default();
+        state.players[0].life = -7;
+
+        let mut events = Vec::new();
+        let ability = beacon_of_immortality_targeting_p0();
+
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(state.players[0].life, -14);
+        assert!(events.iter().any(|event| matches!(
+            event,
+            GameEvent::LifeChanged { player_id, amount: -7, .. } if *player_id == PlayerId(0)
+        )));
+    }
+
+    /// CR 701.10d: the magnitude of a life total of `i32::MIN` is 2^31, which
+    /// does not fit `i32`; doubling takes it as a `u32` instead of overflowing
+    /// on negation, and the effect resolves. The ability is Beacon of
+    /// Immortality's ("Double target player's life total. Shuffle Beacon of
+    /// Immortality into its owner's library."), targeting P0;
+    /// `life_total_saturation.rs` casts the card on a player at `i32::MIN` in
+    /// `doubling_a_life_total_at_i32_min_reports_the_saturated_loss`.
+    #[test]
+    fn double_life_total_at_i32_min_takes_the_magnitude_without_overflow() {
+        let mut state = GameState::default();
+        state.players[0].life = i32::MIN;
+
+        let mut events = Vec::new();
+        let ability = beacon_of_immortality_targeting_p0();
+
+        assert_eq!(resolve(&mut state, &ability, &mut events), Ok(()));
+        assert_eq!(state.players[0].life, i32::MIN);
+        assert!(events.iter().any(|event| matches!(
+            event,
+            GameEvent::EffectResolved {
+                kind: EffectKind::Double,
+                ..
+            }
+        )));
     }
 
     /// CR 701.10d + CR 119.7: Doubling life routes through `apply_life_gain`, so

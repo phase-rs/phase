@@ -127,14 +127,17 @@ pub enum EngineError {
         player: PlayerId,
         pending: Box<crate::types::game_state::PendingCast>,
     },
-    /// A life, player-counter or energy change in this action proved
-    /// unrepresentable (the final amount, the life total, the per-turn
-    /// gained/lost counter, or the counter/energy total does not fit the
-    /// engine's `i32`/`u32` storage). Representability is an engine limit, not
-    /// a game rule; the action boundary rejects the whole action and restores
-    /// its pre-action snapshot rather than silently skipping the change.
+    /// A player-counter or energy change in this action (including one nested
+    /// under a life change) proved unrepresentable: its amount does not fit an
+    /// `i32` delta, its total would pass `u32::MAX`, or a replacement quantity
+    /// for it overflowed. A life change never does: it carries any `u32` amount
+    /// exactly, a life replacement quantity saturates at `u32::MAX`, and a life
+    /// total and its per-turn counters saturate at their limits.
+    /// Representability is an engine limit, not a game rule; the action
+    /// boundary rejects the whole action and restores its pre-action snapshot
+    /// rather than silently skipping the change.
     #[error("Player-resource change is not representable for player {player:?}")]
-    LifeChangeUnrepresentable { player: PlayerId },
+    PlayerResourceChangeUnrepresentable { player: PlayerId },
 }
 
 /// Converts an engine error into stable client-facing metadata without ever
@@ -153,7 +156,9 @@ pub(crate) fn action_rejection_for_engine_error(
         | EngineError::SpellCastReversed { .. } => ActionRejectionCode::ActionNotAllowed,
         // Representability is an engine limit, not a distinct client action
         // class: expose the existing safe code without the diagnostic payload.
-        EngineError::LifeChangeUnrepresentable { .. } => ActionRejectionCode::InvalidAction,
+        EngineError::PlayerResourceChangeUnrepresentable { .. } => {
+            ActionRejectionCode::InvalidAction
+        }
     };
     ActionRejection::from_code(code, related_object_ids)
 }
@@ -1406,24 +1411,25 @@ impl ProspectiveSimulationOutcome {
 }
 
 /// Closes this boundary's ingress window and restores the window that was open
-/// before it. Returns the player whose life, player-counter or energy change
-/// failed inside the boundary.
+/// before it. Returns the player whose player-counter or energy change, on its own or nested
+/// under a life change, failed inside the boundary.
 fn close_ingress_window(
     state: &mut GameState,
-    prior: &mut Option<crate::types::game_state::IngressLifeWindow>,
+    prior: &mut Option<crate::types::game_state::IngressPlayerResourceWindow>,
 ) -> Option<PlayerId> {
-    let window = state.ingress_life_window.take();
-    state.ingress_life_window = prior.take();
+    let window = state.ingress_player_resource_window.take();
+    state.ingress_player_resource_window = prior.take();
     window.and_then(|window| window.failed_player)
 }
 
-/// The player whose life, player-counter or energy change inside the current
-/// action proved unrepresentable, if any. An open ingress window records the first failure;
+/// The player whose player-counter or energy change, on its own or nested under a life change,
+/// proved unrepresentable inside the current action, if any. An open ingress window records the
+/// first failure;
 /// the enclosing action boundary turns it into a rejection and restores its
 /// pre-action snapshot.
-fn boundary_life_change_failure(state: &GameState) -> Option<PlayerId> {
+fn boundary_player_resource_failure(state: &GameState) -> Option<PlayerId> {
     state
-        .ingress_life_window
+        .ingress_player_resource_window
         .and_then(|window| window.failed_player)
 }
 
@@ -1581,9 +1587,11 @@ fn apply_action_boundary_core(
     // A player-resource change this action resolves must be representable: open
     // the ingress window after transient cleanup (which clears any prior window)
     // and close it before returning a `RawActionApplication`. Every ordinary
-    // life, player-counter and energy settlement records a failure here instead of silently treating the
-    // change as zero, so the boundary rejects the whole action atomically.
-    state.ingress_life_window = Some(crate::types::game_state::IngressLifeWindow::default());
+    // player-counter or energy settlement, on its own or nested under a life change, records a
+    // failure here instead of silently treating the change as zero, so the boundary rejects the
+    // whole action atomically.
+    state.ingress_player_resource_window =
+        Some(crate::types::game_state::IngressPlayerResourceWindow::default());
     // CR 601.2c + CR 602.2b + CR 603.2: the live announcement's trigger
     // carrier is held by `announcement_triggers` for this action. The boundary
     // snapshot above still holds it on its `PendingCast`, so every restore path
@@ -1618,21 +1626,21 @@ fn apply_action_boundary_core(
                     None,
                     role,
                 ) {
-                    let failure = boundary_life_change_failure(state);
+                    let failure = boundary_player_resource_failure(state);
                     lifecycle.discard();
                     *state = cast_undo_boundary.restore(boundary_snapshot);
                     return Err(failure.map_or(error, |player| {
-                        EngineError::LifeChangeUnrepresentable { player }
+                        EngineError::PlayerResourceChangeUnrepresentable { player }
                     }));
                 }
             }
             if boundary_snapshot.spell_cast_reversal.is_none() {
-                let failure = boundary_life_change_failure(state);
+                let failure = boundary_player_resource_failure(state);
                 lifecycle.discard();
                 *state = cast_undo_boundary.restore(boundary_snapshot);
                 return Err(failure.map_or_else(
                     || EngineError::ActionNotAllowed("Cannot pay required additional cost".into()),
-                    |player| EngineError::LifeChangeUnrepresentable { player },
+                    |player| EngineError::PlayerResourceChangeUnrepresentable { player },
                 ));
             }
             let settlement = (|| {
@@ -1653,11 +1661,11 @@ fn apply_action_boundary_core(
             let (events, waiting) = match settlement {
                 Ok(settled) => settled,
                 Err(error) => {
-                    let failure = boundary_life_change_failure(state);
+                    let failure = boundary_player_resource_failure(state);
                     lifecycle.discard();
                     *state = cast_undo_boundary.restore(boundary_snapshot);
                     return Err(failure.map_or(error, |player| {
-                        EngineError::LifeChangeUnrepresentable { player }
+                        EngineError::PlayerResourceChangeUnrepresentable { player }
                     }));
                 }
             };
@@ -1666,14 +1674,12 @@ fn apply_action_boundary_core(
             ActionResult::applied(events, waiting)
         }
         Err(err) => {
-            let failure = boundary_life_change_failure(state);
+            let failure = boundary_player_resource_failure(state);
             lifecycle.discard();
             *state = cast_undo_boundary.restore(boundary_snapshot);
-            return Err(
-                failure.map_or(err, |player| EngineError::LifeChangeUnrepresentable {
-                    player,
-                }),
-            );
+            return Err(failure.map_or(err, |player| {
+                EngineError::PlayerResourceChangeUnrepresentable { player }
+            }));
         }
     };
     // CR 602.2b + CR 601.2h: an activation whose elected total cannot be paid is
@@ -1684,10 +1690,10 @@ fn apply_action_boundary_core(
     // `finish_action_boundary` then runs no auto-pass, resolves no log entries
     // and discards the lifecycle frame for a reversed result.
     if !result.disposition.is_applied() {
-        if let Some(player) = boundary_life_change_failure(state) {
+        if let Some(player) = boundary_player_resource_failure(state) {
             lifecycle.discard();
             *state = cast_undo_boundary.restore(boundary_snapshot);
-            return Err(EngineError::LifeChangeUnrepresentable { player });
+            return Err(EngineError::PlayerResourceChangeUnrepresentable { player });
         }
         let reversal = result.waiting_for.clone();
         *state = boundary_snapshot.as_ref().clone();
@@ -1740,14 +1746,12 @@ fn apply_action_boundary_core(
         }
         Ok(None) => false,
         Err(err) => {
-            let failure = boundary_life_change_failure(state);
+            let failure = boundary_player_resource_failure(state);
             lifecycle.discard();
             *state = cast_undo_boundary.restore(boundary_snapshot);
-            return Err(
-                failure.map_or(err, |player| EngineError::LifeChangeUnrepresentable {
-                    player,
-                }),
-            );
+            return Err(failure.map_or(err, |player| {
+                EngineError::PlayerResourceChangeUnrepresentable { player }
+            }));
         }
     };
     let realized_token_entry =
@@ -1765,14 +1769,12 @@ fn apply_action_boundary_core(
         || owed_spell_final_part_is_due
     {
         if let Err(err) = run_boundary_convergence_pipeline(state, &mut result, scan_from) {
-            let failure = boundary_life_change_failure(state);
+            let failure = boundary_player_resource_failure(state);
             lifecycle.discard();
             *state = cast_undo_boundary.restore(boundary_snapshot);
-            return Err(
-                failure.map_or(err, |player| EngineError::LifeChangeUnrepresentable {
-                    player,
-                }),
-            );
+            return Err(failure.map_or(err, |player| {
+                EngineError::PlayerResourceChangeUnrepresentable { player }
+            }));
         }
     }
     // CR 603.2 + CR 603.3: events this action emitted while the announcement
@@ -1784,14 +1786,14 @@ fn apply_action_boundary_core(
     let reducer_wait = std::mem::replace(&mut state.waiting_for, result.waiting_for.clone());
     super::announcement_triggers::end_action(state, &result.events);
     result.waiting_for = std::mem::replace(&mut state.waiting_for, reducer_wait);
-    if let Some(player) = boundary_life_change_failure(state) {
+    if let Some(player) = boundary_player_resource_failure(state) {
         lifecycle.discard();
         *state = cast_undo_boundary.restore(boundary_snapshot);
-        return Err(EngineError::LifeChangeUnrepresentable { player });
+        return Err(EngineError::PlayerResourceChangeUnrepresentable { player });
     }
     // Do not carry the core's window into finalization: that pass owns its own
     // scope over convergence, auto-pass, and re-convergence.
-    state.ingress_life_window = None;
+    state.ingress_player_resource_window = None;
     Ok(RawActionApplication {
         result,
         journal_start,
@@ -2332,21 +2334,20 @@ fn finish_action_boundary_with_lifecycle(
     // Finalization owns the remainder of the action (convergence, auto-pass,
     // reconvergence), so it needs its own ingress window: the core boundary
     // closed its window before handing the raw application over.
-    let mut prior_window = state.ingress_life_window.take();
-    state.ingress_life_window = Some(crate::types::game_state::IngressLifeWindow::default());
+    let mut prior_window = state.ingress_player_resource_window.take();
+    state.ingress_player_resource_window =
+        Some(crate::types::game_state::IngressPlayerResourceWindow::default());
     if let Err(err) = reconcile_terminal_result_completing_resolution(
         state,
         &mut result,
         reconcile_terminal_result,
     ) {
-        let life_failure = close_ingress_window(state, &mut prior_window);
+        let player_resource_failure = close_ingress_window(state, &mut prior_window);
         lifecycle.discard();
         *state = std::sync::Arc::unwrap_or_clone(boundary_snapshot);
-        return Err(
-            life_failure.map_or(err, |player| EngineError::LifeChangeUnrepresentable {
-                player,
-            }),
-        );
+        return Err(player_resource_failure.map_or(err, |player| {
+            EngineError::PlayerResourceChangeUnrepresentable { player }
+        }));
     }
     bump_state_revision(state);
     sync_waiting_for(state, &result.waiting_for);
@@ -2368,11 +2369,11 @@ fn finish_action_boundary_with_lifecycle(
         match run_auto_pass_loop(state, &mut result) {
             Ok(advanced) => advanced,
             Err(error) => {
-                let life_failure = close_ingress_window(state, &mut prior_window);
+                let player_resource_failure = close_ingress_window(state, &mut prior_window);
                 lifecycle.discard();
                 *state = std::sync::Arc::unwrap_or_clone(boundary_snapshot);
-                return Err(life_failure.map_or(error, |player| {
-                    EngineError::LifeChangeUnrepresentable { player }
+                return Err(player_resource_failure.map_or(error, |player| {
+                    EngineError::PlayerResourceChangeUnrepresentable { player }
                 }));
             }
         }
@@ -2385,14 +2386,12 @@ fn finish_action_boundary_with_lifecycle(
     };
     if let Err(err) = reconcile_terminal_result_completing_resolution(state, &mut result, reconcile)
     {
-        let life_failure = close_ingress_window(state, &mut prior_window);
+        let player_resource_failure = close_ingress_window(state, &mut prior_window);
         lifecycle.discard();
         *state = std::sync::Arc::unwrap_or_clone(boundary_snapshot);
-        return Err(
-            life_failure.map_or(err, |player| EngineError::LifeChangeUnrepresentable {
-                player,
-            }),
-        );
+        return Err(player_resource_failure.map_or(err, |player| {
+            EngineError::PlayerResourceChangeUnrepresentable { player }
+        }));
     }
     if matches!(result.waiting_for, WaitingFor::GameOver { .. }) {
         take_and_restore_stack_resolution_session(state);
@@ -2431,17 +2430,17 @@ fn finish_action_boundary_with_lifecycle(
         )
         .is_err()
         {
-            let life_failure = close_ingress_window(state, &mut prior_window);
+            let player_resource_failure = close_ingress_window(state, &mut prior_window);
             lifecycle.discard();
             *state = std::sync::Arc::unwrap_or_clone(boundary_snapshot);
-            return Err(life_failure.map_or_else(
+            return Err(player_resource_failure.map_or_else(
                 || {
                     EngineError::InvalidAction(
                         "Unable to allocate interaction authority for the resulting decision"
                             .to_string(),
                     )
                 },
-                |player| EngineError::LifeChangeUnrepresentable { player },
+                |player| EngineError::PlayerResourceChangeUnrepresentable { player },
             ));
         }
     }
@@ -2474,19 +2473,17 @@ fn finish_action_boundary_with_lifecycle(
         Ok::<_, EngineError>(())
     })();
     if let Err(error) = recording {
-        let life_failure = close_ingress_window(state, &mut prior_window);
+        let player_resource_failure = close_ingress_window(state, &mut prior_window);
         lifecycle.discard();
         *state = std::sync::Arc::unwrap_or_clone(boundary_snapshot);
-        return Err(
-            life_failure.map_or(error, |player| EngineError::LifeChangeUnrepresentable {
-                player,
-            }),
-        );
+        return Err(player_resource_failure.map_or(error, |player| {
+            EngineError::PlayerResourceChangeUnrepresentable { player }
+        }));
     }
     if let Some(player) = close_ingress_window(state, &mut prior_window) {
         lifecycle.discard();
         *state = std::sync::Arc::unwrap_or_clone(boundary_snapshot);
-        return Err(EngineError::LifeChangeUnrepresentable { player });
+        return Err(EngineError::PlayerResourceChangeUnrepresentable { player });
     }
     #[cfg(debug_assertions)]
     super::perf_counters::outside_take_cost(|| debug_assert_runtime_resolution_invariants(state));
@@ -2858,8 +2855,9 @@ fn interactive_loop_bridge_paths(
             // CR 732.2a: OPTIONAL winning drain — only the player with priority may propose
             // the shortcut. Keep that proposer distinct from the already-measured winner; a
             // loop can be detected during a different player's priority window.
-            // `build_cert`'s only use of the frame is `board_delta(prior, state)`, a
-            // comparand read ⇒ the CR 104.4b `.normalized` half.
+            // `build_cert` reads the frame for `board_delta(prior, state)`, a comparand read ⇒ the
+            // CR 104.4b `.normalized` half, and for `with_life_attributed`'s life fields and
+            // per-turn counters, which `normalize_for_loop` leaves untouched.
             let certificate = build_cert(&prior.normalized, state, &delta, winner, None);
             // CR 732.2a: a non-targeted drain reifies no per-iteration player choice ⇒ carry an
             // empty pin list; only the `iteration_count` (from `win_kind`) is populated.
@@ -3340,6 +3338,14 @@ fn find_live_loop_winner(
 /// residual via the SINGLE `board_delta` population seam (`loop_check.rs` invariant — NOT
 /// `BoardDelta::default()`); empty for a constant-depth drain, non-empty for the ω growing
 /// cascade where the Phase-4 materialization consumer reads it.
+///
+/// CR 810.9 + CR 810.9a: every certificate's ∞ axes read life through
+/// `ResourceVector::with_life_attributed` on `prior` → `state`, so where every member's counters
+/// count a shared total's change, it is advertised on the members it happened to rather than on
+/// the fields the spread stored it in; a total with more than one member, an unreadable counter
+/// and a moved field advertises no life axis; and where the counters do not count the stored
+/// change (a loss held at `i32::MIN` before a gain) the field delta's entries stand. `win_kind`
+/// reads `delta`.
 fn build_cert(
     prior: &GameState,
     state: &GameState,
@@ -3357,9 +3363,10 @@ fn build_cert(
         Some(certified) => delta.without_certified_departure(&certified.per_victim),
         None => delta.clone(),
     };
+    let attributed = delta.with_life_attributed(prior, state);
     crate::analysis::loop_check::LoopCertificate {
-        unbounded: delta.unbounded_axes_for(winner),
-        rising: delta.rising_unbounded_axes_for(winner),
+        unbounded: attributed.unbounded_axes_for(winner),
+        rising: attributed.rising_unbounded_axes_for(winner),
         win_kind: Some(crate::analysis::loop_check::classify_win_kind(
             winner,
             &win_kind_delta,
@@ -4105,7 +4112,8 @@ fn bounded_offer_tail(
 
     // (8) The certificate, with the two fields the bounded class states differently from
     // Path A's spelled out at the site rather than mutated after the fact.
-    // `build_cert`'s only use of the pair is `board_delta`, a comparand read.
+    // `build_cert` reads the pair for `board_delta`, a comparand read, and for
+    // `with_life_attributed`'s life fields and per-turn counters.
     let mut base = build_cert(cert_prior, current, &periodic.delta, proposer, None);
     // CR 500.7 + CR 121.4: a turn-cycle period grows its caster's extra turns and consumes its
     // library, which the cascade bounds.
@@ -6080,8 +6088,8 @@ fn apply_until_lethal_shortcut(
                 &mut Vec::new(),
             ) {
                 Ok(()) => w,
-                Err(OfferRefusal::LifeChangeUnrepresentable { player }) => {
-                    return Err(EngineError::LifeChangeUnrepresentable { player });
+                Err(OfferRefusal::PlayerResourceChangeUnrepresentable { player }) => {
+                    return Err(EngineError::PlayerResourceChangeUnrepresentable { player });
                 }
                 Err(_) => {
                     until_lethal_fallback(state, result, committed, proposal.proposer);
@@ -6534,11 +6542,12 @@ fn drive_one_shortcut_cycle(
         // already-consumed triggers.
         let mut beat_events: Vec<GameEvent> = Vec::new();
         let pipeline = pass_priority_once_with_pipeline(&mut work, &mut beat_events, None);
-        // CR 732.2a: the driven beat runs on a private work clone, but its life-ingress marker
-        // belongs to the enclosing public Accept action. A low-level life settle may record the
-        // failure while returning `Ok`; do not let a later `Abort`/fallback discard that marker.
-        if let Some(player) = boundary_life_change_failure(&work) {
-            return Err(EngineError::LifeChangeUnrepresentable { player });
+        // CR 732.2a: the driven beat runs on a private work clone, but a failure in its
+        // player-resource window belongs to the enclosing public Accept action. A low-level
+        // player-counter or energy settle (a life change saturates instead) may record it while
+        // returning `Ok`; do not let a later `Abort`/fallback discard it.
+        if let Some(player) = boundary_player_resource_failure(&work) {
+            return Err(EngineError::PlayerResourceChangeUnrepresentable { player });
         }
         match pipeline {
             // Cross-lethal: COMMIT + STOP. The GameOver event + transition are already in
@@ -6629,11 +6638,12 @@ fn drive_one_shortcut_cycle(
             }) => {
                 ev.append(&mut beat_events);
                 let answer = inject_pinned_answer(&mut work, template, iteration, &other);
-                // The injector's low-level action can also have recorded an unrepresentable life
-                // change in this work clone without returning an error. Preserve it at the same
+                // The injector's low-level action can also have recorded an unrepresentable
+                // player-counter or energy change (a life change saturates instead) in this
+                // work clone without returning an error. Preserve it at the same
                 // public-cycle seam before an ordinary injector refusal maps to `Abort`.
-                if let Some(player) = boundary_life_change_failure(&work) {
-                    return Err(EngineError::LifeChangeUnrepresentable { player });
+                if let Some(player) = boundary_player_resource_failure(&work) {
+                    return Err(EngineError::PlayerResourceChangeUnrepresentable { player });
                 }
                 match answer {
                     Ok(mut answer_events) => {
@@ -6663,7 +6673,9 @@ fn drive_one_shortcut_cycle(
                     Err(RecastAbort) => return Ok(CycleOutcome::Abort),
                 }
             }
-            Err(error @ EngineError::LifeChangeUnrepresentable { .. }) => return Err(error),
+            Err(error @ EngineError::PlayerResourceChangeUnrepresentable { .. }) => {
+                return Err(error)
+            }
             Err(_) => return Ok(CycleOutcome::Abort), // engine error ⇒ abort to manual
         }
     }
@@ -6947,9 +6959,12 @@ fn departure_verdict(
 
 /// Which drive takes an accepted proposal (CR 732.2c).
 enum TakeRoute {
-    /// The confirmed period, performed now.
+    /// The confirmed period, performed now: `materialize_fixed_shortcut` drives it with
+    /// `drive_persistent_axis_collapse`, and `apply_until_lethal_shortcut` takes the ring arm.
     Replay,
-    /// CR 732.1b: the ∞ mark, whose count its controller names when the step ends.
+    /// CR 732.1b: the ∞ mark. Its batched life lands at the take, at the accepted count
+    /// (CR 732.2c); its tokens and counters are applied when the step ends, at the count its
+    /// controller names there.
     Mark(Box<PeriodGrowth>),
     /// The ring drain.
     Ring,
@@ -6961,8 +6976,12 @@ enum TakeRoute {
 /// the mark would refill restricted mana without its restriction (CR 106.6), it batches none of
 /// the damage a period marks (CR 120.3e), its mint makes bare tapped copies under the proposer,
 /// without a keyword, delayed trigger, other controller or certified departure the cover admitted
-/// as growth, its batched collapse must not miss what the board observes, and a signed proposal's
-/// departures are seen only as its repetitions cross them (CR 704.3).
+/// as growth, its batched collapse must not miss what the board observes, every life change in
+/// its cycle must be a gain stored whole on its player's own field (CR 119.3 + CR 810.9), since
+/// a lump carries gains only, none of its cycles may carry a total its gains touch or a gaining
+/// player's own field past an `i32` limit, and it may batch life only alone, since the life lands
+/// at the take (CR 732.2c), and a signed proposal's departures are seen only as its repetitions
+/// cross them (CR 704.3).
 fn take_route(
     state: &GameState,
     proposal: &crate::analysis::loop_check::ShortcutProposal,
@@ -6983,8 +7002,9 @@ fn take_route(
         return TakeRoute::Replay;
     }
     // Every accept-time derivation below reads this one driven cycle.
-    let frames = drive_one_period_frames(state, &proposal.period, proposal.proposer);
-    if adds_restricted_mana(frames.as_ref(), proposal.proposer) || marks_damage(frames.as_ref()) {
+    let driven = drive_one_period_frames(state, &proposal.period, proposal.proposer);
+    let frames = driven.as_ref().map(|cycle| &cycle.frames);
+    if adds_restricted_mana(frames, proposal.proposer) || marks_damage(frames) {
         return TakeRoute::Replay;
     }
     // CR 601.2f + CR 107.14 + CR 732.2c: the mark materializes token/counter/life growth but
@@ -6998,8 +7018,8 @@ fn take_route(
     }) {
         return TakeRoute::Replay;
     }
-    let growth = PeriodGrowth::derive(frames.as_ref(), proposal.proposer);
-    if growth.collapse_is_replay(state, proposal) {
+    let growth = PeriodGrowth::derive(driven.as_ref(), proposal.proposer);
+    if growth.collapse_is_replay(state, proposal, n) {
         TakeRoute::Replay
     } else {
         TakeRoute::Mark(Box::new(growth))
@@ -7007,19 +7027,36 @@ fn take_route(
 }
 
 /// CR 732.2a: one accepted period's growth, derived at accept from one driven cycle: the fodder
-/// its ∞ pile is drawn from, and the batched N×δ items a marked take's CR 500.5 collapse applies.
+/// its ∞ pile is drawn from, the batched N×δ items a marked take applies (its life at the take,
+/// its tokens and counters at the CR 500.5 collapse), and the readings that decide whether the
+/// lump lands what performing lands.
 struct PeriodGrowth {
     fodder: Option<PeriodFodder>,
     batched: Vec<crate::types::game_state::PersistentAxisMaterialization>,
+    /// CR 119.3 + CR 810.9 + CR 810.9a: the players whose life change in the driven cycle is not
+    /// a gain stored whole on their own field, as far as the cycle's events and counters can say
+    /// (`analysis::resource::life_not_stored_as_gains`). Empty on every growth the Mark route
+    /// keeps.
+    life_not_stored_as_gains: BTreeSet<PlayerId>,
+    /// CR 119.3: what the driven cycle's `LifeChanged` events report
+    /// (`analysis::resource::cycle_life_changes`), read by the field above and by
+    /// [`Self::life_passes_a_limit`]. Empty where the cycle did not complete.
+    life_changes: crate::analysis::resource::CycleLifeChanges,
 }
 
 impl PeriodGrowth {
-    fn derive(frames: Option<&(GameState, GameState)>, controller: PlayerId) -> Self {
+    fn derive(cycle: Option<&DrivenCycle>, controller: PlayerId) -> Self {
         use crate::types::game_state::{PersistentAxisMaterialization, TokenGrowth};
-        let Some((before, after)) = frames else {
+        let Some(DrivenCycle {
+            frames: (before, after),
+            events,
+        }) = cycle
+        else {
             return Self {
                 fodder: None,
                 batched: Vec::new(),
+                life_not_stored_as_gains: BTreeSet::new(),
+                life_changes: Default::default(),
             };
         };
         let fodder = current_period_fodder(before, after, controller);
@@ -7046,15 +7083,28 @@ impl PeriodGrowth {
                 per_cycle_delta,
             },
         ));
-        Self { fodder, batched }
+        let life_changes = crate::analysis::resource::cycle_life_changes(after, events);
+        Self {
+            fodder,
+            batched,
+            life_not_stored_as_gains: crate::analysis::resource::life_not_stored_as_gains(
+                before,
+                after,
+                &life_changes,
+            ),
+            life_changes,
+        }
     }
 
     /// CR 732.2c: whether the batched collapse would land a state other than performing the
-    /// period does, so the take performs it instead. Read off the items it would register.
+    /// period does, so the take performs it instead. Read off the items it would batch, off the
+    /// driven cycle's life changes (`life_not_stored_as_gains`), and off whether any of this
+    /// take's `n` cycles passes an `i32` life limit ([`Self::life_passes_a_limit`]).
     fn collapse_is_replay(
         &self,
         state: &GameState,
         proposal: &crate::analysis::loop_check::ShortcutProposal,
+        n: u32,
     ) -> bool {
         use crate::analysis::resource as res;
         use crate::types::game_state::PersistentAxisMaterialization as Item;
@@ -7076,13 +7126,34 @@ impl PeriodGrowth {
             axis.unbounded_mark_kind() == res::UnboundedMarkKind::DeferredAccrual
                 && crate::types::game_state::LoopCollapseAxis::from_resource_axis(*axis).is_none()
         });
+        // CR 732.2c + CR 119.3 + CR 810.9 + CR 810.9a: some life change in the driven cycle is
+        // not a gain stored whole on its player's own field: a loss of any size, a gain the spread
+        // stored on a teammate, a gain an `i32` limit held back where its player's counters are
+        // readable (`life_passes_a_limit` below reads one whose counter is pinned), or a shared
+        // total's change its unreadable counters cannot attribute. The lump carries per-player
+        // gains read off the fields, so it would add nothing to a lost counter and only the net to
+        // a gained counter, or credit or drop the change, where performing the cycles stores each
+        // change and counts it as it happens. A cycle that nets nothing, or only spills, may batch
+        // no item at all, so this is read whatever the take batches.
+        let life_not_stored_as_gains = !self.life_not_stored_as_gains.is_empty();
+        // CR 732.2c + CR 119.3: one of this take's `n` cycles would carry a total its gains
+        // touch, or a gaining player's own field, past an `i32` limit. Where two or more members'
+        // gains share that total, the lump and the cycles can store the held-back part on
+        // different members' fields, so the take performs the cycles; where one player gains on
+        // it the lump stores the same total, fields and counters, and this check is conservative.
+        // A take with no `Life` item can still pass one (a gain held at the cap), so this too is
+        // read whatever the take batches.
+        let life_passes_a_limit = self.life_passes_a_limit(state, n);
         // CR 122.1 / CR 119.3: a lump counter or life application fires an observer once, not
         // once per cycle.
         let counter_observed = counters && res::counter_growth_is_observed(state);
         let life_observed = life && res::life_growth_is_observed(state);
-        // CR 603.6a: the minted tokens' entries would re-earn the batched life.
-        let life_etb_sourced =
-            life && token_profile.is_some() && res::board_has_functioning_etb_trigger(state);
+        // CR 732.2c: a marked take applies its life at the take, at the accepted count, and a
+        // `Tokens` or `Counters` item at the CR 500.5 collapse, at the count its controller names
+        // there. Beside such an item the lump would leave the axes at two different counts, so
+        // the take performs every axis instead. This also covers CR 603.6a: the minted tokens'
+        // entries would re-earn an ETB-sourced batched life.
+        let life_beside_deferred_growth = life && (token_profile.is_some() || counters);
         // CR 601.2i: the batched collapse casts nothing, so no cast trigger re-fires.
         let cast_sourced = res::board_has_functioning_cast_trigger(state);
         // CR 614.1a: a per-cycle count above one may already carry a replacement's factor, which
@@ -7090,13 +7161,96 @@ impl PeriodGrowth {
         let token_growth_needs_replay = token_profile
             .is_some_and(|growth| growth.per_cycle_delta > 1)
             && res::token_growth_is_observed(state);
+        // With these, no life is left pending past the take: a batched `Life` item lands at the
+        // take, alone, as a gain each cycle stores whole, so no later change can reorder against
+        // it.
         unbatchable_deferred
+            || life_not_stored_as_gains
+            || life_passes_a_limit
             || (!self.batched.is_empty()
                 && (counter_observed
                     || life_observed
-                    || life_etb_sourced
+                    || life_beside_deferred_growth
                     || cast_sourced
                     || token_growth_needs_replay))
+    }
+
+    /// CR 119.3 + CR 810.9 + CR 810.9a + CR 732.2c: whether a batched take of `n` cycles from
+    /// `state` would meet an `i32` life limit (an engine limit, not a rule) that performing the
+    /// cycles meets; the take then performs the cycles (needed where two or more members' gains
+    /// share one total, conservative where one player gains on it). It decides only for a cycle
+    /// that only gains: a cycle with a loss is performed whatever this says
+    /// (`analysis::resource::life_not_stored_as_gains`). True when either holds:
+    ///
+    /// - (a) The lump. This take's `Life` items' `n·δ`, summed against the total each item
+    ///   player's life changes adjust (`players::life_change_total`; in a shared-life format every
+    ///   member's items count against their one shared total, CR 810.9a: both teammates' in a
+    ///   Two-Headed Giant team, CR 810.4, every hero's in Archenemy Commander, CR 904.13b, and
+    ///   every survivor's in a Horde game, `topology::has_shared_life`; keyed by
+    ///   `topology::shared_life_dedup_key`) and against each item player's own field, which
+    ///   the spread (`players::spread_life_change`) fills first, does not move that total or
+    ///   field by its whole sum. This covers an item whose player no event of the cycle names (a
+    ///   field that only received a teammate's spill), so no lump is applied unchecked.
+    /// - (b) A total the driven cycle's gains touch cannot take `n` cycles of them from `state`
+    ///   (`analysis::resource::CycleLifeChanges`). The events report each gain's rules amount
+    ///   (CR 119.3), which a pinned per-turn counter cannot hide, so a gain held at the cap with
+    ///   no item is caught.
+    ///
+    /// Each test is the edit authority's own saturation (`arithmetic::saturating_life_total`);
+    /// the sums saturate in `i64`, and a saturated sum passes any limit. A take whose cycle gains
+    /// nothing and batches no `Life` item reads false whatever other seats hold, and a cycle that
+    /// reaches a limit exactly passes none.
+    fn life_passes_a_limit(&self, state: &GameState, n: u32) -> bool {
+        use crate::game::{arithmetic, players, topology};
+        use crate::types::game_state::PersistentAxisMaterialization as Item;
+        let field_of = |player: PlayerId| {
+            state
+                .players
+                .iter()
+                .find(|p| p.id == player)
+                .map_or(0, |p| i64::from(p.life))
+        };
+        let lumps: Vec<(PlayerId, i64)> = self
+            .batched
+            .iter()
+            .filter_map(|item| match item {
+                Item::Life {
+                    player,
+                    per_cycle_delta,
+                } => Some((
+                    *player,
+                    i64::from(*per_cycle_delta).saturating_mul(i64::from(n)),
+                )),
+                Item::Tokens(_) | Item::Counters(_) => None,
+            })
+            .collect();
+        // (a) The lump, per total and per item player's own field: (start, sum).
+        let mut totals: BTreeMap<topology::SharedLifeKey, (i64, i64)> = BTreeMap::new();
+        let mut fields: BTreeMap<PlayerId, (i64, i64)> = BTreeMap::new();
+        for &(player, lump) in &lumps {
+            let (_, sum) = totals
+                .entry(topology::shared_life_dedup_key(state, player))
+                .or_insert_with(|| (players::life_change_total(state, player), 0));
+            *sum = sum.saturating_add(lump);
+            let (_, sum) = fields
+                .entry(player)
+                .or_insert_with(|| (field_of(player), 0));
+            *sum = sum.saturating_add(lump);
+        }
+        let passes =
+            |start: i64, sum: i64| arithmetic::saturating_life_total(start, sum) - start != sum;
+        let lump_passes = totals
+            .values()
+            .chain(fields.values())
+            .any(|&(start, sum)| passes(start, sum));
+        // (b) Each total the cycle's gains touch, from its start on this board.
+        let total_passes = self.life_changes.gains().any(|(player, gained)| {
+            passes(
+                players::life_change_total(state, player),
+                gained.saturating_mul(i64::from(n)),
+            )
+        });
+        lump_passes || total_passes
     }
 }
 
@@ -7162,8 +7316,9 @@ fn materialize_fixed_shortcut(
     // silently cap the NEXT accept's agreed count forever (a mana accept at `Fixed(1)`
     // capping a later, unanimously agreed `Fixed(500)` object-growth collapse at 1). Only the
     // object-growth route below registers anything, and even it registers CONDITIONALLY: a
-    // mana engine grows no token/counter/life axis and registers nothing at all. So the gate
-    // is a measured STASH-GREW check taken ACROSS the call — testing before it would be
+    // mana engine grows no token/counter/life axis and registers nothing at all. A life-only
+    // accept registers nothing either (its life lands at the take), so it writes no bound. So
+    // the gate is a measured STASH-GREW check taken ACROSS the call — testing before it would be
     // unconditionally false, since that call is what registers. Length-delta rather than
     // `contains_key`, so a non-registering accept cannot `min`-shrink a bound that an
     // earlier, larger, genuinely-registering accept owns.
@@ -7209,7 +7364,7 @@ fn materialize_fixed_shortcut(
                 .pending_unbounded_materialization
                 .get(&proposal.proposer)
                 .map_or(0, Vec::len);
-            materialize_object_growth_shortcut(state, result, proposal, *growth);
+            materialize_object_growth_shortcut(state, result, proposal, *growth, n)?;
             if state
                 .pending_unbounded_materialization
                 .get(&proposal.proposer)
@@ -7358,15 +7513,21 @@ fn materialize_fixed_shortcut(
                         .filter(|p| !p.is_eliminated)
                         .map(|p| p.id)
                         .collect();
-                    if !pd.conforms_in(
-                        &crate::analysis::resource::ResourceVector::period_among(
-                            &committed,
-                            &s,
-                            |seat| still_in_game.contains(&seat),
-                        ),
-                        pins,
-                        &still_in_game,
-                    ) {
+                    // CR 732.2c + CR 119.3: a repetition performed as agreed moves each seat's
+                    // life total by the published amount, stopped at the `i32` limit it moves
+                    // toward (the edit authority's saturation, an engine limit). The cycle is
+                    // checked against the published period saturated from the board it starts
+                    // on, so a proposer whose gains reach `i32::MAX` mid-take on its own field,
+                    // with no other member of its total moving, still conforms for every agreed
+                    // repetition (a change stored on a teammate's field, or two members of one
+                    // shared total that both move, reads as a different period; see
+                    // `ResourceVector::with_saturated_life_from`); where no total reaches a limit
+                    // this is the published period itself. A change a limit holds back never
+                    // invalidates the count the cascade derived (CR 704.5a): the cascade charges a
+                    // seat only its losses (`ResourceVector::seat_life_charges` credits no gain),
+                    // so a gain the cap holds back was never headroom it relied on, and a loss the
+                    // floor holds back is smaller than the one it charged.
+                    if !pd.conforms_between(&committed, &s, pins, &still_in_game) {
                         break 'cycles;
                     }
                 }
@@ -8210,13 +8371,24 @@ struct PeriodFodder {
     taps_fodder: bool,
 }
 
+/// One cycle of a confirmed period driven at accept (`drive_one_period_frames`): its
+/// `(before, after)` frames and the events the cycle emitted, in order.
+struct DrivenCycle {
+    frames: (GameState, GameState),
+    events: Vec<GameEvent>,
+}
+
 /// CR 732.2a / CR 111.1: seed a `Priority{controller}` window and perform ONE cycle of the
-/// confirmed `period` on THROWAWAY clones, returning the `(before, after)` frames.
-/// The shared seed+drive kernel of the accept-time re-derivations — `current_period_fodder`
-/// (object-growth ∞ pile), `current_period_counter_growth` (beneficial counter δ, feeding both
-/// the batched stash and the ∞ counter pills) and `current_period_life_growth` (life δ) all diff
-/// these two frames. `None` when the cycle does not complete. The `SimulationProbeGuard` is HELD
-/// across the drive so its internal `apply` never recurses into the shortcut hooks.
+/// confirmed `period` on THROWAWAY clones, returning the `(before, after)` frames and the
+/// cycle's events. The shared seed+drive kernel of the accept-time re-derivations —
+/// `current_period_fodder` (object-growth ∞ pile), `current_period_counter_growth` (beneficial
+/// counter δ, feeding both the batched stash and the ∞ counter pills) and
+/// `current_period_life_growth` (life δ) all diff these two frames, and the events feed the
+/// life readings (`analysis::resource::cycle_life_changes`, read by
+/// `analysis::resource::life_not_stored_as_gains` and `PeriodGrowth::life_passes_a_limit`).
+/// `None` when the cycle does not complete. The
+/// `SimulationProbeGuard` is HELD across the drive so its internal `apply` never recurses into
+/// the shortcut hooks.
 ///
 /// The accept beat's `waiting_for` is `RespondToShortcut`, NOT `Priority`, so the recast
 /// cannot proceed from `state` as-is — seed a `Priority{controller}` window on the driven
@@ -8235,14 +8407,18 @@ fn drive_one_period_frames(
     state: &GameState,
     period: &super::period_confirm::ConfirmedPeriod,
     controller: PlayerId,
-) -> Option<(GameState, GameState)> {
+) -> Option<DrivenCycle> {
     let _probe = SimulationProbeGuard::enter();
     let mut before = crate::game::visibility::proposer_hidden_view(state, controller);
     priority::reset_priority(&mut before);
     before.waiting_for = WaitingFor::Priority { player: controller };
     let mut after = before.clone();
-    super::period_confirm::perform_cycle(&mut after, period, controller, &mut Vec::new()).ok()?;
-    Some((before, after))
+    let mut events = Vec::new();
+    super::period_confirm::perform_cycle(&mut after, period, controller, &mut events).ok()?;
+    Some(DrivenCycle {
+        frames: (before, after),
+        events,
+    })
 }
 
 fn current_period_fodder(
@@ -8296,9 +8472,13 @@ fn current_period_counter_growth(
 }
 
 /// CR 119.3 + CR 732.2a: the per-player life GAIN δ of the accepted period, diffed off the one
-/// driven iteration's frames (`grown_life_deltas`). The batched-collapse δ source for the life
-/// axis. Empty when the period gains no life. Only reached in the UNOBSERVED batched route (the
-/// firewall gates it).
+/// driven iteration's frames (`grown_life_deltas`). The batched δ source for the life axis, which
+/// a marked take applies at the take, at the accepted count (CR 732.2c). Empty when no player's
+/// field rises across the period. A take in whose cycle some life change is not a gain stored
+/// whole on its player's own field, one of whose cycles would pass an `i32` limit, or that would
+/// batch life beside a `Tokens` or `Counters` item, is not batched: the take performs the period
+/// instead (`PeriodGrowth::collapse_is_replay`). Its items land only on the UNOBSERVED batched
+/// route (the firewall gates them).
 fn current_period_life_growth(before: &GameState, after: &GameState) -> Vec<(PlayerId, u32)> {
     crate::analysis::resource::grown_life_deltas(before, after)
 }
@@ -8340,6 +8520,9 @@ fn try_offer_object_growth_shortcut(
         return Some((certificate, schema, confirmation.period, declaration));
     }
     let [s_n1, s_n2] = *confirmation.frames;
+    // CR 810.9 + CR 810.9a: the offer advertises a shared total's change on the member it
+    // happened to, not on the field the spread stored it in, and never a change the total does
+    // not make: `build_cert` reads its axes through `with_life_attributed` on these frames.
     let certificate = build_cert(
         &s_n1,
         &s_n2,
@@ -8352,11 +8535,13 @@ fn try_offer_object_growth_shortcut(
     // threshold and passes the absence, leaving the constructor to derive a capacity at the
     // engine's own budget.
     //
-    // CR 732.2a + CR 732.2c: the count this offer STATES is the count the table binds. There is
-    // no declare-time picker (the frontend echoes `iteration_count` verbatim), and once the last
-    // player accepts, "the shortcut is taken" at that count, which then caps the CR 500.5
-    // collapse prompt. An offer that measures no threshold must therefore STATE the capacity it
-    // publishes as its ceiling; stating less silently caps the controller's collapse choice. The
+    // CR 732.2a + CR 732.2c: the count this offer STATES is the suggestion its count picker opens
+    // on (`InteractionShortcutCountSpec::Fixed`'s `suggested`, which `LoopShortcutModal` renders);
+    // no declaration may name a count above `deliverable_capacity`, published as its `max`. Once
+    // the last player accepts, "the shortcut is taken" at the declared count, which then caps the
+    // CR 500.5 collapse prompt. An offer that measures no threshold must therefore STATE the
+    // capacity it publishes as its ceiling; stating less would cap a controller who accepts the
+    // suggestion. The
     // coercion below is what states it: `build_shortcut_schema` only ever NARROWS a suggestion
     // to the capacity, so deleting this as newly redundant would publish the bare win-kind seed
     // instead. This mirrors `bounded_offer_tail`, which states its own measured
@@ -8365,7 +8550,9 @@ fn try_offer_object_growth_shortcut(
     // CR 704.5a / CR 704.5c: the `UntilLethal` arm is UNREACHABLE FROM THIS PRODUCER — `delta` is
     // a two-`snapshot` diff, and `ResourceVector::snapshot` writes neither `damage_dealt` nor
     // `extra_turns` and never keys a poison `counters` entry by `ObjectClass::Player`, while the
-    // sign check just above forces `life >= 0` and `poison <= 0` on every seat; together those
+    // sign check just above forces `life >= 0` and `poison <= 0` on every seat (and
+    // `build_cert`'s axes read `with_life_attributed`, which keeps every life entry between 0
+    // and its shared total's change, so this holds for them too); together those
     // negate every non-`Advantage` branch of `classify_win_kind` but `Decking`. The forcing
     // function for THAT one is no longer the sign check, which now admits a certified departure
     // carrying a genuinely negative `library_delta`: it is `without_certified_departure`, which
@@ -8562,11 +8749,20 @@ pub(crate) fn counted_offer(
 /// determinate crown uses (`mark_unbounded_loop`; see the reconcile seam above). The offer's
 /// cover admitted the growing class as inert and unobserved, and `board_covers_modulo_fodder`'s
 /// tapped split kept the UNTAPPED remainder finite while the total grows — so the TAPPED
-/// members are the unbounded pile. The board therefore needs NO
-/// mutation: the finite untapped reals stay as-is, and the pre-existing tapped fodder ARE the ∞
-/// pile (the HUD / battlefield render the marked axis as `∞`). For a mana engine the axes are
-/// `Mana(_)`, feeding the existing infinite-mana pool reseed. Every OFFERED growth loop is
-/// certified-unbounded, so `proposal.unbounded` is non-empty (an empty set is a harmless no-op).
+/// members are the unbounded pile. When the proposer already has tapped fodder, the pile needs
+/// NO mutation: the finite untapped reals stay as-is, and the pre-existing tapped fodder ARE the
+/// ∞ pile (the HUD / battlefield render the marked axis as `∞`). When the period taps a fodder
+/// each cycle and the proposer has none tapped yet, the take mints one tapped token, which is
+/// the pile's anchor, and one untapped token (`seed_representative_fodder`); the untapped reals
+/// already there stay as-is. The ∞ counter pills are a display projection of the batched
+/// `Counters` item. For a mana engine the axes are `Mana(_)`, feeding the existing infinite-mana
+/// pool reseed. Besides any representative fodder it seeds, the take's one board change is the
+/// batched life:
+/// each `Life` item lands at the take, at the accepted count `n` (CR 732.2c: the shortcut is
+/// taken once the last player accepts), so no `Life(_)` axis is marked and none waits for the
+/// CR 500.5 boundary; the `Tokens` and `Counters` items are registered for that boundary. Every
+/// OFFERED growth loop is certified-unbounded, but its only axes may be life axes, so the mark
+/// is written only where a non-life axis remains, and no empty set is marked.
 /// Then consume the recast context + hand priority to the living seat so this same `apply()`
 /// does not instantly re-offer; a later manual recast re-arms the context and a later beat
 /// re-detects.
@@ -8575,10 +8771,23 @@ fn materialize_object_growth_shortcut(
     result: &mut ActionResult,
     proposal: &crate::analysis::loop_check::ShortcutProposal,
     growth: PeriodGrowth,
-) {
+    n: u32,
+) -> Result<(), EngineError> {
+    use crate::analysis::resource::ResourceAxis;
+    use crate::types::game_state::PersistentAxisMaterialization as Item;
     // CR 732.2a: reuse the single `unbounded_resources` writer (never mutate the map inline). The
-    // proposer is the loop controller (the offer required the whole period to be theirs).
-    state.mark_unbounded_loop(proposal.proposer, &proposal.unbounded, &proposal.rising);
+    // proposer is the loop controller (the offer required the whole period to be theirs). A life
+    // axis is not marked: its growth lands below, at the take. `mark_unbounded_loop` records a
+    // rising axis only among the axes it marks, so `proposal.rising` adds no life axis either.
+    let marked: Vec<ResourceAxis> = proposal
+        .unbounded
+        .iter()
+        .copied()
+        .filter(|axis| !matches!(axis, ResourceAxis::Life(_)))
+        .collect();
+    if !marked.is_empty() {
+        state.mark_unbounded_loop(proposal.proposer, &marked, &proposal.rising);
+    }
     // CR 732.2a / CR 110.1: snapshot the ∞ pile — the proposer's tapped fodder-class members —
     // for `DerivedViews::unbounded_pile`. A mana-engine loop reproduces no token ⇒ no fodder ⇒ no
     // pile.
@@ -8642,7 +8851,23 @@ fn materialize_object_growth_shortcut(
             .collect(),
     );
     for item in growth.batched {
-        state.register_pending_materialization(proposal.proposer, item);
+        match item {
+            // CR 732.2c + CR 119.3: the accepted count is fixed at the take, so the cycles' life
+            // lands now: `player` gains `per_cycle_delta × n` through the life-gain authority.
+            Item::Life {
+                player,
+                per_cycle_delta,
+            } => engine_resolution_choices::apply_batched_life(
+                state,
+                player,
+                per_cycle_delta,
+                n,
+                &mut result.events,
+            )?,
+            Item::Tokens(_) | Item::Counters(_) => {
+                state.register_pending_materialization(proposal.proposer, item);
+            }
+        }
     }
     state.clear_loop_detect_window();
     state.play_trace = None;
@@ -8651,6 +8876,7 @@ fn materialize_object_growth_shortcut(
         player: living_priority_seat(state),
     };
     result.waiting_for = state.waiting_for.clone();
+    Ok(())
 }
 
 /// Appends one committed repetition of a taken shortcut, opened by its marker.
@@ -8757,10 +8983,10 @@ pub(crate) fn drive_persistent_axis_collapse(
             &mut cycle_events,
         ) {
             Ok(()) => true,
-            Err(OfferRefusal::LifeChangeUnrepresentable { player }) => {
+            Err(OfferRefusal::PlayerResourceChangeUnrepresentable { player }) => {
                 *state = snapshot;
                 events.truncate(committed_events);
-                return Err(EngineError::LifeChangeUnrepresentable { player });
+                return Err(EngineError::PlayerResourceChangeUnrepresentable { player });
             }
             Err(_) => false,
         };
@@ -8802,10 +9028,10 @@ pub(crate) fn drive_persistent_axis_collapse(
                         delivered += 1;
                         commit_repetition(events, controller, delivered, &mut cycle_events);
                     }
-                    Err(OfferRefusal::LifeChangeUnrepresentable { player }) => {
+                    Err(OfferRefusal::PlayerResourceChangeUnrepresentable { player }) => {
                         *state = snapshot;
                         events.truncate(committed_events);
-                        return Err(EngineError::LifeChangeUnrepresentable { player });
+                        return Err(EngineError::PlayerResourceChangeUnrepresentable { player });
                     }
                     Err(_) => {
                         events.append(&mut cycle_events);
@@ -10860,11 +11086,13 @@ pub(crate) fn resume_stack_resolution_session_runner(
 ) -> Result<ActionResult, EngineError> {
     let boundary_snapshot = state.clone();
     let journal_start = state.resolved_rules_journal.entries().len();
-    // This seam bypasses `finish_action_boundary`, so it owns its own life
-    // window. A representability failure rejects the whole restore-resume and
-    // restores its entry state; it is never reported as unchanged progress.
-    let prior_window = state.ingress_life_window.take();
-    state.ingress_life_window = Some(crate::types::game_state::IngressLifeWindow::default());
+    // This seam bypasses `finish_action_boundary`, so it owns its own
+    // player-resource window. A representability failure rejects the whole
+    // restore-resume and restores its entry state; it is never reported as
+    // unchanged progress.
+    let prior_window = state.ingress_player_resource_window.take();
+    state.ingress_player_resource_window =
+        Some(crate::types::game_state::IngressPlayerResourceWindow::default());
     let outcome = (|| -> Result<ActionResult, EngineError> {
         let mut result = ActionResult::applied(Vec::new(), state.waiting_for.clone());
         reconcile_terminal_result_completing_resolution(
@@ -10898,23 +11126,21 @@ pub(crate) fn resume_stack_resolution_session_runner(
         debug_assert_runtime_resolution_invariants(state);
         Ok(result)
     })();
-    let window = state.ingress_life_window.take();
-    state.ingress_life_window = prior_window;
-    let life_failure = window.and_then(|window| window.failed_player);
+    let window = state.ingress_player_resource_window.take();
+    state.ingress_player_resource_window = prior_window;
+    let player_resource_failure = window.and_then(|window| window.failed_player);
     match outcome {
-        Ok(result) if life_failure.is_none() => Ok(result),
+        Ok(result) if player_resource_failure.is_none() => Ok(result),
         Ok(_) => {
-            let player = life_failure.expect("the failure predicate just proved Some");
+            let player = player_resource_failure.expect("the failure predicate just proved Some");
             *state = boundary_snapshot;
-            Err(EngineError::LifeChangeUnrepresentable { player })
+            Err(EngineError::PlayerResourceChangeUnrepresentable { player })
         }
         Err(error) => {
             *state = boundary_snapshot;
-            Err(
-                life_failure.map_or(error, |player| EngineError::LifeChangeUnrepresentable {
-                    player,
-                }),
-            )
+            Err(player_resource_failure.map_or(error, |player| {
+                EngineError::PlayerResourceChangeUnrepresentable { player }
+            }))
         }
     }
 }
@@ -11199,6 +11425,19 @@ fn advance_stack_resolution_session_after_priority_pass(
 // prompt max (turns.rs), reusing the one existing loop-count safety bound.
 pub(crate) const MAX_SHORTCUT_CYCLES: u32 = 1_000;
 
+/// CR 732.2c: the count `controller`'s pending stash was accepted at
+/// (`GameState::pending_materialization_count`), the most its boundary collapse may name, or
+/// `MAX_SHORTCUT_CYCLES` for a stash with no recorded bound (one deserialized from a save written
+/// before the bound was tracked). The one reading of the bound: the boundary prompt's `max`
+/// (`turns::drain_pending_phase_transition_progress`).
+pub(crate) fn pending_collapse_bound(state: &GameState, controller: PlayerId) -> u32 {
+    state
+        .pending_materialization_count
+        .get(&controller)
+        .copied()
+        .unwrap_or(MAX_SHORTCUT_CYCLES)
+}
+
 fn auto_pass_loop_max_iterations(state: &GameState) -> usize {
     let living_players = state
         .players
@@ -11247,10 +11486,11 @@ fn priority_pass_will_close_window(state: &GameState) -> bool {
 /// Auto-pass loop: when a player has an auto-pass flag and receives priority,
 /// automatically pass for them until the goal condition is met or interrupted.
 ///
-/// Returns the typed action-ingress life failure when a pass settled a life
-/// change the engine cannot represent: the caller restores its boundary
-/// snapshot and rejects the action. Every other error keeps the established
-/// policy (restore the iteration checkpoint and stop the drive).
+/// Returns the typed action-ingress failure when a pass settled a player-counter
+/// or energy change the engine cannot represent (a life change saturates
+/// instead): the caller restores its boundary snapshot and rejects the action.
+/// Every other error keeps the established policy (restore the iteration
+/// checkpoint and stop the drive).
 fn run_auto_pass_loop(
     state: &mut GameState,
     result: &mut ActionResult,
@@ -11357,12 +11597,14 @@ fn run_auto_pass_loop(
                 };
                 match pass_priority_once_with_pipeline(state, &mut events, stack_resolution_limit) {
                     Ok(outcome) => {
-                        // Check the life failure BEFORE aggregating this
+                        // Check the player-resource failure BEFORE aggregating this
                         // iteration's events or starting the next one: the
                         // action boundary restores its snapshot, so none of
                         // these events may escape into the result.
-                        if let Some(player) = boundary_life_change_failure(state) {
-                            return Err(EngineError::LifeChangeUnrepresentable { player });
+                        if let Some(player) = boundary_player_resource_failure(state) {
+                            return Err(EngineError::PlayerResourceChangeUnrepresentable {
+                                player,
+                            });
                         }
                         advanced = true;
                         let stack_empty_or_grew =
@@ -11462,10 +11704,15 @@ fn run_auto_pass_loop(
                         // A typed representability failure outranks the
                         // established restore-and-stop policy: the whole action
                         // is rejected, not merely this drive.
-                        if let Some(player) = boundary_life_change_failure(state) {
-                            return Err(EngineError::LifeChangeUnrepresentable { player });
+                        if let Some(player) = boundary_player_resource_failure(state) {
+                            return Err(EngineError::PlayerResourceChangeUnrepresentable {
+                                player,
+                            });
                         }
-                        if matches!(error, EngineError::LifeChangeUnrepresentable { .. }) {
+                        if matches!(
+                            error,
+                            EngineError::PlayerResourceChangeUnrepresentable { .. }
+                        ) {
                             return Err(error);
                         }
                         if let Some((checkpoint, event_start)) = checkpoint {
@@ -11542,8 +11789,8 @@ fn run_auto_pass_loop(
             _ => break,
         }
     }
-    if let Some(player) = boundary_life_change_failure(state) {
-        return Err(EngineError::LifeChangeUnrepresentable { player });
+    if let Some(player) = boundary_player_resource_failure(state) {
+        return Err(EngineError::PlayerResourceChangeUnrepresentable { player });
     }
     Ok(advanced)
 }
@@ -11558,11 +11805,13 @@ pub(crate) fn resume_auto_pass_after_resolve_all(
 ) -> Result<(), EngineError> {
     let before = state.clone();
     let batch_before = batch.clone();
-    // This seam bypasses `finish_action_boundary`, so it owns its own life
-    // window: a life change settled by its drive must reject the resume rather
-    // than be reported as a successful (or unchanged) outcome.
-    let prior_window = state.ingress_life_window.take();
-    state.ingress_life_window = Some(crate::types::game_state::IngressLifeWindow::default());
+    // This seam bypasses `finish_action_boundary`, so it owns its own
+    // player-resource window: an unrepresentable player-counter or energy change
+    // settled by its drive (a life change saturates instead) must reject the
+    // resume rather than be reported as a successful (or unchanged) outcome.
+    let prior_window = state.ingress_player_resource_window.take();
+    state.ingress_player_resource_window =
+        Some(crate::types::game_state::IngressPlayerResourceWindow::default());
     let outcome = (|| -> Result<(), EngineError> {
         let mut result = ActionResult::applied(Vec::new(), state.waiting_for.clone());
         // CR 704.3: mirror the ordinary action-boundary reconciliation on both
@@ -11596,25 +11845,23 @@ pub(crate) fn resume_auto_pass_after_resolve_all(
         batch.waiting_for = state.waiting_for.clone();
         Ok(())
     })();
-    let window = state.ingress_life_window.take();
-    state.ingress_life_window = prior_window;
-    let life_failure = window.and_then(|window| window.failed_player);
+    let window = state.ingress_player_resource_window.take();
+    state.ingress_player_resource_window = prior_window;
+    let player_resource_failure = window.and_then(|window| window.failed_player);
     match outcome {
-        Ok(()) if life_failure.is_none() => Ok(()),
+        Ok(()) if player_resource_failure.is_none() => Ok(()),
         Ok(()) => {
-            let player = life_failure.expect("the failure predicate just proved Some");
+            let player = player_resource_failure.expect("the failure predicate just proved Some");
             *state = before;
             *batch = batch_before;
-            Err(EngineError::LifeChangeUnrepresentable { player })
+            Err(EngineError::PlayerResourceChangeUnrepresentable { player })
         }
         Err(error) => {
             *state = before;
             *batch = batch_before;
-            Err(
-                life_failure.map_or(error, |player| EngineError::LifeChangeUnrepresentable {
-                    player,
-                }),
-            )
+            Err(player_resource_failure.map_or(error, |player| {
+                EngineError::PlayerResourceChangeUnrepresentable { player }
+            }))
         }
     }
 }
@@ -23258,6 +23505,7 @@ mod stage2_injector_tests {
         DecisionTemplate, IterationCount, PinnedDecision, ReplayMode, TargetPin, TargetSchedule,
     };
     use crate::game::scenario::GameScenario;
+    use crate::game::scenario_db::GameScenarioDbExt;
     use crate::types::game_state::{LoopDetectionMode, YieldTarget};
 
     const P0: PlayerId = PlayerId(0);
@@ -23265,6 +23513,16 @@ mod stage2_injector_tests {
     const P2: PlayerId = PlayerId(2);
     const TARGET_DRAIN: &str = "Whenever you gain life, target opponent loses that much life.";
     const FEEDBACK: &str = "Whenever an opponent loses life, you gain that much life.";
+    /// Synthetic `FEEDBACK` variant that also gives energy, so a ring cycle
+    /// moves an energy total the edit authority still checks. No printed card
+    /// exhibits the shape: the test needs the ring's one feedback trigger to
+    /// move energy itself, so the ring keeps the same triggers. The nearest
+    /// printed card is Exquisite Blood ("Whenever an opponent loses life, you
+    /// gain that much life."), whose text `FEEDBACK` is; a printed energy source
+    /// such as Sphinx of the Revelation ("Whenever you gain life, you get that
+    /// many {E} (energy counters).") would add a trigger to every ring cycle.
+    const FEEDBACK_ENERGY: &str =
+        "Whenever an opponent loses life, you gain that much life and you get {E}.";
     const KICKOFF: &str = "You gain 1 life.";
 
     fn life(state: &GameState, p: PlayerId) -> i32 {
@@ -23425,25 +23683,48 @@ mod stage2_injector_tests {
         );
     }
 
-    /// The two-drainer 3p rig: two `TARGET_DRAIN` sources pinned at DIFFERENT opponents, a
-    /// `FEEDBACK` engine, and both opponents seated at equal LOW life so the driven cycle
-    /// carries them past CR 704.5a at different beats. Returns the last committed board, the
-    /// recurrence boundary, the per-source template and the beat cap — the four inputs both
+    /// The feedback engine on [`two_drainer_rig_with`]'s board.
+    #[derive(Clone, Copy)]
+    enum FeedbackEngine {
+        /// The printed Exquisite Blood ("Whenever an opponent loses life, you gain that much
+        /// life.").
+        ExquisiteBlood,
+        /// "Energy Feedback Engine", a name no printed card has: an enchantment, the type of its
+        /// nearest printed card Exquisite Blood, carrying the synthetic `FEEDBACK_ENERGY`.
+        EnergyFeedbackEngine,
+    }
+
+    /// The two-drainer 3p rig: two printed Sanguine Bonds ("Whenever you gain life, target
+    /// opponent loses that much life.") pinned at DIFFERENT opponents, the printed Exquisite
+    /// Blood as the feedback engine, and both opponents seated at equal LOW life so the driven
+    /// cycle carries them past CR 704.5a at different beats. Returns the last committed board,
+    /// the recurrence boundary, the per-source template and the beat cap — the four inputs both
     /// `drive_one_shortcut_cycle` and `apply_until_lethal_shortcut` need — so the rows below
     /// build one board from one authority instead of two copies.
     fn two_drainer_rig() -> (GameState, GameState, DecisionTemplate, usize) {
+        two_drainer_rig_with(FeedbackEngine::ExquisiteBlood)
+    }
+
+    /// [`two_drainer_rig`] with `feedback` as the feedback engine.
+    fn two_drainer_rig_with(
+        feedback: FeedbackEngine,
+    ) -> (GameState, GameState, DecisionTemplate, usize) {
+        let db = crate::test_support::shared_card_db();
         let mut scenario = GameScenario::new_n_player(3, 7);
         scenario.at_phase(crate::types::phase::Phase::PreCombatMain);
         scenario.with_life(P0, 20);
         scenario.with_life(P1, 400);
         scenario.with_life(P2, 400);
-        let drainer_a = scenario
-            .add_creature_from_oracle(P0, "Drainer A", 1, 4, TARGET_DRAIN)
-            .id();
-        let drainer_b = scenario
-            .add_creature_from_oracle(P0, "Drainer B", 2, 2, TARGET_DRAIN)
-            .id();
-        scenario.add_creature_from_oracle(P0, "Feedback", 3, 4, FEEDBACK);
+        let drainer_a = scenario.add_real_card(P0, "Sanguine Bond", Zone::Battlefield, db);
+        let drainer_b = scenario.add_real_card(P0, "Sanguine Bond", Zone::Battlefield, db);
+        match feedback {
+            FeedbackEngine::ExquisiteBlood => {
+                scenario.add_real_card(P0, "Exquisite Blood", Zone::Battlefield, db);
+            }
+            FeedbackEngine::EnergyFeedbackEngine => {
+                scenario.add_enchantment_from_oracle(P0, "Energy Feedback Engine", FEEDBACK_ENERGY);
+            }
+        }
         let kickoff = scenario
             .add_spell_to_hand_from_oracle(P0, "Kickoff", false, KICKOFF)
             .id();
@@ -23545,10 +23826,15 @@ mod stage2_injector_tests {
     /// Attach a ring-road proposal to the existing real two-drainer board and keep all
     /// declaration validation live by publishing the template's two target points.
     fn two_drainer_ring_offer() -> (GameState, DecisionTemplate) {
+        two_drainer_ring_offer_with(FeedbackEngine::ExquisiteBlood)
+    }
+
+    /// [`two_drainer_ring_offer`] on [`two_drainer_rig_with`]`(feedback)`.
+    fn two_drainer_ring_offer_with(feedback: FeedbackEngine) -> (GameState, DecisionTemplate) {
         use crate::analysis::decision_template::{DecisionPoint, DecisionPointKind};
         use crate::types::ability::TargetRef;
 
-        let (mut state, _, template, _) = two_drainer_rig();
+        let (mut state, _, template, _) = two_drainer_rig_with(feedback);
         let points = template
             .decisions
             .iter()
@@ -23573,49 +23859,56 @@ mod stage2_injector_tests {
         (state, template)
     }
 
-    /// The real two-drainer ring board's representable lethal take is the reach guard. The
-    /// hostile public take has one less unit of loss-counter headroom than that cycle consumes,
-    /// probing whether a work-clone failure can be lost through an Abort/fallback. This is a
-    /// single-cycle probe; later-cycle whole-action rollback is covered by the recorded Replay row.
-    #[test]
-    fn public_ring_take_rejects_unrepresentable_life_before_fallback() {
-        fn declare(state: &mut GameState, template: DecisionTemplate, count: u32) {
+    fn declare_ring_take(state: &mut GameState, template: DecisionTemplate, count: u32) {
+        apply(
+            state,
+            P0,
+            GameAction::DeclareShortcut {
+                count: IterationCount::Fixed(count),
+                template: Some(template),
+            },
+        )
+        .expect("the published target points admit the fixture's declaration");
+        let WaitingFor::RespondToShortcut { proposal, .. } = &state.waiting_for else {
+            panic!("the declaration reaches the real public response window");
+        };
+        assert!(matches!(
+            take_route(state, proposal, count),
+            TakeRoute::Ring
+        ));
+        assert!(proposal.period.is_empty());
+    }
+
+    fn accept_ring_take_until_done(state: &mut GameState) -> Result<(), EngineError> {
+        for _ in 0..4 {
+            let player = match &state.waiting_for {
+                WaitingFor::RespondToShortcut { player, .. } => *player,
+                _ => return Ok(()),
+            };
             apply(
                 state,
-                P0,
-                GameAction::DeclareShortcut {
-                    count: IterationCount::Fixed(count),
-                    template: Some(template),
+                player,
+                GameAction::RespondToShortcut {
+                    response: crate::analysis::loop_check::ShortcutResponse::Accept,
                 },
-            )
-            .expect("the published target points admit the fixture's declaration");
-            let WaitingFor::RespondToShortcut { proposal, .. } = &state.waiting_for else {
-                panic!("the declaration reaches the real public response window");
-            };
-            assert!(matches!(
-                take_route(state, proposal, count),
-                TakeRoute::Ring
-            ));
-            assert!(proposal.period.is_empty());
+            )?;
         }
+        panic!("the three-opponent response window must finish within four accepts")
+    }
 
-        fn accept_until_done(state: &mut GameState) -> Result<(), EngineError> {
-            for _ in 0..4 {
-                let player = match &state.waiting_for {
-                    WaitingFor::RespondToShortcut { player, .. } => *player,
-                    _ => return Ok(()),
-                };
-                apply(
-                    state,
-                    player,
-                    GameAction::RespondToShortcut {
-                        response: crate::analysis::loop_check::ShortcutResponse::Accept,
-                    },
-                )?;
-            }
-            panic!("the three-opponent response window must finish within four accepts")
-        }
-
+    /// The real two-drainer ring board's lethal take is the reach guard. The hostile public
+    /// take has one less unit of loss-counter headroom than that cycle consumes; the counter
+    /// saturates at `u32::MAX` and the take settles like the control.
+    ///
+    /// The board is [`two_drainer_rig`]'s, which other rows in this module share. Its drainers
+    /// are two printed Sanguine Bonds ("Whenever you gain life, target opponent loses that much
+    /// life.") and its feedback engine is the printed Exquisite Blood ("Whenever an opponent
+    /// loses life, you gain that much life."). Its "Kickoff", "You gain 1 life.", is synthetic:
+    /// no printed spell's whole text is that. The nearest printed card is Blessed Wine ("You
+    /// gain 1 life." / "Draw a card at the beginning of the next turn's upkeep."), the same gain
+    /// with a delayed draw.
+    #[test]
+    fn public_ring_take_saturates_the_lost_counter_like_the_control() {
         let (mut control, control_template) = two_drainer_ring_offer();
         let p2_life_before = life(&control, P2);
         let p2_counter_before = control
@@ -23624,8 +23917,9 @@ mod stage2_injector_tests {
             .find(|player| player.id == P2)
             .unwrap()
             .life_lost_this_turn;
-        declare(&mut control, control_template, 1);
-        accept_until_done(&mut control).expect("the real lethal ring cycle is representable");
+        declare_ring_take(&mut control, control_template, 1);
+        accept_ring_take_until_done(&mut control)
+            .expect("the real lethal ring cycle is representable");
         let p2_life_lost = u32::try_from(p2_life_before - life(&control, P2))
             .expect("the positive control loses a nonnegative amount");
         let p2_counter_delta = control
@@ -23648,7 +23942,79 @@ mod stage2_injector_tests {
             .find(|player| player.id == P2)
             .unwrap()
             .life_lost_this_turn = u32::MAX - (p2_counter_delta - 1);
-        declare(&mut hostile, hostile_template, 1);
+        declare_ring_take(&mut hostile, hostile_template, 1);
+        accept_ring_take_until_done(&mut hostile)
+            .expect("every Accept of the saturating ring take is accepted");
+        assert_eq!(
+            life(&hostile, P2),
+            life(&control, P2),
+            "the saturated counter does not change the drained amount"
+        );
+        assert_eq!(
+            hostile
+                .players
+                .iter()
+                .find(|player| player.id == P2)
+                .unwrap()
+                .life_lost_this_turn,
+            u32::MAX
+        );
+        assert_eq!(
+            std::mem::discriminant(&hostile.waiting_for),
+            std::mem::discriminant(&control.waiting_for),
+            "the hostile take settles like the control: {:?} vs {:?}",
+            hostile.waiting_for,
+            control.waiting_for
+        );
+    }
+
+    /// The same ring take with a feedback engine that also gives energy: the control's energy
+    /// gain is the reach guard, and the hostile public take has one less unit of energy
+    /// headroom than that cycle consumes, probing whether a work-clone failure can be lost
+    /// through an Abort/fallback. This is a single-cycle probe; later-cycle whole-action
+    /// rollback is covered by the recorded Replay row.
+    ///
+    /// The board is [`two_drainer_rig_with`]`(FeedbackEngine::EnergyFeedbackEngine)`. Its
+    /// drainers are two printed Sanguine Bonds ("Whenever you gain life, target opponent loses
+    /// that much life."). Its feedback engine is the synthetic "Energy Feedback Engine", an
+    /// enchantment carrying `FEEDBACK_ENERGY`, Exquisite Blood's text ("Whenever an opponent
+    /// loses life, you gain that much life.") with an energy gain added; `FEEDBACK_ENERGY`'s doc
+    /// says why no printed card fits. Its "Kickoff", "You gain 1 life.", is synthetic: no printed
+    /// spell's whole text is that. The nearest printed card is Blessed Wine ("You gain 1 life." /
+    /// "Draw a card at the beginning of the next turn's upkeep."), the same gain with a delayed
+    /// draw.
+    #[test]
+    fn public_ring_take_rejects_unrepresentable_energy_before_fallback() {
+        let energy = |state: &GameState| {
+            state
+                .players
+                .iter()
+                .find(|player| player.id == P0)
+                .unwrap()
+                .energy
+        };
+
+        let (mut control, control_template) =
+            two_drainer_ring_offer_with(FeedbackEngine::EnergyFeedbackEngine);
+        let energy_before = energy(&control);
+        declare_ring_take(&mut control, control_template, 1);
+        accept_ring_take_until_done(&mut control)
+            .expect("the real lethal ring cycle is representable");
+        let energy_delta = energy(&control) - energy_before;
+        assert!(
+            energy_delta > 0,
+            "reach guard: the real cycle gives P0 energy"
+        );
+
+        let (mut hostile, hostile_template) =
+            two_drainer_ring_offer_with(FeedbackEngine::EnergyFeedbackEngine);
+        hostile
+            .players
+            .iter_mut()
+            .find(|player| player.id == P0)
+            .unwrap()
+            .energy = u32::MAX - (energy_delta - 1);
+        declare_ring_take(&mut hostile, hostile_template, 1);
         let mut rejection = None;
         for _ in 0..4 {
             let player = match &hostile.waiting_for {
@@ -23664,17 +24030,17 @@ mod stage2_injector_tests {
                 },
             ) {
                 Ok(_) => {}
-                Err(error @ EngineError::LifeChangeUnrepresentable { player: P2 }) => {
+                Err(error @ EngineError::PlayerResourceChangeUnrepresentable { player: P0 }) => {
                     assert_eq!(hostile, entry, "the final public Accept restores its entry");
                     rejection = Some(error);
                     break;
                 }
-                Err(error) => panic!("expected typed P2 loss-counter rejection, got {error:?}"),
+                Err(error) => panic!("expected typed P0 energy rejection, got {error:?}"),
             }
         }
         assert!(
             rejection.is_some(),
-            "reach guard: the public ring drive must reject rather than fall back when its P2 loss exceeds the remaining headroom"
+            "reach guard: the public ring drive must reject rather than fall back when its P0 energy exceeds the remaining headroom"
         );
     }
 
@@ -31551,6 +31917,490 @@ mod legacy_copy_announcement_tests {
             r.act(GameAction::PassPriority).expect("resolve");
         }
         assert_eq!(elementals(&r), 1, "no Elemental for the abandoned copy");
+    }
+}
+
+#[cfg(test)]
+mod period_growth_life_cap_tests {
+    use super::{build_cert, DrivenCycle, PeriodGrowth};
+    use crate::analysis::resource::{cycle_life_changes, ResourceAxis, ResourceVector};
+    use crate::types::events::GameEvent;
+    use crate::types::format::FormatConfig;
+    use crate::types::game_state::{GameState, PersistentAxisMaterialization};
+    use crate::types::player::PlayerId;
+    use std::collections::BTreeSet;
+
+    /// `Life` items for these `(seat, per-cycle gain)` pairs, in order.
+    fn life_items(items: &[(u8, u32)]) -> Vec<PersistentAxisMaterialization> {
+        items
+            .iter()
+            .map(
+                |&(seat, per_cycle_delta)| PersistentAxisMaterialization::Life {
+                    player: PlayerId(seat),
+                    per_cycle_delta,
+                },
+            )
+            .collect()
+    }
+
+    /// One `LifeChanged` event for each `(seat, amount)`, in order.
+    fn life_events(changes: &[(u8, i32)]) -> Vec<GameEvent> {
+        changes
+            .iter()
+            .map(|&(seat, amount)| GameEvent::LifeChanged {
+                player_id: PlayerId(seat),
+                amount,
+                new_total: Default::default(),
+            })
+            .collect()
+    }
+
+    /// The players these seats name.
+    fn seats(seats: &[u8]) -> BTreeSet<PlayerId> {
+        seats.iter().copied().map(PlayerId).collect()
+    }
+
+    /// CR 119.3 + CR 810.9 + CR 810.9a + CR 732.2c: a batched take of `n` cycles meets an `i32`
+    /// life limit exactly where the lump of its `Life` items cannot be stored under the limits,
+    /// on the total each item adjusts and on the gaining player's own field, or where the total a
+    /// cycle's gain events touch cannot take `n` cycles' gains from this board: a gain held at the
+    /// cap with no item, and an amount the event clamps. A cycle that reaches a limit exactly, a
+    /// bystander at the cap that the cycle leaves alone, another seat's item, and the other team's
+    /// item do not.
+    #[test]
+    fn life_passes_a_limit_where_a_cycle_or_the_lump_meets_an_i32_limit() {
+        /// (name, Two-Headed Giant, life fields, this take's items, the cycle's events, cycles,
+        /// whether a limit is passed)
+        type Row = (
+            &'static str,
+            bool,
+            Vec<i32>,
+            Vec<(u8, u32)>,
+            Vec<(u8, i32)>,
+            u32,
+            bool,
+        );
+        let max = i32::MAX;
+        // Team A's fields give it `max - 10` with room on both members' own fields.
+        let room = || vec![1_000, max - 1_010, 15, 15];
+        let rows: Vec<Row> = vec![
+            (
+                "reaches the cap exactly",
+                false,
+                vec![max - 6, 20],
+                vec![(0, 2)],
+                vec![(0, 2)],
+                3,
+                false,
+            ),
+            (
+                "one past the cap",
+                false,
+                vec![max - 5, 20],
+                vec![(0, 2)],
+                vec![(0, 2)],
+                3,
+                true,
+            ),
+            (
+                "held at the cap",
+                false,
+                vec![max, 20],
+                vec![(0, 5)],
+                vec![(0, 5)],
+                1,
+                true,
+            ),
+            (
+                "below the cap",
+                false,
+                vec![20, 20],
+                vec![(0, 2)],
+                vec![(0, 2)],
+                1000,
+                false,
+            ),
+            (
+                "an amount past i64",
+                false,
+                vec![20, 20],
+                vec![(0, u32::MAX)],
+                vec![(0, max)],
+                u32::MAX,
+                true,
+            ),
+            (
+                "no life item",
+                false,
+                vec![max, 20],
+                vec![],
+                vec![],
+                1000,
+                false,
+            ),
+            (
+                "another seat's item",
+                false,
+                vec![max, 20],
+                vec![(1, 2)],
+                vec![(1, 2)],
+                1000,
+                false,
+            ),
+            (
+                "no item: the cycle's gain held at the cap",
+                false,
+                vec![max, 20],
+                vec![],
+                vec![(0, 5)],
+                3,
+                true,
+            ),
+            (
+                "a bystander at the cap the cycle does not change",
+                false,
+                vec![20, max],
+                vec![(0, 2)],
+                vec![(0, 2)],
+                3,
+                false,
+            ),
+            (
+                "a clamped gain",
+                false,
+                vec![-1, 20],
+                vec![],
+                vec![(0, max)],
+                1,
+                true,
+            ),
+            (
+                "both members' items fit",
+                true,
+                room(),
+                vec![(0, 1), (1, 1)],
+                vec![(0, 1), (1, 1)],
+                5,
+                false,
+            ),
+            (
+                "both members' items pass together",
+                true,
+                room(),
+                vec![(0, 1), (1, 1)],
+                vec![(0, 1), (1, 1)],
+                6,
+                true,
+            ),
+            (
+                "one member's item fits",
+                true,
+                room(),
+                vec![(0, 1)],
+                vec![(0, 1)],
+                6,
+                false,
+            ),
+            (
+                "the other team's item does not count",
+                true,
+                room(),
+                vec![(0, 1), (2, 15)],
+                vec![(0, 1), (2, 15)],
+                6,
+                false,
+            ),
+            (
+                "own field at the cap, the team has room",
+                true,
+                vec![max, -100, 15, 15],
+                vec![(0, 5)],
+                vec![(0, 5)],
+                3,
+                true,
+            ),
+            (
+                "own field one below the cap, the team has room",
+                true,
+                vec![max - 1, -20, 15, 15],
+                vec![(0, 2)],
+                vec![(0, 2)],
+                1,
+                true,
+            ),
+            (
+                "a member's own field has room while the teammate's is near the cap",
+                true,
+                vec![-100, max - 1_000, 15, 15],
+                vec![(0, 5)],
+                vec![(0, 5)],
+                10,
+                false,
+            ),
+            (
+                "the team's total already past i32",
+                true,
+                vec![max, 10, 15, 15],
+                vec![(0, 1)],
+                vec![(0, 1)],
+                1,
+                true,
+            ),
+        ];
+        for (name, team, fields, items, events, cycles, passes) in rows {
+            let mut state = if team {
+                GameState::new(FormatConfig::two_headed_giant(), 4, 7)
+            } else {
+                GameState::new_two_player(7)
+            };
+            for (player, life) in state.players.iter_mut().zip(fields) {
+                player.life = life;
+            }
+            let growth = PeriodGrowth {
+                fodder: None,
+                batched: life_items(&items),
+                life_not_stored_as_gains: BTreeSet::new(),
+                life_changes: cycle_life_changes(&state, &life_events(&events)),
+            };
+            assert_eq!(growth.life_passes_a_limit(&state, cycles), passes, "{name}");
+        }
+    }
+
+    /// CR 732.2c + CR 119.3 + CR 810.9 + CR 810.9a: a take in whose driven cycle some life change
+    /// is not a gain stored whole on its player's own field is
+    /// performed, whatever its batched items: a loss spilled onto the teammate at `i32::MIN`, a
+    /// loss on the member's own field, and a loss that reaches `i32::MIN` exactly. A take whose
+    /// cycle only gains, each gain on its own player's field, is not routed by that. The frames
+    /// and the cycle's `LifeChanged` events are built by hand, as a Two-Headed Giant board that a
+    /// can't-lose effect keeps in the game (CR 810.8a) would leave them with team A's member P0
+    /// near `i32::MIN`; no row passes a life limit, so the gate alone decides.
+    #[test]
+    fn a_period_whose_life_is_not_stored_as_gains_is_performed() {
+        use crate::analysis::decision_template::IterationCount;
+        let p1 = PlayerId(1);
+        let proposal = crate::analysis::loop_check::ShortcutProposal {
+            proposer: p1,
+            predicted_winner: None,
+            count: IterationCount::Fixed(5),
+            unbounded: Vec::new(),
+            rising: Vec::new(),
+            win_kind: None,
+            win_kind_at: None,
+            template: None,
+            per_cycle: None,
+            shortened_by: None,
+            published_declaration: None,
+            leading_aims: Vec::new(),
+            road: crate::analysis::loop_check::OfferRoad::RecordedPeriod,
+            counted_take: Default::default(),
+            period: Default::default(),
+        };
+        // (name, team A's fields before → after, P0's lost and P1's gained counters on
+        // `current`, the cycle's `LifeChanged` events, the members the gate names, batched life
+        // items, performed)
+        type Row = (
+            &'static str,
+            ((i32, i32), (i32, i32)),
+            (u32, u32),
+            Vec<(u8, i32)>,
+            Vec<u8>,
+            Vec<(u8, u32)>,
+            bool,
+        );
+        let min = i32::MIN;
+        let rows: [Row; 5] = [
+            (
+                "a member's loss spilled at i32::MIN while the teammate gains as much on its \
+                 own field",
+                ((min, 20), (min, 20)),
+                (2, 2),
+                vec![(0, -2), (1, 2)],
+                vec![0, 1],
+                vec![],
+                true,
+            ),
+            (
+                "the same loss while the teammate gains more",
+                ((min, 20), (min, 21)),
+                (2, 3),
+                vec![(0, -2), (1, 3)],
+                vec![0, 1],
+                vec![(1, 1)],
+                true,
+            ),
+            (
+                "a loss on the member's own field",
+                ((min + 10, 20), (min + 8, 22)),
+                (2, 2),
+                vec![(0, -2), (1, 2)],
+                vec![0],
+                vec![(1, 2)],
+                true,
+            ),
+            (
+                "a member's loss reaching i32::MIN exactly on its own field",
+                ((min + 2, 20), (min, 22)),
+                (2, 2),
+                vec![(0, -2), (1, 2)],
+                vec![0],
+                vec![(1, 2)],
+                true,
+            ),
+            (
+                "control: a pure gain on its own field",
+                ((min + 10, 20), (min + 10, 22)),
+                (0, 2),
+                vec![(1, 2)],
+                vec![],
+                vec![(1, 2)],
+                false,
+            ),
+        ];
+        for (
+            name,
+            ((p0_before, p1_before), (p0_after, p1_after)),
+            (lost, gained),
+            events,
+            named,
+            items,
+            performed,
+        ) in rows
+        {
+            let mut prior = GameState::new(FormatConfig::two_headed_giant(), 4, 7);
+            for (player, life) in prior.players.iter_mut().zip([p0_before, p1_before, 15, 15]) {
+                player.life = life;
+            }
+            let mut current = prior.clone();
+            current.players[0].life = p0_after;
+            current.players[1].life = p1_after;
+            current.players[0].life_lost_this_turn = lost;
+            current.players[1].life_gained_this_turn = gained;
+
+            let cycle = DrivenCycle {
+                frames: (prior.clone(), current),
+                events: life_events(&events),
+            };
+            let growth = PeriodGrowth::derive(Some(&cycle), p1);
+            assert_eq!(growth.life_not_stored_as_gains, seats(&named), "{name}");
+            assert_eq!(growth.batched, life_items(&items), "{name}: batched");
+            assert!(
+                !growth.life_passes_a_limit(&prior, 5),
+                "REACH-GUARD {name}: no cycle passes a life limit, so the gate alone decides"
+            );
+            assert_eq!(
+                growth.collapse_is_replay(&prior, &proposal, 5),
+                performed,
+                "{name}"
+            );
+        }
+    }
+
+    /// CR 810.9 + CR 810.9a: a certificate's ∞ axes name a Two-Headed Giant shared total's
+    /// gain on the member whose counters gained, not on the teammate whose field the spread
+    /// stored it in, keep the drained opponents' axes, and leave `win_kind` as the field delta
+    /// classifies it. A team whose gaining member's counter is pinned at `u32::MAX` cannot say
+    /// who gained, so its certificate names no team-A life axis. A duel's certificate names the
+    /// field delta's axes.
+    #[test]
+    fn build_cert_names_the_two_headed_giant_member_whose_counters_gained() {
+        use crate::analysis::loop_check::classify_win_kind;
+        let (p0, p1, p2, p3) = (PlayerId(0), PlayerId(1), PlayerId(2), PlayerId(3));
+        let field_delta = |prior: &GameState, current: &GameState| {
+            ResourceVector::delta(
+                &ResourceVector::snapshot(prior),
+                &ResourceVector::snapshot(current),
+            )
+        };
+        // Team A's P0 gains 2 with its own field at `i32::MAX`, so the spread stores the gain on
+        // P1's field; each of team B's members loses 1 on its own field. P0's gained counter
+        // runs `gained.0 → gained.1`.
+        let team_frames = |gained: (u32, u32)| {
+            let mut prior = GameState::new(FormatConfig::two_headed_giant(), 4, 7);
+            for (player, life) in prior.players.iter_mut().zip([i32::MAX, -100, 20, 20]) {
+                player.life = life;
+            }
+            prior.players[0].life_gained_this_turn = gained.0;
+            let mut current = prior.clone();
+            current.players[0].life_gained_this_turn = gained.1;
+            current.players[1].life = -98;
+            for victim in [2, 3] {
+                current.players[victim].life = 19;
+                current.players[victim].life_lost_this_turn = 1;
+            }
+            (prior, current)
+        };
+
+        // The spill: P0 gained.
+        let (prior, current) = team_frames((0, 2));
+        let delta = field_delta(&prior, &current);
+        assert!(
+            delta.life.get(&p1).is_some_and(|&change| change > 0) && !delta.life.contains_key(&p0),
+            "REACH-GUARD: the field delta carries P0's gain on P1, got {:?}",
+            delta.life
+        );
+        let certificate = build_cert(&prior, &current, &delta, p0, None);
+        for axis in [
+            ResourceAxis::Life(p0),
+            ResourceAxis::Life(p2),
+            ResourceAxis::Life(p3),
+        ] {
+            assert!(
+                certificate.unbounded.contains(&axis),
+                "spill: {axis:?} is advertised, got {:?}",
+                certificate.unbounded
+            );
+        }
+        assert!(
+            !certificate.unbounded.contains(&ResourceAxis::Life(p1)),
+            "spill: P1 gained nothing, got {:?}",
+            certificate.unbounded
+        );
+        assert_eq!(
+            certificate.win_kind,
+            Some(classify_win_kind(p0, &delta, Some(&current))),
+            "spill: the win kind reads the field delta"
+        );
+
+        // P0's gained counter pinned at `u32::MAX`: nobody's team-A life axis.
+        let (prior, current) = team_frames((u32::MAX, u32::MAX));
+        let delta = field_delta(&prior, &current);
+        assert!(
+            delta.life.get(&p1).is_some_and(|&change| change > 0),
+            "REACH-GUARD pinned: the field delta grows P1's field"
+        );
+        let certificate = build_cert(&prior, &current, &delta, p0, None);
+        assert!(
+            !certificate.unbounded.contains(&ResourceAxis::Life(p0))
+                && !certificate.unbounded.contains(&ResourceAxis::Life(p1)),
+            "pinned: no team-A life axis, got {:?}",
+            certificate.unbounded
+        );
+        assert!(
+            certificate.unbounded.contains(&ResourceAxis::Life(p2))
+                && certificate.unbounded.contains(&ResourceAxis::Life(p3)),
+            "pinned: the victims' axes stay, got {:?}",
+            certificate.unbounded
+        );
+
+        // A duel: P0 gains 2 and P1 loses 1, each on its own field.
+        let prior = GameState::new_two_player(7);
+        let mut current = prior.clone();
+        current.players[0].life = 22;
+        current.players[0].life_gained_this_turn = 2;
+        current.players[1].life = 19;
+        current.players[1].life_lost_this_turn = 1;
+        let delta = field_delta(&prior, &current);
+        let certificate = build_cert(&prior, &current, &delta, p0, None);
+        assert_eq!(
+            certificate.unbounded,
+            delta.unbounded_axes_for(p0),
+            "duel: the field delta's axes"
+        );
+        assert!(
+            certificate.unbounded.contains(&ResourceAxis::Life(p0)),
+            "REACH-GUARD duel: P0's life axis, got {:?}",
+            certificate.unbounded
+        );
     }
 }
 

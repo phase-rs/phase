@@ -96,13 +96,21 @@ fn is_redundant_log_event(events: &[GameEvent], index: usize) -> bool {
                     _ => break,
                 }
             }
+            // The loss row pairs with the damage whose life loss it reports:
+            // `arithmetic::life_changed_amount` turns damage of 2^31 or more into a
+            // loss of `i32::MIN`, while `DamageDealt` keeps the whole `u32`.
             matches!(
                 events.get(next_index),
                 Some(GameEvent::DamageDealt {
                     target: TargetRef::Player(damaged_player),
                     amount: damage,
                     ..
-                }) if damaged_player == player_id && *damage == amount.unsigned_abs()
+                }) if damaged_player == player_id
+                    && *amount
+                        == crate::game::arithmetic::life_changed_amount(
+                            crate::game::arithmetic::LifeDirection::Loss,
+                            u64::from(*damage),
+                        )
             )
         }
         Some(GameEvent::CombatDamageDealtToPlayer {
@@ -1409,10 +1417,14 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
                     text(" life"),
                 ]
             } else {
+                // A loss may carry `i32::MIN`, whose magnitude does not fit the
+                // `i32` number segment; it saturates at `i32::MAX`.
                 vec![
                     player_seg(state, *player_id),
                     text(" loses "),
-                    num(amount.abs()),
+                    num(crate::game::arithmetic::u32_to_i32_saturating(
+                        amount.unsigned_abs(),
+                    )),
                     text(" life"),
                 ]
             }
@@ -3089,6 +3101,36 @@ mod tests {
         assert!(segs.iter().any(|s| matches!(s, LogSegment::Number(3))));
     }
 
+    /// A loss of `i32::MIN` has a magnitude past `i32::MAX`; the log's number
+    /// segment saturates at `i32::MAX` instead of overflowing.
+    #[test]
+    fn life_lost_segments_saturate_an_i32_min_magnitude() {
+        let state = GameState::new_two_player(42);
+        let segments_for = |amount: i32| {
+            format_segments(
+                &GameEvent::LifeChanged {
+                    player_id: PlayerId(0),
+                    amount,
+                    new_total: crate::types::events::LifeTotalReading::default(),
+                },
+                &state,
+            )
+        };
+        for amount in [i32::MIN, -i32::MAX] {
+            let segs = segments_for(amount);
+            assert!(
+                segs.iter()
+                    .any(|s| matches!(s, LogSegment::Text(t) if t == " loses ")),
+                "a loss of {amount} reads as a loss"
+            );
+            assert!(
+                segs.iter()
+                    .any(|s| matches!(s, LogSegment::Number(i32::MAX))),
+                "a loss of {amount} reads its magnitude, saturated at i32::MAX"
+            );
+        }
+    }
+
     #[test]
     fn source_aware_toxic_damage_replaces_its_life_loss_and_summary_lines() {
         let state = GameState::new_two_player(42);
@@ -3175,6 +3217,73 @@ mod tests {
             !is_redundant_log_event(&events, 2),
             "the first aggregate consumes its damage row; the later incomplete group remains visible"
         );
+    }
+
+    /// Damage to a player reports its life loss in the `LifeChanged` event, clamped to
+    /// `i32::MIN` once the damage is 2^31 or more, while `DamageDealt` carries the whole `u32`.
+    /// Furnace of Rath ("If a source would deal damage to a permanent or player, it deals double
+    /// that damage to that permanent or player instead.") doubles damage in `u32`
+    /// (`DamageModification::Double`), so a source dealing 2^30 or more reaches that clamp. The
+    /// loss row still folds into its damage row there, and a loss and damage that differ do not
+    /// pair.
+    #[test]
+    fn damage_past_i32_folds_its_saturated_life_loss_row() {
+        let state = GameState::new_two_player(42);
+        let damage_after_loss = |loss: i32, damage: u32| {
+            [
+                GameEvent::LifeChanged {
+                    player_id: PlayerId(1),
+                    amount: loss,
+                    new_total: crate::types::events::LifeTotalReading::default(),
+                },
+                GameEvent::DamageDealt {
+                    source_id: ObjectId(7),
+                    target: TargetRef::Player(PlayerId(1)),
+                    amount: damage,
+                    is_combat: false,
+                    excess: 0,
+                    source_incarnation: None,
+                },
+            ]
+        };
+        // The number of " loses " and " deals " rows the log shows.
+        let rows = |events: &[GameEvent]| {
+            let entries = resolve_log_entries(events, &state, &state);
+            let count = |word: &str| {
+                entries
+                    .iter()
+                    .flat_map(|entry| &entry.segments)
+                    .filter(|segment| matches!(segment, LogSegment::Text(text) if text == word))
+                    .count()
+            };
+            (count(" loses "), count(" deals "))
+        };
+
+        for (loss, damage) in [(i32::MIN, 3_000_000_000), (-i32::MAX, 2_147_483_647)] {
+            let events = damage_after_loss(loss, damage);
+            assert!(
+                is_redundant_log_event(&events, 0),
+                "a loss of {loss} pairs with {damage} damage"
+            );
+            assert_eq!(rows(&events), (0, 1), "{damage} damage shows one row");
+        }
+
+        for (loss, damage) in [
+            (-5, 7),
+            (i32::MIN, 2_147_483_647),
+            (-i32::MAX, 3_000_000_000),
+        ] {
+            let events = damage_after_loss(loss, damage);
+            assert!(
+                !is_redundant_log_event(&events, 0),
+                "a loss of {loss} does not pair with {damage} damage"
+            );
+            assert_eq!(
+                rows(&events),
+                (1, 1),
+                "a loss of {loss} beside {damage} damage keeps both rows"
+            );
+        }
     }
 
     #[test]

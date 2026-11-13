@@ -40,6 +40,8 @@ enum Board {
     B,
     /// Board B with Soul's Attendant beside it, whose "may" every drive takes.
     BAttendant,
+    /// Board B with the synthetic Energy Attendant beside it, whose "may" every drive takes.
+    BEnergyAttendant,
 }
 
 const BOARDS: [Board; 2] = [Board::A, Board::B];
@@ -124,10 +126,14 @@ fn start_ordered(board: Board, order: Ordering) -> Option<Drive> {
                 }),
             })
         }
-        Board::B | Board::BAttendant => {
+        Board::B | Board::BAttendant | Board::BEnergyAttendant => {
             let (built, attendant) = match board {
                 Board::BAttendant => {
-                    let (built, attendant) = build_board_b_with_attendant()?;
+                    let (built, attendant) = build_board_b_with_attendant(Attendant::Souls)?;
+                    (built, Some(attendant))
+                }
+                Board::BEnergyAttendant => {
+                    let (built, attendant) = build_board_b_with_attendant(Attendant::Energy)?;
                     (built, Some(attendant))
                 }
                 _ => (
@@ -324,9 +330,9 @@ impl Drive {
 fn offered(board: Board) -> Option<(Drive, Vec<Apply>)> {
     let windows = match board {
         Board::A | Board::B => 0,
-        // Animate Dead's leaves trigger, and Felidar Guardian blinking Soul's Attendant for
-        // Preston to copy, each happen once before the period first recurs.
-        Board::BAttendant => 4,
+        // Animate Dead's leaves trigger, and Felidar Guardian blinking the attendant for Preston
+        // to copy, each happen once before the period first recurs.
+        Board::BAttendant | Board::BEnergyAttendant => 4,
     };
     let mut drive = start(board)?;
     let mut applies = drive.drive_to_window();
@@ -366,7 +372,7 @@ fn offered(board: Board) -> Option<(Drive, Vec<Apply>)> {
                 "A: the offer stands before the minting trigger's recurrence window"
             );
         }
-        Board::BAttendant => {}
+        Board::BAttendant | Board::BEnergyAttendant => {}
         Board::B => assert_eq!(
             top_trigger_source(state),
             Some(drive.minting),
@@ -795,9 +801,29 @@ fn trigger_driven_take_history_work_is_flat_per_cycle_b() {
     );
 }
 
-/// Board B with Soul's Attendant on P0's battlefield: "Whenever another creature enters, you may
-/// gain 1 life." Its "may" gains life and never drives the recurrence.
-fn build_board_b_with_attendant() -> Option<(
+/// Synthetic Soul's Attendant analog that gives energy instead of life, so a replayed cycle moves
+/// an energy total the edit authority still checks. No printed card exhibits the shape: the test
+/// needs a "may" that every drive records, as Soul's Attendant's, whose taking moves energy
+/// itself, so the period keeps the same triggers. The nearest printed card is Soul's Attendant
+/// ("Whenever another creature enters, you may gain 1 life."); a printed energy source such as
+/// Sphinx of the Revelation ("Whenever you gain life, you get that many {E} (energy counters).")
+/// would add a trigger to every recorded cycle.
+const ENERGY_ATTENDANT: &str = "Whenever another creature enters, you may get {E}.";
+
+/// The attendant beside Board B.
+#[derive(Debug, Clone, Copy)]
+enum Attendant {
+    /// Soul's Attendant: "Whenever another creature enters, you may gain 1 life."
+    Souls,
+    /// [`ENERGY_ATTENDANT`].
+    Energy,
+}
+
+/// Board B with an attendant on P0's battlefield. Its "may" gains life (Soul's Attendant) or
+/// energy and never drives the recurrence.
+fn build_board_b_with_attendant(
+    kind: Attendant,
+) -> Option<(
     crate::loop_period_trigger_driven_arming::PrestonBoard,
     ObjectId,
 )> {
@@ -812,7 +838,12 @@ fn build_board_b_with_attendant() -> Option<(
     scenario.at_phase(Phase::PreCombatMain);
     let preston = scenario.add_real_card(P0, "Preston, the Vanisher", Zone::Battlefield, db);
     let altar = scenario.add_real_card(P0, "Altar of the Brood", Zone::Battlefield, db);
-    let attendant = scenario.add_real_card(P0, "Soul's Attendant", Zone::Battlefield, db);
+    let attendant = match kind {
+        Attendant::Souls => scenario.add_real_card(P0, "Soul's Attendant", Zone::Battlefield, db),
+        Attendant::Energy => scenario
+            .add_creature_from_oracle(P0, "Energy Attendant", 1, 1, ENERGY_ATTENDANT)
+            .id(),
+    };
     let felidar = scenario.add_real_card(P0, "Felidar Guardian", Zone::Graveyard, db);
     let animate_dead = scenario.add_real_card(P0, "Animate Dead", Zone::Hand, db);
     for _ in 0..2 {
@@ -1054,11 +1085,11 @@ fn a_declared_optional_may_outside_the_recurrence_must_be_the_confirmed_periods_
 }
 
 /// CR 732.2a/c: a live recorded-period declaration must take the Replay route through the public
-/// Declare/Respond actions. The representable control commits every recorded attendant gain; with
-/// the per-turn gain counter one cycle's gains short of its limit, the first replayed cycle fits and
-/// the next one rejects the final Accept action and restores that action's entire entry state.
+/// Declare/Respond actions. The control commits every recorded attendant gain; with the per-turn
+/// gain counter one cycle's gains short of its limit, every replayed cycle still commits its gains
+/// and the counter saturates at `u32::MAX`.
 #[test]
-fn public_recorded_period_replay_rejects_later_life_counter_overflow_atomically() {
+fn public_recorded_period_replay_saturates_a_later_life_counter() {
     use engine::game::perf_counters::take_cost_snapshot;
 
     const COUNT: u32 = 3;
@@ -1116,7 +1147,144 @@ fn public_recorded_period_replay_rejects_later_life_counter_overflow_atomically(
         ),
         "reach guard: hostile case also begins from the real Replay offer"
     );
+    let hostile_life = hostile.state().players[0].life;
     hostile.runner.state_mut().players[0].life_gained_this_turn = u32::MAX - takes;
+    let hostile_recorded = recorded_declaration(hostile.state(), |_| false);
+    let before_hostile = take_cost_snapshot();
+    hostile
+        .runner
+        .act(GameAction::DeclareShortcut {
+            count: IterationCount::Fixed(COUNT),
+            template: Some(hostile_recorded),
+        })
+        .expect("a valid recorded declaration opens the response window");
+    for _ in 0..4 {
+        if !matches!(
+            hostile.state().waiting_for,
+            WaitingFor::RespondToShortcut { .. }
+        ) {
+            break;
+        }
+        hostile
+            .runner
+            .act(GameAction::RespondToShortcut {
+                response: ShortcutResponse::Accept,
+            })
+            .expect("every public Accept of the saturating Replay is accepted");
+    }
+    let hostile_drive = take_cost_snapshot().since(before_hostile);
+    assert!(
+        hostile_drive.drive_snapshots > 0,
+        "reach guard: the public response entered the real Replay drive"
+    );
+    assert_eq!(
+        hostile.state().players[0].life - hostile_life,
+        (takes * COUNT) as i32,
+        "the saturating Replay committed each recorded attendant gain once in each cycle"
+    );
+    assert_eq!(hostile.state().players[0].life_gained_this_turn, u32::MAX);
+    assert!(matches!(
+        hostile.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+}
+
+/// CR 732.2a/c: the recorded-period Replay with the energy attendant. The control commits every
+/// recorded attendant energy gain once in each cycle. With the energy total three cycles' gains
+/// short of its limit (the exact row), every Accept action is accepted and the total lands exactly
+/// on `u32::MAX`. With it one cycle's gains short (the hostile row), the first replayed cycle fits
+/// exactly and the next one rejects the final Accept action and restores that action's entire entry
+/// state. The exact row's last cycle starts where the hostile row's first starts, so the hostile
+/// row's rejection is not its first cycle's.
+#[test]
+fn public_recorded_period_replay_rejects_later_energy_overflow_atomically() {
+    use engine::game::perf_counters::take_cost_snapshot;
+
+    const COUNT: u32 = 3;
+    let (mut control, _) = offered(Board::BEnergyAttendant)
+        .expect("the real Board B fixture must produce its recorded-period offer");
+    let control_offer = control.state().clone();
+    assert!(
+        matches!(
+            &control_offer.waiting_for,
+            WaitingFor::LoopShortcut {
+                proposer,
+                road: OfferRoad::RecordedPeriod,
+                period,
+                ..
+            } if *proposer == P0 && !period.is_empty()
+        ),
+        "reach guard: the offer is a nonempty recorded period owned by P0"
+    );
+    let recorded = recorded_declaration(&control_offer, |_| false);
+    // Energy Attendant: each "may" the period recorded as taken gets {E} once per repetition.
+    let takes = attendant_answers(&control_offer)
+        .iter()
+        .filter(|(_, take)| *take == MayChoiceOption::Take)
+        .count() as u32;
+    assert!(takes > 0, "reach guard: the period takes an attendant gain");
+    let control_energy = control.state().players[0].energy;
+    let before_control = take_cost_snapshot();
+    control.take_declared(IterationCount::Fixed(COUNT), Some(recorded));
+    let control_drive = take_cost_snapshot().since(before_control);
+    assert!(
+        control_drive.drive_snapshots > 0,
+        "reach guard: public DeclareShortcut/RespondToShortcut took a real Replay drive"
+    );
+    assert_eq!(
+        control.state().players[0].energy - control_energy,
+        takes * COUNT,
+        "the representable Replay committed each recorded attendant energy gain once in each cycle"
+    );
+
+    let (mut exact, _) = offered(Board::BEnergyAttendant)
+        .expect("the real Board B fixture must produce its recorded-period offer");
+    exact.runner.state_mut().players[0].energy = u32::MAX - takes * COUNT;
+    let exact_recorded = recorded_declaration(exact.state(), |_| false);
+    let before_exact = take_cost_snapshot();
+    exact
+        .runner
+        .act(GameAction::DeclareShortcut {
+            count: IterationCount::Fixed(COUNT),
+            template: Some(exact_recorded),
+        })
+        .expect("a valid recorded declaration opens the response window");
+    for _ in 0..4 {
+        if !matches!(
+            exact.state().waiting_for,
+            WaitingFor::RespondToShortcut { .. }
+        ) {
+            break;
+        }
+        exact
+            .runner
+            .act(GameAction::RespondToShortcut {
+                response: ShortcutResponse::Accept,
+            })
+            .expect("every public Accept of the Replay that lands on the limit is accepted");
+    }
+    let exact_drive = take_cost_snapshot().since(before_exact);
+    assert!(
+        exact_drive.drive_snapshots > 0,
+        "reach guard: the public response entered the real Replay drive"
+    );
+    assert!(
+        !matches!(
+            exact.state().waiting_for,
+            WaitingFor::RespondToShortcut { .. }
+        ),
+        "the exact landing leaves no response window, got {}",
+        exact.state().waiting_for.variant_name()
+    );
+    assert_eq!(
+        exact.state().players[0].energy,
+        u32::MAX,
+        "a Replay whose last cycle lands exactly on the limit commits every gain"
+    );
+
+    let (mut hostile, _) = offered(Board::BEnergyAttendant)
+        .expect("the real Board B fixture must produce its recorded-period offer");
+    hostile.runner.state_mut().players[0].energy = u32::MAX - takes;
     let hostile_recorded = recorded_declaration(hostile.state(), |_| false);
     let before_hostile = take_cost_snapshot();
     hostile
@@ -1139,8 +1307,10 @@ fn public_recorded_period_replay_rejects_later_life_counter_overflow_atomically(
             response: ShortcutResponse::Accept,
         }) {
             Ok(_) => {}
-            Err(engine::game::engine::EngineError::LifeChangeUnrepresentable { player }) => {
-                assert_eq!(player, P0, "the attendant's overflowing gain is rejected");
+            Err(engine::game::engine::EngineError::PlayerResourceChangeUnrepresentable {
+                player,
+            }) => {
+                assert_eq!(player, P0, "the attendant's overflowing energy is rejected");
                 assert_eq!(
                     hostile.state(),
                     &entry,
@@ -1154,12 +1324,12 @@ fn public_recorded_period_replay_rejects_later_life_counter_overflow_atomically(
                 rejected_after_progress = true;
                 break;
             }
-            Err(error) => panic!("expected typed life-counter rejection, got {error:?}"),
+            Err(error) => panic!("expected typed energy rejection, got {error:?}"),
         }
     }
     assert!(
         rejected_after_progress,
-        "the later-cycle counter overflow must reject after an earlier cycle fit"
+        "the later-cycle energy overflow must reject after an earlier cycle fit"
     );
 }
 
@@ -1292,13 +1462,18 @@ fn a_recorded_offers_may_is_fixed_at_the_interaction_ingress() {
     assert_recorded_mays_are_fixed_at_the_interaction_ingress(drive);
 }
 
-/// Whether `slot` names a choice of Soul's Attendant.
+/// Whether `slot` names a choice of the attendant beside Board B: Soul's Attendant or the
+/// synthetic Energy Attendant ([`ENERGY_ATTENDANT`]).
 fn asked_of_attendant(state: &GameState, slot: &DecisionSlot) -> bool {
     match &slot.source {
-        YieldTarget::ThisObject { source_id, .. } => state
-            .objects
-            .get(source_id)
-            .is_some_and(|object| object.name == "Soul's Attendant"),
+        YieldTarget::ThisObject { source_id, .. } => {
+            state.objects.get(source_id).is_some_and(|object| {
+                matches!(
+                    object.name.as_str(),
+                    "Soul's Attendant" | "Energy Attendant"
+                )
+            })
+        }
         YieldTarget::AllCopies { .. } => false,
     }
 }
@@ -1413,7 +1588,8 @@ const ATTENDANT_ANSWERS: [[MayChoiceOption; 2]; 2] = [
     [MayChoiceOption::Take, MayChoiceOption::Take],
 ];
 
-/// The answer the standing offer's period recorded at each occurrence of Soul's Attendant's "may".
+/// The answer the standing offer's period recorded at each occurrence of the attendant's "may"
+/// ([`asked_of_attendant`]).
 fn attendant_answers(offer: &GameState) -> Vec<(u8, MayChoiceOption)> {
     let WaitingFor::LoopShortcut { period, .. } = &offer.waiting_for else {
         panic!("an offer stands");

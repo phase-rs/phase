@@ -68,10 +68,10 @@ pub enum OfferRefusal {
     /// CR 704.5a: the period moves some player toward losing the game, and the threshold
     /// authority refused its replayed frames.
     LossAxis,
-    /// The replayed play or answer settled a life change the engine cannot represent. This is
-    /// an engine limit, not a rules outcome: the replay propagates it so the public shortcut
-    /// entry can reject the take instead of silently stopping the repetition.
-    LifeChangeUnrepresentable { player: PlayerId },
+    /// The replayed play or answer settled a player-counter or energy change the engine cannot
+    /// represent. This is an engine limit, not a rules outcome: the replay propagates it so the
+    /// public shortcut entry can reject the take instead of silently stopping the repetition.
+    PlayerResourceChangeUnrepresentable { player: PlayerId },
 }
 
 /// One recorded play or answer of a period, as the replay makes it.
@@ -504,9 +504,9 @@ fn step(
     events.extend(
         apply(replay, seat, action)
             .map_err(|error| match error {
-                crate::game::engine::EngineError::LifeChangeUnrepresentable { player } => {
-                    OfferRefusal::LifeChangeUnrepresentable { player }
-                }
+                crate::game::engine::EngineError::PlayerResourceChangeUnrepresentable {
+                    player,
+                } => OfferRefusal::PlayerResourceChangeUnrepresentable { player },
                 _ => rejected,
             })?
             .events,
@@ -2474,11 +2474,7 @@ mod tests {
         assert_ne!(target_key(3), two);
     }
 
-    /// A replayed play whose final life edit is unrepresentable carries its own
-    /// refusal, so the public shortcut entry can reject the take rather than
-    /// treating it as an illegal play or silently stopping the repetition.
-    #[test]
-    fn step_carries_an_unrepresentable_life_change_as_its_own_refusal() {
+    fn debug_priority_state() -> GameState {
         let mut state = GameState::new_two_player(7);
         state.debug_mode = true;
         state.active_player = PlayerId(0);
@@ -2486,9 +2482,17 @@ mod tests {
         state.waiting_for = WaitingFor::Priority {
             player: PlayerId(0),
         };
+        state
+    }
+
+    /// A replayed play whose life gain would pass `i32::MAX` replays like any
+    /// other: the total lands on the limit and the gain counts the rules amount.
+    #[test]
+    fn step_replays_a_life_gain_at_the_cap() {
+        let mut state = debug_priority_state();
         state.players[0].life = i32::MAX - 1;
         let mut events = Vec::new();
-        let refusal = step(
+        step(
             &mut state,
             PlayerId(0),
             GameAction::Debug(DebugAction::GainLife {
@@ -2498,10 +2502,34 @@ mod tests {
             OfferRefusal::IllegalReplayedPlay,
             &mut events,
         )
-        .expect_err("the impossible gain must refuse the replay");
+        .expect("the saturating gain replays");
+        assert_eq!(state.players[0].life, i32::MAX);
+        assert_eq!(state.players[0].life_gained_this_turn, 2);
+    }
+
+    /// A replayed play whose final player-resource edit is unrepresentable (an
+    /// energy total past `u32::MAX`) carries its own refusal, so the public
+    /// shortcut entry can reject the take rather than treating it as an
+    /// illegal play or silently stopping the repetition.
+    #[test]
+    fn step_carries_an_unrepresentable_energy_change_as_its_own_refusal() {
+        let mut state = debug_priority_state();
+        state.players[0].energy = u32::MAX - 1;
+        let mut events = Vec::new();
+        let refusal = step(
+            &mut state,
+            PlayerId(0),
+            GameAction::Debug(DebugAction::GiveEnergy {
+                player_id: PlayerId(0),
+                count: 2,
+            }),
+            OfferRefusal::IllegalReplayedPlay,
+            &mut events,
+        )
+        .expect_err("the impossible energy gain must refuse the replay");
         assert_eq!(
             refusal,
-            OfferRefusal::LifeChangeUnrepresentable {
+            OfferRefusal::PlayerResourceChangeUnrepresentable {
                 player: PlayerId(0)
             }
         );

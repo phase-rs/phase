@@ -36,6 +36,7 @@ use engine::game::derived_views::{derive_views, FamilyCollapseState, UnboundedFa
 use engine::game::engine::{apply, start_game_winner_plays_first};
 use engine::game::layers::{flush_layers, mark_layers_full};
 use engine::game::scenario::{GameRunner, GameScenario};
+use engine::game::scenario_db::GameScenarioDbExt;
 use engine::game::zones::{add_to_zone, create_object, remove_from_zone};
 use engine::types::ability::{Effect, TriggerDefinition};
 use engine::types::actions::{GameAction, MulliganChoice};
@@ -1942,8 +1943,9 @@ fn build_fresh_convoke_none_untapped_growth_does_not_seed_tapped_pile() {
 /// PR-7 v4 (CR 732.2a / CR 122.1 / CR 119.3): the boundary collapse batches N×δ for the beneficial
 /// COUNTER axis and — in the SAME submit — DECLINES the LIFE axis because the real 4p board carries
 /// a functioning life observer. Real 4p offer dump → real accept → graft a +1/+1 counter axis +
-/// a life axis onto the accepted token loop (`mark_unbounded_loop` + `register_pending_materialization`
-/// are the standard Part-2 accept writers) → real boundary → `apply(SubmitPayAmount{5})`.
+/// a life axis onto the accepted token loop (`mark_unbounded_loop` +
+/// `register_pending_materialization`, as a save written before life landed at the take carries
+/// them) → real boundary → `apply(SubmitPayAmount{5})`.
 ///
 /// MEASURED on this fixture (throwaway probe, then removed): post-accept `counter_growth_is_observed
 /// == false`, `life_growth_is_observed == true` — the board has NO counter observer but a REAL life
@@ -2354,7 +2356,8 @@ fn loop_collapse_prompt_labels_counter_axis_counters() {
     );
 }
 
-/// T3 (LIFE): a pure life-gain loop labels its collapse prompt `Life`.
+/// T3 (LIFE): a stash holding only a `Life` item, as a save written before life landed at the take
+/// carries one, labels its collapse prompt `Life`.
 ///
 /// REVERT-PROBE: `from_materializations` → `return LoopCollapseAxis::Tokens;` ⇒ FLIPS.
 #[test]
@@ -3328,11 +3331,11 @@ fn low3_activate_and_settle(runner: &mut GameRunner, source: ObjectId, ability_i
 }
 
 /// [LOW-3] E2E: accepting a REAL UNOBSERVED life-growth loop drives the accept-time production
-/// routing in `materialize_object_growth_shortcut` (engine.rs) into the BATCHED `Life` branch —
-/// the branch every prior Counters/Life collapse test GRAFTS via `register_pending_materialization`
-/// (bypassing the real δ-capture + `life_growth_is_observed` decision). The OBSERVED counter
-/// route, performed at the take, is covered by `kilo_accept_delivers_exactly_n_counters_at_the_take`
-/// (kilo_live_offer_from_real_dump.rs); this closes the UNOBSERVED batched gap.
+/// routing in `materialize_object_growth_shortcut` (engine.rs) onto the MARK route, which applies
+/// its batched `Life` item AT THE TAKE (CR 732.2c: the count is fixed once the last player
+/// accepts) instead of stashing it for the CR 500.5 boundary. The OBSERVED counter route,
+/// performed at the take, is covered by `kilo_accept_delivers_exactly_n_counters_at_the_take`
+/// (kilo_live_offer_from_real_dump.rs); this covers the UNOBSERVED batched life route.
 ///
 /// CONSTRUCTION (self-contained, no dump): a synthetic creature with an off-stack mana ability
 /// (CR 605.3b — the only activation class that SEEDS a loop period; `game/engine.rs`'s `apply_action`
@@ -3341,80 +3344,110 @@ fn low3_activate_and_settle(runner: &mut GameRunner, source: ObjectId, ability_i
 /// the creature TAPPED — the offer's re-drive can't re-tap it, aborting any premature pure-mana
 /// offer and forcing the life beat into the certified 3-step period. No `LifeChanged` trigger /
 /// `GainLife` replacement / life-total reader is on the board ⇒ `life_growth_is_observed == false`
-/// ⇒ the accept routes to the BATCHED `Life` stash.
+/// ⇒ the accept takes the Mark route and lands the batched life at once.
 ///
-/// REVERT-FAILING assertion: break the routing predicate — force the observed branch, or drop the
-/// batched `Life` registration in `materialize_object_growth_shortcut` — and the stash empties
-/// (the take performs the period instead) ⇒ the batched-`Life` assertion FLIPS. Non-vacuity reach-guards: the recorded 3-step period, the surfaced offer, and
-/// the non-empty post-accept stash all gate the shape assertion.
+/// REAL CARDS: the creature is the synthetic Lifedynamo ("{T}: Add {C}." / "{0}: You gain 1
+/// life." / "{0}: Untap Lifedynamo."), which [`low3_life_engine_offered`] builds. No printed card
+/// is, on its own, a free engine that gains life each cycle, and the LOW-3 rows need a loop that
+/// makes mana and gains life by activations alone, so the Mark route's ∞ mana mark shows the
+/// route and the board holds only what each arm adds. The nearest printed board is Basalt
+/// Monolith ("This artifact doesn't untap during your untap step." / "{T}: Add {C}{C}{C}." / "{3}:
+/// Untap this artifact.") enchanted with Power Artifact ("Enchanted artifact's activated abilities
+/// cost {2} less to activate. This effect can't reduce the mana in that cost to less than one
+/// mana.") beside Staff of Domination ("{1}: Untap this artifact." / "{2}, {T}: You gain 1 life."):
+/// two Monolith cycles and one Staff cycle make {C} and gain 1 life by activations alone, over six
+/// activations of two permanents, one of them enchanted, where the Lifedynamo's period is three
+/// activations of one.
+///
+/// REVERT-FAILING assertions: register the `Life` item instead of applying it (the pre-change
+/// Mark arm) and the stash is non-empty and P0's life does not move at the accept; force the
+/// Replay route and the ∞ `Mana(C)` reach-guard fails (a performed take marks nothing).
+/// Non-vacuity reach-guards: the recorded 3-step period and the surfaced offer gate the rig, and
+/// the ∞ `Mana(C)` mark proves the take took the Mark route.
 #[test]
-fn low3_unobserved_life_growth_accept_registers_batched_life() {
+fn low3_unobserved_life_growth_accept_applies_its_batched_life_at_the_take() {
     use engine::analysis::resource::ResourceAxis;
+    use engine::types::mana::ManaType;
 
-    let runner = low3_life_engine_accepted(Low3BoardEtbTrigger::Absent);
+    let mut runner = low3_life_engine_offered(Low3BoardEtbTrigger::Absent);
+    let life_before = life_of(runner.state(), P0);
+    let events = low3_accept(&mut runner, 1);
 
-    // Reach-guard: the accept produced a non-empty deferred stash (not a no-op).
-    let stash = runner
-        .state()
-        .pending_unbounded_materialization
-        .get(&P0)
-        .cloned()
-        .unwrap_or_default();
+    // Reach-guard: the take took the MARK route, which marks the period's ∞ mana axis (a
+    // performed take marks nothing).
+    let marks = runner.state().unbounded_resources.get(&P0);
     assert!(
-        !stash.is_empty(),
-        "reach-guard: the accept must register a deferred materialization stash for P0"
+        marks.is_some_and(|axes| axes.contains(&ResourceAxis::Mana(ManaType::Colorless))),
+        "reach-guard: the accepted loop marks ∞ Mana(C) for P0, got {marks:?}"
     );
-    // DISCRIMINATOR: the UNOBSERVED life growth routes to a BATCHED `Life` item carrying the
-    // per-cycle δ — produced by the real accept-time routing, never grafted.
-    assert!(
-        stash.iter().any(|m| matches!(
-            m,
-            PersistentAxisMaterialization::Life { player, per_cycle_delta }
-                if *player == P0 && *per_cycle_delta >= 1
-        )),
-        "the unobserved life loop must register a BATCHED Life stash (per_cycle_delta captured), \
-         got {stash:?}"
+    // DISCRIMINATOR: the batched life lands at the take, as one gain, and nothing is stashed.
+    assert_eq!(
+        runner.state().pending_unbounded_materialization.get(&P0),
+        None,
+        "the Mark take stashes nothing: its life lands at the take"
     );
-    // The life axis is ∞-marked (the mana axis is too; both are real unbounded axes here).
+    assert_eq!(
+        life_of(runner.state(), P0) - life_before,
+        1,
+        "P0 gains the accepted cycle's 1 life at the take"
+    );
+    let gains: Vec<i32> = events
+        .iter()
+        .filter_map(|event| match event {
+            engine::types::events::GameEvent::LifeChanged {
+                player_id, amount, ..
+            } if *player_id == P0 => Some(*amount),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(gains, vec![1], "one LifeChanged at the accept");
+    // No ∞ life mark: the life is not deferred.
     assert!(
-        runner
-            .state()
-            .unbounded_resources
-            .get(&P0)
-            .is_some_and(|axes| axes.contains(&ResourceAxis::Life(P0))),
-        "the accepted loop marks the Life axis ∞ for P0"
+        marks.is_none_or(|axes| !axes.contains(&ResourceAxis::Life(P0))),
+        "a Mark take marks no ∞ Life axis, got {marks:?}"
     );
 }
 
-/// **CLASS END (b): an axis whose applied items NEVER write a beat, at FULL delivery.** The
-/// production `Lifedynamo` rig routes its own batched `Life` stash — nothing is grafted — and a
-/// batched life gain writes no `waiting_for`, so at the accepted bound the arm's exit is the only
+/// **CLASS END (b): an axis whose applied items NEVER write a beat, at FULL delivery.** A take no
+/// longer stashes a `Life` item (its life lands at the take), so the boundary's `Life` arm is
+/// reached only by a stash restored from a save written before that. This pins that arm on the
+/// production `Lifedynamo` board: the offer is declined, and a `Life { P0, 1 }` item is grafted
+/// through the single-authority writer and its bound of 1 written beside it, as such a save carries
+/// them. A batched life gain writes no `waiting_for`, so at the bound the arm's exit is the only
 /// thing that can produce an ending point (CR 732.2a). Both arms run: at the bound the life moves
-/// by exactly the accepted count AND a seat can act; at `0` no life moves and a seat can still act.
+/// by exactly the bound AND a seat can act; at `0` no life moves and a seat can still act.
+///
+/// The Lifedynamo is synthetic: the doc of
+/// [`low3_unobserved_life_growth_accept_applies_its_batched_life_at_the_take`] says why no
+/// printed card fits and quotes the nearest printed board, Basalt Monolith with Power Artifact
+/// beside Staff of Domination.
 ///
 /// Neither arm is green alone, and each refuses a different wrong repair. A repair keyed on
 /// `amount == 0` never fires at the bound, so the full-delivery arm reds. A repair conditioned on
 /// something having been delivered passes the full-delivery arm and reds the `0` arm.
 #[test]
-fn low3_batched_life_collapse_ends_where_a_seat_can_act_at_both_ends() {
+fn low3_restored_life_stash_collapse_ends_where_a_seat_can_act_at_both_ends() {
     for amount in [1u32, 0] {
-        let mut runner = low3_life_engine_accepted(Low3BoardEtbTrigger::Absent);
-
-        // Reach-guard: the stash under test is the PRODUCTION batched `Life` item, not a graft.
-        let stash = runner
-            .state()
-            .pending_unbounded_materialization
-            .get(&P0)
-            .cloned()
-            .unwrap_or_default();
+        let mut runner = low3_life_engine_offered(Low3BoardEtbTrigger::Absent);
+        runner
+            .act(GameAction::DeclineShortcut)
+            .expect("P0 declines the shortcut");
         assert!(
-            stash.iter().any(
-                |m| matches!(m, PersistentAxisMaterialization::Life { player, .. } if *player == P0)
-            ),
-            "reach-guard: the accept must route a batched Life stash for P0, got {stash:?}"
+            matches!(runner.state().waiting_for, WaitingFor::Priority { .. })
+                && runner.state().stack.is_empty(),
+            "reach-guard: declining returns to priority with an empty stack, got {:?}",
+            runner.state().waiting_for
         );
-
         let state = runner.state_mut();
+        state.register_pending_materialization(
+            P0,
+            PersistentAxisMaterialization::Life {
+                player: P0,
+                per_cycle_delta: 1,
+            },
+        );
+        state.pending_materialization_count.insert(P0, 1);
+
         drive_priority_to_next_boundary(state);
         let WaitingFor::PayAmountChoice {
             resource: PayableResource::LoopCollapse { .. },
@@ -3429,7 +3462,7 @@ fn low3_batched_life_collapse_ends_where_a_seat_can_act_at_both_ends() {
         };
         assert_eq!(
             *max, 1,
-            "CR 732.2c: the prompt is bounded by the accepted count, so amount 1 IS full delivery"
+            "CR 732.2c: the prompt is bounded by the stash's count, so amount 1 IS full delivery"
         );
         let boundary_beat = state.waiting_for.clone();
         let life_before = life_of(state, P0);
@@ -3440,7 +3473,7 @@ fn low3_batched_life_collapse_ends_where_a_seat_can_act_at_both_ends() {
         assert_eq!(
             life_of(state, P0) - life_before,
             amount as i32,
-            "the batched Life axis delivers per_cycle_delta x {amount}"
+            "the restored Life item delivers per_cycle_delta x {amount}"
         );
         assert_ne!(
             state.waiting_for, boundary_beat,
@@ -3449,22 +3482,25 @@ fn low3_batched_life_collapse_ends_where_a_seat_can_act_at_both_ends() {
         );
         super::wba_loop_firewall_interposition::answer_terminal_beat(
             state,
-            &format!("CR 732.2a: production batched Life at amount {amount}"),
+            &format!("CR 732.2a: restored batched Life at amount {amount}"),
         );
     }
 }
 
-/// Which FUNCTIONING board trigger (if any) [`low3_life_engine_accepted`] installs before the loop
+/// Which FUNCTIONING board trigger (if any) [`low3_life_engine_offered`] installs before the loop
 /// is driven — the one-object difference between this rig's arms.
 ///
-/// `Present` is the hostile arm for the `token_profile.is_some()` conjunct of `life_etb_sourced`
-/// (engine.rs): it makes `board_has_functioning_etb_trigger` TRUE while the loop stays mana-only,
-/// so the conjunct is the ONLY thing still holding the route on the batched arm.
+/// `Present` is the hostile arm for the axis condition of `life_beside_deferred_growth`
+/// (engine.rs's `PeriodGrowth::collapse_is_replay`): its printed Soul Warden ("Whenever another
+/// creature enters, you gain 1 life.") makes `board_has_functioning_etb_trigger` TRUE while the
+/// loop stays mana-only, so only a conjunct that reads the take's own `Tokens` / `Counters` items,
+/// rather than the board's triggers, keeps the take on the Mark route.
 ///
 /// `CastPresent` is the hostile arm for `cast_sourced`, the one route disjunct with NO axis-shaped
-/// conjunct. It makes `board_has_functioning_cast_trigger` TRUE, which flips this same mana+life
-/// loop onto the `Replay` route, so the take performs the period. One arm rather than a parallel
-/// enum: the question is "which board graft", and the arms are leaf-level variants of it.
+/// conjunct. Its grafted cast trigger makes `board_has_functioning_cast_trigger` TRUE, which flips
+/// this same mana+life loop onto the `Replay` route, so the take performs the period. One arm
+/// rather than a parallel enum: the question is "which board trigger", and the arms are
+/// leaf-level variants of it.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Low3BoardEtbTrigger {
     Absent,
@@ -3472,42 +3508,10 @@ enum Low3BoardEtbTrigger {
     CastPresent,
 }
 
-/// A minimal functioning battlefield-entry life trigger (the Prosperous Innkeeper shape, built
-/// directly because this fixture is synthetic and loads no card pool). Its EFFECT is deliberately
-/// `GainLife`: that is the production shape that double-pays when a `Tokens` collapse mints real
-/// CR 603.6a entries, and it is NOT a life OBSERVER — `life_growth_is_observed` keys on
-/// `TriggerEventKey::LifeChanged` / `ReplacementEvent::GainLife`, never on `EnterBattlefield` — so
-/// installing it cannot flip `life_observed` and mask what this arm is measuring.
-fn low3_board_etb_life_trigger() -> TriggerDefinition {
-    use engine::types::ability::{AbilityDefinition, AbilityKind, QuantityExpr, TargetFilter};
-    use engine::types::triggers::TriggerMode;
-
-    let mut def = TriggerDefinition::new(TriggerMode::ChangesZone);
-    def.destination = Some(Zone::Battlefield);
-    def.trigger_zones = vec![Zone::Battlefield];
-    def.execute = Some(Box::new(AbilityDefinition::new(
-        AbilityKind::Spell,
-        Effect::GainLife {
-            amount: QuantityExpr::Fixed { value: 1 },
-            player: TargetFilter::Controller,
-        },
-    )));
-    def.description =
-        Some("Whenever another creature you control enters, you gain 1 life.".to_string());
-    def
-}
-
-/// Build the LOW-3 mana+life engine, optionally graft a functioning board ETB trigger, drive one
-/// certified period, and take the offer through the real APNAP accept. Returns the post-accept
-/// runner. Shared so both arms inherit the same non-vacuity reach-guards (3-step period, surfaced
-/// offer) — the only difference between them is `etb`.
-fn low3_life_engine_accepted(etb: Low3BoardEtbTrigger) -> GameRunner {
-    let mut runner = low3_life_engine_offered(etb);
-    low3_accept(&mut runner, 1);
-    runner
-}
-
-/// [`low3_life_engine_accepted`] stopped at the surfaced offer.
+/// Build the LOW-3 mana+life engine with `etb`'s functioning board trigger, if any, and drive
+/// one certified period, stopping at the surfaced offer (take it with [`low3_accept`]). Shared so
+/// every arm inherits the same non-vacuity reach-guards (3-step period, surfaced offer) — the only
+/// difference between them is `etb`.
 fn low3_life_engine_offered(etb: Low3BoardEtbTrigger) -> GameRunner {
     use engine::game::mana_abilities::is_mana_ability;
     use engine::types::ability::TapStateChange;
@@ -3523,27 +3527,34 @@ fn low3_life_engine_offered(etb: Low3BoardEtbTrigger) -> GameRunner {
             "{T}: Add {C}.\n{0}: You gain 1 life.\n{0}: Untap Lifedynamo.",
         )
         .id();
+    // Placed BEFORE the drive so the board is identical every cycle (a permanent that never
+    // changes cannot perturb the modulo-resources loop cover), and so the predicate the accept
+    // reads is the one this board really has. Nothing enters the battlefield during the mana+life
+    // period, so Soul Warden's trigger never actually fires — `board_has_functioning_etb_trigger`
+    // is a board-shape question, not a fired-this-cycle one. Soul Warden has no trigger on its
+    // own entry, and `add_real_card` puts it on the battlefield before the drive starts. Its
+    // trigger gains life but is NOT a life OBSERVER — `life_growth_is_observed` keys on
+    // `TriggerEventKey::LifeChanged` / `ReplacementEvent::GainLife`, never on `EnterBattlefield` —
+    // so it cannot flip `life_observed` and mask what this arm is measuring.
+    let soul_warden = (etb == Low3BoardEtbTrigger::Present).then(|| {
+        let db = shared_card_db().expect("the Present arm's Soul Warden is in the card fixture");
+        scenario.add_real_card(P0, "Soul Warden", Zone::Battlefield, db)
+    });
     let mut runner = scenario.build();
     runner.state_mut().loop_detection = LoopDetectionMode::Interactive;
-    if etb == Low3BoardEtbTrigger::Present {
-        // Grafted BEFORE the drive so the board is identical every cycle (a permanent that never
-        // changes cannot perturb the modulo-resources loop cover), and so the predicate the accept
-        // reads is the one this board really has. Nothing enters the battlefield during the
-        // mana+life period, so the trigger never actually fires — `board_has_functioning_etb_trigger`
-        // is a board-shape question, not a fired-this-cycle one.
-        let host = create_life_gainer(runner.state_mut(), P0, "Grafted Innkeeper");
-        graft_trigger(runner.state_mut(), host, low3_board_etb_life_trigger());
-        // Reach-guard: the graft must survive the layer rebuild and be ACTIVE (CR 113.6) on a
-        // battlefield permanent. Without this the arm would pass VACUOUSLY — a dropped graft leaves
-        // `board_has_functioning_etb_trigger` false, which is the `Absent` arm wearing a new name.
+    if let Some(soul_warden) = soul_warden {
+        // Reach-guard: Soul Warden's battlefield-entry trigger must be ACTIVE (CR 113.6) on the
+        // battlefield permanent. Without this the arm would pass VACUOUSLY — an inactive trigger
+        // leaves `board_has_functioning_etb_trigger` false, which is the `Absent` arm wearing a
+        // new name.
         let state = runner.state();
-        let host_obj = &state.objects[&host];
+        let warden_obj = &state.objects[&soul_warden];
         assert!(
-            engine::game::functioning_abilities::active_trigger_definitions(state, host_obj).any(
+            engine::game::functioning_abilities::active_trigger_definitions(state, warden_obj).any(
                 |active| active.definition.destination == Some(Zone::Battlefield)
                     && active.definition.mode == engine::types::triggers::TriggerMode::ChangesZone
             ),
-            "reach-guard: the grafted battlefield-entry trigger must be ACTIVE on the host"
+            "reach-guard: Soul Warden's battlefield-entry trigger must be ACTIVE"
         );
     }
     if etb == Low3BoardEtbTrigger::CastPresent {
@@ -3561,10 +3572,11 @@ fn low3_life_engine_offered(etb: Low3BoardEtbTrigger) -> GameRunner {
         );
         // REACH-GUARD (ATTRIBUTION): the graft must survive the layer rebuild and be ACTIVE (CR
         // 113.6). This is what attributes the `Replay` route to `cast_sourced` specifically — the
-        // shipped `low3_unobserved_life_growth_accept_registers_batched_life` shows this same rig
-        // routes BATCHED without the graft, so with the graft active, `cast_sourced` is the only
-        // disjunct that changed. Without this guard, a future change flipping the rig to `Replay`
-        // through `counter_observed` / `life_observed` / `life_etb_sourced` would leave the rows
+        // shipped `low3_unobserved_life_growth_accept_applies_its_batched_life_at_the_take` shows
+        // this same rig takes the Mark route without the graft, so with the graft active,
+        // `cast_sourced` is the only disjunct that changed. Without this guard, a future change
+        // flipping the rig to `Replay` through `counter_observed` / `life_observed` /
+        // `life_beside_deferred_growth` would leave the rows
         // below green while they silently stopped testing the cast route.
         let state = runner.state();
         let host_obj = &state.objects[&host];
@@ -3632,8 +3644,12 @@ fn low3_life_engine_offered(etb: Low3BoardEtbTrigger) -> GameRunner {
     runner
 }
 
-/// Accept the surfaced offer at `Fixed(n)` through the REAL APNAP pipeline.
-fn low3_accept(runner: &mut GameRunner, n: u32) {
+/// Accept the surfaced offer at `Fixed(n)` through the REAL APNAP pipeline; returns the accept's
+/// events. Every caller takes the offer on the synthetic Lifedynamo board of
+/// [`low3_life_engine_offered`]; the doc of
+/// [`low3_unobserved_life_growth_accept_applies_its_batched_life_at_the_take`] says why no
+/// printed card fits and quotes the nearest printed board.
+fn low3_accept(runner: &mut GameRunner, n: u32) -> Vec<engine::types::events::GameEvent> {
     runner
         .act(GameAction::DeclareShortcut {
             count: IterationCount::Fixed(n),
@@ -3644,62 +3660,60 @@ fn low3_accept(runner: &mut GameRunner, n: u32) {
         .act(GameAction::RespondToShortcut {
             response: ShortcutResponse::Accept,
         })
-        .expect("the single opponent accepts");
+        .expect("the single opponent accepts")
+        .events
 }
 
-/// PINS the `token_profile.is_some()` conjunct of `life_etb_sourced` (engine.rs) — the conjunct the
-/// sibling test above cannot reach, because its board has no functioning ETB trigger at all, so
-/// `board_has_functioning_etb_trigger` short-circuits the predicate false before `token_profile` is
-/// ever consulted.
+/// PINS the axis condition of `life_beside_deferred_growth` (engine.rs's
+/// `PeriodGrowth::collapse_is_replay`): a take that batches life beside a `Tokens` or `Counters`
+/// item is performed, because the boundary would apply that item at a count its controller names
+/// there while the life lands at the take, and the CR 603.6a re-earn (minted entries paying an
+/// ETB-sourced batched life again) is one case of that. The condition reads the take's own items,
+/// never the board's triggers.
 ///
-/// Same mana-only Lifedynamo loop, but with a functioning battlefield-entry trigger grafted onto the
-/// board. That makes TWO of the three conjuncts true (`!life.is_empty()` and
-/// `board_has_functioning_etb_trigger`), so `token_profile.is_some()` — false here, because a
-/// mana-only collapse mints no tokens and `current_period_fodder` returns `None` — is the ONLY thing
-/// still holding this loop on the BATCHED route.
+/// Same mana-only Lifedynamo loop as the sibling test above, but with a functioning
+/// battlefield-entry trigger on the board. A mana-only take batches no `Tokens` item
+/// (`current_period_fodder` returns `None`) and no `Counters` item, so it stays on the MARK route
+/// and its life lands at the take, whatever ETB trigger the board holds. A mana engine mints
+/// nothing, so there is no double-pay and the O(N) replay would be pure cost.
 ///
-/// Why that matters: the collapse re-earns an ETB-sourced life axis only if it MINTS the entries
-/// that re-fire the trigger. A mana engine mints nothing, so there is no double-pay and the O(N)
-/// replay is pure cost. Deleting the conjunct silently sends every life-growing loop with any board
-/// ETB trigger — mana engines included — down the concrete replay.
+/// REAL CARDS: the Lifedynamo is synthetic; the doc of
+/// [`low3_unobserved_life_growth_accept_applies_its_batched_life_at_the_take`] says why no
+/// printed card fits and quotes the nearest printed board. The battlefield-entry trigger is the
+/// printed Soul Warden's ("Whenever another creature enters, you gain 1 life."); nothing enters
+/// during the period, so it never fires.
 ///
-/// REVERT-PROBE (RUN): delete `&& token_profile.is_some()` from `life_etb_sourced` ⇒ this test's
-/// batched-`Life` assertion FAILS (the take performs the period and stashes nothing). The sibling
-/// `Absent`-arm test stays green under that same deletion, which is precisely why this arm exists.
+/// REVERT-PROBE: replace the axis condition with a board-shape one
+/// (`res::board_has_functioning_etb_trigger(state)`, the pre-change gate's) ⇒ this test's
+/// ∞ `Mana(C)` reach-guard FAILS (the take performs the period and marks nothing). The sibling
+/// `Absent`-arm test stays green under that same change, which is precisely why this arm exists.
 #[test]
 fn low3_mana_only_life_growth_stays_batched_despite_board_etb_trigger() {
-    let runner = low3_life_engine_accepted(Low3BoardEtbTrigger::Present);
+    use engine::analysis::resource::ResourceAxis;
+    use engine::types::mana::ManaType;
 
-    let stash = runner
-        .state()
-        .pending_unbounded_materialization
-        .get(&P0)
-        .cloned()
-        .unwrap_or_default();
-    // Reach-guard: the accept produced a stash at all.
+    let mut runner = low3_life_engine_offered(Low3BoardEtbTrigger::Present);
+    let life_before = life_of(runner.state(), P0);
+    low3_accept(&mut runner, 1);
+
+    // DISCRIMINATOR: with the ETB trigger present and the loop token-less, the take stays on the
+    // MARK route, which marks the period's ∞ mana axis.
+    let marks = runner.state().unbounded_resources.get(&P0);
     assert!(
-        !stash.is_empty(),
-        "reach-guard: the accept must register a deferred materialization stash for P0"
+        marks.is_some_and(|axes| axes.contains(&ResourceAxis::Mana(ManaType::Colorless))),
+        "a token-less life loop must stay on the Mark route even with a board ETB trigger, got \
+         {marks:?}"
     );
-    // Reach-guard: this really is the mana-only shape — a `Tokens` item would mean the loop DID
-    // mint fodder, `token_profile` would be `Some`, and the conjunct would no longer be the
-    // load-bearing one.
-    assert!(
-        !stash
-            .iter()
-            .any(|m| matches!(m, PersistentAxisMaterialization::Tokens(_))),
-        "reach-guard: the mana-only loop must stash no Tokens axis, got {stash:?}"
+    // The Mark take stashes nothing (no `Tokens` item: the mana-only shape) and lands its life.
+    assert_eq!(
+        runner.state().pending_unbounded_materialization.get(&P0),
+        None,
+        "the mana-only take stashes nothing"
     );
-    // DISCRIMINATOR: with the ETB trigger present and the loop token-less, the route stays BATCHED.
-    // Drop `token_profile.is_some()` from `life_etb_sourced` and the take performs instead.
-    assert!(
-        stash.iter().any(|m| matches!(
-            m,
-            PersistentAxisMaterialization::Life { player, per_cycle_delta }
-                if *player == P0 && *per_cycle_delta >= 1
-        )),
-        "a token-less life loop must stay on the BATCHED Life route even with a board ETB trigger, \
-         got {stash:?}"
+    assert_eq!(
+        life_of(runner.state(), P0) - life_before,
+        1,
+        "the batched life lands at the take"
     );
 }
 
@@ -3812,8 +3826,9 @@ fn create_life_gainer(state: &mut GameState, owner: PlayerId, name: &str) -> Obj
     id
 }
 
-/// A coarse label per registered materialization — the ROUTE oracle. `Tokens`/`Counters`/`Life`
-/// are the batched N×δ collapse; none means the take performed the period.
+/// A coarse label per registered materialization — the ROUTE oracle on these token boards. `Tokens`
+/// and `Counters` are the batched N×δ collapse (a take lands a `Life` item at once, so a `Life`
+/// label is a graft); none means the take performed the period.
 fn route_labels(state: &GameState, player: PlayerId) -> Vec<String> {
     state
         .pending_unbounded_materialization
@@ -3874,13 +3889,13 @@ fn take_at(state: &mut GameState, n: u32) -> usize {
 /// R6b-converge (CR 732.2a + CR 603.6a): the two collapse ROUTES must land on the SAME life total.
 ///
 /// ARM 1 (ETB-observer board): a real parsed "whenever another creature you control enters, you
-/// gain 1 life" trigger on a P0 permanent. The take must perform the period — NOT register the
-/// batched pair — and taking N=5 must pay the life exactly ONCE, measured ACROSS the take *and*
-/// the stack drain (the drain is where the double-count surfaced: 596 → 646).
+/// gain 1 life" trigger on a P0 permanent. The take must perform the period — NOT batch its
+/// `Tokens` and `Life` — and taking N=5 must pay the life exactly ONCE, measured ACROSS the take
+/// *and* the stack drain (the drain is where the double-count surfaced: 596 → 646).
 ///
-/// REVERT-PROBE (discriminating): drop the `life_etb_sourced` conjunct from
-/// `PeriodGrowth::collapse_is_replay` ⇒ the take registers `["Tokens", "Life(PlayerId(0),1)"]`
-/// instead of performing.
+/// REVERT-PROBE (discriminating): drop the `life_beside_deferred_growth` disjunct from
+/// `PeriodGrowth::collapse_is_replay` ⇒ the take registers `["Tokens"]` and applies the batched
+/// life at the take instead of performing, so the drained ETBs pay it again.
 ///
 /// MUST-NOT-FLIP, ARM 2: the same dump with NO life gainer grows no life axis (MEASURED:
 /// `unbounded == {TokensCreated}`) and must still register the batched `Tokens`.
@@ -3899,11 +3914,20 @@ fn batched_and_replay_routes_converge_on_the_same_life_total() {
     );
 
     // ── ARM 1 (primary): an ETB-sourced life axis ⇒ performed at the take, paid exactly once. ──
+    let db = shared_card_db().expect("integration card fixture must load");
     let mut state = offer_state();
     strip_life_conditional_cost_static(&mut state);
-    let etb_life = innkeeper_etb_life_trigger(&state);
-    let host = create_life_gainer(&mut state, P0, "Grafted Innkeeper");
-    graft_trigger(&mut state, host, etb_life);
+    // Prosperous Innkeeper, placed without entering, so its own "When this creature enters,
+    // create a Treasure token." does not fire.
+    place_card(
+        &mut state,
+        P0,
+        "Prosperous Innkeeper",
+        Zone::Battlefield,
+        db,
+    );
+    mark_layers_full(&mut state);
+    flush_layers(&mut state);
 
     let life_before = life_of(&state, P0);
     let minted = take_at(&mut state, N);
@@ -3913,25 +3937,26 @@ fn batched_and_replay_routes_converge_on_the_same_life_total() {
         minted, N as usize,
         "the take mints exactly N real Saprolings"
     );
-    // (2) DISCRIMINATOR: one Saproling ETB per driven cycle × 1 life each = exactly N. The
-    //     batched route pays N at the collapse AND N again when the real ETBs drain ⇒ 2N.
-    let life_per_cycle = 1i32; // the single grafted ETB gainer on P0's battlefield
+    // (2) DISCRIMINATOR: one Saproling ETB per driven cycle × 1 life each = exactly N. A batched
+    //     take pays N at the take AND N again when the real ETBs drain ⇒ 2N.
+    let life_per_cycle = 1i32; // Prosperous Innkeeper, P0's one ETB life gainer
     assert_eq!(
         life_of(&state, P0) - life_before,
         N as i32 * life_per_cycle,
-        "the ETB life is paid ONCE across collapse+drain (batched route ⇒ over-counts by N)"
+        "the ETB life is paid ONCE across take+drain (batched route ⇒ over-counts by N)"
     );
 }
 
 /// MIXED-CAUSE (CR 732.2a): TWO ETB life gainers on P0's board ⇒ a batched route would carry
 /// `per_cycle_delta == 2`. The take must perform the period for the WHOLE axis.
 ///
-/// This is why the fix is a ROUTE decision and not a registration-cancelling suppressor: a
-/// suppressor keyed on "an ETB source exists" would drop the whole `Life` registration and
+/// This is why the fix is a ROUTE decision and not an item-cancelling suppressor: a
+/// suppressor keyed on "an ETB source exists" would drop the whole batched `Life` item and
 /// under-apply. Here it would pay N instead of 2N.
 ///
-/// REVERT-PROBE (discriminating): drop the `life_etb_sourced` conjunct ⇒ the take registers
-/// `["Tokens", "Life(PlayerId(0),2)"]` instead of performing.
+/// REVERT-PROBE (discriminating): drop the `life_beside_deferred_growth` disjunct ⇒ the take
+/// registers `["Tokens"]` and applies `Life(PlayerId(0), 2)` per cycle at the take instead of
+/// performing.
 #[test]
 fn mixed_cause_life_axis_routes_to_replay() {
     const N: u32 = 5;
@@ -3964,24 +3989,29 @@ fn mixed_cause_life_axis_routes_to_replay() {
 /// beneficiary and silently zero P0's gain.
 ///
 /// REVERT-PROBE (discriminating, RUN): replace the route flip with a board-level suppressor of
-/// the `Life` registration ⇒ P0's Δlife collapses to 0 while P1's stays N.
+/// the batched `Life` item ⇒ P0's Δlife collapses to 0 while P1's stays N.
 #[test]
 fn opponents_etb_life_gainer_does_not_suppress_your_axis() {
     const N: u32 = 5;
+    let db = shared_card_db().expect("integration card fixture must load");
     let mut state = offer_state();
     strip_life_conditional_cost_static(&mut state);
-    let etb_life = innkeeper_etb_life_trigger(&state);
 
-    // P0's own gainer ("another creature YOU control enters").
-    let p0_host = create_life_gainer(&mut state, P0, "Grafted Innkeeper");
-    graft_trigger(&mut state, p0_host, etb_life.clone());
+    // P0's own gainer, Prosperous Innkeeper ("Whenever another creature you control enters,
+    // you gain 1 life."), placed without entering, so its own Treasure trigger does not fire.
+    place_card(
+        &mut state,
+        P0,
+        "Prosperous Innkeeper",
+        Zone::Battlefield,
+        db,
+    );
 
-    // P1 gets a Soul-Warden-shaped copy: the same parsed GainLife trigger with the `You`
-    // controller narrowing dropped, so P0's tokens feed P1's life too.
-    let mut soul_warden = etb_life;
-    soul_warden.valid_card = None;
-    let p1_host = create_life_gainer(&mut state, P1, "Grafted Soul Warden");
-    graft_trigger(&mut state, p1_host, soul_warden);
+    // P1's Soul Warden ("Whenever another creature enters, you gain 1 life.") gains for P0's
+    // tokens too.
+    place_card(&mut state, P1, "Soul Warden", Zone::Battlefield, db);
+    mark_layers_full(&mut state);
+    flush_layers(&mut state);
 
     let p0_before = life_of(&state, P0);
     let p1_before = life_of(&state, P1);
@@ -4013,8 +4043,8 @@ fn opponents_etb_life_gainer_does_not_suppress_your_axis() {
 /// shape (CR 603.2c). Collapsing at N now produces N SEPARATE same-turn token batches (one per
 /// replayed cycle), so the total is right only if BOTH fixes hold:
 ///
-/// * 4a (route): the ETB-sourced axis must be performed at the take. Reverting it registers the
-///   batched `Life` instead.
+/// * 4a (route): the ETB-sourced axis must be performed at the take. Reverting it lands the
+///   batched life at the take and registers only `Tokens`.
 /// * 4b (index): each replayed cycle's entry must carry its OWN zone-change index. Reverting it
 ///   leaves every entry on the `0` placeholder, so `batched_zone_change_already_collected` keys
 ///   all N batches to `(def, 0)` and only the FIRST fires ⇒ the trigger-count assertion fails.
@@ -4055,9 +4085,13 @@ fn combined_batched_etb_gainer_fires_once_per_replayed_cycle() {
 /// `double.rs`, `exchange_life.rs`, `deal_damage.rs`), so that test answers NO here, the loop
 /// keeps the batched `[Tokens, Life]` pair, and the 596-vs-646 double-apply reproduces.
 ///
-/// REVERT-PROBE (discriminating, RUN): re-add the `Effect::GainLife` chain test as a conjunct of
-/// `board_has_functioning_etb_trigger` ⇒ this board's route flips back to
-/// `["Tokens", "Life(PlayerId(0),3)"]` and the assertion below fails on the labels.
+/// REVERT-PROBE: this cycle's ping makes each opponent lose life, so two disjuncts of
+/// `PeriodGrowth::collapse_is_replay` perform the take: the `life_not_stored_as_gains` gate and
+/// `life_beside_deferred_growth`. Dropping either alone leaves this test green; dropping both ⇒
+/// the take registers `["Tokens"]` and applies the `Life(PlayerId(0), 3)` lump at the take, so
+/// the drained ETBs pay it again. The earlier probe, re-adding the `Effect::GainLife` chain test
+/// as a conjunct of `board_has_functioning_etb_trigger`, no longer discriminates: neither
+/// disjunct reads that predicate.
 #[test]
 fn lifelink_etb_damage_life_axis_routes_to_replay() {
     const N: u32 = 5;
@@ -4105,9 +4139,9 @@ fn lifelink_etb_damage_life_axis_routes_to_replay() {
         -(N as i32),
         "each replayed cycle pings every opponent once"
     );
-    // DISCRIMINATOR: the lifelink life is paid ONCE across collapse+drain. The batched route pays
-    // the `Life { per_cycle_delta: 3 }` at the collapse AND the N real token ETBs pay it again on
-    // the drain ⇒ 2 × 3N.
+    // DISCRIMINATOR: the lifelink life is paid ONCE across the take and the drain. A batched take
+    // pays the `Life { per_cycle_delta: 3 }` lump at the take AND the N real token ETBs pay it
+    // again on the drain ⇒ 2 × 3N.
     assert_eq!(
         life_of(&state, P0) - p0_before,
         N as i32 * LIFELINK_PER_CYCLE,

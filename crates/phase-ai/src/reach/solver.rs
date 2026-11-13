@@ -84,9 +84,13 @@ pub(super) fn lethal_combinations(sources: &[PricedSource], budget: &Budget) -> 
             sum.plus(sources[index].loss.controller_gain)
         });
         // CR 104.4a: if both players hit 0 together the game is a draw, so the
-        // AI must stay above 0 for the line to win.
+        // AI must stay above 0 for the line to win. The AI's life (up to
+        // `i32::MAX`) plus a read gain can pass `u32::MAX`; the survival
+        // comparison is made in `u64`.
         let survives = |x: u32| match gain {
-            Gain::Read(gained) => paid.at(x) < budget.controller_life + gained.at(x),
+            Gain::Read(gained) => {
+                u64::from(paid.at(x)) < u64::from(budget.controller_life) + u64::from(gained.at(x))
+            }
             Gain::Unread => true,
         };
         let lethal_at = |x: u32| damage.at(x) >= budget.opponent_life;
@@ -238,4 +242,66 @@ fn searched_indices(sources: &[PricedSource], mana: u32) -> Vec<usize> {
         indices.sort_unstable();
     }
     indices
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::sources::StepOrder;
+    use super::*;
+    use engine::types::mana::ManaCost;
+
+    /// One instant-speed source that deals the opponent's 20 life, costs no
+    /// mana, and makes the AI pay `paid` life while it gains `gain`.
+    fn lethal_source(paid: u32, gain: Gain) -> PricedSource {
+        PricedSource {
+            steps: vec![],
+            loss: LifeLoss {
+                opponent: Linear {
+                    fixed: 20,
+                    per_x: 0,
+                },
+                controller: Linear {
+                    fixed: paid,
+                    per_x: 0,
+                },
+                controller_gain: gain,
+            },
+            mana: ManaCost::zero(),
+            order: StepOrder::InstantSpeed,
+        }
+    }
+
+    fn budget(controller_life: u32) -> Budget {
+        Budget {
+            opponent_life: 20,
+            controller_life,
+            mana: 0,
+        }
+    }
+
+    fn read(fixed: u32) -> Gain {
+        Gain::Read(Linear { fixed, per_x: 0 })
+    }
+
+    /// CR 104.3b + CR 104.4a: a player at 0 or less life loses, and both
+    /// players losing together is a draw, so the AI's line wins only while the
+    /// life it pays stays below its life plus the life it gains. At `i32::MAX`
+    /// life with a gain of `u32::MAX` that sum passes `u32::MAX`; it is
+    /// compared exactly.
+    #[test]
+    fn survival_check_holds_past_u32_life_plus_gain() {
+        let combinations =
+            lethal_combinations(&[lethal_source(1, read(u32::MAX))], &budget(2_147_483_647));
+        assert_eq!(combinations.len(), 1);
+        assert_eq!(combinations[0].members, vec![0]);
+        assert_eq!(combinations[0].x, None);
+
+        // Reach guard and negative: paying 30 from 20 life with no gain does
+        // not survive; paying 1 does.
+        assert!(lethal_combinations(&[lethal_source(30, read(0))], &budget(20)).is_empty());
+        assert_eq!(
+            lethal_combinations(&[lethal_source(1, read(0))], &budget(20)).len(),
+            1
+        );
+    }
 }

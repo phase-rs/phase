@@ -1,5 +1,6 @@
 //! CR 732.2a: a board carrying a FUNCTIONING cast-mode trigger makes an accepted object-growth
-//! take perform its period instead of registering the batched `Tokens`/`Counters`/`Life` items. Every row runs on the REAL 4-player
+//! take perform its period instead of batching its `Tokens`, `Counters` or `Life` items. Every row
+//! runs on the REAL 4-player
 //! `sprout_witherbloom_realistic_lands_4p` dump through the production restore chokepoint and the
 //! public `apply()` boundary; grafted and ungrafted arms are ONE OBJECT apart.
 //!
@@ -7,9 +8,11 @@
 //! ELIDED period, not to the collapse — so a batched accept re-performs a cast-sourced per-cycle
 //! effect ZERO times where live play performs it once per cycle. CR 601.2i is the cast event, and
 //! CR 113.6 / CR 113.6b are the zone gate keeping a library-resident cast trigger from counting.
-//! The whole replay disjunction sits under `!batched.is_empty()`, so the replay route is only
-//! ever the better version of a registration the batched arm would have made, never a
-//! performance out of nothing (`mana_engine_with_cast_trigger_registers_nothing` is its pin).
+//! The observer disjuncts, `cast_sourced` among them, sit under `!batched.is_empty()`, so they only
+//! ever replace a batch the batched arm would have made, never a performance out of nothing
+//! (`mana_engine_with_cast_trigger_registers_nothing` is its pin). The disjuncts outside it (an
+//! axis no item can deliver, and a life change a lump would not land as performing lands it)
+//! perform a take whatever it batches.
 
 use engine::analysis::decision_template::IterationCount;
 use engine::analysis::loop_check::ShortcutResponse;
@@ -333,7 +336,7 @@ fn two_accepts_one_phase_one_batched_one_performed_at_the_take() {
 /// **A real Basalt Monolith + Power Artifact mana engine carrying a functioning cast trigger
 /// still stands on the mark and registers NOTHING**, rather than performing the period at the take
 /// for growth no batched item would carry. The route seam's arms are ASYMMETRIC — the batched arm
-/// registers CONDITIONALLY (token profile / counter growth / life growth, none of which a mana
+/// batches CONDITIONALLY (token profile / counter growth / life growth, none of which a mana
 /// engine has), and `cast_sourced` is the only route disjunct
 /// with no axis-shaped conjunct. Without `!batched.is_empty()` ANY functioning cast trigger
 /// anywhere flips this rig: `functioning_board_trigger_defs` walks `state.objects.values()` with

@@ -10,6 +10,7 @@ use rand_chacha::ChaCha20Rng;
 use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::database::card_db::CardDbHandle;
+use crate::game::arithmetic;
 use crate::game::game_object::ObjectIncarnationRefExt;
 use crate::parser::oracle::{
     parse_attack_exert_header, parse_unknown_conditioned_attack_exert_header,
@@ -4955,7 +4956,9 @@ pub struct PendingCopyTokenBatch {
 /// persistent-growth axis, applied at the CR 500.5 step/phase boundary at the
 /// controller-named N. Generalizes the shipped token-only deferred materialization to
 /// the whole persistent-materialization class (tokens, beneficial-growable counters,
-/// life gain). A future persistent axis
+/// life gain). A take applies a `Life` item at the take instead
+/// (`game::engine`'s `materialize_object_growth_shortcut`), so a stash holds one only from a
+/// save written before that. A future persistent axis
 /// is a new leaf variant + one submit arm + one clear arm (exhaustive `match` keeps
 /// every seam honest — a new variant will not compile until classified).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -4973,7 +4976,9 @@ pub enum PersistentAxisMaterialization {
     /// CR 122.1 / CR 701.34a: apply `per_cycle_delta × N` counters to each captured
     /// target (the beneficial-growable counter axis: Generic / +1/+1 / loyalty / defense).
     Counters(Vec<CounterGrowth>),
-    /// CR 119.3: gain `per_cycle_delta × N` life for `player` via the life-gain authority.
+    /// CR 119.3: gain `per_cycle_delta × N` life for `player` via the life-gain authority. A
+    /// take applies it at the take, at the accepted N; a stash holds one only from a save
+    /// written before that, and the boundary still applies it.
     Life {
         player: PlayerId,
         per_cycle_delta: u32,
@@ -8343,10 +8348,12 @@ pub struct PendingCounterAdditionQueue {
 /// simultaneous life-total assignment that paused on a replacement choice. The
 /// current gain/loss event is owned by `pending_replacement`; this record holds
 /// only the tail plus the completion work that runs after the full assignment.
+/// `remaining` holds exact `i64` differences: a difference between two life
+/// totals spans up to `u32::MAX`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PendingLifeTotalAssignment {
     pub completion_player: PlayerId,
-    pub remaining: Vec<(PlayerId, i32)>,
+    pub remaining: Vec<(PlayerId, i64)>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub completion: Option<PendingEffectResolved>,
 }
@@ -23858,18 +23865,19 @@ declare_game_state! {
     /// inside that synchronous window; it is never serialized.
     #[serde(skip)]
     pub active_spend_only_on_x_count: Option<(ObjectId, u32)>,
-    /// Open while an action-ingress player-resource change (life, player
-    /// counter, energy) settles synchronously (a `try_*` entry's whole call, or
-    /// the replacement-choice handler resuming a `Reject` record). Any such
-    /// settlement inside it that is unrepresentable is recorded here and the
-    /// ingress caller rejects. Transient — never serialized.
+    /// Open while an action-ingress player-resource change settles synchronously (a public action
+    /// boundary, a `try_*` entry's whole call, or the replacement-choice handler resuming a
+    /// `Reject` record). A player-counter or energy settlement inside it that is unrepresentable is
+    /// recorded here and the ingress owner rejects; a life change saturates instead. Transient —
+    /// never serialized.
     #[serde(skip)]
-    pub(crate) ingress_life_window: Option<IngressLifeWindow>,
-    /// A replacement's computed life, player-counter or energy quantity
-    /// overflowed while the current event was being replaced (see
-    /// `ReplacementQuantityOverflow`). Recorded by the life and player/energy
-    /// counter appliers, taken by that event's settle step inside one
-    /// synchronous action. Transient — never serialized.
+    pub(crate) ingress_player_resource_window: Option<IngressPlayerResourceWindow>,
+    /// A replacement's computed player-counter or energy quantity overflowed
+    /// while the current event was being replaced (see
+    /// `ReplacementQuantityOverflow`). Recorded by the player/energy counter
+    /// applier, taken by that event's settle step inside one synchronous
+    /// action; a life applier saturates instead and records nothing.
+    /// Transient — never serialized.
     #[serde(skip)]
     pub(crate) replacement_quantity_overflow: Option<ReplacementQuantityOverflow>,
     /// CR 601.2g + CR 605.3b: the row policy of the automatic mana payment that
@@ -24856,8 +24864,12 @@ declare_game_state! {
 
     /// CR 732.2a: for each controller that accepted an unbounded loop shortcut, the
     /// list of deferred persistent-axis materializations captured at accept. Part 1
-    /// marks the ∞ axes and mutates NOTHING (or, for a token loop, seeds a display
-    /// anchor); the concrete finite growth is applied at the next phase/step boundary,
+    /// marks the ∞ axes other than life and applies any batched life (a take with a `Tokens` or
+    /// `Counters` item batches none, since one batching life beside them is performed); for a token
+    /// loop
+    /// whose period taps a fodder each cycle while the proposer has none tapped, it seeds a
+    /// tapped display anchor and one untapped token (`seed_representative_fodder`); the
+    /// concrete finite growth is applied at the next phase/step boundary,
     /// where the controller is prompted (`PayableResource::LoopCollapse`) for a finite
     /// N. Each element is one `PersistentAxisMaterialization` — a per-axis batched item
     /// (`Tokens` mint recipe / `Counters` δ / `Life` δ) that applies N×δ. The token profile is a `CopiableValues`
@@ -24865,7 +24877,8 @@ declare_game_state! {
     /// `ResidualPermanent` (a token's `oracle_id` is empty). Written ONLY by
     /// `register_pending_materialization` (push); taken by `take_pending_materialization`;
     /// cleared axis-scoped by `clear_collapsed_materializations` (and, whole-player, by
-    /// `clear_unbounded_loop`).
+    /// `clear_unbounded_loop`). A take registers no `Life` item, since its life lands at the
+    /// take; a `Life` item is here only from a save written before that.
     ///
     /// INTENTIONALLY EXCLUDED from `PartialEq`, `normalize_for_loop`, and
     /// `loop_fingerprint` (same unbounded family as `unbounded_resources` /
@@ -24882,8 +24895,9 @@ declare_game_state! {
     /// only let the controller collapse to at most N, because re-asking for a larger
     /// count would be a new game choice the accepted proposal never contained. Written
     /// by `materialize_fixed_shortcut` (the ONLY path that can register a deferred
-    /// materialization — `UntilLethal` never reaches it); read by
-    /// `turns::drain_pending_phase_transition_progress` as the prompt's `max`; cleared in
+    /// materialization — `UntilLethal` never reaches it); read through
+    /// `game::engine::pending_collapse_bound` by the boundary prompt
+    /// (`turns::drain_pending_phase_transition_progress`); cleared in
     /// lockstep with `pending_unbounded_materialization` by `take_pending_materialization`,
     /// `clear_collapsed_materializations` and `clear_unbounded_loop`.
     ///
@@ -29661,22 +29675,31 @@ pub struct PendingReplacement {
     /// boundary methods below.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub delivery_boundary: Option<Box<ProposedEvent>>,
-    /// Whether an engine-unrepresentable final player-resource edit (life,
-    /// player counter, energy) on resume rejects the
-    /// public action and restores its entry state (`Reject`), or uses the
-    /// compatibility skip when no ingress window owns it (`IgnoreImpossible`).
-    /// Older payloads omit this field and retain that compatibility policy.
+    /// Whether an engine-unrepresentable player-resource settlement on resume
+    /// (a player counter or energy, including one a resumed life event's
+    /// substitute or continuation reaches; a life change saturates instead)
+    /// rejects the public action and restores its entry state (`Reject`), or
+    /// uses the compatibility skip when no ingress window owns it
+    /// (`IgnoreImpossible`). Older payloads omit this field and retain that
+    /// compatibility policy. The serialized key keeps the field's earlier name,
+    /// `unrepresentable_life_change`, because saved games and peers carry it
+    /// (`protocol/changes/ec18f476-7885-4d54-826e-b9f2ed25f966.json`).
     #[serde(
+        rename = "unrepresentable_life_change",
         default,
         skip_serializing_if = "UnrepresentablePolicy::is_ignore_impossible"
     )]
-    pub unrepresentable_life_change: UnrepresentablePolicy,
+    pub unrepresentable_player_resource_change: UnrepresentablePolicy,
 }
 
-/// Who owns a player-resource change (life, player counter, energy) whose final
-/// result the engine cannot represent (final amount beyond an `i32` delta, life
-/// total overflow, per-turn gained/lost counter overflow, or counter/energy
-/// total overflow).
+/// Who owns a player-resource change (a player counter or energy, on its own or nested under a
+/// life change) whose final
+/// result the engine cannot represent (a player-counter or energy amount beyond
+/// an `i32` delta or total past `u32::MAX`, or a player-counter or energy
+/// replacement quantity that overflowed while the event was replaced). A life
+/// change is never unrepresentable: it carries any `u32` amount exactly, a life
+/// replacement quantity saturates at `u32::MAX`, and the total and per-turn
+/// gained/lost counters saturate at their limits.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum UnrepresentablePolicy {
     /// Action ingress: return the typed error so the caller rejects the
@@ -29685,7 +29708,7 @@ pub enum UnrepresentablePolicy {
     /// Compatibility fallback for ordinary resolution outside a public action
     /// boundary and for older serialized payloads. This is an engine numeric
     /// capacity limit, not a rules outcome: the change cannot be recorded, so it
-    /// is logged once and skipped without a life mutation. An open ingress
+    /// is logged once and skipped without a mutation. An open ingress
     /// window instead records failure so the public boundary rejects the action
     /// and restores its entry state.
     #[default]
@@ -29700,30 +29723,32 @@ impl UnrepresentablePolicy {
 }
 
 /// State of the transient action-ingress window (see
-/// `GameState::ingress_life_window`): the first player whose player-resource
-/// (life, player counter, energy) settlement inside the window proved
+/// `GameState::ingress_player_resource_window`): the first player whose player-counter or energy
+/// settlement inside the window, on its own or nested under a life change, proved
 /// unrepresentable, if any.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub(crate) struct IngressLifeWindow {
+pub(crate) struct IngressPlayerResourceWindow {
     pub(crate) failed_player: Option<PlayerId>,
 }
 
-/// A replacement's computed life, player-counter or energy quantity overflowed
-/// the engine's numeric range, so the modified event cannot be represented. This
-/// is an engine capacity limit, NOT a CR 101.3 impossibility: the applier
-/// records the overflowing replacement's source (diagnostic) and that event's
-/// settle step takes the record and routes it through the existing
+/// A replacement's computed player-counter or energy quantity overflowed the
+/// engine's numeric range, so the modified event cannot be represented. This is
+/// an engine capacity limit, NOT a CR 101.3 impossibility: the applier records
+/// the overflowing replacement's source (diagnostic) and that event's settle
+/// step takes the record and routes it through the existing
 /// unrepresentable-player-resource-change authority. A public action boundary
 /// rejects and restores; the ordinary fallback outside one skips the change for
-/// compatibility (never clamping, and never inventing a CR 119.3 amount).
+/// compatibility. A life replacement quantity is never recorded: it lands on
+/// `u32::MAX` (an engine limit, not a rule), which the life settle carries exactly while the life
+/// total saturates at its `i32` limit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct ReplacementQuantityOverflow {
     pub(crate) source: ObjectId,
 }
 
 impl GameState {
-    /// Record that a replacement's computed life, player-counter or energy
-    /// quantity overflowed. The first writer wins: the loop stops at the first
+    /// Record that a replacement's computed player-counter or energy quantity
+    /// overflowed. The first writer wins: the loop stops at the first
     /// overflow, so a later record can only be the same event.
     pub(crate) fn record_replacement_quantity_overflow(&mut self, source: ObjectId) {
         if self.replacement_quantity_overflow.is_none() {
@@ -29744,12 +29769,12 @@ impl PendingReplacement {
     /// `predecessor_policy`) was being answered keeps the ingress stamp. Copies
     /// `Reject` onto a record still at the default and never downgrades a
     /// `Reject` already on it.
-    pub(crate) fn inherit_unrepresentable_life_change(
+    pub(crate) fn inherit_unrepresentable_player_resource_change(
         &mut self,
         predecessor_policy: UnrepresentablePolicy,
     ) {
         if predecessor_policy == UnrepresentablePolicy::Reject {
-            self.unrepresentable_life_change = UnrepresentablePolicy::Reject;
+            self.unrepresentable_player_resource_change = UnrepresentablePolicy::Reject;
         }
     }
 
@@ -32904,39 +32929,61 @@ impl GameState {
 
     /// Applies one final player-resource edit without replacements, quantity
     /// evaluation, or an implicit player selection.
+    ///
+    /// The life arm adjusts the total the change applies to — the player's own
+    /// life, or in a shared-life format the team's exact shared total
+    /// (CR 810.4 + CR 810.9, `players::life_change_total`) — and saturates it
+    /// at the `i32` limit the change moves toward
+    /// (`arithmetic::saturating_life_total`). It stores the result across the
+    /// team's fields (`players::spread_life_change`) and adds the rules amount
+    /// to the acting player's per-turn gained/lost counter, whatever the total
+    /// moved, saturating at `u32::MAX` (CR 119.3 + CR 119.9). Energy and player
+    /// counters keep the checked
+    /// edit. Replaying a recorded command on the same prefix reproduces the
+    /// same result, the spread included.
     pub fn apply_resolved_player_edit(
         &mut self,
         command: &ResolvedPlayerEditCommand,
     ) -> Result<(), ResolvedPlayerEditReplayInvariantError> {
-        let player = self
+        let index = self
             .players
-            .iter_mut()
-            .find(|candidate| candidate.id == command.player)
+            .iter()
+            .position(|candidate| candidate.id == command.player)
             .ok_or(ResolvedPlayerEditReplayInvariantError::UnknownPlayer(
                 command.player,
             ))?;
+        let player = &mut self.players[index];
 
         match &command.edit {
             ResolvedPlayerEdit::Life { delta } => {
-                let amount = nonzero_delta_magnitude(*delta)?;
-                let life = player
-                    .life
-                    .checked_add(*delta)
-                    .ok_or(ResolvedPlayerEditReplayInvariantError::ResourceOverflow)?;
-                if *delta > 0 {
-                    let gained = player
-                        .life_gained_this_turn
-                        .checked_add(amount)
-                        .ok_or(ResolvedPlayerEditReplayInvariantError::ResourceOverflow)?;
-                    player.life = life;
-                    player.life_gained_this_turn = gained;
+                let rules = delta.unsigned_abs();
+                if rules == 0 {
+                    return Err(ResolvedPlayerEditReplayInvariantError::ZeroDelta);
+                }
+                // CR 810.4 + CR 810.9: the change adjusts the player's shared
+                // life total (its own life outside a shared-life format).
+                let current = crate::game::players::life_change_total(self, command.player);
+                // CR 119.3: the gain or loss adjusts the total, which may be
+                // negative (CR 107.1b). It stops at the `i32` limit the change
+                // moves toward: an engine storage limit, not a rule
+                // (`arithmetic::saturating_life_total`).
+                let total = arithmetic::saturating_life_total(current, *delta);
+                debug_assert!(
+                    total.abs_diff(current) <= rules,
+                    "a saturating life total never moves past the rules amount"
+                );
+                // CR 810.9 + CR 810.9a: the adjusted total is stored across the
+                // team's fields, the acting player's own field first.
+                crate::game::players::spread_life_change(self, command.player, total - current);
+                // CR 119.3 + CR 119.9: the per-turn counters add the rules amount, saturating,
+                // since a gain held at the cap is still a life gain.
+                let counted = arithmetic::u64_to_u32_saturating(rules);
+                let player = &mut self.players[index];
+                if delta.is_positive() {
+                    player.life_gained_this_turn =
+                        player.life_gained_this_turn.saturating_add(counted);
                 } else {
-                    let lost = player
-                        .life_lost_this_turn
-                        .checked_add(amount)
-                        .ok_or(ResolvedPlayerEditReplayInvariantError::ResourceOverflow)?;
-                    player.life = life;
-                    player.life_lost_this_turn = lost;
+                    player.life_lost_this_turn = player.life_lost_this_turn.saturating_add(counted);
                 }
             }
             ResolvedPlayerEdit::Energy { delta } => {
@@ -33948,7 +33995,7 @@ impl GameState {
             active_graveyard_permission_latch: None,
             active_paid_resolution_offer_tail: None,
             active_spend_only_on_x_count: None,
-            ingress_life_window: None,
+            ingress_player_resource_window: None,
             replacement_quantity_overflow: None,
             active_auto_tap_row_policy: None,
             battlefield: im::Vector::new(),
@@ -35754,7 +35801,7 @@ impl GameState {
         self.die_result_this_resolution = None;
         self.die_result_publication = None;
         self.consumed_before_priority_trigger_events.clear();
-        self.ingress_life_window = None;
+        self.ingress_player_resource_window = None;
         self.replacement_quantity_overflow = None;
     }
 
@@ -35762,8 +35809,8 @@ impl GameState {
     /// right now must be stamped with: `Reject`
     /// while an action-ingress window is open (the event belongs to that public
     /// action), otherwise legacy/outside-boundary compatibility behavior.
-    pub(crate) fn ingress_life_policy(&self) -> UnrepresentablePolicy {
-        if self.ingress_life_window.is_some() {
+    pub(crate) fn ingress_player_resource_policy(&self) -> UnrepresentablePolicy {
+        if self.ingress_player_resource_window.is_some() {
             UnrepresentablePolicy::Reject
         } else {
             UnrepresentablePolicy::IgnoreImpossible
@@ -37259,12 +37306,12 @@ impl GameState {
             .insert(controller, targets.into_iter().collect());
     }
 
-    /// CR 732.2a: single write authority for `pending_unbounded_materialization` — only
+    /// CR 732.2a: single write authority for `pending_unbounded_materialization` —
     /// `game::engine::materialize_object_growth_shortcut` calls this, at accept, PUSHING
-    /// one deferred per-axis batched item (`Tokens` / `Counters` / `Life`) onto the
-    /// controller's list. Consumed at the next phase/step boundary
-    /// (`take_pending_materialization`) to apply the deferred finite growth. Appends
-    /// (multiple axes of one loop, or two accepts by the same controller, coexist).
+    /// one deferred per-axis batched item (`Tokens` / `Counters`; its `Life` items land at the
+    /// take instead) onto the controller's list. Consumed at the next phase/step boundary
+    /// (`take_pending_materialization`) to apply the deferred finite growth. Appends (multiple
+    /// axes of one loop, or two accepts by the same controller, coexist).
     pub fn register_pending_materialization(
         &mut self,
         controller: PlayerId,
@@ -37356,7 +37403,10 @@ impl GameState {
     ///
     /// (a) UNOBSERVED → batch. `batch(N) ≡ perform-each(N)` by the growth-observed firewall's own
     ///     precondition: the batch route is entered only when no observer can make the lump apply
-    ///     differently from N separate applications.
+    ///     differently from N separate applications. Life is applied at the take (route (f)),
+    ///     and the gate and the limit reading of `game::engine`'s
+    ///     `PeriodGrowth::collapse_is_replay` send every cycle whose life changes the lump would
+    ///     not land as performing lands them to route (b).
     /// (b) OBSERVED AT ACCEPT → the take performs the period
     ///     (`game::engine::drive_persistent_axis_collapse`), so observers fire exactly as they
     ///     would in manual play.
@@ -37374,6 +37424,18 @@ impl GameState {
     ///     accepted an unbounded advance; a responder who named a place (CR 732.2b) accepted no
     ///     such thing, and a sequence performed zero times reaches its ending point having done
     ///     nothing, so neither may take the elision. Identity again holds by performance.
+    /// (f) LIFE LANDS AT THE TAKE → a Mark take applies its `Life` items at the accepted count
+    ///     (`game::engine`'s `materialize_object_growth_shortcut`), so no life waits for the
+    ///     boundary and no later change can reorder against it. Identity holds for every total,
+    ///     field and per-turn counter because the take batches life only where every life change
+    ///     in the driven cycle is a gain stored whole on its player's own field, and no cycle of
+    ///     the accepted count would carry a total those gains touch, or a gaining player's own
+    ///     field, past an `i32` limit. Then no change is held back and nothing spills, so every
+    ///     cycle repeats the driven cycle from where the one before it ended, the lump moves each
+    ///     total, field and gained counter as the cycles' gains do, and no lost counter moves
+    ///     either way. A cycle with any loss is performed (route (b)), since a lump cannot add to a
+    ///     lost counter. A take that would batch life beside a `Tokens` or `Counters` item, which
+    ///     the boundary applies at the count its controller names there, is performed too.
     ///
     /// Route (c) is the one the review indicted, and it is the route that ENFORCES CR 732.2c rather
     /// than departing from it. Once an observer appears, the other two options both break the
@@ -37398,8 +37460,10 @@ impl GameState {
     ///   at every place up to N, i.e. consenting to every prefix. The collapse prompt's `[0, N]`
     ///   range therefore only ever lands on a consented, manually-reachable prefix.
     /// * **L5 THIRD-PARTY INVARIANCE** — the batch route is reachable only when unobserved, so no
-    ///   non-controller state depends on the count; under-delivery moves only the controller's own
-    ///   gain (and tapped tokens carry no lethal driver, per `game::turns`).
+    ///   observer depends on the count. A seat other than the controller can still gain by it (P1's
+    ///   Soul Warden on P0's loop): that `Life` item lands at the take at the count the seat
+    ///   accepted (route (f)), so the boundary's under-delivery moves only the `Tokens` and
+    ///   `Counters` items (and tapped tokens carry no lethal driver, per `game::turns`).
     ///
     /// THE HONEST BOUNDARY, STATED BECAUSE IT IS THE ARGUMENT AND NOT A CONCESSION: this engine does
     /// not follow the CR 732.2 procedure verbatim. It is a CR 732.1a-licensed VARIANT — "as long as
@@ -37415,8 +37479,10 @@ impl GameState {
     /// about them — it names what the boundary will REMOVE, not what the display may show.
     ///
     /// No item kind names a `Mana(_)` axis. Note the two axis classes end their `∞` by
-    /// different routes: `Tokens` / `Counters` / `Life` are DEFERRED and end here, when the
-    /// boundary applies the growth; a `Mana(_)` is already materialized in the pool
+    /// different routes: `Tokens` / `Counters` are DEFERRED and end here, when the boundary
+    /// applies the growth (as does a `Life` item restored from an earlier save; a Mark take marks
+    /// no `Life` axis, route (f), and a drain crown's `Life` mark ends with the game); a `Mana(_)`
+    /// is already materialized in the pool
     /// (`mana_payment::refill_infinite_mana` re-tops it off this very store) and its `∞` ends at
     /// the CR 500.5 step/phase end instead.
     ///
@@ -37875,7 +37941,7 @@ fn _gamestate_partition_is_total(s: &GameState) {
         active_graveyard_permission_latch: _,
         active_paid_resolution_offer_tail: _,
         active_spend_only_on_x_count: _,
-        ingress_life_window: _,
+        ingress_player_resource_window: _,
         replacement_quantity_overflow: _,
         active_auto_tap_row_policy: _,
         battlefield: _,
@@ -57700,39 +57766,39 @@ mod tests {
         );
     }
 
-    /// The ingress life window lives only inside one synchronous action: it is
+    /// The ingress player-resource window lives only inside one synchronous action: it is
     /// never serialized, and the per-action reset closes it.
     #[test]
-    fn ingress_life_window_is_skipped_by_serde_and_cleared_per_action() {
+    fn ingress_player_resource_window_is_skipped_by_serde_and_cleared_per_action() {
         let mut state = GameState::new_two_player(7);
-        state.ingress_life_window = Some(IngressLifeWindow {
+        state.ingress_player_resource_window = Some(IngressPlayerResourceWindow {
             failed_player: Some(PlayerId(1)),
         });
         assert_eq!(
-            state.ingress_life_policy(),
+            state.ingress_player_resource_policy(),
             UnrepresentablePolicy::Reject,
             "reach guard: an open window selects the rejecting stamp"
         );
 
         let serialized = serde_json::to_string(&state).expect("state must serialize");
         assert!(
-            !serialized.contains("ingress_life_window"),
-            "ingress_life_window must be skipped by serde: {serialized}"
+            !serialized.contains("ingress_player_resource_window"),
+            "ingress_player_resource_window must be skipped by serde: {serialized}"
         );
         let deserialized: GameState =
             serde_json::from_str(&serialized).expect("state must deserialize");
         assert_eq!(
-            deserialized.ingress_life_window, None,
-            "deserialized ingress_life_window must be None"
+            deserialized.ingress_player_resource_window, None,
+            "deserialized ingress_player_resource_window must be None"
         );
 
         state.clear_player_action_transients();
         assert_eq!(
-            state.ingress_life_window, None,
+            state.ingress_player_resource_window, None,
             "the per-action reset must close the window"
         );
         assert_eq!(
-            state.ingress_life_policy(),
+            state.ingress_player_resource_policy(),
             UnrepresentablePolicy::IgnoreImpossible
         );
     }
@@ -57802,12 +57868,14 @@ mod tests {
             may_cost_paid: false,
             may_cost_remaining: None,
             delivery_boundary: None,
-            unrepresentable_life_change: policy,
+            unrepresentable_player_resource_change: policy,
         }
     }
 
     /// Wire shape of the parked-record policy: present as `"Reject"` and
     /// round-trips; omitted for the ordinary policy; absent in older payloads.
+    /// Named for the policy's wire key, `unrepresentable_life_change`, which the
+    /// field `unrepresentable_player_resource_change` keeps through its serde rename.
     #[test]
     fn pending_replacement_unrepresentable_life_change_wire_shape() {
         let reject = pending_life_gain_replacement(UnrepresentablePolicy::Reject);
@@ -57833,7 +57901,7 @@ mod tests {
         let legacy: PendingReplacement =
             serde_json::from_value(json).expect("legacy record must deserialize");
         assert_eq!(
-            legacy.unrepresentable_life_change,
+            legacy.unrepresentable_player_resource_change,
             UnrepresentablePolicy::IgnoreImpossible
         );
     }
@@ -57841,23 +57909,27 @@ mod tests {
     /// CR 616.1f: a re-parked record copies a `Reject` stamp from its
     /// predecessor and never downgrades one it already carries.
     #[test]
-    fn inherit_unrepresentable_life_change_copies_reject_and_never_downgrades() {
+    fn inherit_unrepresentable_player_resource_change_copies_reject_and_never_downgrades() {
         let mut reparked = pending_life_gain_replacement(UnrepresentablePolicy::IgnoreImpossible);
-        reparked.inherit_unrepresentable_life_change(UnrepresentablePolicy::IgnoreImpossible);
+        reparked.inherit_unrepresentable_player_resource_change(
+            UnrepresentablePolicy::IgnoreImpossible,
+        );
         assert_eq!(
-            reparked.unrepresentable_life_change,
+            reparked.unrepresentable_player_resource_change,
             UnrepresentablePolicy::IgnoreImpossible,
             "an ordinary predecessor leaves the default record ordinary"
         );
-        reparked.inherit_unrepresentable_life_change(UnrepresentablePolicy::Reject);
+        reparked.inherit_unrepresentable_player_resource_change(UnrepresentablePolicy::Reject);
         assert_eq!(
-            reparked.unrepresentable_life_change,
+            reparked.unrepresentable_player_resource_change,
             UnrepresentablePolicy::Reject,
             "a rejecting predecessor stamps the default record"
         );
-        reparked.inherit_unrepresentable_life_change(UnrepresentablePolicy::IgnoreImpossible);
+        reparked.inherit_unrepresentable_player_resource_change(
+            UnrepresentablePolicy::IgnoreImpossible,
+        );
         assert_eq!(
-            reparked.unrepresentable_life_change,
+            reparked.unrepresentable_player_resource_change,
             UnrepresentablePolicy::Reject,
             "an ordinary predecessor must not downgrade a rejecting record"
         );

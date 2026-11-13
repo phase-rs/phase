@@ -479,7 +479,10 @@ pub fn teammates(state: &GameState, player: PlayerId) -> Vec<PlayerId> {
 }
 
 /// CR 810.9a + CR 810.9d: Fold a player population into one i32 by aggregating
-/// each DISTINCT team's shared `team_life_total` exactly once (dedup by team).
+/// each DISTINCT team's exact shared total ([`team_life_sum`]) exactly once
+/// (dedup by team), then saturating the result into `i32` once — so a Sum stays
+/// exact whenever the result fits, even when a team above `i32::MAX` and a team
+/// below 0 fold back into range.
 /// Min/Max = extremum over team totals; Sum = Σ team totals (no double-count).
 /// Empty population → 0. Off-team every player is its own singleton team, so
 /// this matches a per-individual fold: the dedup key is a per-seat variant,
@@ -497,15 +500,31 @@ where
     I: IntoIterator<Item = PlayerId>,
 {
     let mut seen = std::collections::BTreeSet::new();
-    let team_totals = players.into_iter().filter_map(|pid| {
+    let team_sums = players.into_iter().filter_map(|pid| {
         let key = super::topology::shared_life_dedup_key(state, pid);
-        seen.insert(key).then(|| team_life_total(state, pid))
+        seen.insert(key).then(|| team_life_sum(state, pid))
     });
-    match aggregate {
-        AggregateFunction::Max => team_totals.max().unwrap_or(0),
-        AggregateFunction::Min => team_totals.min().unwrap_or(0),
-        AggregateFunction::Sum => team_totals.sum(),
-    }
+    let exact = match aggregate {
+        AggregateFunction::Max => team_sums.max().unwrap_or(0),
+        AggregateFunction::Min => team_sums.min().unwrap_or(0),
+        AggregateFunction::Sum => team_sums.sum(),
+    };
+    super::arithmetic::i64_to_i32_saturating(exact)
+}
+
+/// CR 810.4 + CR 810.9a: The exact value of a player's team's shared life
+/// total: the sum of the living members' `Player::life` fields, computed in
+/// `i64` so no team can overflow it. In non-team formats this is the player's
+/// own life, and a player who has left the game reads 0, exactly as
+/// [`team_life_total`] does. [`team_life_total`] is this value saturated into
+/// `i32`; the life-payment authority (`life_costs::can_pay_life_cost`,
+/// `life_costs::max_payable_life`) reads this exact value (CR 119.4a).
+pub fn team_life_sum(state: &GameState, player: PlayerId) -> i64 {
+    super::topology::shared_life_members(state, player)
+        .into_iter()
+        .filter_map(|member| state.players.iter().find(|p| p.id == member))
+        .map(|p| i64::from(p.life))
+        .sum()
 }
 
 /// CR 810.4 + CR 810.9a: A player's team's shared life total. In non-team
@@ -515,15 +534,77 @@ where
 /// that cost or effect uses the team's life total instead" — callers that
 /// read an individual life total for a comparison, cost, or SBA check in a
 /// team-based format must go through this accessor rather than `Player::life`
-/// directly. The underlying per-player `life` fields remain the single
-/// source of truth (CR 810.9: life loss/gain still happens to "each player
-/// individually") — this is a pure derived sum, not a separate stored pool.
+/// directly. The members' `life` fields are the only storage. A life
+/// change happens to a player and adjusts the team's shared total, which
+/// [`spread_life_change`] stores (CR 810.9). This is a pure derived reading,
+/// not a separate stored pool: the exact [`team_life_sum`] saturated into
+/// `i32`. Saturation keeps the sign, so the CR 810.8c / CR 704.5a "0 or less"
+/// loss check answers as the exact total does. Life-payment affordability and budgets read
+/// [`team_life_sum`] instead (CR 119.4a).
 pub fn team_life_total(state: &GameState, player: PlayerId) -> i32 {
-    super::topology::shared_life_members(state, player)
+    super::arithmetic::i64_to_i32_saturating(team_life_sum(state, player))
+}
+
+/// CR 810.4 + CR 810.9: The stored life fields a life change to `player`
+/// adjusts, in the order the change is stored: `player`'s own field first,
+/// then the other living members of its shared life total in
+/// `topology::shared_life_members` order (a Two-Headed Giant team has one
+/// teammate, CR 810.1; the Archenemy Commander heroes share one total,
+/// CR 904.13b; a Horde game's survivors share one, `topology::has_shared_life`).
+/// Outside a shared-life format this is `player` alone; `player` is
+/// always included, so a player outside every living team adjusts its own
+/// total.
+fn life_change_fields(state: &GameState, player: PlayerId) -> Vec<PlayerId> {
+    std::iter::once(player)
+        .chain(
+            super::topology::shared_life_members(state, player)
+                .into_iter()
+                .filter(|&member| member != player),
+        )
+        .collect()
+}
+
+/// CR 810.4 + CR 810.9: The exact total a life change to `player` adjusts:
+/// the sum of [`life_change_fields`]. Outside a shared-life format it is the
+/// player's own life; in a shared-life format (Two-Headed Giant, CR 810.4; the
+/// Archenemy Commander heroes, CR 904.13b; a Horde game's survivors,
+/// `topology::has_shared_life`) it is the team's shared total
+/// ([`team_life_sum`] for a living player).
+pub(crate) fn life_change_total(state: &GameState, player: PlayerId) -> i64 {
+    life_change_fields(state, player)
         .into_iter()
         .filter_map(|member| state.players.iter().find(|p| p.id == member))
-        .map(|p| p.life)
+        .map(|p| i64::from(p.life))
         .sum()
+}
+
+/// CR 810.9 + CR 810.9a: Stores a change of the total a life change to
+/// `player` adjusts ([`life_change_total`]). The change lands on `player`'s
+/// own field first, and only the part that field cannot hold within the `i32`
+/// limits moves on to its teammates, each field saturating at its own limits.
+/// CR 810.9a has a cost or effect that needs a player's life total use the
+/// team's, but these effects still read a member's field:
+/// `effects::double::resolve_double_life`, `effects::exchange_life_totals`,
+/// `effects::exchange_life`, `effects::redistribute_life_totals` and
+/// `DamageModification::LifeFloor` (`game::replacement`). The loop analysis reads
+/// members' fields too: the per-seat life axis of
+/// `analysis::resource::ResourceVector::snapshot`, the seat headroom readers in
+/// `analysis::resource`, and `analysis::loop_check`'s `winner_life_never_dips`
+/// and `fallers_lives_pairwise_equal`.
+pub(crate) fn spread_life_change(state: &mut GameState, player: PlayerId, change: i64) {
+    let mut remaining = change;
+    for member in life_change_fields(state, player) {
+        if remaining == 0 {
+            break;
+        }
+        let Some(field) = state.players.iter_mut().find(|p| p.id == member) else {
+            continue;
+        };
+        let before = i64::from(field.life);
+        field.life = super::arithmetic::i64_to_i32_saturating(before.saturating_add(remaining));
+        remaining -= i64::from(field.life) - before;
+    }
+    debug_assert_eq!(remaining, 0, "a saturated total always fits its fields");
 }
 
 /// CR 810.10 + CR 810.10a: A player's team's shared poison-counter total.
@@ -1224,6 +1305,49 @@ mod tests {
         assert_eq!(team_poison_total(&state, PlayerId(2)), 9);
     }
 
+    /// CR 810.4 + CR 810.9a: a Two-Headed Giant team's shared total is the exact
+    /// `i64` sum of its living members' life fields, and the `i32` reading
+    /// saturates it at both limits while keeping its sign — two members at
+    /// `i32::MAX` (or `i32::MIN`) no longer overflow the team reading.
+    #[test]
+    fn team_life_sum_is_exact_and_team_life_total_saturates_at_both_limits() {
+        let mut state = GameState::new(FormatConfig::two_headed_giant(), 4, 0);
+
+        state.players[0].life = i32::MAX;
+        state.players[1].life = i32::MAX;
+        assert_eq!(team_life_sum(&state, PlayerId(0)), 4_294_967_294);
+        assert_eq!(team_life_total(&state, PlayerId(0)), i32::MAX);
+
+        state.players[0].life = i32::MIN;
+        state.players[1].life = i32::MIN;
+        assert_eq!(team_life_sum(&state, PlayerId(0)), -4_294_967_296);
+        assert_eq!(team_life_total(&state, PlayerId(0)), i32::MIN);
+
+        // In range: (MAX, MIN) sums to -1 exactly, and both members read the
+        // same team total (CR 810.9a). The opposing team keeps its own 30.
+        state.players[0].life = i32::MAX;
+        state.players[1].life = i32::MIN;
+        assert_eq!(team_life_sum(&state, PlayerId(0)), -1);
+        assert_eq!(team_life_total(&state, PlayerId(0)), -1);
+        assert_eq!(team_life_sum(&state, PlayerId(1)), -1);
+        assert_eq!(team_life_total(&state, PlayerId(1)), -1);
+        assert_eq!(team_life_sum(&state, PlayerId(2)), 30);
+        assert_eq!(team_life_total(&state, PlayerId(2)), 30);
+
+        // Only living members count: an eliminated teammate at MAX adds nothing.
+        state.players[0].life = i32::MAX;
+        state.players[1].life = i32::MAX;
+        eliminate(&mut state, PlayerId(1));
+        assert_eq!(team_life_sum(&state, PlayerId(0)), i64::from(i32::MAX));
+        assert_eq!(team_life_total(&state, PlayerId(0)), i32::MAX);
+
+        // Off-team, the exact sum is the player's own life.
+        let mut commander = GameState::new(FormatConfig::commander(), 4, 0);
+        commander.players[0].life = i32::MIN;
+        assert_eq!(team_life_sum(&commander, PlayerId(0)), i64::from(i32::MIN));
+        assert_eq!(team_life_total(&commander, PlayerId(0)), i32::MIN);
+    }
+
     // --- aggregate_over_teams ---
 
     /// CR 810.9a + CR 810.9d: aggregating life over a population folds each
@@ -1285,6 +1409,43 @@ mod tests {
         assert_eq!(
             aggregate_over_teams(&state, empty, AggregateFunction::Sum),
             0
+        );
+    }
+
+    /// CR 810.9a + CR 810.9d: the aggregate folds each team's EXACT shared total
+    /// and saturates into `i32` once at the end, so a team above `i32::MAX` and
+    /// a team below 0 sum back into range exactly.
+    #[test]
+    fn aggregate_over_teams_folds_exact_team_sums_and_saturates_once() {
+        let mut state = GameState::new(FormatConfig::two_headed_giant(), 4, 0);
+        // Team A (P0 + P1) = 3,000,000,000; team B (P2 + P3) = -2,000,000,000.
+        state.players[0].life = 2_000_000_000;
+        state.players[1].life = 1_000_000_000;
+        state.players[2].life = -1_000_000_000;
+        state.players[3].life = -1_000_000_000;
+        let population = vec![PlayerId(0), PlayerId(2)];
+        // Saturating each team first would give MAX + (-2e9) = 147,483,647.
+        assert_eq!(
+            aggregate_over_teams(&state, population.clone(), AggregateFunction::Sum),
+            1_000_000_000
+        );
+        assert_eq!(
+            aggregate_over_teams(&state, population.clone(), AggregateFunction::Max),
+            i32::MAX
+        );
+        assert_eq!(
+            aggregate_over_teams(&state, population.clone(), AggregateFunction::Min),
+            -2_000_000_000
+        );
+
+        // Two teams at (MAX, 0) each: the exact Sum saturates once at MAX.
+        state.players[0].life = i32::MAX;
+        state.players[1].life = 0;
+        state.players[2].life = i32::MAX;
+        state.players[3].life = 0;
+        assert_eq!(
+            aggregate_over_teams(&state, population, AggregateFunction::Sum),
+            i32::MAX
         );
     }
 

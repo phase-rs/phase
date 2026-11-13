@@ -6413,7 +6413,7 @@ fn counter_threshold_to_condition(
 /// Class-general: any `AbilityCondition::QuantityCheck` yields the difference
 /// of its operands. Both `lhs` and `rhs` are already `QuantityExpr`, so they
 /// are cloned directly — no fresh `Ref`/`Fixed` reconstruction. `Difference`
-/// resolves via `.abs()` (`fold_compose`), so operand order and comparator
+/// resolves via `abs_diff` (`fold_compose`), so operand order and comparator
 /// direction are irrelevant. Returns `None` for non-comparison conditions.
 pub(super) fn difference_expr(cond: &AbilityCondition) -> Option<QuantityExpr> {
     match cond {

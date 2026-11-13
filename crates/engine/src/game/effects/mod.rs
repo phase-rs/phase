@@ -18472,20 +18472,33 @@ fn previous_effect_amount_from_events(
                 })
                 .sum()
         }
-        AmountEvents::LifeLost => events
-            .iter()
-            .filter_map(|event| match event {
-                GameEvent::LifeChanged { amount, .. } if *amount < 0 => Some(-*amount),
-                _ => None,
-            })
-            .sum(),
-        AmountEvents::LifeGained => events
-            .iter()
-            .filter_map(|event| match event {
-                GameEvent::LifeChanged { amount, .. } if *amount > 0 => Some(*amount),
-                _ => None,
-            })
-            .sum(),
+        // CR 119.3 + CR 608.2c: "the life lost this way" is the total magnitude of
+        // this instruction's losses. A loss may carry `i32::MIN` (magnitude past
+        // `i32::MAX`) and several large losses can sum past `i32::MAX`, so the total
+        // is exact in `i64` and saturated once.
+        AmountEvents::LifeLost => crate::game::arithmetic::i64_to_i32_saturating(
+            events
+                .iter()
+                .filter_map(|event| match event {
+                    GameEvent::LifeChanged { amount, .. } if *amount < 0 => {
+                        Some(i64::from(amount.unsigned_abs()))
+                    }
+                    _ => None,
+                })
+                .sum(),
+        ),
+        // CR 119.3: the gained total, exact in `i64` and saturated once.
+        AmountEvents::LifeGained => crate::game::arithmetic::i64_to_i32_saturating(
+            events
+                .iter()
+                .filter_map(|event| match event {
+                    GameEvent::LifeChanged { amount, .. } if *amount > 0 => {
+                        Some(i64::from(*amount))
+                    }
+                    _ => None,
+                })
+                .sum(),
+        ),
         AmountEvents::CountersRemoved => events
             .iter()
             .filter_map(|event| match event {
@@ -29635,6 +29648,88 @@ mod tests {
         assert_eq!(state.current_trigger_match_count, Some(17));
         assert!(state.resolution_stack.is_empty());
         assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+    }
+
+    /// CR 119.3 + CR 608.2c: "the life lost this way" / "that much life" totals
+    /// the magnitudes of this instruction's own life changes. A loss of
+    /// `i32::MIN` and a sum of large losses or gains both pass `i32::MAX`; the
+    /// total is exact and saturates once instead of overflowing. The printed
+    /// card is Exsanguinate ("Each opponent loses X life. You gain life equal
+    /// to the life lost this way.").
+    #[test]
+    fn life_amount_channels_total_past_i32_limits() {
+        let state = GameState::new_two_player(42);
+        let lose_life = ResolvedAbility::new(
+            Effect::LoseLife {
+                amount: QuantityExpr::Fixed { value: 1 },
+                target: None,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let gain_life = ResolvedAbility::new(
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 1 },
+                player: TargetFilter::Controller,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let life_changed = |player: u8, amount: i32| GameEvent::LifeChanged {
+            player_id: PlayerId(player),
+            amount,
+            new_total: crate::types::events::LifeTotalReading::default(),
+        };
+
+        assert_eq!(
+            previous_effect_amount_from_events(&state, &lose_life, &[life_changed(1, i32::MIN)]),
+            Some(i32::MAX),
+            "a single loss of i32::MIN reads its magnitude, saturated"
+        );
+        assert_eq!(
+            previous_effect_amount_from_events(
+                &state,
+                &lose_life,
+                &[
+                    life_changed(1, -1_500_000_000),
+                    life_changed(0, -1_500_000_000)
+                ],
+            ),
+            Some(i32::MAX),
+            "two losses whose total passes i32::MAX saturate"
+        );
+        assert_eq!(
+            previous_effect_amount_from_events(
+                &state,
+                &gain_life,
+                &[
+                    life_changed(0, 1_500_000_000),
+                    life_changed(1, 1_500_000_000)
+                ],
+            ),
+            Some(i32::MAX),
+            "two gains whose total passes i32::MAX saturate"
+        );
+
+        // In-range controls: each channel still sums only its own sign.
+        assert_eq!(
+            previous_effect_amount_from_events(
+                &state,
+                &lose_life,
+                &[life_changed(1, -3), life_changed(0, -4), life_changed(1, 5)],
+            ),
+            Some(7)
+        );
+        assert_eq!(
+            previous_effect_amount_from_events(
+                &state,
+                &gain_life,
+                &[life_changed(0, 2), life_changed(1, -9)],
+            ),
+            Some(2)
+        );
     }
 
     /// CR 603.2h + CR 608.2d: the "would it prompt" authority agrees with production for

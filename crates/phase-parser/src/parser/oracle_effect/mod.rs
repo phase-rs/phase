@@ -18473,7 +18473,7 @@ enum EqualizeVerb {
 /// clause. "Each player keeps the minimum, disposes the rest" is identically
 /// "each player disposes (their own count − the minimum)". Operand order is
 /// load-bearing: `left` MUST be the per-player count and `right` MUST be the
-/// cross-player minimum. The `Difference` resolver takes `.abs()`, which masks
+/// cross-player minimum. The `Difference` resolver takes `abs_diff`, which masks
 /// a `left >= right` invariant — `left >= right` always holds here because the
 /// per-player count includes the minimizing player, and the §8 clause-local
 /// snapshot freezes `right` so an earlier APNAP player's sacrifices cannot
@@ -19927,7 +19927,7 @@ fn parse_uneven_land_search_ir(
 /// per CR 608.2e so an earlier-APNAP draw can't raise it), `right` = the
 /// iterating player's own live `HandSize { ScopedPlayer }`. `left >= right`
 /// always holds because Max includes the iterating player; `Difference` takes
-/// `.abs()` and `Draw` clamps `.max(0)` (CR 107.1b), so the leader(s) draw 0 and
+/// `abs_diff` and `Draw` clamps `.max(0)` (CR 107.1b), so the leader(s) draw 0 and
 /// the "with fewer cards in hand" subject restriction needs no separate
 /// `PlayerFilter`.
 pub(crate) fn parse_catch_up_draw_ir(

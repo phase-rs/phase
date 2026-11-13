@@ -45,7 +45,7 @@ use crate::types::replacements::ReplacementEvent;
 use crate::types::zones::Zone;
 
 use super::ability_utils::build_resolved_from_def;
-use super::arithmetic::u32_to_i32_saturating;
+use super::arithmetic::{i64_to_i32_saturating, i64_to_u32_saturating, u32_to_i32_saturating};
 use super::game_object::GameObject;
 
 // CR 122.1c shield-counter effects are intrinsic to counters, not stored
@@ -4518,85 +4518,132 @@ fn proliferate_applier(
     })
 }
 
-/// Why a replacement quantity expression has no `i32` value.
+/// Why a replacement quantity expression has no value in its `QuantityRange`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum EventQuantityError {
     /// The expression is not statically resolvable from the event amount
     /// (a `QuantityExpr::Ref` other than `EventContextAmount`).
     NotStatic,
-    /// A step of the computation does not fit an `i32`. This is an engine
-    /// numeric-capacity limit, so it is reported, never clamped or wrapped.
+    /// A step of a `QuantityRange::CheckedI32` computation does not fit an
+    /// `i32`. This is an engine numeric-capacity limit, so it is reported,
+    /// never clamped or wrapped.
     Overflow,
 }
 
-/// The replacement's computed quantity overflowed (unit error of the checked
-/// life-gain entry; see `gain_life_replacement_amount`).
+/// The numeric range a replacement quantity expression is evaluated in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct EventQuantityOverflow;
+enum QuantityRange {
+    /// Non-life counts (draw, scry, coin flip, dice, proliferate, mill): every
+    /// step must fit an `i32`, and a step that does not is an `Overflow`.
+    CheckedI32,
+    /// Life amounts (CR 119.3): every step is computed in `i64`, saturating at
+    /// its limits, and never overflows; the life applier saturates the result
+    /// into the `u32` event amount.
+    SaturatingI64,
+}
+
+impl QuantityRange {
+    /// One computed step, admitted to this range. The only producer of
+    /// `EventQuantityError::Overflow`.
+    fn fit(self, value: i64) -> Result<i64, EventQuantityError> {
+        match self {
+            Self::CheckedI32 => i32::try_from(value)
+                .map(i64::from)
+                .map_err(|_| EventQuantityError::Overflow),
+            Self::SaturatingI64 => Ok(value),
+        }
+    }
+}
 
 /// Lenient entry for the non-life count replacements (draw, scry, coin flip,
 /// dice, proliferate, mill): an overflow there falls back to the unchanged
 /// count, which is exactly what each caller already does for a
-/// not-statically-resolvable expression. There is no action-ingress rejection
-/// contract for a non-life count, and a count that large cannot arise from the
-/// ingress cap. The life appliers use `try_resolve_event_replacement_quantity`
-/// so an overflow is reported instead.
+/// not-statically-resolvable expression. These counts have no action-ingress
+/// rejection contract (only a player-counter or energy quantity does), and a
+/// count that large cannot arise from the ingress cap. The life appliers use
+/// `life_replacement_amount`, which saturates instead.
 fn resolve_event_replacement_quantity(expr: &QuantityExpr, event_count: u32) -> Option<i32> {
     try_resolve_event_replacement_quantity(expr, event_count).ok()
 }
 
-/// Checked evaluation of a replacement quantity expression: no clamp, no wrap.
+/// Checked evaluation of a non-life replacement quantity expression: no clamp,
+/// no wrap.
 fn try_resolve_event_replacement_quantity(
     expr: &QuantityExpr,
     event_count: u32,
 ) -> Result<i32, EventQuantityError> {
-    use EventQuantityError::{NotStatic, Overflow};
+    // `CheckedI32` admits only `i32` values, so the narrowing is exact.
+    evaluate_event_replacement_quantity(expr, event_count, QuantityRange::CheckedI32)
+        .map(i64_to_i32_saturating)
+}
+
+/// CR 119.3 + CR 614.1a: the life amount a replacement substitutes for the
+/// replaced amount; `None` when the expression is not statically resolvable.
+/// A negative result floors at 0 (no gain or loss); a result past `u32` lands
+/// on `u32::MAX`, which the settle carries exactly while the life total
+/// saturates.
+fn life_replacement_amount(expr: &QuantityExpr, event_count: u32) -> Option<u32> {
+    match evaluate_event_replacement_quantity(expr, event_count, QuantityRange::SaturatingI64) {
+        Ok(value) => Some(i64_to_u32_saturating(value)),
+        Err(EventQuantityError::NotStatic) => None,
+        Err(EventQuantityError::Overflow) => {
+            unreachable!("a saturating replacement quantity never overflows (QuantityRange::fit)")
+        }
+    }
+}
+
+/// Evaluates a replacement quantity expression over the event amount in
+/// `range`. Every step is computed in `i64` and admitted through
+/// `QuantityRange::fit`, so `CheckedI32` reports exactly the steps an `i32`
+/// computation cannot hold and `SaturatingI64` saturates instead.
+fn evaluate_event_replacement_quantity(
+    expr: &QuantityExpr,
+    event_count: u32,
+    range: QuantityRange,
+) -> Result<i64, EventQuantityError> {
+    use EventQuantityError::NotStatic;
+    let eval =
+        |inner: &QuantityExpr| evaluate_event_replacement_quantity(inner, event_count, range);
     match expr {
         QuantityExpr::Ref {
             qty: crate::types::ability::QuantityRef::EventContextAmount,
-        } => i32::try_from(event_count).map_err(|_| Overflow),
-        QuantityExpr::Fixed { value } => Ok(*value),
+        } => range.fit(i64::from(event_count)),
+        QuantityExpr::Fixed { value } => Ok(i64::from(*value)),
         QuantityExpr::DivideRounded {
             inner,
             divisor,
             rounding,
         } => {
-            let value = try_resolve_event_replacement_quantity(inner, event_count)?;
+            let value = eval(inner)?;
             // A divisor above i32::MAX is not an overflow of the quotient.
-            let divisor = i32::try_from((*divisor).max(1)).map_err(|_| NotStatic)?;
+            let divisor = i64::from(i32::try_from((*divisor).max(1)).map_err(|_| NotStatic)?);
             Ok(match rounding {
                 crate::types::ability::RoundingMode::Up => {
                     // divisor >= 1, so `divisor - 1` cannot overflow.
-                    value.checked_add(divisor - 1).ok_or(Overflow)? / divisor
+                    range.fit(value.saturating_add(divisor - 1))? / divisor
                 }
                 crate::types::ability::RoundingMode::Down => value / divisor,
             })
         }
         QuantityExpr::Offset { inner, offset } => {
-            try_resolve_event_replacement_quantity(inner, event_count)?
-                .checked_add(*offset)
-                .ok_or(Overflow)
+            range.fit(eval(inner)?.saturating_add(i64::from(*offset)))
         }
-        QuantityExpr::ClampMin { inner, minimum } => {
-            Ok(try_resolve_event_replacement_quantity(inner, event_count)?.max(*minimum))
+        QuantityExpr::ClampMin { inner, minimum } => Ok(eval(inner)?.max(i64::from(*minimum))),
+        QuantityExpr::Multiply { factor, inner } => {
+            range.fit(i64::from(*factor).saturating_mul(eval(inner)?))
         }
-        QuantityExpr::Multiply { factor, inner } => (*factor)
-            .checked_mul(try_resolve_event_replacement_quantity(inner, event_count)?)
-            .ok_or(Overflow),
         QuantityExpr::Sum { exprs } => {
-            let mut total = 0i32;
+            let mut total = 0i64;
             for inner in exprs {
-                total = total
-                    .checked_add(try_resolve_event_replacement_quantity(inner, event_count)?)
-                    .ok_or(Overflow)?;
+                total = range.fit(total.saturating_add(eval(inner)?))?;
             }
             Ok(total)
         }
         // CR 107.1: the maximum of the computed operand values; empty → 0.
         QuantityExpr::Max { exprs } => {
-            let mut best: Option<i32> = None;
+            let mut best: Option<i64> = None;
             for inner in exprs {
-                let value = try_resolve_event_replacement_quantity(inner, event_count)?;
+                let value = eval(inner)?;
                 best = Some(best.map_or(value, |b| b.max(value)));
             }
             Ok(best.unwrap_or(0))
@@ -4605,23 +4652,21 @@ fn try_resolve_event_replacement_quantity(
         // `UpTo` transparently as its upper bound — the replacement-effect
         // pipeline does not honor "may pick fewer" semantics (the choice
         // already happened at effect resolution before the replacement fires).
-        QuantityExpr::UpTo { max } => try_resolve_event_replacement_quantity(max, event_count),
+        QuantityExpr::UpTo { max } => eval(max),
         // CR 107.3: `base ^ exponent`. Negative exponents clamp to 0 per
-        // CR 107.1b; `checked_pow` reports an overflow instead of saturating.
+        // CR 107.1b.
         QuantityExpr::Power { base, exponent } => {
-            let exp = try_resolve_event_replacement_quantity(exponent, event_count)?.max(0) as u32;
-            base.checked_pow(exp).ok_or(Overflow)
+            let exp = i64_to_u32_saturating(eval(exponent)?);
+            range.fit(i64::from(*base).saturating_pow(exp))
         }
         // "The difference between A and B" being unsigned is an Oracle
         // templating convention with no dedicated CR number — resolves to the
         // absolute value of the gap. (CR 107.1b is distinct: it clamps a
         // negative result to zero, not the operand-order-independent magnitude
-        // taken here.) The unsigned gap is computed without overflow; only a
-        // gap above i32::MAX is unrepresentable.
+        // taken here.) The unsigned gap is computed without overflow.
         QuantityExpr::Difference { left, right } => {
-            let l = try_resolve_event_replacement_quantity(left, event_count)?;
-            let r = try_resolve_event_replacement_quantity(right, event_count)?;
-            i32::try_from(l.abs_diff(r)).map_err(|_| Overflow)
+            let gap = eval(left)?.abs_diff(eval(right)?);
+            range.fit(i64::try_from(gap).unwrap_or(i64::MAX))
         }
         QuantityExpr::Ref { .. } => Err(NotStatic),
     }
@@ -4634,8 +4679,10 @@ enum ScaledQuantity {
     Scaled(u32),
     /// CR 614.6 + CR 614.7: the modified event never happens.
     Prevented,
-    /// Engine numeric capacity: a `Times` / `Plus` result past `u32`. Recorded
-    /// for the settle step instead of clamped; not a CR 101.3 impossibility.
+    /// Engine numeric capacity: a `Times` / `Plus` result past `u32`. The
+    /// player-counter and energy applier records it for the settle step instead
+    /// of clamping it; a life applier lands it on `u32::MAX` (an engine limit, not a rule). Not a
+    /// CR 101.3 impossibility.
     Unrepresentable,
 }
 
@@ -4657,8 +4704,9 @@ fn scale_event_quantity(amount: u32, modification: &QuantityModification) -> Sca
     }
 }
 
-/// A replacement's computed life, player-counter or energy quantity exceeds the
-/// engine's numeric range. Record it for the settle step of the same event: an
+/// A replacement's computed player-counter or energy quantity exceeds the
+/// engine's numeric range (a life quantity saturates instead). Record it for
+/// the settle step of the same event: an
 /// open public-action ingress window rejects and restores that action, while
 /// legacy or outside-boundary resolution uses its compatibility skip. Leave the
 /// event unchanged because the pipeline stops at the loop head, so that value
@@ -4703,9 +4751,7 @@ fn gain_life_applier(
             applied,
         } = event
         {
-            // Engine numeric capacity: a `Times` / `Plus` result past `u32`
-            // is recorded for the settle step instead of clamped.
-            // `Minus` floors at zero, which is not an overflow.
+            // `Minus` floors at zero.
             let new_amount = match scale_event_quantity(amount, &modification) {
                 ScaledQuantity::Scaled(new_amount) => new_amount,
                 // CR 614.6 + CR 614.7: No life-gain replacement uses Prevent
@@ -4713,17 +4759,10 @@ fn gain_life_applier(
                 // but the variant composes here for symmetry — fully suppress
                 // the gain event.
                 ScaledQuantity::Prevented => return ApplyResult::Prevented,
-                ScaledQuantity::Unrepresentable => {
-                    return record_quantity_overflow(
-                        state,
-                        rid,
-                        ProposedEvent::LifeGain {
-                            player_id,
-                            amount,
-                            applied,
-                        },
-                    );
-                }
+                // Engine limit, not a rule: a `Times` / `Plus` life amount past
+                // `u32` lands on `u32::MAX`; the settle carries it and the life
+                // total saturates (CR 119.3 applies the amount that remains).
+                ScaledQuantity::Unrepresentable => u32::MAX,
             };
             return ApplyResult::Modified(ProposedEvent::LifeGain {
                 player_id,
@@ -4742,23 +4781,18 @@ fn gain_life_applier(
     // `Offset { inner: EventContextAmount, offset: 1 }` for "you gain that
     // much life plus 1 instead". CR 614.1a: the replacement substitutes a
     // new event (the replaced amount), not an additive delta.
-    match gain_life_replacement_amount(state, rid, &event) {
-        Ok(Some(new_amount)) => {
-            if let ProposedEvent::LifeGain {
-                player_id, applied, ..
-            } = event
-            {
-                return ApplyResult::Modified(ProposedEvent::LifeGain {
-                    player_id,
-                    amount: new_amount,
-                    applied,
-                });
-            }
-            return ApplyResult::Modified(event);
+    if let Some(new_amount) = gain_life_replacement_amount(state, rid, &event) {
+        if let ProposedEvent::LifeGain {
+            player_id, applied, ..
+        } = event
+        {
+            return ApplyResult::Modified(ProposedEvent::LifeGain {
+                player_id,
+                amount: new_amount,
+                applied,
+            });
         }
-        // The computed quantity exceeds the engine's numeric capacity.
-        Err(EventQuantityOverflow) => return record_quantity_overflow(state, rid, event),
-        Ok(None) => {}
+        return ApplyResult::Modified(event);
     }
 
     // Branch 3: Cross-event-type substitution — "If you would gain life,
@@ -4770,9 +4804,11 @@ fn gain_life_applier(
     // branch). `EventContextAmount` in the substitute reads
     // `last_effect_count` (CR 615.5 fallback); stamp it to the original
     // amount so "draw that many" sees the prevented life-gain quantity.
+    // The stamp is an `i32`: an amount past `i32::MAX` reads `i32::MAX` (as
+    // the `LifeChanged` amount does), never a wrapped value.
     if gain_life_execute_substitutes_event_type(state, rid) {
         if let ProposedEvent::LifeGain { amount, .. } = event {
-            state.last_effect_count = Some(amount as i32);
+            state.last_effect_count = Some(u32_to_i32_saturating(amount));
         }
         return ApplyResult::Prevented;
     }
@@ -4811,35 +4847,24 @@ fn gain_life_replacement_amount(
     state: &GameState,
     rid: ReplacementId,
     event: &ProposedEvent,
-) -> Result<Option<u32>, EventQuantityOverflow> {
+) -> Option<u32> {
     let ProposedEvent::LifeGain { amount, .. } = event else {
-        return Ok(None);
+        return None;
     };
 
-    let Some(execute) = state
+    let execute = state
         .objects
         .get(&rid.source)
         .and_then(|obj| obj.replacement_definitions.get(rid.index))
-        .and_then(|def| def.execute.as_deref())
-    else {
-        return Ok(None);
-    };
+        .and_then(|def| def.execute.as_deref())?;
 
     if execute.sub_ability.is_some() {
-        return Ok(None);
+        return None;
     }
 
     match &*execute.effect {
-        Effect::GainLife { amount: qty, .. } => {
-            match try_resolve_event_replacement_quantity(qty, *amount) {
-                // A negative result floors at 0 = no gain, which the settle
-                // step already treats as no change.
-                Ok(resolved) => Ok(Some(resolved.max(0) as u32)),
-                Err(EventQuantityError::NotStatic) => Ok(None),
-                Err(EventQuantityError::Overflow) => Err(EventQuantityOverflow),
-            }
-        }
-        _ => Ok(None),
+        Effect::GainLife { amount: qty, .. } => life_replacement_amount(qty, *amount),
+        _ => None,
     }
 }
 
@@ -4884,23 +4909,14 @@ fn lose_life_applier(
         else {
             return ApplyResult::Modified(event);
         };
-        // Engine numeric capacity: a `Times` / `Plus` result past `u32` is
-        // recorded for the settle step instead of clamped. `Minus`
-        // floors at zero, which is not an overflow.
+        // `Minus` floors at zero.
         let new_amount = match scale_event_quantity(amount, &modification) {
             ScaledQuantity::Scaled(new_amount) => new_amount,
             ScaledQuantity::Prevented => return ApplyResult::Prevented,
-            ScaledQuantity::Unrepresentable => {
-                return record_quantity_overflow(
-                    state,
-                    rid,
-                    ProposedEvent::LifeLoss {
-                        player_id,
-                        amount,
-                        applied,
-                    },
-                );
-            }
+            // Engine limit, not a rule: a `Times` / `Plus` life amount past
+            // `u32` lands on `u32::MAX`; the settle carries it and the life
+            // total saturates (CR 119.3 applies the amount that remains).
+            ScaledQuantity::Unrepresentable => u32::MAX,
         };
         return ApplyResult::Modified(ProposedEvent::LifeLoss {
             player_id,
@@ -4925,34 +4941,27 @@ fn lose_life_applier(
             },
         ) = (&event, &*execute.effect)
         {
-            match try_resolve_event_replacement_quantity(replacement_amount, *amount) {
-                Ok(resolved) => {
-                    return ApplyResult::Modified(ProposedEvent::LifeLoss {
-                        player_id: *player_id,
-                        amount: resolved.max(0) as u32,
-                        applied: applied.clone(),
-                    });
-                }
-                // The computed quantity exceeds the engine's numeric capacity.
-                // Return explicitly so this arm never depends on the later
-                // fall-through checks.
-                Err(EventQuantityError::Overflow) => {
-                    return record_quantity_overflow(state, rid, event);
-                }
-                Err(EventQuantityError::NotStatic) => {}
+            if let Some(new_amount) = life_replacement_amount(replacement_amount, *amount) {
+                return ApplyResult::Modified(ProposedEvent::LifeLoss {
+                    player_id: *player_id,
+                    amount: new_amount,
+                    applied: applied.clone(),
+                });
             }
         }
     }
 
     // CR 614.1a + CR 614.6: A typed non-LifeLoss execute chain substitutes
     // its effect for the life-loss event. The common replacement driver owns
-    // and drains that mandatory post-replacement continuation.
+    // and drains that mandatory post-replacement continuation. Stamp the
+    // replaced amount for the substitute's `EventContextAmount`, saturating
+    // into the `i32` stamp.
     if !matches!(
         &*execute.effect,
         Effect::LoseLife { .. } | Effect::Unimplemented { .. }
     ) {
         if let ProposedEvent::LifeLoss { amount, .. } = event {
-            state.last_effect_count = Some(amount as i32);
+            state.last_effect_count = Some(u32_to_i32_saturating(amount));
         }
         return ApplyResult::Prevented;
     }
@@ -12174,7 +12183,7 @@ fn park_entry_controller_choice(
         may_cost_paid: false,
         may_cost_remaining: None,
         delivery_boundary: None,
-        unrepresentable_life_change: state.ingress_life_policy(),
+        unrepresentable_player_resource_change: state.ingress_player_resource_policy(),
     });
     state.waiting_for = WaitingFor::EntryControllerChoice { player, candidates };
     ReplacementResult::NeedsChoice(player)
@@ -12349,7 +12358,7 @@ fn park_as_enters_named_choice(
         may_cost_paid: false,
         may_cost_remaining: None,
         delivery_boundary: None,
-        unrepresentable_life_change: state.ingress_life_policy(),
+        unrepresentable_player_resource_change: state.ingress_player_resource_policy(),
     });
     raise_as_enters_named_choice(state, object_id, choice, events)
 }
@@ -12559,7 +12568,7 @@ fn park_as_enters_pay_choice(
         may_cost_paid: false,
         may_cost_remaining: None,
         delivery_boundary: None,
-        unrepresentable_life_change: state.ingress_life_policy(),
+        unrepresentable_player_resource_change: state.ingress_player_resource_policy(),
     });
     raise_as_enters_pay_choice(state, rid.source, choice, events)
 }
@@ -13213,8 +13222,9 @@ fn pipeline_loop(
     record_proposed_event(&proposed);
 
     loop {
-        // Engine numeric capacity: an applier recorded that the modified life,
-        // player-counter or energy event is unrepresentable. Stop this pipeline
+        // Engine numeric capacity: an applier recorded that the modified
+        // player-counter or energy event is unrepresentable (a life applier
+        // saturates instead and never records). Stop this pipeline
         // before applying further replacements or asking another ordering
         // prompt; that event's settle step takes the record and the public action owner rejects and restores.
         // Outside a public boundary, the existing compatibility policy logs and
@@ -13318,7 +13328,7 @@ fn pipeline_loop(
                     may_cost_paid: false,
                     may_cost_remaining: None,
                     delivery_boundary: None,
-                    unrepresentable_life_change: state.ingress_life_policy(),
+                    unrepresentable_player_resource_change: state.ingress_player_resource_policy(),
                 });
                 return replay_pending_replacement(state, affected, events);
             }
@@ -13389,7 +13399,7 @@ fn pipeline_loop(
                 may_cost_paid: false,
                 may_cost_remaining: None,
                 delivery_boundary: None,
-                unrepresentable_life_change: state.ingress_life_policy(),
+                unrepresentable_player_resource_change: state.ingress_player_resource_policy(),
             });
             return replay_pending_replacement(state, affected, events);
         } else {
@@ -13683,7 +13693,8 @@ fn continue_replacement_impl(
         let reparked_sacrifice_provenance = pending.sacrifice_provenance;
         let reparked_choice_player = pending.choice_player;
         let reparked_delivery_boundary = pending.delivery_boundary.clone();
-        let reparked_unrepresentable_life_change = pending.unrepresentable_life_change;
+        let reparked_unrepresentable_player_resource_change =
+            pending.unrepresentable_player_resource_change;
         let mut proposed = pending.proposed.clone();
         if chosen_index == 0 {
             if let Some((player, entry_candidates)) = entry_controller_choice(state, &proposed, rid)
@@ -13819,7 +13830,8 @@ fn continue_replacement_impl(
                     // The rebuilt record answers the same parked event, so it keeps
                     // the predecessor's stamp (a boxed cost-move resume restores it
                     // unchanged).
-                    unrepresentable_life_change: reparked_unrepresentable_life_change,
+                    unrepresentable_player_resource_change:
+                        reparked_unrepresentable_player_resource_change,
                 };
                 if let Some(crate::types::game_state::PendingCostMoveResume::ReplacementMayCost {
                     outer_replacement: parked_outer,
@@ -14161,18 +14173,19 @@ pub fn continue_replacement(
     });
     // The parked record is consumed by the impl; capture the stamp the resume
     // answers to so a record it re-parks cannot lose it.
-    let predecessor_life_policy = state
+    let predecessor_player_resource_policy = state
         .pending_replacement
         .as_ref()
-        .map(|pending| pending.unrepresentable_life_change);
+        .map(|pending| pending.unrepresentable_player_resource_change);
     let result = continue_replacement_impl(state, chosen_index, events);
     // CR 616.1f: backstop for the stamp — a record re-parked while a stamped
     // record is answered stays stamped (a fresh park already reads the open
     // ingress window; this never downgrades).
-    if let (Some(policy), Some(reparked)) =
-        (predecessor_life_policy, state.pending_replacement.as_mut())
-    {
-        reparked.inherit_unrepresentable_life_change(policy);
+    if let (Some(policy), Some(reparked)) = (
+        predecessor_player_resource_policy,
+        state.pending_replacement.as_mut(),
+    ) {
+        reparked.inherit_unrepresentable_player_resource_change(policy);
     }
     // A remaining prompt belongs to a nested decision, not the chosen ordering.
     state.replacement_auto_choice_tail = None;
@@ -14806,6 +14819,64 @@ mod tests {
             state.battlefield.push_back(obj_id);
         }
         state
+    }
+
+    /// The parsed replacements of the printed card `name`, from the card data
+    /// (`shared_card_db`). Reach guard: the card is there and has one.
+    fn printed_replacements(name: &str) -> &'static [ReplacementDefinition] {
+        let face = crate::test_support::shared_card_db()
+            .get_face_by_name(name)
+            .unwrap_or_else(|| panic!("reach guard: {name} is in the card data"));
+        assert!(
+            !face.replacements.is_empty(),
+            "reach guard: {name} has a parsed replacement"
+        );
+        &face.replacements
+    }
+
+    /// Puts one P0 battlefield object named `name` into `state`, carrying the
+    /// printed card's parsed replacements (`printed_replacements`) on its live and
+    /// base definitions, as `engine_debug.rs`'s `add_bloodletters` builds a
+    /// Bloodletter of Aclazotz. Returns its id.
+    fn add_printed_replacement_source(state: &mut GameState, name: &str) -> ObjectId {
+        let replacements = printed_replacements(name);
+        let card_id = CardId(state.next_object_id);
+        let id = crate::game::zones::create_object(
+            state,
+            card_id,
+            PlayerId(0),
+            name.to_string(),
+            Zone::Battlefield,
+        );
+        let object = state.objects.get_mut(&id).unwrap();
+        object.replacement_definitions = replacements.to_vec().into();
+        object.base_replacement_definitions = std::sync::Arc::new(replacements.to_vec());
+        id
+    }
+
+    /// Reach guard: Bloodletter of Aclazotz's one replacement in the card data,
+    /// "If an opponent would lose life during your turn, they lose twice that much
+    /// life instead.", is a `LoseLife` `Times { 2 }` for an opponent's loss during
+    /// its controller's turn.
+    fn assert_bloodletter_parse() {
+        let [bloodletter] = printed_replacements("Bloodletter of Aclazotz") else {
+            panic!("reach guard: Bloodletter of Aclazotz has one replacement");
+        };
+        assert!(
+            bloodletter.event == ReplacementEvent::LoseLife
+                && bloodletter.quantity_modification
+                    == Some(QuantityModification::Times { factor: 2 })
+                && bloodletter.valid_player == Some(ReplacementPlayerScope::Opponent)
+                && matches!(
+                    bloodletter.condition,
+                    Some(ReplacementCondition::OnlyIfQuantity {
+                        active_player_req: Some(ControllerRef::You),
+                        ..
+                    })
+                ),
+            "Bloodletter of Aclazotz parses to an opponent's doubled loss during your turn: \
+             {bloodletter:?}"
+        );
     }
 
     fn reset_indexed_replacement_consults() {
@@ -17187,7 +17258,7 @@ mod tests {
             may_cost_paid: false,
             may_cost_remaining: None,
             delivery_boundary: None,
-            unrepresentable_life_change: Default::default(),
+            unrepresentable_player_resource_change: Default::default(),
         });
 
         let WaitingFor::ReplacementChoice {
@@ -17252,7 +17323,7 @@ mod tests {
                 may_cost_paid: false,
                 may_cost_remaining: None,
                 delivery_boundary: None,
-                unrepresentable_life_change: Default::default(),
+                unrepresentable_player_resource_change: Default::default(),
             });
 
             let WaitingFor::ReplacementChoice { candidates, .. } =
@@ -17338,7 +17409,7 @@ mod tests {
             may_cost_paid: false,
             may_cost_remaining: None,
             delivery_boundary: None,
-            unrepresentable_life_change: Default::default(),
+            unrepresentable_player_resource_change: Default::default(),
         });
 
         let WaitingFor::ReplacementChoice { candidates, .. } =
@@ -17484,7 +17555,21 @@ mod tests {
         u32,
         Option<crate::types::game_state::ReplacementQuantityOverflow>,
     ) {
-        let mut state = test_state_with_object(ObjectId(10), Zone::Battlefield, defs);
+        replace_life_amount_in(
+            test_state_with_object(ObjectId(10), Zone::Battlefield, defs),
+            event,
+        )
+    }
+
+    /// Runs `event` through `replace_event` on `state`; returns the resulting
+    /// amount and the overflow record.
+    fn replace_life_amount_in(
+        mut state: GameState,
+        event: ProposedEvent,
+    ) -> (
+        u32,
+        Option<crate::types::game_state::ReplacementQuantityOverflow>,
+    ) {
         let mut events = Vec::new();
         let result = replace_event(&mut state, event, &mut events);
         let (ReplacementResult::Execute(ProposedEvent::LifeGain { amount, .. })
@@ -17646,11 +17731,21 @@ mod tests {
         );
     }
 
-    /// A `Times` / `Plus` or computed gain beyond engine numeric capacity is
-    /// recorded for the settle step and the event is left unchanged (never
-    /// clamped to `u32::MAX` or wrapped through `i32`).
+    /// Engine limit, not a rule: a `Times` / `Plus` or computed life gain past `u32` lands on
+    /// `u32::MAX` and records nothing (a player-counter or energy count still
+    /// records: `add_counter_applier_player_and_energy_overflow_is_recorded_not_clamped`).
+    /// Results within `u32` are exact.
+    ///
+    /// The Branch 2 rows run Boon Reflection ("If you would gain life, you gain twice that much
+    /// life instead.") from the card data, on an object named for it; `times` and `plus` are
+    /// that doubling and Angel of Vitality's plus 1 ("If you would gain life, you gain that much
+    /// life plus 1 instead.") in Branch 1's `Times` / `Plus` form, which no printed card parses to
+    /// (both cards parse to Branch 2), and the test needs that form to pin Branch 1's saturation.
+    /// The `Half` / `Minus` siblings and `not_static` are synthetic: no printed card halves a life
+    /// gain, subtracts from one, or gains an amount read from the board. The nearest printed cards
+    /// are Boon Reflection and Angel of Vitality.
     #[test]
-    fn gain_life_applier_overflow_sets_the_carrier_and_leaves_the_event_unchanged() {
+    fn gain_life_applier_saturates_past_u32_and_records_nothing() {
         let times = || life_qmod_def(ReplacementEvent::GainLife, QuantityModification::DOUBLE);
         let plus = || {
             life_qmod_def(
@@ -17658,27 +17753,39 @@ mod tests {
                 QuantityModification::Plus { value: 1 },
             )
         };
-        let branch2 = || {
-            ReplacementDefinition::new(ReplacementEvent::GainLife).execute(AbilityDefinition::new(
-                AbilityKind::Spell,
-                Effect::GainLife {
-                    amount: QuantityExpr::Multiply {
-                        factor: 2,
-                        inner: Box::new(event_amount_expr()),
-                    },
-                    player: TargetFilter::Controller,
-                },
-            ))
+        // Reach guard: Boon Reflection's one replacement in the card data is
+        // Branch 2's parsed `GainLife { Multiply { 2, EventContextAmount } }`.
+        let [boon_reflection] = printed_replacements("Boon Reflection") else {
+            panic!("reach guard: Boon Reflection has one replacement");
         };
-        let src = ObjectId(10);
+        assert!(
+            boon_reflection.event == ReplacementEvent::GainLife
+                && boon_reflection
+                    .execute
+                    .as_deref()
+                    .is_some_and(|ability| matches!(
+                        &*ability.effect,
+                        Effect::GainLife {
+                            amount: QuantityExpr::Multiply { factor: 2, inner },
+                            ..
+                        } if **inner == event_amount_expr()
+                    )),
+            "Boon Reflection parses to Branch 2's doubled gain: {boon_reflection:?}"
+        );
+        // P0 controls Boon Reflection and `life_gain_event` is P0's, so "you" holds.
+        let boon_reflection_state = || {
+            let mut state = GameState::new_two_player(42);
+            add_printed_replacement_source(&mut state, "Boon Reflection");
+            state
+        };
 
         // Branch 1, Times: 2^31 x 2 does not fit a u32.
         assert_eq!(
             replace_life_amount(vec![times()], life_gain_event(2_147_483_648)),
-            (2_147_483_648, overflow_from(src))
+            (u32::MAX, None)
         );
-        // A u32 above i32::MAX is representable in the applier; the settle
-        // step, not the applier, decides.
+        // A u32 above i32::MAX is exact in the applier; the settle step applies
+        // it and the life total saturates.
         assert_eq!(
             replace_life_amount(vec![times()], life_gain_event(2_000_000_000)),
             (4_000_000_000, None)
@@ -17686,26 +17793,27 @@ mod tests {
         // Branch 1, Plus.
         assert_eq!(
             replace_life_amount(vec![plus()], life_gain_event(u32::MAX)),
-            (u32::MAX, overflow_from(src))
+            (u32::MAX, None)
         );
         assert_eq!(
             replace_life_amount(vec![plus()], life_gain_event(u32::MAX - 1)),
             (u32::MAX, None)
         );
-        // Branch 2 (parsed `Multiply { 2, EventContextAmount }`): 2.4e9 > i32::MAX.
+        // Branch 2 (Boon Reflection's `Multiply { 2, EventContextAmount }`):
+        // 2.4e9 > i32::MAX.
         assert_eq!(
-            replace_life_amount(vec![branch2()], life_gain_event(1_200_000_000)),
-            (1_200_000_000, overflow_from(src))
+            replace_life_amount_in(boon_reflection_state(), life_gain_event(1_200_000_000)),
+            (2_400_000_000, None)
         );
         assert_eq!(
-            replace_life_amount(vec![branch2()], life_gain_event(1_000_000_000)),
+            replace_life_amount_in(boon_reflection_state(), life_gain_event(1_000_000_000)),
             (2_000_000_000, None)
         );
         // Branch 2 on an event amount that is itself above i32::MAX: the old
         // `as i32` wrapped it into a silent 0 gain.
         assert_eq!(
-            replace_life_amount(vec![branch2()], life_gain_event(3_000_000_000)),
-            (3_000_000_000, overflow_from(src))
+            replace_life_amount_in(boon_reflection_state(), life_gain_event(3_000_000_000)),
+            (u32::MAX, None)
         );
         // Siblings: `Half` and `Minus` never record.
         for modification in [
@@ -17738,9 +17846,26 @@ mod tests {
     }
 
     /// Loss twin of the gain row, including Branch 3 (`LoseLife { Multiply }`).
+    ///
+    /// The `times` rows run Bloodletter of Aclazotz ("If an opponent would lose life during your
+    /// turn, they lose twice that much life instead.") from the card data, on an object named for
+    /// it, during its controller's turn against an opponent's loss; on the opponent's turn it does
+    /// not apply. `branch3` is the same doubling in Branch 3's `LoseLife` execute form, which no
+    /// printed card parses to (Bloodletter parses to a `Times { 2 }` quantity modification, and
+    /// the parser does not yet read the replacement of Selenia, the Cursed Heart's Curse token),
+    /// and the test needs it to pin that branch's saturation. `plus` is synthetic: no printed card
+    /// adds to a life loss. The nearest printed card is Bloodletter of Aclazotz.
     #[test]
-    fn lose_life_applier_overflow_sets_the_carrier_and_leaves_the_event_unchanged() {
-        let times = || life_qmod_def(ReplacementEvent::LoseLife, QuantityModification::DOUBLE);
+    fn lose_life_applier_saturates_past_u32_and_records_nothing() {
+        assert_bloodletter_parse();
+        // P0 controls Bloodletter and `life_loss_event` is P1's, so "an
+        // opponent" holds; `active` decides "during your turn".
+        let bloodletter_state = |active: PlayerId| {
+            let mut state = GameState::new_two_player(42);
+            state.active_player = active;
+            add_printed_replacement_source(&mut state, "Bloodletter of Aclazotz");
+            state
+        };
         let plus = || {
             life_qmod_def(
                 ReplacementEvent::LoseLife,
@@ -17763,19 +17888,34 @@ mod tests {
             repl.valid_player = Some(ReplacementPlayerScope::AnyPlayer);
             repl
         };
-        let src = ObjectId(10);
 
+        // The `times` rows, on P0's turn: 2^31 x 2 does not fit a u32.
         assert_eq!(
-            replace_life_amount(vec![times()], life_loss_event(2_147_483_648)),
-            (2_147_483_648, overflow_from(src))
+            replace_life_amount_in(
+                bloodletter_state(PlayerId(0)),
+                life_loss_event(2_147_483_648)
+            ),
+            (u32::MAX, None)
         );
         assert_eq!(
-            replace_life_amount(vec![times()], life_loss_event(2_000_000_000)),
+            replace_life_amount_in(
+                bloodletter_state(PlayerId(0)),
+                life_loss_event(2_000_000_000)
+            ),
             (4_000_000_000, None)
+        );
+        // On P1's turn Bloodletter does not apply; the rows above are its reach
+        // guard.
+        assert_eq!(
+            replace_life_amount_in(
+                bloodletter_state(PlayerId(1)),
+                life_loss_event(2_000_000_000)
+            ),
+            (2_000_000_000, None)
         );
         assert_eq!(
             replace_life_amount(vec![plus()], life_loss_event(u32::MAX)),
-            (u32::MAX, overflow_from(src))
+            (u32::MAX, None)
         );
         assert_eq!(
             replace_life_amount(vec![plus()], life_loss_event(u32::MAX - 1)),
@@ -17783,11 +17923,15 @@ mod tests {
         );
         assert_eq!(
             replace_life_amount(vec![branch3()], life_loss_event(1_200_000_000)),
-            (1_200_000_000, overflow_from(src))
+            (2_400_000_000, None)
         );
         assert_eq!(
             replace_life_amount(vec![branch3()], life_loss_event(1_000_000_000)),
             (2_000_000_000, None)
+        );
+        assert_eq!(
+            replace_life_amount(vec![branch3()], life_loss_event(3_000_000_000)),
+            (u32::MAX, None)
         );
     }
 
@@ -17917,8 +18061,240 @@ mod tests {
         );
     }
 
+    /// CR 119.3 + CR 614.1a: the life evaluator computes every arm in `i64`,
+    /// saturating, and lands the result in `u32` (a negative result floors at
+    /// 0). Each row past `i32` is paired with the checked non-life evaluator's
+    /// `Overflow` on the same expression, so the two ranges differ only there.
+    #[test]
+    fn life_replacement_amount_saturates_per_arm() {
+        use crate::types::ability::RoundingMode;
+        let fixed = |value: i32| QuantityExpr::Fixed { value };
+        let event = || Box::new(event_amount_expr());
+        let overflow = Err(EventQuantityError::Overflow);
+        // (name, expression, event amount, life result, checked result)
+        type Row = (
+            &'static str,
+            QuantityExpr,
+            u32,
+            Option<u32>,
+            Result<i32, EventQuantityError>,
+        );
+        let rows: Vec<Row> = vec![
+            (
+                "event amount past i32",
+                event_amount_expr(),
+                3_000_000_000,
+                Some(3_000_000_000),
+                overflow,
+            ),
+            (
+                "offset +1 on i32::MAX",
+                QuantityExpr::Offset {
+                    inner: event(),
+                    offset: 1,
+                },
+                i32::MAX as u32,
+                Some(2_147_483_648),
+                overflow,
+            ),
+            (
+                "offset +1 on u32::MAX",
+                QuantityExpr::Offset {
+                    inner: event(),
+                    offset: 1,
+                },
+                u32::MAX,
+                Some(u32::MAX),
+                overflow,
+            ),
+            (
+                "offset -5 on 3 floors at 0",
+                QuantityExpr::Offset {
+                    inner: event(),
+                    offset: -5,
+                },
+                3,
+                Some(0),
+                Ok(-2),
+            ),
+            (
+                "multiply 2 on 1.1e9",
+                QuantityExpr::Multiply {
+                    factor: 2,
+                    inner: event(),
+                },
+                1_100_000_000,
+                Some(2_200_000_000),
+                overflow,
+            ),
+            (
+                "multiply 2 on u32::MAX",
+                QuantityExpr::Multiply {
+                    factor: 2,
+                    inner: event(),
+                },
+                u32::MAX,
+                Some(u32::MAX),
+                overflow,
+            ),
+            (
+                "sum past i32",
+                QuantityExpr::Sum {
+                    exprs: vec![event_amount_expr(), fixed(1)],
+                },
+                i32::MAX as u32,
+                Some(2_147_483_648),
+                overflow,
+            ),
+            (
+                "divide i32::MAX by 2 rounding up",
+                QuantityExpr::DivideRounded {
+                    inner: Box::new(fixed(i32::MAX)),
+                    divisor: 2,
+                    rounding: RoundingMode::Up,
+                },
+                0,
+                Some(1_073_741_824),
+                overflow,
+            ),
+            (
+                "2^31",
+                QuantityExpr::Power {
+                    base: 2,
+                    exponent: Box::new(fixed(31)),
+                },
+                0,
+                Some(2_147_483_648),
+                overflow,
+            ),
+            (
+                "2^40",
+                QuantityExpr::Power {
+                    base: 2,
+                    exponent: Box::new(fixed(40)),
+                },
+                0,
+                Some(u32::MAX),
+                overflow,
+            ),
+            (
+                "difference of i32::MIN and 1",
+                QuantityExpr::Difference {
+                    left: Box::new(fixed(i32::MIN)),
+                    right: Box::new(fixed(1)),
+                },
+                0,
+                Some(2_147_483_649),
+                overflow,
+            ),
+            (
+                "not statically resolvable",
+                QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectCount {
+                        filter: TargetFilter::Any,
+                    },
+                },
+                0,
+                None,
+                Err(EventQuantityError::NotStatic),
+            ),
+        ];
+        for (name, expr, count, life, checked) in rows {
+            assert_eq!(life_replacement_amount(&expr, count), life, "life: {name}");
+            assert_eq!(
+                try_resolve_event_replacement_quantity(&expr, count),
+                checked,
+                "checked: {name}"
+            );
+        }
+    }
+
+    /// CR 614.1a: a cross-type substitute ("draw that many cards instead")
+    /// reads the replaced life amount from the `i32` `last_effect_count` stamp;
+    /// an amount past `i32::MAX` stamps `i32::MAX`, never a wrapped value, on
+    /// both the gain and the loss applier.
+    ///
+    /// The gain substitute is Nefarious Lich's "If you would gain life, draw
+    /// that many cards instead." (Lich prints the same line), from the card
+    /// data, on an object named for it. The loss substitute is that draw built
+    /// in code on a life loss, and is synthetic: no printed card replaces every
+    /// life loss with an effect that reads the amount lost, and the test needs
+    /// one so the loss applier's stamp is checked as the gain applier's is. The
+    /// nearest printed card is Ashiok, Wicked Manipulator, whose "If you would
+    /// pay life while your library has at least that many cards in it, exile
+    /// that many cards from the top of your library instead." replaces a
+    /// payment of life, which is a loss (CR 119.4), and which the parser does
+    /// not read yet.
+    #[test]
+    fn life_substitution_stamps_saturate_into_i32() {
+        let draw_that_many = || {
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Draw {
+                    count: event_amount_expr(),
+                    target: TargetFilter::Controller,
+                },
+            )
+        };
+        // Nefarious Lich's life-gain replacement, selected by its event.
+        let lich_gain_index = printed_replacements("Nefarious Lich")
+            .iter()
+            .position(|replacement| replacement.event == ReplacementEvent::GainLife)
+            .expect("reach guard: Nefarious Lich has a life-gain replacement");
+        let nefarious_lich = &printed_replacements("Nefarious Lich")[lich_gain_index];
+        // Reach guard: the printed line parses to the draw substitute the loss
+        // half builds, with no quantity modification ahead of it.
+        assert!(
+            nefarious_lich.quantity_modification.is_none()
+                && nefarious_lich
+                    .execute
+                    .as_deref()
+                    .is_some_and(|ability| *ability.effect == *draw_that_many().effect),
+            "Nefarious Lich parses to a draw substitute: {nefarious_lich:?}"
+        );
+        let loss_rid = ReplacementId {
+            source: ObjectId(10),
+            index: 0,
+        };
+        for (amount, stamp) in [(3_000_000_000u32, i32::MAX), (7, 7)] {
+            let mut state = GameState::new_two_player(42);
+            let lich = add_printed_replacement_source(&mut state, "Nefarious Lich");
+            let gain_rid = ReplacementId {
+                source: lich,
+                index: lich_gain_index,
+            };
+            let result = gain_life_applier(
+                life_gain_event(amount),
+                gain_rid,
+                &mut state,
+                &mut Vec::new(),
+            );
+            assert!(
+                matches!(result, ApplyResult::Prevented),
+                "gain {amount}: {result:?}"
+            );
+            assert_eq!(state.last_effect_count, Some(stamp), "gain {amount}");
+
+            let mut loss_def =
+                ReplacementDefinition::new(ReplacementEvent::LoseLife).execute(draw_that_many());
+            loss_def.valid_player = Some(ReplacementPlayerScope::AnyPlayer);
+            let mut state = test_state_with_object(ObjectId(10), Zone::Battlefield, vec![loss_def]);
+            let result = lose_life_applier(
+                life_loss_event(amount),
+                loss_rid,
+                &mut state,
+                &mut Vec::new(),
+            );
+            assert!(
+                matches!(result, ApplyResult::Prevented),
+                "loss {amount}: {result:?}"
+            );
+            assert_eq!(state.last_effect_count, Some(stamp), "loss {amount}");
+        }
+    }
+
     /// Non-life count replacements keep the lenient fallback: an overflowing
-    /// mill count stays unchanged (no ingress contract for a non-life count).
+    /// mill count stays unchanged (a mill count has no ingress contract).
     #[test]
     fn mill_applier_overflow_falls_back_to_the_unchanged_count() {
         let repl =
@@ -17961,46 +18337,102 @@ mod tests {
         assert_eq!(state.replacement_quantity_overflow, None);
     }
 
-    /// The engine-capacity guard stops the loop at the replacement whose result
-    /// is unrepresentable. One source carries three `Times { 30000 }` loss
-    /// multipliers (commuting, so no ordering prompt and the pipeline applies
-    /// them in turn); the first takes 100,000 to 3,000,000,000 (fits a `u32`),
-    /// the second overflows and is the last one applied (it is marked applied
-    /// before its applier runs), and the third never applies. A bare 3-def
-    /// source keeps the row to at most three pipeline passes, and the
-    /// pipeline's own depth bound (`MAX_REPLACEMENT_DEPTH`) caps it regardless.
+    /// Fourteen Bloodletter of Aclazotz ("If an opponent would lose life during
+    /// your turn, they lose twice that much life instead."), each from the card
+    /// data on its own P0 object named for it, apply on P0's turn to P1's loss
+    /// of 1,000,000 (their `Times { 2 }` quantity modifications commute, so no
+    /// ordering prompt): doubled twelve times it is 4,096,000,000, the
+    /// thirteenth doubling passes `u32` and lands on `u32::MAX`, and the
+    /// fourteenth applies there; every replacement applies and nothing is
+    /// recorded (CR 119.3 + CR 616.1f).
     #[test]
-    fn lose_life_times_overflow_stops_the_loop_at_the_overflowing_replacement() {
-        let defs: Vec<_> = (0..3)
-            .map(|_| {
-                life_qmod_def(
-                    ReplacementEvent::LoseLife,
-                    QuantityModification::Times { factor: 30_000 },
-                )
-            })
-            .collect();
-        let mut state = test_state_with_object(ObjectId(10), Zone::Battlefield, defs);
+    fn lose_life_times_saturates_and_applies_every_replacement() {
+        assert_bloodletter_parse();
+        let mut state = GameState::new_two_player(42);
+        state.active_player = PlayerId(0);
+        for _ in 0..14 {
+            add_printed_replacement_source(&mut state, "Bloodletter of Aclazotz");
+        }
         let mut events = Vec::new();
-        let result = replace_event(&mut state, life_loss_event(100_000), &mut events);
+        let result = replace_event(&mut state, life_loss_event(1_000_000), &mut events);
         let ReplacementResult::Execute(ProposedEvent::LifeLoss {
             amount, applied, ..
         }) = result
         else {
-            panic!("expected Execute of the unchanged LifeLoss, got {result:?}");
+            panic!("expected Execute of the LifeLoss, got {result:?}");
         };
-        assert_eq!(
-            amount, 3_000_000_000,
-            "the event as left by the one representable application"
-        );
-        assert_eq!(
-            applied.len(),
-            2,
-            "the overflowing second is marked applied, the third never is"
-        );
-        assert_eq!(
-            state.replacement_quantity_overflow,
-            overflow_from(ObjectId(10))
-        );
+        assert_eq!(amount, u32::MAX, "the loss saturates at `u32::MAX`");
+        assert_eq!(applied.len(), 14, "every replacement applies");
+        assert_eq!(state.replacement_quantity_overflow, None);
+    }
+
+    /// CR 122.1 + CR 107.14: the engine-capacity guard stops the loop at the
+    /// replacement whose player-counter or energy count is unrepresentable.
+    /// Fourteen Innkeeper's Talents at level 3 ("If you would put one or more
+    /// counters on a permanent or player, put twice that many of each of those
+    /// kinds of counters on that permanent or player instead."; the Talent is
+    /// not legendary), each from the card data on its own P0 object named for
+    /// it, double P0's 1,000,000 (their `Times { 2 }` quantity modifications
+    /// commute, so no ordering prompt and the pipeline applies them in turn):
+    /// twelve take it to 4,096,000,000 (fits a `u32`), the thirteenth overflows
+    /// and is the last one applied (it is marked applied before its applier
+    /// runs), and the fourteenth never applies, so the loop stops at the
+    /// overflow, not at the depth limit. Its production twin is
+    /// `r6_a_scaler_answer_past_u32_stops_before_the_remaining_replacements`.
+    #[test]
+    fn player_and_energy_times_overflow_stops_the_loop_at_the_overflowing_replacement() {
+        for event in [
+            energy_counter_event(1_000_000),
+            player_counter_event(1_000_000),
+        ] {
+            let mut state = GameState::new_two_player(42);
+            let talents: Vec<ObjectId> = (0..14)
+                .map(|_| {
+                    let talent = add_printed_replacement_source(&mut state, "Innkeeper's Talent");
+                    state.objects.get_mut(&talent).unwrap().class_level = Some(3);
+                    talent
+                })
+                .collect();
+            let mut events = Vec::new();
+            let result = replace_event(&mut state, event, &mut events);
+            let ReplacementResult::Execute(ProposedEvent::AddCounter { count, applied, .. }) =
+                result
+            else {
+                panic!("expected Execute of the unchanged AddCounter, got {result:?}");
+            };
+            assert_eq!(
+                count, 4_096_000_000,
+                "the event as left by the twelve representable applications"
+            );
+            assert_eq!(
+                applied.len(),
+                13,
+                "the overflowing thirteenth is marked applied, the fourteenth never is"
+            );
+            let applied_sources: HashSet<ObjectId> = applied
+                .iter()
+                .filter_map(|key| match key {
+                    AppliedReplacementKey::Object { source, .. } => Some(*source),
+                    _ => None,
+                })
+                .collect();
+            let overflow = state
+                .replacement_quantity_overflow
+                .as_ref()
+                .map(|overflow| overflow.source);
+            assert!(
+                overflow.is_some_and(|source| applied_sources.contains(&source)),
+                "the overflow names an applied Talent: {overflow:?}"
+            );
+            assert_eq!(
+                talents
+                    .iter()
+                    .filter(|talent| !applied_sources.contains(talent))
+                    .count(),
+                1,
+                "exactly one Talent never applies"
+            );
+        }
     }
 
     #[test]
@@ -22833,7 +23265,7 @@ mod tests {
             may_cost_paid: false,
             may_cost_remaining: None,
             delivery_boundary: None,
-            unrepresentable_life_change: Default::default(),
+            unrepresentable_player_resource_change: Default::default(),
         });
 
         let waiting_for = replacement_choice_waiting_for(PlayerId(0), &state);

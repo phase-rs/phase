@@ -8472,6 +8472,11 @@ fn concretize_chosen_x_cost(cost: &AbilityCost, chosen_x: u32) -> AbilityCost {
         // CR 107.3a + CR 107.3k: bare X belongs to this activation's announcement.
         // CR 602.2b + CR 601.2h + CR 119.4: bind it before the authoritative
         // residual cost payer deducts life, without replacing derived quantities.
+        // CR 107.3a: the cost charges X through the conversion the spell's
+        // effects read X with (`QuantityRef::Variable` "X" →
+        // `u32_to_i32_saturating`). `max_pay_life_x` keeps every announcement
+        // for a life cost within `i32`, so this is the identity there; it never
+        // turns an X into a negative, zero-life payment.
         AbilityCost::PayLife {
             amount:
                 QuantityExpr::Ref {
@@ -8479,7 +8484,7 @@ fn concretize_chosen_x_cost(cost: &AbilityCost, chosen_x: u32) -> AbilityCost {
                 },
         } if name == "X" => AbilityCost::PayLife {
             amount: QuantityExpr::Fixed {
-                value: chosen_x as i32,
+                value: super::arithmetic::u32_to_i32_saturating(chosen_x),
             },
         },
         AbilityCost::Composite { costs } => AbilityCost::Composite {
@@ -12505,13 +12510,20 @@ fn targeted_remove_counter_choice_cost(cost: &AbilityCost) -> Option<AbilityCost
     }
 }
 
+/// CR 107.3a + CR 601.2b + CR 119.4a: The largest X a "pay X life" cast or
+/// activation cost can announce: the cast/activation payable-life budget
+/// (`life_costs::max_payable_life_cast_or_activation`: in a shared-life format
+/// the shared total of a Two-Headed Giant team, CR 810.4, of the Archenemy
+/// Commander heroes, CR 904.13b, or of a Horde game's survivors,
+/// `topology::has_shared_life`, clamped into `u32`), capped at `i32::MAX`.
 fn max_pay_life_x(state: &GameState, player: PlayerId) -> u32 {
-    if !super::life_costs::can_pay_life_cast_or_activation_cost(state, player, 1) {
-        return 0;
-    }
-    // CR 119.4a: in a team format the max X payable via life is bounded by the
-    // team's shared total (off-team this is the player's own life).
-    u32::try_from(super::players::team_life_total(state, player).max(0)).unwrap_or(0)
+    // Engine capacity limit, not a rule: the announced X is carried into the
+    // cost as an `i32` (`concretize_chosen_x_cost`) and read by the spell's
+    // effects as an `i32` (`QuantityRef::Variable` "X"), so the announcement
+    // stops at `i32::MAX`, the engine's arithmetic domain for a chosen number
+    // (as `ChoiceType::free_entry` bounds an unbounded number choice).
+    // Affordability itself stays exact (`life_costs::can_pay_life_cost`).
+    super::life_costs::max_payable_life_cast_or_activation(state, player).min(i32::MAX as u32)
 }
 
 /// CR 601.2b/f + CR 113.2c: the effective queue of independently-functioning,
@@ -32249,6 +32261,319 @@ its replicate cost was paid.)\nDraw a card.";
                 )),
             );
         assert_eq!(max_pay_life_x(&state, PlayerId(0)), 0);
+    }
+
+    /// CR 107.3a + CR 601.2b + CR 601.2h + CR 119.4a + CR 810.8c + CR 810.9a:
+    /// Toxic Deluge cast by a Two-Headed Giant player whose team's exact total
+    /// (two members at `i32::MAX`) exceeds `i32::MAX`. The X announcement stops
+    /// at `i32::MAX`, the engine's range for an announced X; a larger X is
+    /// refused with the prompt, the cast and every life total intact; X at the
+    /// cap is paid exactly from the payer's own life, the spell resolves, and
+    /// the team (still at `i32::MAX`) does not lose.
+    #[test]
+    fn toxic_deluge_x_announcement_stops_at_i32_max_on_a_two_headed_giant_team_above_it() {
+        use crate::game::scenario::P1;
+        use crate::types::format::FormatConfig;
+        use crate::types::phase::Phase;
+
+        const TOXIC_DELUGE: &str = "As an additional cost to cast this spell, pay X life.\nAll creatures get -X/-X until end of turn.";
+
+        fn announce_toxic_deluge(mut scenario: GameScenario) -> (GameRunner, ObjectId) {
+            let deluge = scenario
+                .add_spell_to_hand_from_oracle(P0, "Toxic Deluge", false, TOXIC_DELUGE)
+                .with_mana_cost(ManaCost::Cost {
+                    shards: vec![ManaCostShard::Black],
+                    generic: 2,
+                })
+                .id();
+            scenario.with_mana_pool(
+                P0,
+                [ManaType::Colorless, ManaType::Colorless, ManaType::Black]
+                    .into_iter()
+                    .map(|kind| ManaUnit::new(kind, ObjectId(0), false, vec![]))
+                    .collect(),
+            );
+            let mut runner = scenario.build();
+            let card_id = runner.state().objects[&deluge].card_id;
+            runner
+                .act(GameAction::CastSpell {
+                    object_id: deluge,
+                    card_id,
+                    targets: vec![],
+                    payment_mode: CastPaymentMode::Manual,
+                })
+                .expect("announce Toxic Deluge");
+            (runner, deluge)
+        }
+
+        fn lives(runner: &GameRunner) -> Vec<i32> {
+            runner.state().players.iter().map(|p| p.life).collect()
+        }
+
+        let mut scenario = GameScenario::new_with_format(FormatConfig::two_headed_giant(), 4, 42);
+        scenario
+            .at_phase(Phase::PreCombatMain)
+            .with_life(P0, i32::MAX)
+            .with_life(P1, i32::MAX);
+        let bears = scenario
+            .add_creature(PlayerId(2), "Grizzly Bears", 2, 2)
+            .id();
+        let (mut runner, deluge) = announce_toxic_deluge(scenario);
+
+        let WaitingFor::ChooseXValue {
+            player, min, max, ..
+        } = runner.state().waiting_for.clone()
+        else {
+            panic!(
+                "Toxic Deluge announces X first, got {:?}",
+                runner.state().waiting_for
+            );
+        };
+        assert_eq!((player, min, max), (P0, 0, 2_147_483_647));
+
+        // An X past the engine's range is refused before anything changes.
+        for value in [2_147_483_648, 4_294_967_294] {
+            let before = runner.state().waiting_for.clone();
+            assert!(
+                matches!(
+                    runner.act(GameAction::ChooseX { value }),
+                    Err(EngineError::InvalidAction(_))
+                ),
+                "ChooseX({value}) must be refused"
+            );
+            assert_eq!(runner.state().waiting_for, before);
+            assert!(runner.state().pending_cast.is_some());
+            assert_eq!(lives(&runner), vec![i32::MAX, i32::MAX, 15, 15]);
+        }
+
+        // X at the cap is paid exactly, from the payer's own life field.
+        let result = runner
+            .act(GameAction::ChooseX { value: max })
+            .expect("X at the cap is legal and payable");
+        assert!(
+            result.events.iter().any(|event| matches!(
+                event,
+                GameEvent::LifeChanged {
+                    player_id,
+                    amount: -2_147_483_647,
+                    ..
+                } if *player_id == P0
+            )),
+            "the X life is paid: {:?}",
+            result.events
+        );
+        assert_eq!(lives(&runner), vec![0, i32::MAX, 15, 15]);
+        assert!(
+            matches!(runner.state().waiting_for, WaitingFor::ManaPayment { .. }),
+            "Toxic Deluge still owes its mana cost, got {:?}",
+            runner.state().waiting_for
+        );
+
+        let pass = runner
+            .act(GameAction::PassPriority)
+            .expect("finish paying {2}{B} from the pool");
+        assert!(
+            pass.events
+                .iter()
+                .any(|event| matches!(event, GameEvent::SpellCast { .. })),
+            "Toxic Deluge becomes cast: {:?}",
+            pass.events
+        );
+        runner.advance_until_stack_empty();
+
+        let state = runner.state();
+        assert!(state.stack.is_empty());
+        assert_eq!(state.waiting_for, WaitingFor::Priority { player: P0 });
+        // CR 810.8c: the team's total is still `i32::MAX`, so nobody loses.
+        assert!(state.players.iter().all(|p| !p.is_eliminated));
+        assert!(state.game_end.is_none());
+        assert_eq!(state.objects[&deluge].zone, Zone::Graveyard);
+        // CR 704.5f: -X/-X put the opposing 2/2 into its owner's graveyard.
+        assert_eq!(state.objects[&bears].zone, Zone::Graveyard);
+        assert_eq!(
+            crate::game::players::team_life_sum(state, P0),
+            i64::from(i32::MAX)
+        );
+        assert_eq!(crate::game::players::team_life_total(state, P0), i32::MAX);
+
+        // Control: off-team the announcement is the player's own life, and
+        // the cap at `i32::MAX` does not lower it.
+        let mut scenario = GameScenario::new();
+        scenario
+            .at_phase(Phase::PreCombatMain)
+            .with_life(P0, i32::MAX);
+        let (mut runner, _) = announce_toxic_deluge(scenario);
+        let WaitingFor::ChooseXValue { max, .. } = runner.state().waiting_for.clone() else {
+            panic!(
+                "Toxic Deluge announces X first, got {:?}",
+                runner.state().waiting_for
+            );
+        };
+        assert_eq!(max, 2_147_483_647);
+        let before = runner.state().waiting_for.clone();
+        assert!(matches!(
+            runner.act(GameAction::ChooseX {
+                value: 2_147_483_648
+            }),
+            Err(EngineError::InvalidAction(_))
+        ));
+        assert_eq!(runner.state().waiting_for, before);
+    }
+
+    /// The two printed "pay X life" costs, read from the card data: Toxic
+    /// Deluge's additional cost ("As an additional cost to cast this spell, pay
+    /// X life.") and Krumar Initiate's whole activation cost ("{X}{B}, {T}, Pay
+    /// X life: This creature endures X. Activate only as a sorcery.").
+    fn printed_pay_x_life_costs() -> (AbilityCost, AbilityCost) {
+        let db = crate::test_support::shared_card_db();
+        let deluge = db
+            .get_face_by_name("Toxic Deluge")
+            .expect("Toxic Deluge is in the card data");
+        let Some(AdditionalCost::Required(bare)) = deluge.additional_cost.clone() else {
+            panic!(
+                "reach guard: Toxic Deluge has a required additional cost, got {:?}",
+                deluge.additional_cost
+            );
+        };
+        assert!(
+            matches!(&bare, AbilityCost::PayLife { amount } if amount.contains_x()),
+            "reach guard: Toxic Deluge's additional cost pays X life, got {bare:?}"
+        );
+        let krumar = db
+            .get_face_by_name("Krumar Initiate")
+            .expect("Krumar Initiate is in the card data");
+        let composite = krumar
+            .abilities
+            .first()
+            .and_then(|ability| ability.cost.clone())
+            .expect("Krumar Initiate's activated ability has a cost");
+        assert!(
+            matches!(
+                &composite,
+                AbilityCost::Composite { costs } if matches!(
+                    costs.as_slice(),
+                    [
+                        AbilityCost::Mana { .. },
+                        AbilityCost::Tap,
+                        AbilityCost::PayLife {
+                            amount: QuantityExpr::Ref {
+                                qty: QuantityRef::Variable { name },
+                            },
+                        },
+                    ] if name == "X"
+                )
+            ),
+            "reach guard: Krumar Initiate's cost is {{X}}{{B}}, {{T}}, Pay X life, got {composite:?}"
+        );
+        (bare, composite)
+    }
+
+    /// CR 107.3a + CR 601.2b + CR 119.4a: every "pay X life" announcement — a
+    /// bare cost, a composite cost (the smallest component bound), and a
+    /// per-counter cost — stops at `i32::MAX`, while the cast/activation
+    /// payable-life predicate and budget stay exact. The bare row is Toxic
+    /// Deluge's additional cost ("As an additional cost to cast this spell, pay
+    /// X life."), and the composite row is Krumar Initiate's whole activation
+    /// cost ("{X}{B}, {T}, Pay X life: This creature endures X. Activate only as
+    /// a sorcery."), both read from the card data; its mana and tap components
+    /// add no bound in `additional_cost_x_max` (a real activation caps X by the
+    /// mana it can pay separately), so the composite's bound here is its life
+    /// payment's. No printed card pays X life for each counter: every printed
+    /// per-counter life cost is a fixed amount. The nearest printed card, whose
+    /// cost parses to `PerCounter`, is Inner Sanctum ("Cumulative upkeep—Pay 2
+    /// life.").
+    #[test]
+    fn pay_x_life_announcement_cap_stops_at_i32_max_while_affordability_stays_exact() {
+        use crate::types::format::FormatConfig;
+
+        let (life_x, composite) = printed_pay_x_life_costs();
+        let shapes = [
+            life_x.clone(),
+            composite,
+            AbilityCost::PerCounter {
+                counter: CounterType::Plus1Plus1,
+                target: TargetFilter::SelfRef,
+                base: Box::new(life_x),
+            },
+        ];
+        let two_headed_giant = |first: i32, second: i32| {
+            let mut state = GameState::new(FormatConfig::two_headed_giant(), 4, 0);
+            state.players[0].life = first;
+            state.players[1].life = second;
+            state
+        };
+
+        let state = two_headed_giant(i32::MAX, i32::MAX);
+        for shape in &shapes {
+            assert_eq!(
+                additional_cost_x_max(&state, PlayerId(0), ObjectId(1), None, shape),
+                Some(2_147_483_647),
+                "{shape:?}"
+            );
+        }
+        assert_eq!(
+            crate::game::life_costs::max_payable_life_cast_or_activation(&state, PlayerId(0)),
+            4_294_967_294
+        );
+        assert!(
+            crate::game::life_costs::can_pay_life_cast_or_activation_cost(
+                &state,
+                PlayerId(0),
+                3_000_000_000
+            )
+        );
+
+        let state = two_headed_giant(6, 5);
+        for shape in &shapes {
+            assert_eq!(
+                additional_cost_x_max(&state, PlayerId(0), ObjectId(1), None, shape),
+                Some(11),
+                "{shape:?}"
+            );
+        }
+
+        let state = two_headed_giant(i32::MAX, i32::MIN);
+        for shape in &shapes {
+            assert_eq!(
+                additional_cost_x_max(&state, PlayerId(0), ObjectId(1), None, shape),
+                Some(0),
+                "{shape:?}"
+            );
+        }
+    }
+
+    /// CR 107.3a: the concretized "pay X life" cost reads the announced X
+    /// through the same saturating conversion the spell's effects use, so no X
+    /// turns into a negative (zero-life) payment. The bare cost is Toxic
+    /// Deluge's additional cost and the composite Krumar Initiate's activation
+    /// cost, both read from the card data; the `{X}{B}` passes through
+    /// unconcretized.
+    #[test]
+    fn concretize_chosen_x_pay_life_never_wraps_an_announced_x() {
+        let (life_x, composite) = printed_pay_x_life_costs();
+        let capped = AbilityCost::PayLife {
+            amount: QuantityExpr::Fixed { value: i32::MAX },
+        };
+        for x in [i32::MAX as u32, 2_147_483_648, 3_000_000_000, u32::MAX] {
+            assert_eq!(concretize_chosen_x_cost(&life_x, x), capped, "x = {x}");
+        }
+        let AbilityCost::Composite { costs } = &composite else {
+            panic!("Krumar Initiate's cost is a composite, got {composite:?}");
+        };
+        // The printed composite with only its life payment capped.
+        let expected = AbilityCost::Composite {
+            costs: costs
+                .iter()
+                .map(|cost| match cost {
+                    AbilityCost::PayLife { .. } => capped.clone(),
+                    printed => printed.clone(),
+                })
+                .collect(),
+        };
+        assert_eq!(
+            concretize_chosen_x_cost(&composite, 3_000_000_000),
+            expected
+        );
     }
 
     /// CR 118.9: A lingering `ExileWithAltAbilityCost { cost: KeywordCostOfCastSpell }`

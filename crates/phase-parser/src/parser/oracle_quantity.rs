@@ -991,7 +991,7 @@ pub(crate) fn parse_cda_quantity_with_context(
     }
 
     // CR 208.1 / CR 107.1: General "the difference between A and B" over any
-    // two independently parsed quantity expressions. The unsigned `.abs()`
+    // two independently parsed quantity expressions. The unsigned `abs_diff`
     // resolution is an Oracle templating convention (cf. the P/T arm above).
     if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("the difference between ").parse(text) {
         if let Ok((_, (left_text, right_text))) = nom_primitives::split_once_on(rest, " and ") {

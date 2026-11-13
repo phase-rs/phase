@@ -11448,7 +11448,7 @@ fn doran_attack_block_pump_resolves_pt_difference() {
     //  PtValue::Variable (the `unwrap_or_else` fallback in
     //  oracle_effect/mod.rs). CR 208.1 / CR 611.2d. ("The difference
     //  between A and B" is an unsigned Oracle templating convention with
-    //  no dedicated CR number — the resolver takes `.abs()`.)
+    //  no dedicated CR number — the resolver takes `abs_diff`.)
     let def = parse_trigger_line(
             "Whenever a creature you control attacks or blocks, it gets +X/+X until end of turn, where X is the difference between its power and toughness.",
             "Doran, Besieged by Time",

@@ -6,7 +6,9 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::game::arithmetic::{u32_to_i32_saturating, usize_to_i32_saturating};
+use crate::game::arithmetic::{
+    i64_to_i32_saturating, u32_to_i32_saturating, usize_to_i32_saturating,
+};
 use crate::game::filter::{
     matches_target_filter, matches_target_filter_on_attack_declaration_record,
     matches_target_filter_on_counter_added_record, matches_target_filter_on_damage_record_source,
@@ -3495,13 +3497,21 @@ fn fold_compose(expr: &QuantityExpr, recurse: impl Fn(&QuantityExpr) -> i32) -> 
             divisor,
             rounding,
         } => divide_rounded(recurse(inner), *divisor, *rounding),
-        QuantityExpr::Offset { inner, offset } => recurse(inner) + offset,
+        // CR 107.1b: a game value may be negative, so an offset saturates at
+        // either `i32` limit (exact in `i64`, saturated once) — e.g. "20 minus the
+        // highest life total" when every total is near `i32::MIN`.
+        QuantityExpr::Offset { inner, offset } => {
+            i64_to_i32_saturating(i64::from(recurse(inner)) + i64::from(*offset))
+        }
         // CR 107.1b: effect-result calculations that would be negative use zero
         // instead. The lower bound is parameterized for non-zero floors, but
         // current Oracle users are the zero-floor "beyond the first" class.
         QuantityExpr::ClampMin { inner, minimum } => recurse(inner).max(*minimum),
         QuantityExpr::Multiply { factor, inner } => factor.saturating_mul(recurse(inner)),
-        QuantityExpr::Sum { exprs } => exprs.iter().map(&recurse).sum(),
+        // Exact sum, saturated once, as `players::aggregate_over_teams` does.
+        QuantityExpr::Sum { exprs } => {
+            i64_to_i32_saturating(exprs.iter().map(|expr| i64::from(recurse(expr))).sum())
+        }
         // CR 107.3: `base ^ exponent` with the exponent resolved from a
         // QuantityExpr (typically the X variable on a cost). The exponent is
         // clamped to a non-negative u32 because `i32::saturating_pow` requires
@@ -3531,12 +3541,16 @@ fn fold_compose(expr: &QuantityExpr, recurse: impl Fn(&QuantityExpr) -> i32) -> 
         QuantityExpr::UpTo { max } => recurse(max),
         // "The difference between A and B" is an unsigned-magnitude Oracle
         // templating convention — it has no dedicated Comprehensive Rules
-        // number. `.abs()` implements that convention: the gap between the two
+        // number. `abs_diff` implements that convention: the gap between the two
         // operands regardless of operand order. (CR 107.1b is related but
         // distinct — it clamps a negative *result* to zero, which is not the
         // same operation as an absolute value; it confirms only that the
-        // resulting amount is non-negative.)
-        QuantityExpr::Difference { left, right } => (recurse(left) - recurse(right)).abs(),
+        // resulting amount is non-negative.) `abs_diff` is exact over the whole
+        // `i32` range (two life totals can differ by up to `u32::MAX`); the
+        // distance saturates at `i32::MAX`.
+        QuantityExpr::Difference { left, right } => {
+            u32_to_i32_saturating(recurse(left).abs_diff(recurse(right)))
+        }
         // CR 107.1: the maximum of the computed integer operands. CR 120.4a /
         // CR 120.10 establish the in-rules "the greatest of the calculated
         // amounts" precedent for taking a maximum over multiple computed
@@ -4999,11 +5013,19 @@ fn resolve_ref(
         // (team total in 2HG, individual total elsewhere) minus the selected
         // controller's rules starting total. Single controller bind — no
         // double-count, and Archenemy's 40/20 baseline follows that controller.
+        // The difference from the saturating team view (`team_life_total`) is
+        // computed in `i64` and saturated into `i32`; the exact `team_life_sum`
+        // is read by affordability, payable-life budgets, set life's current
+        // value and `players::aggregate_over_teams`.
         QuantityRef::LifeAboveStarting => player.map_or(0, |p| {
-            crate::game::players::team_life_total(state, p.id)
-                - state
-                    .format_config
-                    .starting_life_total_for_player(p.id, state.players.len())
+            i64_to_i32_saturating(
+                i64::from(crate::game::players::team_life_total(state, p.id))
+                    - i64::from(
+                        state
+                            .format_config
+                            .starting_life_total_for_player(p.id, state.players.len()),
+                    ),
+            )
         }),
         // CR 103.4 + CR 904.5: the rules starting total for the referenced
         // player or players selected by `scope`, including the archenemy's
@@ -6592,7 +6614,11 @@ fn resolve_ref(
         QuantityRef::ChosenNumber => source_lki_for_context(state, &ctx)
             .and_then(|lki| {
                 lki.chosen_attributes.iter().find_map(|a| match a {
-                    crate::types::ability::ChosenAttribute::Number(n) => Some(*n as i32),
+                    // A paid-life latch ("pay any amount of life" as it enters) can
+                    // exceed `i32::MAX`; the reading saturates.
+                    crate::types::ability::ChosenAttribute::Number(n) => {
+                        Some(u32_to_i32_saturating(*n))
+                    }
                     _ => None,
                 })
             })
@@ -9703,7 +9729,7 @@ fn resolve_per_team_life(
     }
 }
 
-/// CR 107.3e: Reduce a player iterator to a single i32 by aggregate function.
+/// CR 107.2: Reduce a player iterator to a single i32 by aggregate function.
 /// Returns 0 for an empty iterator (mirrors the prior `OpponentLifeTotal`
 /// `.unwrap_or(0)` semantics — there is always at least one opponent in a
 /// real game, but a 1-player test harness should not panic).
@@ -9716,7 +9742,10 @@ where
     match aggregate {
         AggregateFunction::Max => values.max().unwrap_or(0),
         AggregateFunction::Min => values.min().unwrap_or(0),
-        AggregateFunction::Sum => values.sum(),
+        // Per-player `i32` values (e.g. two opponents' saturated life-lost tallies)
+        // can sum past `i32::MAX`: exact in `i64`, saturated once, as
+        // `players::aggregate_over_teams` does for team life totals.
+        AggregateFunction::Sum => i64_to_i32_saturating(values.map(i64::from).sum()),
     }
 }
 
@@ -10399,6 +10428,311 @@ mod tests {
             .unwrap()
             .mana_spent_source_snapshots
             .push(ManaSpentSourceSnapshot { source_id, lki });
+    }
+
+    const PLATINUM_ANGEL: &str =
+        "Flying\nYou can't lose the game and your opponents can't win the game.";
+
+    /// CR 107.1b + CR 107.2: `Offset`, `Sum` and `Difference` are computed
+    /// exactly and saturate once at the `i32` limits instead of overflowing. A
+    /// sum is exact-then-saturate, not a saturating fold: `MAX + MAX + MIN` is
+    /// `MAX - 1`, which a saturating fold would read as -1.
+    #[test]
+    fn fold_compose_offset_sum_difference_saturate_at_i32_limits() {
+        let state = GameState::new_two_player(42);
+        let resolve =
+            |expr: QuantityExpr| resolve_quantity(&state, &expr, PlayerId(0), ObjectId(1));
+        let fixed = |value: i32| QuantityExpr::Fixed { value };
+        let offset = |value: i32, by: i32| QuantityExpr::Offset {
+            inner: Box::new(fixed(value)),
+            offset: by,
+        };
+        let sum = |values: &[i32]| QuantityExpr::Sum {
+            exprs: values.iter().copied().map(fixed).collect(),
+        };
+        let difference = |left: i32, right: i32| QuantityExpr::Difference {
+            left: Box::new(fixed(left)),
+            right: Box::new(fixed(right)),
+        };
+
+        assert_eq!(resolve(offset(i32::MAX, 5)), i32::MAX);
+        assert_eq!(resolve(offset(i32::MIN, -5)), i32::MIN);
+        assert_eq!(resolve(sum(&[i32::MAX, i32::MAX])), i32::MAX);
+        assert_eq!(
+            resolve(sum(&[i32::MAX, i32::MAX, i32::MIN])),
+            i32::MAX - 1,
+            "the exact sum fits i32, so it is not saturated"
+        );
+        assert_eq!(resolve(difference(i32::MAX, -1)), i32::MAX);
+        assert_eq!(resolve(difference(-1, i32::MAX)), i32::MAX);
+        assert_eq!(resolve(difference(i32::MIN, i32::MAX)), i32::MAX);
+
+        // In-range controls.
+        assert_eq!(resolve(offset(3, 4)), 7);
+        assert_eq!(resolve(difference(3, 10)), 7);
+        assert_eq!(resolve(difference(10, 3)), 7);
+        assert_eq!(resolve(sum(&[2, 3])), 5);
+        // CR 107.2: an empty sum reads 0.
+        assert_eq!(resolve(sum(&[])), 0);
+    }
+
+    /// CR 107.1b: Scourge of the Skyclaves reads "20 minus the highest life
+    /// total among players". With every total at `i32::MIN` (Platinum Angel,
+    /// "You can't lose the game and your opponents can't win the game.", keeps
+    /// both players in the game through the state-based-action check of
+    /// CR 704.3) that is 2^31 + 20, past the `i32` power/toughness range, so it
+    /// saturates at `i32::MAX`. Without the Angels the same check eliminates
+    /// both players (CR 704.5a), and the game is a draw (CR 104.4a).
+    #[test]
+    fn scourge_of_the_skyclaves_power_saturates_when_every_life_total_is_i32_min() {
+        use crate::game::scenario::{GameScenario, P0, P1};
+        use crate::types::game_state::WaitingFor;
+
+        const SCOURGE: &str = "Kicker {4}{B}\nWhen you cast this spell, if it was kicked, each player loses half their life, rounded up.\nScourge of the Skyclaves's power and toughness are each equal to 20 minus the highest life total among players.";
+
+        // Builds the board, applies the layers, then runs the CR 704.3
+        // state-based-action check a player getting priority would run.
+        let scourge_after_state_based_actions = |lives: [i32; 2], with_angels: bool| {
+            let mut scenario = GameScenario::new();
+            scenario.at_phase(Phase::PreCombatMain);
+            scenario.with_life(P0, lives[0]).with_life(P1, lives[1]);
+            if with_angels {
+                for player in [P0, P1] {
+                    scenario.add_creature_from_oracle(
+                        player,
+                        "Platinum Angel",
+                        4,
+                        4,
+                        PLATINUM_ANGEL,
+                    );
+                }
+            }
+            let scourge = scenario
+                .add_creature_from_oracle(P0, "Scourge of the Skyclaves", 0, 0, SCOURGE)
+                .id();
+            let mut runner = scenario.build();
+            crate::game::layers::flush_layers(runner.state_mut());
+            crate::game::sba::check_state_based_actions(runner.state_mut(), &mut Vec::new());
+            (runner.state().clone(), scourge)
+        };
+
+        // Reach guard / control: 20 minus the highest total (15) is 5.
+        let (state, scourge) = scourge_after_state_based_actions([12, 15], false);
+        let object = &state.objects[&scourge];
+        assert_eq!((object.power, object.toughness), (Some(5), Some(5)));
+
+        // Control: without the Platinum Angels the check eliminates both
+        // players, so the elimination assertion below can fail.
+        let (state, _) = scourge_after_state_based_actions([i32::MIN, i32::MIN], false);
+        assert!(state.players.iter().all(|player| player.is_eliminated));
+        assert!(
+            matches!(state.waiting_for, WaitingFor::GameOver { winner: None }),
+            "got {:?}",
+            state.waiting_for
+        );
+
+        let (state, scourge) = scourge_after_state_based_actions([i32::MIN, i32::MIN], true);
+        let object = &state.objects[&scourge];
+        assert_eq!(object.zone, Zone::Battlefield);
+        assert!(state.players.iter().all(|player| !player.is_eliminated));
+        assert!(
+            matches!(state.waiting_for, WaitingFor::Priority { .. }),
+            "got {:?}",
+            state.waiting_for
+        );
+        assert_eq!(
+            (object.power, object.toughness),
+            (Some(i32::MAX), Some(i32::MAX))
+        );
+    }
+
+    /// CR 103.4 + CR 810.9a + CR 810.4: `LifeAboveStarting` is the life total
+    /// (in Two-Headed Giant the saturating team view, `team_life_total`)
+    /// minus the starting life total, computed in `i64` and saturated into
+    /// `i32` instead of overflowing at `i32::MIN`.
+    #[test]
+    fn life_above_starting_saturates_at_i32_limits() {
+        let expr = QuantityExpr::Ref {
+            qty: QuantityRef::LifeAboveStarting,
+        };
+        let mut state = GameState::new_two_player(42);
+        let mut read = |life: i32| {
+            state.players[0].life = life;
+            resolve_quantity(&state, &expr, PlayerId(0), ObjectId(1))
+        };
+        assert_eq!(read(25), 5);
+        assert_eq!(read(i32::MAX), i32::MAX - 20);
+        assert_eq!(read(i32::MIN), i32::MIN);
+
+        // Two-Headed Giant: both members at `i32::MIN` give the saturated team
+        // view `i32::MIN`; minus the team's starting total of 30 it stays there.
+        let mut team = GameState::new(FormatConfig::two_headed_giant(), 4, 42);
+        team.players[0].life = i32::MIN;
+        team.players[1].life = i32::MIN;
+        assert_eq!(
+            crate::game::players::team_life_total(&team, PlayerId(0)),
+            i32::MIN,
+            "players 0 and 1 share the team total"
+        );
+        assert_eq!(
+            team.format_config
+                .starting_life_total_for_player(PlayerId(0), team.players.len()),
+            30
+        );
+        assert_eq!(
+            resolve_quantity(&team, &expr, PlayerId(0), ObjectId(1)),
+            i32::MIN
+        );
+    }
+
+    /// CR 103.4: Righteous Valkyrie's "at least 7 life more than your starting
+    /// life total" reads `LifeAboveStarting`; at `i32::MIN` (Platinum Angel
+    /// keeps its controller in the game) the reading saturates and the bonus
+    /// does not apply.
+    #[test]
+    fn righteous_valkyrie_reads_life_above_starting_at_i32_min() {
+        use crate::game::scenario::{GameScenario, P0};
+
+        const VALKYRIE: &str = "Flying\nWhenever another Angel or Cleric you control enters, you gain life equal to that creature's toughness.\nAs long as you have at least 7 life more than your starting life total, creatures you control get +2/+2.";
+
+        let valkyrie_after_layers = |life: i32| {
+            let mut scenario = GameScenario::new();
+            scenario.at_phase(Phase::PreCombatMain);
+            scenario.with_life(P0, life);
+            scenario.add_creature_from_oracle(P0, "Platinum Angel", 4, 4, PLATINUM_ANGEL);
+            let valkyrie = scenario
+                .add_creature_from_oracle(P0, "Righteous Valkyrie", 2, 4, VALKYRIE)
+                .id();
+            let mut runner = scenario.build();
+            crate::game::layers::flush_layers(runner.state_mut());
+            let object = &runner.state().objects[&valkyrie];
+            (object.power, object.toughness)
+        };
+
+        // Reach guard: 27 is 7 more than 20, so the bonus applies.
+        assert_eq!(valkyrie_after_layers(27), (Some(4), Some(6)));
+        assert_eq!(valkyrie_after_layers(26), (Some(2), Some(4)));
+        assert_eq!(valkyrie_after_layers(i32::MAX), (Some(4), Some(6)));
+        assert_eq!(valkyrie_after_layers(i32::MIN), (Some(2), Some(4)));
+    }
+
+    /// A `Sum` over opponents' per-player tallies is exact and saturates
+    /// once; two saturated life-lost tallies no longer overflow.
+    #[test]
+    fn opponent_sum_of_life_lost_this_turn_saturates_at_i32_limits() {
+        let opponents = |aggregate| QuantityExpr::Ref {
+            qty: QuantityRef::LifeLostThisTurn {
+                player: PlayerScope::Opponent { aggregate },
+            },
+        };
+        let sum = opponents(AggregateFunction::Sum);
+        let max = opponents(AggregateFunction::Max);
+        let mut state = GameState::new(FormatConfig::standard(), 3, 7);
+
+        state.players[1].life_lost_this_turn = 3;
+        state.players[2].life_lost_this_turn = 4;
+        assert_eq!(resolve_quantity(&state, &sum, PlayerId(0), ObjectId(1)), 7);
+
+        state.players[1].life_lost_this_turn = u32::MAX;
+        state.players[2].life_lost_this_turn = u32::MAX;
+        assert_eq!(
+            resolve_quantity(&state, &sum, PlayerId(0), ObjectId(1)),
+            i32::MAX
+        );
+        assert_eq!(
+            resolve_quantity(&state, &max, PlayerId(0), ObjectId(1)),
+            i32::MAX
+        );
+
+        // CR 107.2: an empty population reads 0.
+        assert_eq!(
+            aggregate_over_players(
+                std::iter::empty::<&crate::types::player::Player>(),
+                AggregateFunction::Sum,
+                |player| player.life,
+            ),
+            0
+        );
+    }
+
+    /// Cryptborn Horror enters with X +1/+1 counters, "where X is the total
+    /// life lost by your opponents this turn". Two opponents' tallies of 2^31
+    /// total 2^32, past the `i32` quantity range, so X saturates at `i32::MAX`.
+    #[test]
+    fn cryptborn_horror_counts_opponent_life_lost_past_i32_max() {
+        use crate::game::scenario::{GameScenario, P0};
+        use crate::types::game_state::WaitingFor;
+
+        const CRYPTBORN: &str = "Trample\nThis creature enters with X +1/+1 counters on it, where X is the total life lost by your opponents this turn.";
+
+        let cast_after_opponent_losses = |lost: [u32; 2]| {
+            let mut scenario = GameScenario::new_n_player(3, 7);
+            scenario.at_phase(Phase::PreCombatMain);
+            let horror = scenario
+                .add_creature_to_hand_from_oracle(P0, "Cryptborn Horror", 0, 0, CRYPTBORN)
+                .id();
+            let mut runner = scenario.build();
+            runner.state_mut().players[1].life_lost_this_turn = lost[0];
+            runner.state_mut().players[2].life_lost_this_turn = lost[1];
+            let outcome = runner
+                .cast(horror)
+                .try_resolve()
+                .expect("Cryptborn Horror resolves");
+            let state = outcome.state();
+            assert!(
+                matches!(state.waiting_for, WaitingFor::Priority { player } if player == P0),
+                "the cast completes back to P0's priority: {:?}",
+                state.waiting_for
+            );
+            assert!(state.stack.is_empty());
+            let object = &state.objects[&horror];
+            assert_eq!(object.zone, Zone::Battlefield);
+            (
+                object.counters.get(&CounterType::Plus1Plus1).copied(),
+                object.power,
+            )
+        };
+
+        // Reach guard / control: 3 + 4 life lost gives 7 counters.
+        assert_eq!(cast_after_opponent_losses([3, 4]), (Some(7), Some(7)));
+        assert_eq!(
+            cast_after_opponent_losses([1 << 31, 1 << 31]),
+            (Some(2_147_483_647), Some(i32::MAX))
+        );
+    }
+
+    /// The number latched on a permanent is a `u32`; read as an `i32` quantity
+    /// it saturates at `i32::MAX` instead of wrapping negative. The number is
+    /// the one Minion of the Wastes latches ("As this creature enters, pay any
+    /// amount of life. Minion of the Wastes's power and toughness are each
+    /// equal to the life paid as it entered."), whose power and toughness read
+    /// it. This is the quantity reader's unit seam: the object here is named
+    /// for the Minion but carries none of its text, and the latch is set by
+    /// hand. The printed twin, in which the Minion enters and its controller
+    /// pays the life, is
+    /// `two_headed_giant_pays_life_above_i32_max_as_minion_of_the_wastes_enters`
+    /// in `life_total_saturation.rs`.
+    #[test]
+    fn chosen_number_above_i32_max_saturates() {
+        let mut state = GameState::new_two_player(7);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Minion of the Wastes".to_string(),
+            Zone::Battlefield,
+        );
+        let expr = QuantityExpr::Ref {
+            qty: QuantityRef::ChosenNumber,
+        };
+        let mut read = |number: u32| {
+            state.objects.get_mut(&source).unwrap().chosen_attributes =
+                vec![crate::types::ability::ChosenAttribute::Number(number)];
+            resolve_quantity(&state, &expr, PlayerId(0), source)
+        };
+        assert_eq!(read(7), 7);
+        assert_eq!(read(3_000_000_000), i32::MAX);
+        assert_eq!(read(u32::MAX), i32::MAX);
     }
 
     #[test]

@@ -139,8 +139,11 @@ pub(crate) fn handle_topdeck_choice(
 /// affordability check makes an unaffordable payment here an internal
 /// inconsistency; preserve the legacy event-free failure shape in release
 /// builds while asserting it in debug builds. A payment whose deduction is
-/// affordable but not representable (life total or lost-this-turn counter
-/// overflow) takes the same event-free return.
+/// affordable but not representable (only a nested player-counter or energy
+/// settlement that overflows; a deduction of any `u32` amount is carried
+/// exactly, a life replacement quantity saturates at `u32::MAX`, and the life
+/// total and the lost-this-turn counter saturate instead) takes the same
+/// event-free return.
 pub(crate) fn complete_topdeck_choice(
     state: &mut GameState,
     player: PlayerId,

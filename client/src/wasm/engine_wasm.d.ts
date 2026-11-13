@@ -263,7 +263,7 @@ export function export_replay_log(): string;
  * there is no unresolvable input. This wrapper is fallible anyway — beyond
  * deserializing the JS payload, it also bounds the resolved config's
  * `starting_life` (CR 704.5a / CR 810.8c playability floor, and the engine's
- * `MAX_STARTING_LIFE` overflow-safety ceiling) via
+ * `MAX_STARTING_LIFE` saturation-headroom ceiling) via
  * `validate_starting_life_bounds`. `custom_rules` is user-editable
  * localStorage data, so this bound fails early with a readable lobby-level
  * message rather than a raw `FormatConfig::deserialize` error at game

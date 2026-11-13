@@ -4886,8 +4886,22 @@ pub(crate) mod tests {
         "Zubera",
     ];
 
-    const LUMINESCENT_RAIN_ORACLE: &str =
-        "Choose a creature type. You gain 2 life for each permanent you control of that type.";
+    /// Synthetic (no printed card): Luminescent Rain ("Choose a creature type.
+    /// You gain 2 life for each permanent you control of that type.") with its
+    /// life gain replaced by Aetherwind Basker's energy gain ("you get {E} (an
+    /// energy counter) for each creature you control"), two {E} per permanent.
+    /// These tests need a creature-type answer that passes the structural
+    /// check and that the engine refuses on apply. A life gain no longer gives
+    /// one: a life total stops at `i32::MAX` (Luminescent Rain at the cap is
+    /// `luminescent_rain_one_below_the_cap_applies_the_named_type_and_saturates`
+    /// in the engine's `life_total_saturation` tests). A player's energy keeps
+    /// the engine's checked edit, so an energy total past `u32::MAX` is refused
+    /// with `EngineError::PlayerResourceChangeUnrepresentable`, the error the engine's
+    /// energy and player-counter edits report. No printed card chooses a
+    /// creature type and gives energy
+    /// or a player counter for each permanent of that type.
+    const ENERGY_RAIN_ORACLE: &str =
+        "Choose a creature type. You get {E}{E} for each permanent you control of that type.";
 
     /// Put `name`, a P0 spell with `oracle` and mana cost `cost`, in P0's hand,
     /// and float one mana of each type in `mana` to pay for it.
@@ -5186,14 +5200,16 @@ pub(crate) mod tests {
     }
 
     /// Production path where the answer the AI prefers passes the structural
-    /// check but the engine rejects it: Luminescent Rain ("Choose a creature
-    /// type. You gain 2 life for each permanent you control of that type.") for
-    /// a P0 one life below the largest life total the engine represents
-    /// (`i32::MAX`; CR 119.3 adjusts a life total by what is gained, and the
-    /// rules set no maximum), controlling one creature of each of five types.
-    /// Each of those types would gain 2 life, a total outside that range, so
-    /// its apply returns `EngineError::LifeChangeUnrepresentable`; every other
-    /// type gains no life and applies. The five fill the Medium root beam, and
+    /// check but the engine rejects it: the synthetic Energy Rain
+    /// (`ENERGY_RAIN_ORACLE`: "Choose a creature type. You get {E}{E} for each
+    /// permanent you control of that type.") for a P0 one energy counter below
+    /// the most energy the engine represents (`u32::MAX`; CR 107.14 + CR 122.1:
+    /// each {E} is an energy counter put on the player, and the rules set no
+    /// maximum), controlling one creature of each of five types
+    /// (`energy_rain_prompt_rejecting`). Each of those types would give 2
+    /// energy, a total outside that range, so its apply returns
+    /// `EngineError::PlayerResourceChangeUnrepresentable`; every other type gives no
+    /// energy and applies. The five fill the Medium root beam, and
     /// the root search's simulation of the first of them fails, so the decision
     /// is scored again with every type simulated before anything is selected. The AI
     /// submits the type, and leaves its RNG where, the simulate-every-answer
@@ -5211,50 +5227,8 @@ pub(crate) mod tests {
     #[test]
     fn ai_driver_replaces_a_submitted_creature_type_the_engine_rejects() {
         const CONTROLLED: [&str; 5] = ["Elf", "Goblin", "Human", "Merfolk", "Zombie"];
-        let mut scenario = GameScenario::new();
-        scenario.at_phase(Phase::PreCombatMain);
-        scenario.with_life(P0, i32::MAX - 1);
-        for subtype in CONTROLLED {
-            scenario
-                .add_creature(P0, &format!("{subtype} A"), 1, 1)
-                .with_subtypes(vec![subtype]);
-        }
-        let rain = add_creature_type_spell(
-            &mut scenario,
-            "Luminescent Rain",
-            true,
-            LUMINESCENT_RAIN_ORACLE,
-            ManaCost::Cost {
-                generic: 2,
-                shards: vec![ManaCostShard::Green],
-            },
-            &[ManaType::Colorless, ManaType::Colorless, ManaType::Green],
-        );
-        let prompt = prompt_offering_every_creature_type(scenario.build(), rain);
+        let prompt = energy_rain_prompt_rejecting(&CONTROLLED);
         let offered = named_options(&prompt).len() as u64;
-
-        // Fixture: each controlled type passes the structural check and is
-        // rejected on apply; a type P0 controls no permanent of applies.
-        for subtype in CONTROLLED {
-            let answer = choose(subtype);
-            assert!(
-                engine::ai_support::structurally_valid_prompt_answer(&prompt, &answer),
-                "{subtype} is an offered creature type"
-            );
-            let mut sim = prompt.clone();
-            let applied = apply_as_current_for_simulation(&mut sim, answer);
-            assert!(
-                matches!(
-                    applied,
-                    Err(EngineError::LifeChangeUnrepresentable { player }) if player == P0
-                ),
-                "{subtype}: 2 more life is outside the engine's range, got {applied:?}"
-            );
-        }
-        assert!(
-            planner_simulation_accepts(&prompt, &choose("Advisor")),
-            "a type P0 controls no permanent of gains no life and applies"
-        );
 
         let decision = run_ai_decision(&prompt);
         let reference = run_reference_ai_decision(&prompt);
@@ -5277,8 +5251,8 @@ pub(crate) mod tests {
             "the decision must draw from the AI's RNG exactly as that gate's decision does"
         );
 
-        // Luminescent Rain resolved with an accepted type: none of P0's, so no
-        // life is gained, and P0 as the active player receives priority again
+        // Energy Rain resolved with an accepted type: none of P0's, so no
+        // energy is gained, and P0 as the active player receives priority again
         // (CR 117.3b).
         let GameAction::ChooseOption { choice } = &decision.action else {
             panic!(
@@ -5290,33 +5264,32 @@ pub(crate) mod tests {
             !CONTROLLED.contains(&choice.as_str()),
             "the AI must not submit a rejected type, got {choice}"
         );
-        assert_eq!(seat(&decision.after, P0).life, i32::MAX - 1);
+        assert_eq!(seat(&decision.after, P0).energy, u32::MAX - 1);
         assert!(
             decision.after.stack.is_empty(),
-            "Luminescent Rain must finish resolving"
+            "Energy Rain must finish resolving"
         );
         assert!(
             matches!(decision.after.waiting_for, WaitingFor::Priority { player } if player == P0),
-            "P0 must receive priority after Luminescent Rain resolves, got {:?}",
+            "P0 must receive priority after Energy Rain resolves, got {:?}",
             decision.after.waiting_for
         );
     }
 
-    /// Luminescent Rain ("Choose a creature type. You gain 2 life for each
-    /// permanent you control of that type.") cast by a P0 one life below the
-    /// largest life total the engine represents (`i32::MAX`), controlling one
-    /// creature of each type in `controlled`, resolved up to its creature-type
-    /// prompt offering every CR 205.3m type. Asserts the fixture: each
-    /// controlled type passes the structural check and its apply returns
-    /// `EngineError::LifeChangeUnrepresentable` (2 more life is outside that
-    /// range; CR 119.3 adjusts a life total by what is gained, and the rules set
-    /// no maximum), and a type P0 controls no permanent of gains no life and
-    /// applies.
+    /// The synthetic Energy Rain (`ENERGY_RAIN_ORACLE`) cast by a P0 one energy
+    /// counter below the most the engine represents (`u32::MAX`), controlling
+    /// one creature of each type in `controlled`, resolved up to its
+    /// creature-type prompt offering every CR 205.3m type. Asserts the fixture:
+    /// each controlled type passes the structural check and its apply returns
+    /// `EngineError::PlayerResourceChangeUnrepresentable` (2 more energy is outside that
+    /// range; CR 107.14 + CR 122.1: each {E} is an energy counter put on the
+    /// player, and the rules set no maximum); the same answer gives P0 {E}{E}
+    /// from no energy, so the refusal is that gain's; and a type P0 controls no
+    /// permanent of gives no energy and applies.
     /// `pub(crate)` so the root-search tests in `search.rs` build the same board.
-    pub(crate) fn luminescent_rain_prompt_rejecting(controlled: &[&str]) -> GameState {
+    pub(crate) fn energy_rain_prompt_rejecting(controlled: &[&str]) -> GameState {
         let mut scenario = GameScenario::new();
         scenario.at_phase(Phase::PreCombatMain);
-        scenario.with_life(P0, i32::MAX - 1);
         for subtype in controlled {
             scenario
                 .add_creature(P0, &format!("{subtype} A"), 1, 1)
@@ -5324,16 +5297,18 @@ pub(crate) mod tests {
         }
         let rain = add_creature_type_spell(
             &mut scenario,
-            "Luminescent Rain",
+            "Energy Rain",
             true,
-            LUMINESCENT_RAIN_ORACLE,
+            ENERGY_RAIN_ORACLE,
             ManaCost::Cost {
                 generic: 2,
                 shards: vec![ManaCostShard::Green],
             },
             &[ManaType::Colorless, ManaType::Colorless, ManaType::Green],
         );
-        let prompt = prompt_offering_every_creature_type(scenario.build(), rain);
+        let mut runner = scenario.build();
+        runner.state_mut().players[0].energy = u32::MAX - 1;
+        let prompt = prompt_offering_every_creature_type(runner, rain);
         for subtype in controlled {
             let answer = choose(subtype);
             assert!(
@@ -5341,26 +5316,37 @@ pub(crate) mod tests {
                 "{subtype} is an offered creature type"
             );
             let mut sim = prompt.clone();
-            let applied = apply_as_current_for_simulation(&mut sim, answer);
+            let applied = apply_as_current_for_simulation(&mut sim, answer.clone());
             assert!(
                 matches!(
                     applied,
-                    Err(EngineError::LifeChangeUnrepresentable { player }) if player == P0
+                    Err(EngineError::PlayerResourceChangeUnrepresentable { player }) if player == P0
                 ),
-                "{subtype}: 2 more life is outside the engine's range, got {applied:?}"
+                "{subtype}: 2 more energy is outside the engine's range, got {applied:?}"
+            );
+            // Reach guard: below the limit the same answer applies and gives
+            // P0 {E}{E} for its one permanent of that type.
+            let mut below = prompt.clone();
+            below.players[0].energy = 0;
+            apply_as_current_for_simulation(&mut below, answer)
+                .unwrap_or_else(|error| panic!("{subtype} applies below the limit, got {error:?}"));
+            assert_eq!(
+                seat(&below, P0).energy,
+                2,
+                "{subtype}: P0 gets {{E}}{{E}} for its one permanent of that type"
             );
         }
         assert!(
             planner_simulation_accepts(&prompt, &choose("Advisor")),
-            "a type P0 controls no permanent of gains no life and applies"
+            "a type P0 controls no permanent of gives no energy and applies"
         );
         prompt
     }
 
     /// Production path where the root beam holds answers the engine rejects
-    /// beside one it accepts: Luminescent Rain for a P0 at `i32::MAX - 1` life
+    /// beside one it accepts: Energy Rain for a P0 at `u32::MAX - 1` energy
     /// controlling one creature of each of four types. Those four types would
-    /// each gain life past the engine's range, so their applies fail; they
+    /// each give energy past the engine's range, so their applies fail; they
     /// outrank every other type and take four of the Medium beam's five places,
     /// and the fifth is a type P0 controls no permanent of, which applies. The
     /// root search simulates the beam in order and stops at the first of the
@@ -5374,7 +5360,7 @@ pub(crate) mod tests {
     #[test]
     fn ai_driver_scores_again_when_its_root_search_rejects_an_admitted_type() {
         const CONTROLLED: [&str; 4] = ["Elf", "Goblin", "Human", "Merfolk"];
-        let prompt = luminescent_rain_prompt_rejecting(&CONTROLLED);
+        let prompt = energy_rain_prompt_rejecting(&CONTROLLED);
         let offered = named_options(&prompt).len() as u64;
 
         let decision = run_ai_decision(&prompt);
@@ -5398,8 +5384,8 @@ pub(crate) mod tests {
              simulated, and the submitted one once more"
         );
 
-        // Luminescent Rain resolved with an accepted type: none of P0's, so no
-        // life is gained, and P0 as the active player receives priority again
+        // Energy Rain resolved with an accepted type: none of P0's, so no
+        // energy is gained, and P0 as the active player receives priority again
         // (CR 117.3b).
         let GameAction::ChooseOption { choice } = &decision.action else {
             panic!(
@@ -5411,20 +5397,20 @@ pub(crate) mod tests {
             !CONTROLLED.contains(&choice.as_str()),
             "the AI must not submit a rejected type, got {choice}"
         );
-        assert_eq!(seat(&decision.after, P0).life, i32::MAX - 1);
+        assert_eq!(seat(&decision.after, P0).energy, u32::MAX - 1);
         assert!(
             decision.after.stack.is_empty(),
-            "Luminescent Rain must finish resolving"
+            "Energy Rain must finish resolving"
         );
         assert!(
             matches!(decision.after.waiting_for, WaitingFor::Priority { player } if player == P0),
-            "P0 must receive priority after Luminescent Rain resolves, got {:?}",
+            "P0 must receive priority after Energy Rain resolves, got {:?}",
             decision.after.waiting_for
         );
     }
 
     /// Production path where nothing simulates the beam before selection: the
-    /// Luminescent Rain board whose five rejected types fill the Medium root
+    /// Energy Rain board whose five rejected types fill the Medium root
     /// beam, decided by a seat whose root search has no time
     /// (`time_budget_ms: Some(0)`), so its deadline has expired before the
     /// search's first rung and the beam is scored by the tactical floor alone.
@@ -5438,7 +5424,7 @@ pub(crate) mod tests {
     #[test]
     fn ai_driver_replaces_a_rejected_type_it_selects_before_any_search() {
         const CONTROLLED: [&str; 5] = ["Elf", "Goblin", "Human", "Merfolk", "Zombie"];
-        let prompt = luminescent_rain_prompt_rejecting(&CONTROLLED);
+        let prompt = energy_rain_prompt_rejecting(&CONTROLLED);
         let offered = named_options(&prompt).len() as u64;
         let mut config = create_config_for_players(AiDifficulty::Medium, Platform::Native, 2);
         config.search.time_budget_ms = Some(0);
@@ -5479,28 +5465,28 @@ pub(crate) mod tests {
             !CONTROLLED.contains(&choice.as_str()),
             "the AI must not submit a rejected type, got {choice}"
         );
-        assert_eq!(seat(&decision.after, P0).life, i32::MAX - 1);
+        assert_eq!(seat(&decision.after, P0).energy, u32::MAX - 1);
         assert!(
             decision.after.stack.is_empty(),
-            "Luminescent Rain must finish resolving"
+            "Energy Rain must finish resolving"
         );
         assert!(
             matches!(decision.after.waiting_for, WaitingFor::Priority { player } if player == P0),
-            "P0 must receive priority after Luminescent Rain resolves, got {:?}",
+            "P0 must receive priority after Energy Rain resolves, got {:?}",
             decision.after.waiting_for
         );
     }
 
     /// Production path where the root beam holds an answer both a policy and the
-    /// engine reject: Luminescent Rain ("Choose a creature type. You gain 2 life
-    /// for each permanent you control of that type.") for a P0 at `i32::MAX - 1`
-    /// life controlling one Ally, decided by a Medium seat whose only policy
-    /// rejects every creature type. Every type then scores −∞, so the root beam is
-    /// the first five types in the stable action order (Advisor, Aetherborn, Alien,
-    /// Ally, Angel). Ally's apply fails: 2 more life is outside the engine's range
-    /// (CR 119.3 adjusts a life total by what is gained, and the rules set no
-    /// maximum). The root search's first rung simulates the admitted answers in its
-    /// beam in order although a policy rejects them, stops at Ally, which it finds
+    /// engine reject: Energy Rain (`ENERGY_RAIN_ORACLE`) for a P0 at
+    /// `u32::MAX - 1` energy controlling one Ally, decided by a Medium seat whose
+    /// only policy rejects every creature type. Every type then scores −∞, so the
+    /// root beam is the first five types in the stable action order (Advisor,
+    /// Aetherborn, Alien, Ally, Angel). Ally's apply fails: 2 more energy is
+    /// outside the engine's range (CR 107.14 + CR 122.1: each {E} is an energy
+    /// counter on the player, and the rules set no maximum). The root search's
+    /// first rung simulates the admitted answers in its beam in order although a
+    /// policy rejects them, stops at Ally, which it finds
     /// rejected, and the decision is scored again with every type simulated before
     /// anything is selected. That
     /// gate's beam (Advisor, Aetherborn, Alien, Angel, Antelope) is all −∞, so its
@@ -5513,7 +5499,7 @@ pub(crate) mod tests {
     fn ai_driver_scores_again_when_a_policy_rejected_beam_type_fails() {
         const CONTROLLED: [&str; 1] = ["Ally"];
         let rejects_every_type = RejectsNamedChoices { except: &[] };
-        let prompt = luminescent_rain_prompt_rejecting(&CONTROLLED);
+        let prompt = energy_rain_prompt_rejecting(&CONTROLLED);
         let offered = named_options(&prompt).len() as u64;
         let config = create_config_for_players(AiDifficulty::Medium, Platform::Native, 2)
             .into_measurement(AI_DECISION_SEED);
@@ -5558,14 +5544,14 @@ pub(crate) mod tests {
             decision.next_draw, reference.next_draw,
             "the decision must draw from the AI's RNG exactly as that gate's decision does"
         );
-        assert_eq!(seat(&decision.after, P0).life, i32::MAX - 1);
+        assert_eq!(seat(&decision.after, P0).energy, u32::MAX - 1);
         assert!(
             decision.after.stack.is_empty(),
-            "Luminescent Rain must finish resolving"
+            "Energy Rain must finish resolving"
         );
         assert!(
             matches!(decision.after.waiting_for, WaitingFor::Priority { player } if player == P0),
-            "P0 must receive priority after Luminescent Rain resolves (CR 117.3b), got {:?}",
+            "P0 must receive priority after Energy Rain resolves (CR 117.3b), got {:?}",
             decision.after.waiting_for
         );
     }
@@ -5574,14 +5560,14 @@ pub(crate) mod tests {
     /// `create_config_for_players` also disables it at Medium or below for five or
     /// more players), so no root search simulates the scored answers and the
     /// chooser's check of the answer it selects is the only simulation of an
-    /// admitted answer before submission. Luminescent Rain ("Choose a creature
-    /// type. You gain 2 life for each permanent you control of that type.") for a
-    /// P0 at `i32::MAX - 1` life controlling one creature of each of five types,
-    /// scored by a policy that rejects every type except those five. Each of the
-    /// five would gain life past the engine's range (CR 119.3 sets no maximum), so
-    /// its apply fails. They are the only rows with a finite score, so the
-    /// only rows with a nonzero selection weight, and the selection draws once
-    /// and selects one of them. The driver's simulation of it
+    /// admitted answer before submission. Energy Rain (`ENERGY_RAIN_ORACLE`) for
+    /// a P0 at `u32::MAX - 1` energy controlling one creature of each of five
+    /// types, scored by a policy that rejects every type except those five. Each
+    /// of the five would give energy past the engine's range (CR 107.14 +
+    /// CR 122.1: each {E} is an energy counter on the player, and the rules set
+    /// no maximum), so its apply fails. They are the only rows with a finite
+    /// score, so the only rows with a nonzero selection weight, and the
+    /// selection draws once and selects one of them. The driver's simulation of it
     /// fails, and the decision is taken again with every type simulated: the five
     /// are gone, every remaining row is −∞, and the selection falls back to the
     /// last type in the stable order, Zubera, without another draw. The
@@ -5598,7 +5584,7 @@ pub(crate) mod tests {
         let rejects_all_but_controlled = RejectsNamedChoices {
             except: &CONTROLLED,
         };
-        let prompt = luminescent_rain_prompt_rejecting(&CONTROLLED);
+        let prompt = energy_rain_prompt_rejecting(&CONTROLLED);
         let offered = named_options(&prompt).len() as u64;
         let config = create_config_for_players(AiDifficulty::Easy, Platform::Native, 2)
             .into_measurement(AI_DECISION_SEED);
@@ -5649,14 +5635,14 @@ pub(crate) mod tests {
             decision.next_draw, draws[1],
             "the decision's first selection draws once, where that gate's selection draws none"
         );
-        assert_eq!(seat(&decision.after, P0).life, i32::MAX - 1);
+        assert_eq!(seat(&decision.after, P0).energy, u32::MAX - 1);
         assert!(
             decision.after.stack.is_empty(),
-            "Luminescent Rain must finish resolving"
+            "Energy Rain must finish resolving"
         );
         assert!(
             matches!(decision.after.waiting_for, WaitingFor::Priority { player } if player == P0),
-            "P0 must receive priority after Luminescent Rain resolves (CR 117.3b), got {:?}",
+            "P0 must receive priority after Energy Rain resolves (CR 117.3b), got {:?}",
             decision.after.waiting_for
         );
     }
@@ -5675,7 +5661,7 @@ pub(crate) mod tests {
     #[test]
     fn ai_driver_retakes_a_decision_under_the_deadline_its_first_pass_started() {
         const CONTROLLED: [&str; 5] = ["Elf", "Goblin", "Human", "Merfolk", "Zombie"];
-        let prompt = luminescent_rain_prompt_rejecting(&CONTROLLED);
+        let prompt = energy_rain_prompt_rejecting(&CONTROLLED);
         let offered = named_options(&prompt).len() as u64;
         let mut config = create_config_for_players(AiDifficulty::Easy, Platform::Native, 2);
         config.search.time_budget_ms = Some(LIVE_TIME_BUDGET_MS);
@@ -5728,14 +5714,14 @@ pub(crate) mod tests {
             !CONTROLLED.contains(&choice.as_str()),
             "the AI must not submit a rejected type, got {choice}"
         );
-        assert_eq!(seat(&decision.after, P0).life, i32::MAX - 1);
+        assert_eq!(seat(&decision.after, P0).energy, u32::MAX - 1);
         assert!(
             decision.after.stack.is_empty(),
-            "Luminescent Rain must finish resolving"
+            "Energy Rain must finish resolving"
         );
         assert!(
             matches!(decision.after.waiting_for, WaitingFor::Priority { player } if player == P0),
-            "P0 must receive priority after Luminescent Rain resolves (CR 117.3b), got {:?}",
+            "P0 must receive priority after Energy Rain resolves (CR 117.3b), got {:?}",
             decision.after.waiting_for
         );
     }
@@ -5764,7 +5750,7 @@ pub(crate) mod tests {
     #[test]
     fn ai_driver_scores_again_under_the_deadline_its_root_search_started() {
         const CONTROLLED: [&str; 5] = ["Elf", "Goblin", "Human", "Merfolk", "Zombie"];
-        let prompt = luminescent_rain_prompt_rejecting(&CONTROLLED);
+        let prompt = energy_rain_prompt_rejecting(&CONTROLLED);
         let offered = named_options(&prompt).len() as u64;
         let mut config = create_config_for_players(AiDifficulty::Medium, Platform::Native, 2);
         config.search.time_budget_ms = Some(LIVE_TIME_BUDGET_MS);
@@ -5809,14 +5795,14 @@ pub(crate) mod tests {
             !CONTROLLED.contains(&choice.as_str()),
             "the AI must not submit a rejected type, got {choice}"
         );
-        assert_eq!(seat(&decision.after, P0).life, i32::MAX - 1);
+        assert_eq!(seat(&decision.after, P0).energy, u32::MAX - 1);
         assert!(
             decision.after.stack.is_empty(),
-            "Luminescent Rain must finish resolving"
+            "Energy Rain must finish resolving"
         );
         assert!(
             matches!(decision.after.waiting_for, WaitingFor::Priority { player } if player == P0),
-            "P0 must receive priority after Luminescent Rain resolves (CR 117.3b), got {:?}",
+            "P0 must receive priority after Energy Rain resolves (CR 117.3b), got {:?}",
             decision.after.waiting_for
         );
     }

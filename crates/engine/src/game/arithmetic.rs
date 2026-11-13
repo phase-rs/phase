@@ -15,6 +15,23 @@
 //! semantics are rules-correct: clamping to `i32::MAX` / `i32::MIN` preserves
 //! the direction of the effect while preventing wrap, which is the only
 //! outcome consistent with the CR's intent.
+//!
+//! Life readings that combine `i32` life values — a shared life total (a
+//! Two-Headed Giant team's, CR 810.4; the Archenemy Commander heroes',
+//! CR 904.13b; a Horde game's survivors', `topology::has_shared_life`), the
+//! difference of two totals, a sum of life-change amounts — are computed
+//! exactly in a wider type (`i64`, or a `u32` magnitude
+//! via `unsigned_abs` / `abs_diff`, which holds `i32::MIN`'s magnitude) and
+//! converted back once here: [`i64_to_i32_saturating`] for a reading,
+//! [`i64_to_u32_saturating`] for a payable-life budget or an unsigned delta,
+//! [`u32_to_i32_saturating`] for a magnitude.
+//!
+//! Life totals saturate at the `i32` limits through [`saturating_life_total`],
+//! the one place a total is computed. A capped change still reports its rules
+//! amount, and [`life_changed_amount`] converts that to the `LifeChanged` event
+//! field.
+
+use std::cmp::Ordering;
 
 /// Saturating add for power/toughness modifications in the layer system.
 ///
@@ -48,6 +65,79 @@ pub fn usize_to_i32_saturating(n: usize) -> i32 {
 #[inline]
 pub fn u32_to_i32_saturating(n: u32) -> i32 {
     i32::try_from(n).unwrap_or(i32::MAX)
+}
+
+/// Convert an exact `i64` value — e.g. the sum of a Two-Headed Giant team's
+/// life fields (CR 810.4) — to `i32`, saturating at `i32::MIN` / `i32::MAX`.
+///
+/// CR 107.1b: a game value such as a life total may be negative, so the bottom
+/// saturates as well as the top; saturation keeps the value's sign.
+#[inline]
+pub fn i64_to_i32_saturating(n: i64) -> i32 {
+    match i32::try_from(n) {
+        Ok(value) => value,
+        Err(_) if n.is_negative() => i32::MIN,
+        Err(_) => i32::MAX,
+    }
+}
+
+/// Convert an exact `i64` value to `u32`: a negative value reads 0 and a value
+/// past `u32::MAX` saturates. Used for payable-life budgets, where a life total
+/// of 0 or less affords no positive payment (CR 119.4) and 0 is always payable
+/// (CR 119.4b).
+#[inline]
+pub fn i64_to_u32_saturating(n: i64) -> u32 {
+    match u32::try_from(n) {
+        Ok(value) => value,
+        Err(_) if n.is_negative() => 0,
+        Err(_) => u32::MAX,
+    }
+}
+
+/// Convert a `u64` magnitude to `u32`, saturating at `u32::MAX`.
+#[inline]
+pub fn u64_to_u32_saturating(n: u64) -> u32 {
+    u32::try_from(n).unwrap_or(u32::MAX)
+}
+
+/// CR 119.3: which way a life change moves a life total.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LifeDirection {
+    Gain,
+    Loss,
+}
+
+/// The new life total after `current` changes by `delta`.
+///
+/// CR 119.3 + CR 107.1b: a gain or loss adjusts the life total, which may be
+/// negative; the total is stored as `i32`, so the result stops at the limit
+/// the change moves toward and never moves against the change. This is the one
+/// place a life total is computed. `current` is the total the change adjusts:
+/// the player's own life, or in a shared-life format the exact shared total (a
+/// Two-Headed Giant team's, CR 810.4; the Archenemy Commander heroes',
+/// CR 904.13b; a Horde game's survivors', `topology::has_shared_life`),
+/// which a state this function never wrote may hold outside `i32`.
+#[inline]
+pub fn saturating_life_total(current: i64, delta: i64) -> i64 {
+    let moved = current.saturating_add(delta);
+    match delta.cmp(&0) {
+        Ordering::Greater => current.max(moved.min(i64::from(i32::MAX))),
+        Ordering::Less => current.min(moved.max(i64::from(i32::MIN))),
+        Ordering::Equal => current,
+    }
+}
+
+/// CR 119.3 + CR 119.9: the `LifeChanged` event amount for a life change of this
+/// rules amount, whatever the total moved, so a gain held at the cap is still a
+/// life gain event and "whenever you gain life" triggers fire: a gain clamps at
+/// `i32::MAX`, a loss at `i32::MIN`.
+#[inline]
+pub fn life_changed_amount(direction: LifeDirection, magnitude: u64) -> i32 {
+    let magnitude = i64::try_from(magnitude).unwrap_or(i64::MAX);
+    i64_to_i32_saturating(match direction {
+        LifeDirection::Gain => magnitude,
+        LifeDirection::Loss => -magnitude,
+    })
 }
 
 #[cfg(test)]
@@ -85,5 +175,98 @@ mod tests {
         assert_eq!(u32_to_i32_saturating(0), 0);
         assert_eq!(u32_to_i32_saturating(1_000), 1_000);
         assert_eq!(u32_to_i32_saturating(u32::MAX), i32::MAX);
+    }
+
+    #[test]
+    fn i64_to_i32_conversion_saturates_at_both_limits() {
+        assert_eq!(i64_to_i32_saturating(0), 0);
+        assert_eq!(i64_to_i32_saturating(-5), -5);
+        assert_eq!(i64_to_i32_saturating(i64::from(i32::MAX)), i32::MAX);
+        assert_eq!(i64_to_i32_saturating(i64::from(i32::MIN)), i32::MIN);
+        assert_eq!(i64_to_i32_saturating(i64::from(i32::MAX) + 1), i32::MAX);
+        assert_eq!(i64_to_i32_saturating(i64::from(i32::MIN) - 1), i32::MIN);
+        assert_eq!(i64_to_i32_saturating(i64::MAX), i32::MAX);
+        assert_eq!(i64_to_i32_saturating(i64::MIN), i32::MIN);
+    }
+
+    #[test]
+    fn i64_to_u32_conversion_floors_negatives_and_saturates() {
+        assert_eq!(i64_to_u32_saturating(0), 0);
+        assert_eq!(i64_to_u32_saturating(-1), 0);
+        assert_eq!(i64_to_u32_saturating(i64::MIN), 0);
+        assert_eq!(i64_to_u32_saturating(4_294_967_294), 4_294_967_294);
+        assert_eq!(i64_to_u32_saturating(i64::from(u32::MAX)), u32::MAX);
+        assert_eq!(i64_to_u32_saturating(i64::from(u32::MAX) + 1), u32::MAX);
+    }
+
+    #[test]
+    fn saturating_life_total_stops_at_the_limit_it_moves_toward() {
+        let max = i64::from(i32::MAX);
+        let min = i64::from(i32::MIN);
+        let u32_max = i64::from(u32::MAX);
+        assert_eq!(saturating_life_total(max - 1, 2), max);
+        assert_eq!(saturating_life_total(min + 1, -2), min);
+        assert_eq!(saturating_life_total(max, 1), max);
+        assert_eq!(saturating_life_total(min, -1), min);
+        assert_eq!(saturating_life_total(5, -8), -3);
+        assert_eq!(saturating_life_total(min, u32_max), max);
+        assert_eq!(saturating_life_total(max, -u32_max), min);
+
+        // A current total outside `i32` is never pulled to the limit and
+        // never moved against the change.
+        assert_eq!(
+            saturating_life_total(4_294_967_294, 1),
+            4_294_967_294,
+            "a gain never lowers a total already past the top"
+        );
+        assert_eq!(saturating_life_total(4_294_967_294, -1), 4_294_967_293);
+        assert_eq!(saturating_life_total(-4_294_967_296, -1), -4_294_967_296);
+        assert_eq!(
+            saturating_life_total(4_000_000_000, -3_000_000_000),
+            1_000_000_000
+        );
+        for current in [min - 1, min, -3, 0, 7, max, max + 1] {
+            assert_eq!(saturating_life_total(current, 0), current);
+        }
+    }
+
+    #[test]
+    fn life_changed_amount_clamps_a_gain_at_max_and_a_loss_at_min() {
+        let two_pow_31 = 1_u64 << 31;
+        assert_eq!(life_changed_amount(LifeDirection::Gain, 2), 2);
+        assert_eq!(
+            life_changed_amount(LifeDirection::Gain, u64::from(i32::MAX.unsigned_abs())),
+            i32::MAX
+        );
+        assert_eq!(
+            life_changed_amount(LifeDirection::Gain, two_pow_31),
+            i32::MAX
+        );
+        assert_eq!(life_changed_amount(LifeDirection::Gain, u64::MAX), i32::MAX);
+        assert_eq!(life_changed_amount(LifeDirection::Loss, 2), -2);
+        assert_eq!(
+            life_changed_amount(LifeDirection::Loss, two_pow_31 - 1),
+            -i32::MAX
+        );
+        assert_eq!(
+            life_changed_amount(LifeDirection::Loss, two_pow_31),
+            i32::MIN
+        );
+        assert_eq!(
+            life_changed_amount(LifeDirection::Loss, u64::from(u32::MAX)),
+            i32::MIN
+        );
+        assert_eq!(life_changed_amount(LifeDirection::Loss, u64::MAX), i32::MIN);
+        assert_eq!(life_changed_amount(LifeDirection::Gain, 0), 0);
+        assert_eq!(life_changed_amount(LifeDirection::Loss, 0), 0);
+    }
+
+    #[test]
+    fn u64_to_u32_conversion_saturates() {
+        assert_eq!(u64_to_u32_saturating(0), 0);
+        assert_eq!(u64_to_u32_saturating(7), 7);
+        assert_eq!(u64_to_u32_saturating(u64::from(u32::MAX)), u32::MAX);
+        assert_eq!(u64_to_u32_saturating(u64::from(u32::MAX) + 1), u32::MAX);
+        assert_eq!(u64_to_u32_saturating(u64::MAX), u32::MAX);
     }
 }

@@ -2179,6 +2179,38 @@ pub(crate) fn boundary_declines(
     }
 }
 
+/// CR 119.3: apply one batched `PersistentAxisMaterialization::Life` item at `amount` cycles:
+/// `player` gains `per_cycle_delta × amount` life. Shared by `game::engine`'s
+/// `materialize_object_growth_shortcut`, which applies a Mark take's life at the take, and the
+/// boundary's `LoopCollapse` arm, which applies a `Life` item only from a stash restored from a
+/// save written before that.
+pub(crate) fn apply_batched_life(
+    state: &mut GameState,
+    player: crate::types::player::PlayerId,
+    per_cycle_delta: u32,
+    amount: u32,
+    events: &mut Vec<GameEvent>,
+) -> Result<(), EngineError> {
+    // CR 119.3 single life authority; SOUND only because the firewall rejected any life-gain
+    // replacement/observer (`apply_life_gain` re-runs the replacement pipeline, so a lump gain
+    // would fire an observer ONCE not N×). The shortcut is an action-ingress edit: the lump gain
+    // (up to `u32::MAX`) is carried exactly and the life total saturates at `i32::MAX`, so the
+    // gain itself is always representable; the `Unrepresentable` arm stays as the shared ingress
+    // routing and would reject the action through its rollback. A deferral stays ignored — the
+    // firewall excludes life replacements, so none can be pending here.
+    if let Err(effects::life::PlayerResourceChangeError::Unrepresentable(unrepresentable)) =
+        crate::game::effects::life::try_apply_life_gain(
+            state,
+            player,
+            per_cycle_delta.saturating_mul(amount),
+            events,
+        )
+    {
+        return Err(unrepresentable.into());
+    }
+    Ok(())
+}
+
 pub(super) fn handle_resolution_choice(
     state: &mut GameState,
     waiting_for: WaitingFor,
@@ -2412,12 +2444,6 @@ pub(super) fn handle_resolution_choice(
                 // CR 616.1: a competing replacement installed a choice WaitingFor;
                 // the resume path completes the assignment and continuation.
                 effects::life::LifeAssignmentOutcome::Deferred => {
-                    ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
-                }
-                // The difference was unrepresentable: nothing was assigned. The
-                // open ingress window rejects the action at the boundary, which
-                // restores this prompt.
-                effects::life::LifeAssignmentOutcome::Unrepresentable => {
                     ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
                 }
                 effects::life::LifeAssignmentOutcome::Applied => {
@@ -3951,25 +3977,7 @@ pub(super) fn handle_resolution_choice(
                                 player: p,
                                 per_cycle_delta,
                             } => {
-                                // CR 119.3 single life authority; SOUND only because the
-                                // firewall rejected any life-gain replacement/observer
-                                // (`apply_life_gain` re-runs the replacement pipeline, so a
-                                // lump gain would fire an observer ONCE not N×).
-                                // The shortcut is an action-ingress edit: a gain the engine
-                                // cannot represent (the saturated amount never fits an `i32`
-                                // delta) rejects the action through the boundary rollback.
-                                // A deferral stays ignored — the firewall excludes life
-                                // replacements, so none can be pending here.
-                                if let Err(effects::life::LifeChangeError::Unrepresentable(
-                                    unrepresentable,
-                                )) = crate::game::effects::life::try_apply_life_gain(
-                                    state,
-                                    *p,
-                                    per_cycle_delta.saturating_mul(amount),
-                                    events,
-                                ) {
-                                    return Err(unrepresentable.into());
-                                }
+                                apply_batched_life(state, *p, *per_cycle_delta, amount, events)?;
                             }
                         }
                         // Reaching here means the growth applied.
@@ -10574,7 +10582,8 @@ pub(crate) fn finish_pay_amount_choice(
     total: u32,
     events: &mut Vec<GameEvent>,
 ) -> WaitingFor {
-    state.last_effect_count = Some(total as i32);
+    // CR 118.11: the declared payment, clamped to the `i32` quantity range.
+    state.last_effect_count = Some(crate::game::arithmetic::u32_to_i32_saturating(total));
     stamp_paused_payment_rider_x(state, ContinuationXAnnouncement::PaidAmount, total);
     let mut waiting_for = finish_with_continuation(state, player, events);
     if let WaitingFor::PayAmountChoice {

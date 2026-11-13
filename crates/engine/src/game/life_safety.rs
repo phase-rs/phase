@@ -370,16 +370,20 @@ impl LifeSafetyProbe {
         else {
             return;
         };
-        let Some(committed) = before
-            .checked_sub(after)
-            .and_then(|delta| u32::try_from(delta).ok())
-        else {
+        // CR 119.4: paying life is losing it. The committed loss is read in `i64`, where the
+        // difference of two `i32` totals is exact.
+        let committed = i64::from(before) - i64::from(after);
+        // CR 704.5a + CR 810.8c: a payment that leaves the total at 0 or less loses the game
+        // even where the `i32` limit held part of the loss back (an engine limit, not a rule),
+        // so the receipt records what was committed rather than refusing for falling short.
+        let held_back = after <= 0 && committed < i64::from(loss_amount);
+        let Ok(committed) = u32::try_from(committed) else {
             self.attempt = Some(AttemptState::Invalid);
             return;
         };
         if expected_payer != payer
             || committed == 0
-            || committed != loss_amount
+            || (committed != loss_amount && !held_back)
             || self.receipt.is_some()
         {
             self.attempt = Some(AttemptState::Invalid);
@@ -668,6 +672,60 @@ mod tests {
                 committed: 4,
             })
         );
+    }
+
+    /// CR 119.4 + CR 704.5a + CR 810.8c: a life payment that leaves the total at 0 or less binds
+    /// a lethal receipt, read in `i64` so a difference past `i32` is exact, also where the `i32`
+    /// limit held part of the loss back; a saturated reading that leaves the total positive binds
+    /// none.
+    #[test]
+    fn lethal_receipt_survives_a_loss_the_i32_limit_holds_back() {
+        let player = PlayerId(0);
+        let unsafe_receipt =
+            |before: i32, after: i32, committed: u32| CandidateLifeSafety::Unsafe {
+                before,
+                after,
+                committed,
+            };
+        // (name, before, after, the loss paid, the receipt)
+        let rows: [(&str, i32, i32, u32, CandidateLifeSafety); 5] = [
+            (
+                "(a) a loss whose difference passes i32, committed whole",
+                2_000_000_000,
+                -1_000_000_000,
+                3_000_000_000,
+                unsafe_receipt(2_000_000_000, -1_000_000_000, 3_000_000_000),
+            ),
+            (
+                "(b) a difference past i32, held at i32::MIN",
+                1_000_000_000,
+                i32::MIN,
+                u32::MAX,
+                unsafe_receipt(1_000_000_000, i32::MIN, 3_147_483_648),
+            ),
+            (
+                "(c) held at i32::MIN, the difference within i32",
+                -10,
+                i32::MIN,
+                u32::MAX,
+                unsafe_receipt(-10, i32::MIN, 2_147_483_638),
+            ),
+            (
+                "(d) a saturated reading that leaves the total positive",
+                i32::MAX,
+                i32::MAX - 4,
+                10,
+                CandidateLifeSafety::NotUnsafe,
+            ),
+            ("(e) control", 3, -1, 4, unsafe_receipt(3, -1, 4)),
+        ];
+        for (name, before, after, loss, receipt) in rows {
+            let mut probe = LifeSafetyProbe::default();
+            probe.arm(defiler_root(player));
+            activate_attempt(&mut probe, player);
+            probe.record_mutation(player, before, after, loss);
+            assert_eq!(probe.take_lethal_receipt(), receipt, "{name}");
+        }
     }
 
     #[test]

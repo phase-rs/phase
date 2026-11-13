@@ -1147,6 +1147,11 @@ pub enum GameEvent {
     },
     LifeChanged {
         player_id: PlayerId,
+        /// CR 119.3: the rules amount gained (positive) or lost (negative),
+        /// clamped only to this field's type: a gain above `i32::MAX` reports
+        /// `i32::MAX`, and a loss of 2^31 or more reports `i32::MIN`
+        /// (`arithmetic::life_changed_amount`). It is the rules amount even when
+        /// the stored total moved less because it stopped at an `i32` limit.
         amount: i32,
         /// CR 119.1 + CR 119.3: the player's own life total once this change has
         /// been applied. Emitted so a presentation layer animating a run of life

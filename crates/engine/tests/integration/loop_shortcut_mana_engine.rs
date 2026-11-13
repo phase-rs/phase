@@ -920,7 +920,8 @@ fn mana_engine_accept_records_no_collapse_bound() {
     );
 
     // (4) CONSEQUENCE, on the real `turns.rs` read. Graft a stash through the production
-    // single-authority writer (as if a later object-growth accept had registered one) and
+    // single-authority writer (as a save written before life landed at the take carries one; an
+    // object-growth accept now registers only `Tokens` or `Counters` items) and
     // reach the CR 500.5 boundary through real priority passes.
     rig.runner.state_mut().register_pending_materialization(
         P0,

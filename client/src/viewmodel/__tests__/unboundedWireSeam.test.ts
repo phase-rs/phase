@@ -3,8 +3,10 @@
  * `combo_infinite_pile::real_4p_object_growth_accept_writes_infinite_pile`, driving a REAL
  * 4-player dump through the REAL APNAP accept. Regenerate with
  * `UPDATE_WIRE_GOLDEN=1 cargo test -p phase-engine --test integration <fn>`. Never hand-edit them.
- * The life golden is emitted by `life_magnitude_display::own_life_growth_reads_unbounded_until_the_collapse_lands`
- * at its take frame and regenerates with the same command.
+ * The life golden is emitted by
+ * `life_magnitude_display::blight_priest_and_exquisite_blood_crown_reads_only_the_gaining_seat_as_unbounded`
+ * from the game-over frame of a crown on printed cards (Marauding Blight-Priest and Exquisite
+ * Blood, started by Blessed Wine) and regenerates with the same command.
  * Every existing client test that touches these channels hand-writes its own `derived` block, so
  * this file is the only place the engine's wire shape and the client's readers meet.
  * The token golden is captured AFTER the accept, while a finite collapse is merely SCHEDULED — the
