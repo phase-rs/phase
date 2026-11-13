@@ -466,7 +466,7 @@ fn this_is_how_it_ends_shuffle_branch_with_one_eligible_creature_moves_it_withou
     assert!(state.stack.is_empty());
 }
 
-/// CR 701.24a + CR 730.3 + CR 730.2b: with only a merged creature to choose,
+/// CR 701.24a + CR 730.3 + CR 730.2: with only a merged creature to choose,
 /// the exclusion of its absorbed component leaves one candidate, so the branch
 /// moves the merged permanent without a prompt, both of its cards arrive, and
 /// the owner's library is shuffled exactly once.
@@ -492,8 +492,8 @@ fn this_is_how_it_ends_shuffle_branch_with_only_a_merged_creature_moves_every_ca
 }
 
 /// Zero-eligible control: the target's owner has no other creature, so the
-/// shuffle branch moves nothing, completes without a prompt, and still
-/// shuffles (CR 701.24c).
+/// shuffle branch moves nothing, completes without a prompt, and the library
+/// shuffle the card prints still happens (equal to the merge base).
 #[test]
 fn this_is_how_it_ends_shuffle_branch_with_no_other_creature_completes_without_a_prompt() {
     let (mut runner, target, _others, _component, shuffle_index) =
@@ -508,7 +508,7 @@ fn this_is_how_it_ends_shuffle_branch_with_no_other_creature_completes_without_a
     assert_eq!(
         shuffled_players(&chosen.events),
         vec![P1],
-        "CR 701.24c: the branch's library is shuffled even with nothing to move"
+        "the printed shuffle still happens with nothing to move"
     );
     let state = runner.state();
     assert_eq!(state.objects[&target].zone, Zone::Library);

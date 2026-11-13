@@ -687,6 +687,14 @@ fn announced_incarnation_one_behind_is_a_same_chain_departure() {
         vec![host],
         "a pin for a different object is not evidence for this referent"
     );
+    assert_eq!(
+        expand(&with_pin(ObjectIncarnationRef::of(
+            host,
+            crate::types::identifiers::LEGACY_INCARNATION
+        ))),
+        vec![host],
+        "a legacy pin neither panics nor counts as evidence"
+    );
 }
 
 /// CR 730.3c + CR 730.3: the returned components come back as SEPARATE, non-merged

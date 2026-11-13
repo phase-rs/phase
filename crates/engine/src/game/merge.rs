@@ -675,7 +675,8 @@ fn referent_records_departure(
                 // selection of an already-departed object announced the
                 // incarnation it still has.
                 || ability.target_pins.iter().flatten().any(|pin| {
-                    pin.object_id == current.object_id && pin.incarnation + 1 == current.incarnation
+                    pin.object_id == current.object_id
+                        && pin.incarnation.checked_add(1) == Some(current.incarnation)
                 })
         }
         TargetFilter::TrackedSet { .. }
