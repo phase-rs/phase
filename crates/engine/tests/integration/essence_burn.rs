@@ -440,6 +440,8 @@ fn essence_burn_target_does_not_rebind_after_cloudshift() {
     let mut r = s.build();
     let prior_turn = r.state().turn_number;
     advance_to_main(&mut r, P1, prior_turn);
+    fund_after_cleanup(&mut r, P0);
+    fund_after_cleanup(&mut r, P1);
     let incarnation = r.state().objects[&host].incarnation;
 
     let mut committed = r.cast(essence).target_object(host).commit();
@@ -655,12 +657,14 @@ fn lifetime_board() -> GameScenario {
             ],
         );
     }
-    // Avacyn supplies the production prevention path used to keep low-toughness
-    // targets alive while the independent Essence Burn rider is installed.
-    real(&mut s, P0, "Avacyn, Guardian Angel", Zone::Battlefield);
-    // A second legal creature proves Avacyn's target-specific shield stays on
-    // the selected object rather than leaking to another eligible permanent.
+    // Keep a neutral creature on each side for target-scope controls. The
+    // prevention helper below uses Shielded Passage, whose full printed effect
+    // is supported by the current parser and engine.
+    real(&mut s, P0, "Grizzly Bears", Zone::Battlefield);
     real(&mut s, P1, "Grizzly Bears", Zone::Battlefield);
+    for _ in 0..2 {
+        real(&mut s, P0, "Shielded Passage", Zone::Hand);
+    }
     s
 }
 fn real(s: &mut GameScenario, player: PlayerId, name: &str, zone: Zone) -> ObjectId {
@@ -726,32 +730,43 @@ fn assert_intrinsic_base_in_state(state: &engine::types::game_state::GameState, 
         .iter()
         .all(|def| !def.is_resolution_installed()));
 }
-fn has_red_prevention(r: &GameRunner, host: ObjectId) -> bool {
-    use engine::types::ability::{FilterProp, PreventionAmount, ShieldKind, TargetFilter};
-    let incarnation = r.state().objects[&host].incarnation;
-    r.state().objects[&host]
+fn live_targeted_prevention_count(r: &GameRunner, host: ObjectId) -> usize {
+    live_targeted_prevention_count_in_state(r.state(), host)
+}
+fn live_targeted_prevention_count_in_state(
+    state: &engine::types::game_state::GameState,
+    host: ObjectId,
+) -> usize {
+    use engine::types::ability::{PreventionAmount, RestrictionExpiry, ShieldKind, TargetFilter};
+    use engine::types::replacements::ReplacementEvent;
+    let incarnation = state.objects[&host].incarnation;
+    state.objects[&host]
         .replacement_definitions
         .iter_unchecked()
-        .any(|definition| {
+        .filter(|definition| {
             matches!(
                 definition.shield_kind,
                 ShieldKind::Prevention {
                     amount: PreventionAmount::All
                 }
-            ) && definition.target_recipient_incarnation == Some(incarnation)
-                && definition.damage_source_filter.as_ref().is_some_and(|filter| {
-                    matches!(filter, TargetFilter::Typed(typed) if typed.properties.contains(&FilterProp::HasColor { color: ManaColor::Red }))
-                })
+            ) && definition.is_resolution_installed()
+                && definition.event == ReplacementEvent::DamageDone
+                && definition.valid_card == Some(TargetFilter::SelfRef)
+                && definition.target_recipient_incarnation == Some(incarnation)
+                && definition.expiry == Some(RestrictionExpiry::EndOfTurn)
         })
+        .count()
 }
-fn protect_host_with_avacyn(r: &mut GameRunner, host: ObjectId) {
+fn protect_host_with_shielded_passage(r: &mut GameRunner, host: ObjectId) {
     use engine::types::card_type::CoreType;
-    let avacyn = r
+    let passage = r
         .state()
         .objects
         .values()
-        .find(|object| object.name == "Avacyn, Guardian Angel" && object.zone == Zone::Battlefield)
-        .expect("real Avacyn is on the battlefield")
+        .find(|object| {
+            object.name == "Shielded Passage" && object.owner == P0 && object.zone == Zone::Hand
+        })
+        .expect("a real Shielded Passage is in hand")
         .id;
     let incarnation = r.state().objects[&host].incarnation;
     let other_creature = r
@@ -761,7 +776,6 @@ fn protect_host_with_avacyn(r: &mut GameRunner, host: ObjectId) {
         .copied()
         .find(|id| {
             *id != host
-                && *id != avacyn
                 && r.state().objects[id]
                     .card_types
                     .core_types
@@ -769,54 +783,21 @@ fn protect_host_with_avacyn(r: &mut GameRunner, host: ObjectId) {
         })
         .expect("a second creature verifies exact recipient binding");
 
-    priority_for(r, P0);
-    r.act(GameAction::ActivateAbility {
-        source_id: avacyn,
-        ability_index: 0,
-        payment_mode: CastPaymentMode::Auto,
-    })
-    .expect("activate Avacyn's printed {1}{W} target-creature ability");
-    let WaitingFor::TargetSelection { target_slots, .. } = &r.state().waiting_for else {
-        panic!(
-            "Avacyn must reach target selection, got {:?}",
-            r.state().waiting_for
-        );
-    };
-    assert!(target_slots[0]
-        .legal_targets
-        .contains(&TargetRef::Object(host)));
-    r.act(GameAction::ChooseTarget {
-        target: Some(TargetRef::Object(host)),
-    })
-    .expect("select the exact Essence Burn host");
-
-    for _ in 0..4 {
-        match &r.state().waiting_for {
-            WaitingFor::Priority { .. } => {
-                r.act(GameAction::PassPriority)
-                    .expect("pass priority to resolve Avacyn's ability");
-            }
-            WaitingFor::NamedChoice { options, .. } => {
-                assert!(options.iter().any(|option| option == "Red"));
-                break;
-            }
-            other => panic!("expected priority or Avacyn color choice, got {other:?}"),
-        }
-    }
-    assert!(matches!(
-        r.state().waiting_for,
-        WaitingFor::NamedChoice { .. }
-    ));
-    r.act(GameAction::ChooseOption {
-        choice: "Red".to_string(),
-    })
-    .expect("choose red as the prevented damage source color");
-    r.advance_until_stack_empty();
+    // CR 615.3: this printed turn-bound prevention shield is installed before
+    // the damage spell through the normal cast, target, and resolution path.
+    let out = r.cast(passage).target_object(host).resolve();
+    out.assert_zone(&[passage], Zone::Graveyard);
+    assert_eq!(out.damage_marked(host), 0);
 
     assert_eq!(r.state().objects[&host].incarnation, incarnation);
-    assert!(has_red_prevention(r, host), "red shield is bound to host");
-    assert!(
-        !has_red_prevention(r, other_creature),
+    assert_eq!(
+        live_targeted_prevention_count(r, host),
+        1,
+        "the target-specific prevention shield is live on the selected host"
+    );
+    assert_eq!(
+        live_targeted_prevention_count(r, other_creature),
+        0,
         "bystander gets no shield"
     );
 }
@@ -847,18 +828,19 @@ fn assert_cyber_body(r: &GameRunner, host: ObjectId, counters: i32) {
 fn burn_surviving_host(r: &mut GameRunner, spell: ObjectId, host: ObjectId) {
     priority_for(r, P0);
     let incarnation = r.state().objects[&host].incarnation;
-    protect_host_with_avacyn(r, host);
+    protect_host_with_shielded_passage(r, host);
     let out = r.cast(spell).target_object(host).resolve();
     out.assert_zone(&[host], Zone::Battlefield);
     out.assert_zone(&[spell], Zone::Graveyard);
     assert_eq!(
         out.damage_marked(host),
         0,
-        "Avacyn prevents all five red damage"
+        "Shielded Passage prevents all five damage"
     );
     out.assert_stack_size(0);
     assert_eq!(r.state().objects[&host].incarnation, incarnation);
     assert_eq!(live_resolution_count(r, host), 1);
+    assert_eq!(live_targeted_prevention_count(r, host), 1);
     assert_intrinsic_base(r, host);
 }
 fn sacrifice_real(
@@ -907,6 +889,7 @@ fn essence_burn_face_down_keeps_die_exile() {
     assert_eq!(r.state().objects[&host].incarnation, incarnation);
     assert_eq!(r.state().objects[&host].damage_marked, 0);
     assert_eq!(live_resolution_count(&r, host), 1);
+    assert_eq!(live_targeted_prevention_count(&r, host), 1);
     assert_intrinsic_base(&r, host);
 
     priority_for(&mut r, P0);
@@ -919,6 +902,7 @@ fn essence_burn_face_down_keeps_die_exile() {
     assert_eq!(r.state().objects[&host].incarnation, incarnation);
     assert_eq!(r.state().objects[&host].damage_marked, 0);
     assert_eq!(live_resolution_count(&r, host), 1);
+    assert_eq!(live_targeted_prevention_count(&r, host), 1);
     assert_intrinsic_base(&r, host);
     sacrifice_real(&mut r, rites, host, P1, Zone::Exile);
 
@@ -984,6 +968,10 @@ fn essence_burn_face_up_keeps_die_exile() {
         assert_eq!(r.state().objects[&host].incarnation, incarnation);
         assert_eq!(r.state().objects[&host].damage_marked, 0);
         assert_eq!(live_resolution_count(&r, host), pre_face_down_count);
+        assert_eq!(
+            live_targeted_prevention_count(&r, host),
+            usize::from(granted)
+        );
         priority_for(&mut r, P1);
         let out = r.cast(open).target_object(host).resolve();
         out.assert_zone(&[open], Zone::Graveyard);
@@ -998,6 +986,10 @@ fn essence_burn_face_up_keeps_die_exile() {
         assert_eq!(obj.damage_marked, 0);
         assert_eq!(obj.incarnation, incarnation);
         assert_eq!(live_resolution_count(&r, host), usize::from(granted));
+        assert_eq!(
+            live_targeted_prevention_count(&r, host),
+            usize::from(granted)
+        );
         sacrifice_real(
             &mut r,
             rites,
@@ -1058,6 +1050,10 @@ fn essence_burn_transform_keeps_die_exile() {
         assert_eq!(obj.damage_marked, 0);
         assert_eq!(obj.incarnation, incarnation);
         assert_eq!(live_resolution_count(&r, host), usize::from(granted));
+        assert_eq!(
+            live_targeted_prevention_count(&r, host),
+            usize::from(granted)
+        );
         assert_intrinsic_base(&r, host);
         if let Some(mut replay) = before_transform {
             use engine::types::resolved_commands::ResolvedRulesCommand;
@@ -1082,11 +1078,13 @@ fn essence_burn_transform_keeps_die_exile() {
             assert_eq!(replay.objects[&host].incarnation, incarnation);
             assert_eq!(replay.objects[&host].damage_marked, 0);
             assert_eq!(live_resolution_count_in_state(&replay, host), 1);
+            assert_eq!(live_targeted_prevention_count_in_state(&replay, host), 1);
             assert_intrinsic_base_in_state(&replay, host);
             replay.layers_dirty.mark_full();
             engine::game::layers::evaluate_layers(&mut replay);
             assert_eq!(live_resolution_count_in_state(&replay, host), 1);
             assert_eq!(replay.objects[&host].damage_marked, 0);
+            assert_eq!(live_targeted_prevention_count_in_state(&replay, host), 1);
             assert_intrinsic_base_in_state(&replay, host);
         }
         sacrifice_real(
@@ -1176,6 +1174,10 @@ fn essence_burn_flip_keeps_die_exile() {
             should_flip
         );
         assert_eq!(live_resolution_count(&r, host), usize::from(granted));
+        assert_eq!(
+            live_targeted_prevention_count(&r, host),
+            usize::from(granted)
+        );
         assert_intrinsic_base(&r, host);
         sacrifice_real(
             &mut r,
@@ -1208,6 +1210,7 @@ fn essence_burn_copy_recipient_keeps_die_exile() {
     out.assert_zone(&[mirror], Zone::Graveyard);
     assert_eq!(out.damage_marked(host), 0);
     assert_eq!(live_resolution_count(&r, host), 1);
+    assert_eq!(live_targeted_prevention_count(&r, host), 1);
     assert_intrinsic_base(&r, host);
     assert_eq!(r.state().objects[&plain].name, "Grizzly Bears");
     assert_eq!(
@@ -1244,6 +1247,9 @@ fn essence_burn_copy_source_does_not_donate_die_exile() {
         (Some(2), Some(6))
     );
     assert_eq!(live_resolution_count(&r, recipient), 0);
+    assert_eq!(live_resolution_count(&r, host), 1);
+    assert_eq!(live_targeted_prevention_count(&r, recipient), 0);
+    assert_eq!(live_targeted_prevention_count(&r, host), 1);
     assert_intrinsic_base(&r, recipient);
     assert!(!engine::game::printed_cards::intrinsic_copiable_values(
         &r.state().objects[&recipient]
@@ -1274,6 +1280,7 @@ fn essence_burn_survives_nezumi_graverobber_flip() {
     assert_eq!(flipped.incarnation, incarnation);
     assert_eq!(flipped.damage_marked, 0);
     assert_eq!(live_resolution_count(&r, host), 1);
+    assert_eq!(live_targeted_prevention_count(&r, host), 1);
     assert_intrinsic_base(&r, host);
 
     sacrifice_real(&mut r, rites, host, P0, Zone::Exile);
@@ -1296,6 +1303,7 @@ fn essence_burn_survives_lazav_multifarious_copy() {
     assert_eq!(copied.incarnation, incarnation);
     assert_eq!(copied.damage_marked, 0);
     assert_eq!(live_resolution_count(&r, host), 1);
+    assert_eq!(live_targeted_prevention_count(&r, host), 1);
     assert_intrinsic_base(&r, host);
 
     sacrifice_real(&mut r, rites, host, P0, Zone::Exile);
@@ -1351,10 +1359,12 @@ fn essence_burn_donor_does_not_give_spark_double_its_rider() {
     assert_eq!(entered.zone, Zone::Battlefield);
     assert!(entered.incarnation > hand_incarnation);
     assert_eq!(live_resolution_count(&r, spark), 0);
+    assert_eq!(live_targeted_prevention_count(&r, spark), 0);
     assert_intrinsic_base(&r, spark);
     assert_eq!(r.state().objects[&donor].incarnation, donor_incarnation);
     assert_eq!(r.state().objects[&donor].damage_marked, 0);
     assert_eq!(live_resolution_count(&r, donor), 1);
+    assert_eq!(live_targeted_prevention_count(&r, donor), 1);
 
     sacrifice_real(&mut r, spark_rites, spark, P0, Zone::Graveyard);
     sacrifice_real(&mut r, donor_rites, donor, P0, Zone::Exile);
@@ -1385,6 +1395,10 @@ fn essence_burn_rehydrate_keeps_die_exile() {
         assert_eq!(r.state().objects[&host].zone, Zone::Battlefield);
         assert_eq!(r.state().objects[&host].damage_marked, 0);
         assert_eq!(live_resolution_count(&r, host), usize::from(granted));
+        assert_eq!(
+            live_targeted_prevention_count(&r, host),
+            usize::from(granted)
+        );
         assert_intrinsic_base(&r, host);
         sacrifice_real(
             &mut r,
@@ -1475,10 +1489,18 @@ fn assert_cost_cast_completed(
     assert_eq!(completed.events.iter().filter(|event| matches!(event, GameEvent::SpellCast { object_id, .. } if *object_id == spell)).count(), 1);
 }
 fn finish_real_rites(r: &mut GameRunner, spell: ObjectId, player: PlayerId) {
+    finish_real_rites_in_zone(r, spell, player, Zone::Graveyard);
+}
+fn finish_real_rites_in_zone(
+    r: &mut GameRunner,
+    spell: ObjectId,
+    player: PlayerId,
+    expected_zone: Zone,
+) {
     let before_draw = hand_size(r, player);
     r.advance_until_stack_empty();
     assert!(r.state().stack.is_empty());
-    assert_eq!(r.state().objects[&spell].zone, Zone::Graveyard);
+    assert_eq!(r.state().objects[&spell].zone, expected_zone);
     assert_eq!(hand_size(r, player), before_draw + 2);
     assert!(r.state().pending_cost_move_resume.is_none());
 }
@@ -1649,6 +1671,10 @@ fn essence_burn_multiple_live_replacements_keep_actual_choice() {
         r.cast(cyber).target_object(host).resolve();
         assert_cyber_body(&r, host, 6);
         assert_eq!(live_resolution_count(&r, host), count);
+        assert_eq!(
+            live_targeted_prevention_count(&r, host),
+            usize::from(count > 0)
+        );
         assert_eq!(
             r.state().objects[&host].replacement_definitions.as_slice(),
             before_rewrite.as_slice()
@@ -1921,6 +1947,7 @@ fn essence_burn_rewrite_bounce_reentry_drops_old_grant() {
     assert!(r.state().objects[&host].counters.is_empty());
     assert!(!r.state().objects[&host].face_down);
     assert_eq!(live_resolution_count(&r, host), 0);
+    assert_eq!(live_targeted_prevention_count(&r, host), 0);
     assert_intrinsic_base(&r, host);
     let bounced_incarnation = r.state().objects[&host].incarnation;
     let turn = r.state().turn_number;
@@ -1938,6 +1965,7 @@ fn essence_burn_rewrite_bounce_reentry_drops_old_grant() {
     assert!(obj.counters.is_empty());
     assert!(!obj.face_down && !obj.flipped);
     assert_eq!(live_resolution_count(&r, host), 0);
+    assert_eq!(live_targeted_prevention_count(&r, host), 0);
     let completed = begin_real_rites_cost(&mut r, rites, host, P1);
     assert_eq!(r.state().objects[&host].zone, Zone::Graveyard);
     assert_cost_cast_completed(&r, rites, &completed);
@@ -1972,6 +2000,7 @@ fn essence_burn_rewrite_expires_at_cleanup() {
     assert_cyber_body(&r, host, 6);
     assert_eq!(r.state().objects[&host].damage_marked, 0);
     assert_eq!(live_resolution_count(&r, host), 0);
+    assert_eq!(live_targeted_prevention_count(&r, host), 0);
     assert!(r.state().objects[&host].replacement_definitions.is_empty());
     assert!(r.state().objects[&host]
         .base_replacement_definitions
@@ -2052,5 +2081,5 @@ fn essence_burn_and_rest_in_peace_choice_survives_restore() {
         "the selected shared-destination replacement delivers one zone-change event"
     );
     assert_cost_cast_completed(&restored, rites, &chosen);
-    finish_real_rites(&mut restored, rites, P0);
+    finish_real_rites_in_zone(&mut restored, rites, P0, Zone::Exile);
 }
