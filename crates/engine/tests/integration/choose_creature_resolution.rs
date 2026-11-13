@@ -2428,3 +2428,220 @@ fn final_showdown_finishes_resolving_when_its_chooser_concedes() {
         .finalize_after_rehydration(|_| Ok(()))
         .expect("restored state is publishable");
 }
+
+const DEVOURING_TENDRILS: &str = "Target creature you control deals damage equal to its power to target creature or planeswalker you don't control. When the permanent you don't control dies this turn, you gain 2 life.";
+
+/// CR 603.2 + CR 603.7: an event that happens before a resolution-time choice
+/// pauses the spell still triggers a delayed ability. Devouring Tendrils damages an
+/// opposing planeswalker without killing it ("When the permanent you don't control
+/// dies this turn, you gain 2 life."); The Elderspell then destroys that
+/// planeswalker and pauses on "Choose a planeswalker you control". The delayed
+/// trigger must fire exactly once, also across a save and restore taken while the
+/// choice is open.
+#[test]
+fn delayed_trigger_fires_for_a_death_before_the_elderspell_choice() {
+    for restore_at_choice in [false, true] {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let own_low = scenario
+            .add_planeswalker_from_oracle(P0, "Own Low Walker", "Jace", 5, WALKER_ABILITY)
+            .id();
+        let own_high = scenario
+            .add_planeswalker_from_oracle(P0, "Own High Walker", "Chandra", 6, WALKER_ABILITY)
+            .id();
+        let victim = scenario
+            .add_planeswalker_from_oracle(
+                P1,
+                "Opposing Victim Walker",
+                "Liliana",
+                4,
+                WALKER_ABILITY,
+            )
+            .id();
+        let biter = scenario.add_creature(P0, "Own creature", 1, 1).id();
+        scenario.add_basic_land(P0, ManaColor::Green);
+        scenario.add_basic_land(P0, ManaColor::Green);
+        scenario.add_basic_land(P0, ManaColor::Black);
+        scenario.add_basic_land(P0, ManaColor::Black);
+        let tendrils = scenario
+            .add_spell_to_hand_from_oracle(P0, "Devouring Tendrils", false, DEVOURING_TENDRILS)
+            .with_mana_cost(parse_mtgjson_mana_cost("{1}{G}"))
+            .id();
+        let elderspell = scenario
+            .add_spell_to_hand_from_oracle(P0, "The Elderspell", false, THE_ELDERSPELL)
+            .with_mana_cost(parse_mtgjson_mana_cost("{B}{B}"))
+            .id();
+        let mut runner = scenario.build();
+        let life = |runner: &GameRunner| runner.state().players[0].life;
+        let starting_life = life(&runner);
+
+        let cast = |runner: &mut GameRunner, spell: ObjectId, targets: &[ObjectId]| {
+            let card_id = runner.state().objects[&spell].card_id;
+            runner
+                .act(GameAction::CastSpell {
+                    object_id: spell,
+                    card_id,
+                    targets: vec![],
+                    payment_mode: CastPaymentMode::Auto,
+                })
+                .unwrap();
+            let mut remaining = targets.iter();
+            for _ in 0..8 {
+                let WaitingFor::TargetSelection { .. } = &runner.state().waiting_for else {
+                    break;
+                };
+                let target = remaining.next().map(|id| TargetRef::Object(*id));
+                runner.act(GameAction::ChooseTarget { target }).unwrap();
+            }
+            assert!(
+                matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+                "the spell is on the stack: {:?}",
+                runner.state().waiting_for
+            );
+        };
+
+        cast(&mut runner, tendrils, &[biter, victim]);
+        runner.advance_until_stack_empty();
+        assert_eq!(
+            runner.state().objects[&victim].zone,
+            Zone::Battlefield,
+            "reach guard: the damaged planeswalker survives Devouring Tendrils"
+        );
+        assert_eq!(loyalty(&runner, victim), 3);
+        assert_eq!(life(&runner), starting_life);
+
+        cast(&mut runner, elderspell, &[victim]);
+        pass_priority_to_prompt(&mut runner, "The Elderspell");
+        assert_eq!(runner.state().objects[&victim].zone, Zone::Graveyard);
+        let WaitingFor::ChooseFromZoneChoice { cards, .. } = &runner.state().waiting_for else {
+            panic!(
+                "reach guard: the mandatory planeswalker choice is open: {:?}",
+                runner.state().waiting_for
+            );
+        };
+        assert_eq!(id_set(cards), id_set(&[own_low, own_high]));
+        if restore_at_choice {
+            let json = serde_json::to_string(&PersistedGameState::capture(runner.state().clone()))
+                .expect("state serializes");
+            let state = serde_json::from_str::<PersistedGameState>(&json)
+                .expect("persisted state decodes")
+                .prepare_for_restore(PersistedRestoreFinalization::DeferUntilRehydrated)
+                .expect("persisted state is admissible")
+                .finalize_after_rehydration(|_| Ok(()))
+                .expect("restored state is publishable");
+            runner = GameRunner::from_state(state);
+        }
+        runner
+            .act(GameAction::SelectCards {
+                cards: vec![own_high],
+            })
+            .unwrap();
+        assert_eq!(loyalty(&runner, own_high), 8);
+        runner.advance_until_stack_empty();
+        assert_resolution_settled(&runner, "The Elderspell");
+        assert_eq!(
+            life(&runner),
+            starting_life + 2,
+            "the delayed trigger fired exactly once (restore_at_choice = {restore_at_choice})"
+        );
+    }
+}
+
+/// CR 603.7 + CR 608.2m: the delayed-trigger sibling of
+/// `final_showdown_settled_by_a_concession_still_triggers_on_the_destruction`.
+/// Devouring Tendrils damages P2's creature without killing it; Final Showdown
+/// (modes 2 and 3) pauses on P0's choice; P1 concedes, the departure settles the
+/// choice and runs "Destroy all creatures", and the delayed "When the permanent
+/// you don't control dies this turn, you gain 2 life" fires exactly once.
+#[test]
+fn delayed_trigger_fires_for_a_death_in_instructions_resumed_by_a_concession() {
+    let mut scenario = GameScenario::new_n_player(3, 7);
+    scenario.at_phase(Phase::PreCombatMain);
+    let own = scenario.add_creature(P0, "Own creature", 1, 1).id();
+    let borrowed = scenario
+        .add_creature(P1, "Borrowed creature", 3, 3)
+        .controlled_by(P0)
+        .id();
+    let bitten = scenario.add_creature(P2, "P2 creature", 2, 3).id();
+    for _ in 0..7 {
+        scenario.add_basic_land(P0, ManaColor::White);
+    }
+    scenario.add_basic_land(P0, ManaColor::Green);
+    scenario.add_basic_land(P0, ManaColor::Green);
+    let tendrils = scenario
+        .add_spell_to_hand_from_oracle(P0, "Devouring Tendrils", false, DEVOURING_TENDRILS)
+        .with_mana_cost(parse_mtgjson_mana_cost("{1}{G}"))
+        .id();
+    let showdown = scenario
+        .add_spell_to_hand_from_oracle(P0, "Final Showdown", true, FINAL_SHOWDOWN)
+        .with_mana_cost(parse_mtgjson_mana_cost("{W}"))
+        .id();
+    let mut runner = scenario.build();
+    let life = |runner: &GameRunner| runner.state().players[0].life;
+    let starting_life = life(&runner);
+
+    let card_id = runner.state().objects[&tendrils].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: tendrils,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .unwrap();
+    for target in [own, bitten] {
+        runner
+            .act(GameAction::ChooseTarget {
+                target: Some(TargetRef::Object(target)),
+            })
+            .unwrap();
+    }
+    runner.advance_until_stack_empty();
+    assert_eq!(
+        runner.state().objects[&bitten].zone,
+        Zone::Battlefield,
+        "reach guard: the damaged creature survives Devouring Tendrils"
+    );
+    assert_eq!(runner.state().objects[&bitten].damage_marked, 1);
+
+    let card_id = runner.state().objects[&showdown].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: showdown,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .unwrap();
+    runner
+        .act(GameAction::SelectModes {
+            indices: vec![1, 2],
+        })
+        .unwrap();
+    pass_priority_to_prompt(&mut runner, "Final Showdown's creature choice");
+    let WaitingFor::ChooseFromZoneChoice { cards, .. } = &runner.state().waiting_for else {
+        panic!(
+            "reach guard: the creature choice is open: {:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert_eq!(id_set(cards), id_set(&[own, borrowed]));
+
+    runner.act(GameAction::Concede { player_id: P1 }).unwrap();
+    assert_eq!(runner.state().objects[&bitten].zone, Zone::Graveyard);
+    assert!(runner.state().objects[&own].has_keyword(&Keyword::Indestructible));
+    for _ in 0..12 {
+        if life(&runner) != starting_life && runner.state().stack.is_empty() {
+            break;
+        }
+        if runner.act(GameAction::PassPriority).is_err() {
+            break;
+        }
+    }
+    assert_eq!(
+        life(&runner),
+        starting_life + 2,
+        "the delayed trigger fired exactly once"
+    );
+    assert_resolution_settled(&runner, "Final Showdown after the concession");
+}

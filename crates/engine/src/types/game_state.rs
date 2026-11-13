@@ -15038,6 +15038,13 @@ fn legacy_firing_class_matches(canonical: &serde_json::Value, legacy: &serde_jso
         (serde_json::Value::Object(canonical), serde_json::Value::Object(legacy)) => {
             canonical.contains_key("ReceiptEligible") && legacy.contains_key("ReceiptEligible")
         }
+        // CR 603.7: the legacy classifier only says "delayed"; a canonical carrier
+        // that also supplies the delayed trigger's provenance agrees with it. This
+        // is what a delayed trigger parked in `deferred_triggers` serializes as
+        // (`firing: ReceiptEligible`, `dispatch_origin: Delayed`).
+        (serde_json::Value::Object(canonical), serde_json::Value::String(legacy)) => {
+            canonical.contains_key("ReceiptEligible") && legacy == "LegacyDelayed"
+        }
         _ => false,
     }
 }

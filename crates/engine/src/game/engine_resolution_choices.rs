@@ -430,6 +430,9 @@ pub(crate) fn settle_resolution_object_choice_after_departure(
     if let Some(outcome) = batch_or_drain_observer_triggers(state, events, base, end, false) {
         adopt_departure_choice_outcome(state, events, outcome);
     }
+    // The departure's own delayed scan covers these events as well (CR 603.7);
+    // `delayed_trigger_fires_for_a_death_in_instructions_resumed_by_a_concession`
+    // pins that.
     Ok(DepartureSettlement::Settled)
 }
 

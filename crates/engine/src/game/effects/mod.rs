@@ -13575,6 +13575,17 @@ fn park_resolution_object_choice(
 /// and control effects they owned end), and a player can't choose an illegal or
 /// impossible option. `None` when the open prompt is not such a choice.
 pub(crate) fn open_resolution_object_choice_candidates(state: &GameState) -> Option<Vec<ObjectId>> {
+    let (chain, target) = open_resolution_object_choice(state)?;
+    Some(resolution_choice_candidates(state, chain, target, |_| true))
+}
+
+/// CR 608.2d: whether a parked untargeted `TargetOnly` choice owns the open
+/// `ChooseFromZoneChoice` prompt, i.e. a resolution is paused on it.
+pub(crate) fn resolution_object_choice_is_open(state: &GameState) -> bool {
+    open_resolution_object_choice(state).is_some()
+}
+
+fn open_resolution_object_choice(state: &GameState) -> Option<(&ResolvedAbility, &TargetFilter)> {
     if !matches!(state.waiting_for, WaitingFor::ChooseFromZoneChoice { .. }) {
         return None;
     }
@@ -13582,8 +13593,7 @@ pub(crate) fn open_resolution_object_choice_candidates(state: &GameState) -> Opt
     let Effect::TargetOnly { target } = &chain.effect else {
         return None;
     };
-    awaits_resolution_object_choice(chain)
-        .then(|| resolution_choice_candidates(state, chain, target, |_| true))
+    awaits_resolution_object_choice(chain).then_some((chain.as_ref(), target))
 }
 
 /// CR 608.2c + CR 608.2d: once its resolution-time object choice is answered,
