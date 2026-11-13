@@ -10,11 +10,10 @@ use engine::game::coverage::{
 use flate2::read::GzDecoder;
 use serde::Serialize;
 
+const FIXTURE: &[u8] = include_bytes!("../fixtures/integration_cards.json.gz");
+
 fn load() -> CardDatabase {
-    CardDatabase::from_export_reader(GzDecoder::new(
-        &include_bytes!("../fixtures/integration_cards.json.gz")[..],
-    ))
-    .expect("integration fixture loads")
+    CardDatabase::from_export_reader(GzDecoder::new(FIXTURE)).expect("integration fixture loads")
 }
 
 fn json(value: &impl Serialize) -> String {
@@ -95,6 +94,20 @@ fn channel_face(oracle_id: &str, printings: &[&str]) -> serde_json::Value {
     })
 }
 
+const ANCESTRAL_RECALL: &str = "ancestral recall";
+
+/// The fixture's Ancestral Recall face with a synthetic `IgnoredRemainder`, a warning that adds no gap.
+fn ancestral_recall_face() -> serde_json::Value {
+    let mut export: serde_json::Value =
+        serde_json::from_reader(GzDecoder::new(FIXTURE)).expect("integration fixture parses");
+    let mut face = export[ANCESTRAL_RECALL].take();
+    assert_eq!(face["oracle_text"], "Target player draws three cards.");
+    face["parse_warnings"] = serde_json::json!([{
+        "type": "IgnoredRemainder", "parser": "draw", "text": "three cards", "line_index": 0
+    }]);
+    face
+}
+
 #[test]
 fn warning_drilldown_joins_by_face_key_and_breaks_name_ties_by_key() {
     let export = serde_json::Value::Object(serde_json::Map::from_iter([
@@ -106,29 +119,23 @@ fn warning_drilldown_joins_by_face_key_and_breaks_name_ties_by_key() {
             CHANNEL_PREPARE.to_string(),
             channel_face("d9068051-b51c-4700-b492-30b148e3a72c", &["SOC"]),
         ),
+        (ANCESTRAL_RECALL.to_string(), ancestral_recall_face()),
     ]))
     .to_string();
     let load = || CardDatabase::from_json_str(&export).expect("test export deserializes");
     let summary = analyze_coverage(&load());
 
     let mut walk_leaders = BTreeSet::new();
-    for _ in 0..32 {
+    for _ in 0..64 {
         let db = load();
         walk_leaders.extend(db.face_iter().next().map(|(key, _)| key.to_owned()));
-        let drill = |limit| {
-            build_warning_drilldown(
-                &db,
-                &summary,
-                None,
-                None,
-                Some("Condition_If"),
-                limit,
-                false,
-            )
+        let drill = |detector, limit| {
+            build_warning_drilldown(&db, &summary, None, None, detector, limit, false)
         };
 
-        let all = drill(usize::MAX);
-        assert_eq!(all.matched_cards, 2);
+        let all = drill(None, usize::MAX);
+        assert_eq!(all.matched_cards, 3);
+        assert_eq!(drill(Some("Condition_If"), usize::MAX).matched_cards, 2);
         let printings = |key: &str| {
             all.cards
                 .iter()
@@ -140,24 +147,30 @@ fn warning_drilldown_joins_by_face_key_and_breaks_name_ties_by_key() {
             Some(CHANNEL_PRINTINGS.map(String::from).to_vec())
         );
         assert_eq!(printings(CHANNEL_PREPARE), Some(vec!["SOC".to_string()]));
+        assert_eq!(
+            all.cards
+                .iter()
+                .map(|card| card.key.as_str())
+                .collect::<Vec<_>>(),
+            [ANCESTRAL_RECALL, CHANNEL, CHANNEL_PREPARE]
+        );
         let rank = |index: usize| {
             let card = &all.cards[index];
             (card.supported, card.gap_count, card.name.clone())
         };
-        assert_eq!(rank(0), rank(1), "every sort key above the face key ties");
+        assert_eq!(rank(1), rank(2), "every sort key above the face key ties");
 
-        let top = drill(1);
-        assert_eq!(
-            top.cards
-                .iter()
-                .map(|card| card.key.as_str())
-                .collect::<Vec<_>>(),
-            [CHANNEL]
-        );
+        let top = serde_json::to_value(drill(None, 1)).expect("drilldown serializes");
+        assert_eq!(top["supported_cards"], 1);
+        let cards = top["cards"]
+            .as_array()
+            .expect("cards serialize as an array");
+        assert_eq!(cards.len(), 1);
+        assert_eq!(cards[0]["key"], ANCESTRAL_RECALL);
+        assert_eq!(cards[0]["supported"], true);
     }
-    assert_eq!(
-        walk_leaders.len(),
-        2,
+    assert!(
+        walk_leaders.contains(CHANNEL) && walk_leaders.contains(CHANNEL_PREPARE),
         "the face walk must lead with each Channel in some load"
     );
 }
