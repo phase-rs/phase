@@ -10222,7 +10222,28 @@ pub(super) fn current_self_enter_replacement_modifiers(
     source_id: ObjectId,
 ) -> EnterReplacementModifiers {
     let registry = replacement_registry();
-    let event = ProposedEvent::zone_change(source_id, Zone::Battlefield, Zone::Battlefield, None);
+    let mut event =
+        ProposedEvent::zone_change(source_id, Zone::Battlefield, Zone::Battlefield, None);
+    // CR 607.2d + CR 614.12a: the acquired as-enters choice has already bound
+    // its player on the entrant. Reuse the ordinary entry-event quantity scope.
+    if let ProposedEvent::ZoneChange {
+        enter_with_choices, ..
+    } = &mut event
+    {
+        if let Some(player) = state.objects.get(&source_id).and_then(|entrant| {
+            entrant
+                .chosen_attributes
+                .iter()
+                .find_map(|attribute| match attribute {
+                    ChosenAttribute::Player(player) => Some(*player),
+                    _ => None,
+                })
+        }) {
+            *enter_with_choices = Some(Box::new(crate::types::proposed_event::EntryChoices(vec![
+                ChosenAttribute::Player(player),
+            ])));
+        }
+    }
     let mut result = EnterReplacementModifiers::default();
 
     for rid in find_applicable_replacements(state, &event, registry)
@@ -10256,6 +10277,86 @@ pub(super) fn current_self_enter_replacement_modifiers(
     }
 
     result
+}
+
+/// CR 607.2d: only counter quantities linked to an acquired choice need its answer first.
+pub(super) fn copy_entry_counters_read_choice(state: &GameState, source_id: ObjectId) -> bool {
+    let event = ProposedEvent::zone_change(source_id, Zone::Battlefield, Zone::Battlefield, None);
+    find_applicable_replacements(state, &event, replacement_registry())
+        .into_iter()
+        .filter(|rid| rid.source == source_id)
+        .filter_map(|rid| {
+            state
+                .objects
+                .get(&rid.source)?
+                .replacement_definitions
+                .get(rid.index)
+        })
+        .filter(|replacement| !replacement_mode_is_optional(&replacement.mode))
+        .any(|replacement| {
+            let mut current = replacement.execute.as_deref();
+            while let Some(ability) = current {
+                if !EventModifiers::is_event_modifier_effect(&ability.effect) {
+                    break;
+                }
+                let reads_choice = match &*ability.effect {
+                    Effect::PutCounter {
+                        count,
+                        target: TargetFilter::SelfRef,
+                        ..
+                    } => entry_counter_quantity_reads_choice(count),
+                    Effect::ChangeZone {
+                        enter_with_counters,
+                        ..
+                    } => enter_with_counters
+                        .iter()
+                        .any(|(_, count)| entry_counter_quantity_reads_choice(count)),
+                    _ => false,
+                };
+                if reads_choice {
+                    return true;
+                }
+                current = ability.sub_ability.as_deref();
+            }
+            false
+        })
+}
+
+fn entry_counter_quantity_reads_choice(count: &QuantityExpr) -> bool {
+    use crate::types::ability::{
+        quantity_expr_grammar_any, FilterGrammarNode, PlayerScope, QuantityRef,
+    };
+    count.any_ref(&mut |qty| {
+        matches!(qty, QuantityRef::ChosenNumber)
+            || matches!(
+                qty.player_scope(),
+                Some(PlayerScope::ScopedPlayer | PlayerScope::SourceChosenPlayer)
+            )
+    }) || quantity_expr_grammar_any(count, &|node| match node {
+        FilterGrammarNode::Filter(filter) => {
+            matches!(
+                filter,
+                TargetFilter::ScopedPlayer
+                    | TargetFilter::SourceChosenPlayer
+                    | TargetFilter::HasChosenName
+                    | TargetFilter::ChosenCard
+            ) || matches!(
+                filter.controller_scope(),
+                Some(
+                    ControllerRef::ScopedPlayer
+                        | ControllerRef::SourceChosenPlayer
+                        | ControllerRef::ChosenPlayer { .. }
+                )
+            )
+        }
+        FilterGrammarNode::Prop(prop) => matches!(
+            prop,
+            crate::types::ability::FilterProp::IsChosenCreatureType
+                | crate::types::ability::FilterProp::IsChosenColor
+                | crate::types::ability::FilterProp::IsChosenCardType
+        ),
+        FilterGrammarNode::Player(_) => false,
+    })
 }
 
 /// CR 614.12 + CR 707.9: an object entering as a copy also acquires any
@@ -14667,6 +14768,45 @@ pub fn continue_replacement(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn entry_counter_quantity_choice_dependencies_are_structural() {
+        use crate::types::ability::{
+            ControllerRef, QuantityExpr, QuantityRef, TargetFilter, TypedFilter,
+        };
+        let count = |controller| QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCount {
+                filter: TargetFilter::Not {
+                    filter: Box::new(TargetFilter::Typed(
+                        TypedFilter::default().controller(controller),
+                    )),
+                },
+            },
+        };
+        assert!(super::entry_counter_quantity_reads_choice(&count(
+            ControllerRef::ScopedPlayer
+        )));
+        assert!(super::entry_counter_quantity_reads_choice(&count(
+            ControllerRef::SourceChosenPlayer
+        )));
+        assert!(!super::entry_counter_quantity_reads_choice(&count(
+            ControllerRef::You
+        )));
+        assert!(!super::entry_counter_quantity_reads_choice(
+            &QuantityExpr::Fixed { value: 1 }
+        ));
+        let chosen = QuantityExpr::Ref {
+            qty: QuantityRef::ChosenNumber,
+        };
+        let wrapped = QuantityExpr::Difference {
+            left: Box::new(QuantityExpr::Fixed { value: 3 }),
+            right: Box::new(QuantityExpr::Multiply {
+                factor: 2,
+                inner: Box::new(chosen),
+            }),
+        };
+        assert!(super::entry_counter_quantity_reads_choice(&wrapped));
+    }
+
     use super::*;
 
     /// CR 614.1 + CR 616.1: an optional replacement's accept and

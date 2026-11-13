@@ -3496,7 +3496,7 @@ enum CopyEntryCounters<'a> {
     },
 }
 
-/// Outcome of resuming a copy-target-choice entry tail after its counters.
+/// Outcome of resuming a copy-target-choice entry after a choice or counters.
 pub(crate) enum CopyEntryResumption {
     /// The tail ran to its end (or was retired as stale); nothing is owed.
     Completed,
@@ -3508,7 +3508,7 @@ fn finish_copy_target_choice_entry(
     state: &mut GameState,
     source_id: ObjectId,
     events: &mut Vec<GameEvent>,
-    mut counter_pause_post_actions: Vec<PendingCounterPostAction>,
+    counter_pause_post_actions: Vec<PendingCounterPostAction>,
     replay_entry_events: bool,
     entry_counters: CopyEntryCounters<'_>,
 ) -> Result<Option<WaitingFor>, EngineError> {
@@ -3516,6 +3516,80 @@ fn finish_copy_target_choice_entry(
     // characteristics below (enter-tapped, ETB counters) read post-copy state.
     crate::game::layers::mark_layers_full(state);
     crate::game::layers::flush_layers(state);
+    // CR 614.12 + CR 707.9: Surface any mandatory "as this enters, choose ..."
+    // replacement choice acquired from entering as a copy before replaying the entry.
+    // CR 707.5: it is read as the entrant enters, with the tokens entering in the same
+    // event absent (`replacement::copy_entry_board`).
+    let (choice, linked) = {
+        let board = super::replacement::copy_entry_board(state, source_id);
+        let choice = super::replacement::current_self_enter_replacement_choice(&board, source_id);
+        let linked = choice.is_some()
+            && super::replacement::copy_entry_counters_read_choice(&board, source_id);
+        (choice, linked)
+    };
+    if let Some(choice) = choice.filter(|_| linked) {
+        // CR 607.2d + CR 614.12a: linked quantities must read the answer,
+        // not a controller fallback, before any entry counters are evaluated.
+        let entrant = state
+            .objects
+            .get(&source_id)
+            .map(crate::types::identifiers::ObjectIncarnationRef::from_object)
+            .ok_or_else(|| EngineError::InvalidAction("Missing entering copy".to_string()))?;
+        let pending_counters = crate::types::game_state::CopyEntryPendingCounters {
+            exceptions: match entry_counters {
+                CopyEntryCounters::ReplacementsOnly => None,
+                CopyEntryCounters::Merged { exceptions } => Some(exceptions.to_vec()),
+            },
+            replay_entry_events,
+        };
+        let mut choice_post_actions = vec![PendingCounterPostAction::FinishCopyTargetChoiceEntry {
+            entrant,
+            resume_stage: crate::types::game_state::CopyEntryResumeStage::BeforeCounters(Box::new(
+                pending_counters,
+            )),
+        }];
+        choice_post_actions.extend(counter_pause_post_actions.iter().cloned());
+        if let Some(waiting_for) =
+            surface_copy_entry_pause(state, source_id, &choice_post_actions, |state| {
+                apply_post_replacement_effect(
+                    state,
+                    &choice,
+                    // CR 109.5: this self-scoped replacement belongs to the entrant.
+                    ContinuationSubjects::affected_only(Some(source_id)),
+                    None,
+                    Some(&ReplacementEvent::Moved),
+                    HashSet::new(),
+                    events,
+                )
+            })
+        {
+            return Ok(Some(waiting_for));
+        }
+    }
+    finish_copy_target_choice_entry_counters(
+        state,
+        source_id,
+        events,
+        counter_pause_post_actions,
+        replay_entry_events,
+        entry_counters,
+        if linked {
+            crate::types::game_state::CopyEntryResumeStage::ChoiceSettled
+        } else {
+            crate::types::game_state::CopyEntryResumeStage::ChoiceOwedAfterCounters
+        },
+    )
+}
+
+fn finish_copy_target_choice_entry_counters(
+    state: &mut GameState,
+    source_id: ObjectId,
+    events: &mut Vec<GameEvent>,
+    mut counter_pause_post_actions: Vec<PendingCounterPostAction>,
+    replay_entry_events: bool,
+    entry_counters: CopyEntryCounters<'_>,
+    resume_stage: crate::types::game_state::CopyEntryResumeStage,
+) -> Result<Option<WaitingFor>, EngineError> {
     // CR 614.12 + CR 707.5 + CR 614.1c + CR 122.6: the entrant's acquired "enters with"
     // counters and tap state, and any quantity they count, are read as it enters — with
     // the tokens entering in the same event absent (`replacement::copy_entry_board`), so a
@@ -3578,7 +3652,10 @@ fn finish_copy_target_choice_entry(
             // publication and the remaining batch, after all counter additions settle.
             counter_pause_post_actions.insert(
                 0,
-                PendingCounterPostAction::FinishCopyTargetChoiceEntry { entrant },
+                PendingCounterPostAction::FinishCopyTargetChoiceEntry {
+                    entrant,
+                    resume_stage: resume_stage.clone(),
+                },
             );
         }
         super::effects::counters::append_pending_counter_post_actions(
@@ -3593,13 +3670,16 @@ fn finish_copy_target_choice_entry(
         events,
         counter_pause_post_actions,
         replay_entry_events,
+        resume_stage,
     )
 }
 
-/// CR 614.12 + CR 616.1: resume only the unperformed entry tail, never counters.
+/// CR 614.12 + CR 616.1: resume only the unperformed entry work. A choice
+/// carries an unevaluated counter plan; a counter pause never repeats placement.
 pub(crate) fn resume_copy_target_choice_entry(
     state: &mut GameState,
     entrant: crate::types::identifiers::ObjectIncarnationRef,
+    resume_stage: crate::types::game_state::CopyEntryResumeStage,
     events: &mut Vec<GameEvent>,
 ) -> Result<CopyEntryResumption, EngineError> {
     // CR 400.7: a later incarnation must not receive choices, replayed ETBs,
@@ -3617,13 +3697,35 @@ pub(crate) fn resume_copy_target_choice_entry(
         state.finish_active_paused_post_replacement_dispatch();
         return Ok(CopyEntryResumption::Completed);
     }
-    match finish_copy_target_choice_entry_after_counters(
-        state,
-        entrant.object_id,
-        events,
-        Vec::new(),
-        true,
-    )? {
+    use crate::types::game_state::CopyEntryResumeStage;
+    let waiting_for = match resume_stage {
+        CopyEntryResumeStage::BeforeCounters(plan) => {
+            let counters = match &plan.exceptions {
+                None => CopyEntryCounters::ReplacementsOnly,
+                Some(exceptions) => CopyEntryCounters::Merged { exceptions },
+            };
+            finish_copy_target_choice_entry_counters(
+                state,
+                entrant.object_id,
+                events,
+                Vec::new(),
+                plan.replay_entry_events,
+                counters,
+                CopyEntryResumeStage::ChoiceSettled,
+            )?
+        }
+        CopyEntryResumeStage::ChoiceSettled | CopyEntryResumeStage::ChoiceOwedAfterCounters => {
+            finish_copy_target_choice_entry_after_counters(
+                state,
+                entrant.object_id,
+                events,
+                Vec::new(),
+                true,
+                resume_stage,
+            )?
+        }
+    };
+    match waiting_for {
         Some(waiting_for) => {
             state.waiting_for = waiting_for;
             Ok(CopyEntryResumption::Paused)
@@ -3735,6 +3837,7 @@ fn finish_copy_target_choice_entry_after_counters(
     events: &mut Vec<GameEvent>,
     counter_pause_post_actions: Vec<PendingCounterPostAction>,
     replay_entry_events: bool,
+    resume_stage: crate::types::game_state::CopyEntryResumeStage,
 ) -> Result<Option<WaitingFor>, EngineError> {
     // CR 614.12 + CR 707.9: Surface any mandatory "as this enters, choose ..."
     // replacement choice acquired from entering as a copy before replaying the entry.
@@ -3744,7 +3847,9 @@ fn finish_copy_target_choice_entry_after_counters(
         let board = super::replacement::copy_entry_board(state, source_id);
         super::replacement::current_self_enter_replacement_choice(&board, source_id)
     };
-    if let Some(choice) = choice {
+    if let Some(choice) = choice.filter(|_| {
+        resume_stage == crate::types::game_state::CopyEntryResumeStage::ChoiceOwedAfterCounters
+    }) {
         if let Some(waiting_for) =
             surface_copy_entry_pause(state, source_id, &counter_pause_post_actions, |state| {
                 apply_post_replacement_effect(

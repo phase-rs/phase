@@ -8577,6 +8577,9 @@ pub(super) fn handle_resolution_choice(
                 .filter(|source| {
                     source.is_exact_object_and_resolution()
                         && source.prompt.identity.expected_zone == Zone::Battlefield
+                        // CR 614.12a: a copied choice may still owe entry counters.
+                        // Its witnessed tail owns replay after those settle.
+                        && !effects::counters::copy_entry_completion_is_ready(state)
                         && !state.deferred_entry_events.is_empty()
                 })
                 .map(|source| source.prompt.identity.reference.object_id)

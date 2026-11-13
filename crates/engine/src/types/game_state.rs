@@ -8055,6 +8055,29 @@ pub struct PendingTokenEventDelivery {
     pub source_id: ObjectId,
 }
 
+/// CR 614.12a + CR 607.2d: counter evaluation held until an acquired entry
+/// choice has bound its answer. `None` exceptions retains the meld-only policy;
+/// `Some` retains the merged placement policy, including an empty exception list.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CopyEntryPendingCounters {
+    pub exceptions: Option<Vec<ContinuousModification>>,
+    pub replay_entry_events: bool,
+}
+
+/// CR 707.5 + CR 614.12a: remaining work for a copied as-enters choice.
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CopyEntryResumeStage {
+    /// Counters have settled and the tail still offers the acquired choice:
+    /// the order when no counter reads it, and the meaning of a save that
+    /// predates this field.
+    #[default]
+    ChoiceOwedAfterCounters,
+    /// The acquired choice is answered; counters have settled.
+    ChoiceSettled,
+    /// The acquired choice paused before counter evaluation.
+    BeforeCounters(Box<CopyEntryPendingCounters>),
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PendingCounterPostAction {
     EmitEffectResolved {
@@ -8211,9 +8234,10 @@ pub enum PendingCounterPostAction {
     EmitCommittedCopyTokenEntry {
         object_id: ObjectId,
     },
-    /// CR 614.12 + CR 616.1: finish an ordinary or liminal-token interactive
-    /// enter-as-copy entry after its merged counter placement settles. Never
-    /// minted by Meld. The incarnation pin prevents work on a later object.
+    /// CR 614.12 + CR 616.1: resume an interactive enter-as-copy entry after
+    /// its acquired choice or merged counter placement settles. Meld uses this
+    /// only before counters; its own completion still owns the post-counter tail.
+    /// The incarnation pin prevents work on a later object.
     ///
     /// The fallible engine consumer pops this action before running the entry
     /// tail; a nested pause parks only the remaining post-actions. It runs in
@@ -8234,6 +8258,9 @@ pub enum PendingCounterPostAction {
     /// Same one-way contract; no game protocol or resolution-state wire bump.
     FinishCopyTargetChoiceEntry {
         entrant: ObjectIncarnationRef,
+        /// Missing on legacy saves that still owe the acquired choice.
+        #[serde(default)]
+        resume_stage: CopyEntryResumeStage,
     },
     /// CR 701.42 + CR 707.9: finish a meld instruction after a copy-as-enters
     /// choice whose entry counters paused on their own replacement choice.
@@ -40990,6 +41017,30 @@ mod tests {
     use crate::types::resolved_commands::ResolvedDelayedTriggerCommand;
     use crate::types::triggers::TriggerMode;
     use EpicIngress::{BareGameState, PersistedRaw, TrustedEnvelope};
+
+    #[test]
+    fn copy_entry_resume_stage_defaults_to_legacy_choice_owed() {
+        let action = PendingCounterPostAction::FinishCopyTargetChoiceEntry {
+            entrant: ObjectIncarnationRef {
+                object_id: ObjectId(42),
+                incarnation: LEGACY_INCARNATION,
+            },
+            resume_stage: CopyEntryResumeStage::ChoiceSettled,
+        };
+        let mut json = serde_json::to_value(action).unwrap();
+        json["FinishCopyTargetChoiceEntry"]
+            .as_object_mut()
+            .unwrap()
+            .remove("resume_stage");
+        let restored: PendingCounterPostAction = serde_json::from_value(json).unwrap();
+        assert!(matches!(
+            restored,
+            PendingCounterPostAction::FinishCopyTargetChoiceEntry {
+                resume_stage: CopyEntryResumeStage::ChoiceOwedAfterCounters,
+                ..
+            }
+        ));
+    }
 
     fn exact_destination() -> EntryAttackDestination {
         EntryAttackDestination::Exact {
