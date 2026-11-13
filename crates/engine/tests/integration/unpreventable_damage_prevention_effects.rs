@@ -1031,6 +1031,143 @@ fn fight_damage_redirected_to_the_host_meets_one_reading() {
     assert_shielded_once(&runner, champion);
 }
 
+const MENDING_HANDS: &str =
+    "Prevent the next 4 damage that would be dealt to any target this turn.";
+
+/// CR 701.14a + CR 614.9 + CR 616.1: a capped redirect's hit is a portion of the fight's batch.
+/// Pit Fight between two Nomads en-Kor, each one's shield ("The next 1 damage ... is dealt to
+/// target creature you control instead.") aimed at P0's Wall, under Test of Faith and Mending
+/// Hands. Each redirected 1 meets both shields, so P0 chooses which applies (CR 616.1: "the
+/// affected object's controller ... chooses one to apply"); nothing is dealt to the Wall or the
+/// Nomads, and the fight completes once, after the choices.
+#[test]
+fn a_fights_capped_redirects_ask_the_recipients_shield_choice() {
+    let mut scenario = main_phase();
+    let wall = scenario.add_creature(P0, "Wall", 0, 4).id();
+    let nomads = [
+        nomads_shielding(&mut scenario, "Nomads en-Kor A"),
+        nomads_shielding(&mut scenario, "Nomads en-Kor B"),
+    ];
+    let faith = spell(&mut scenario, "Test of Faith", TEST_OF_FAITH, true);
+    let hands = spell(&mut scenario, "Mending Hands", MENDING_HANDS, true);
+    let pit_fight = spell(&mut scenario, "Pit Fight", PIT_FIGHT, true);
+    let mut runner = scenario.build();
+    activate_shields_at(&mut runner, &nomads, wall);
+    cast(&mut runner, faith, vec![TargetRef::Object(wall)]);
+    cast(&mut runner, hands, vec![TargetRef::Object(wall)]);
+
+    let mut events = cast(
+        &mut runner,
+        pit_fight,
+        nomads.map(TargetRef::Object).to_vec(),
+    );
+    let fight_cast = events.len();
+    let prompts = answer(&mut runner, &[Pick::From(wall)], wall, &mut events);
+
+    assert_settled(&runner);
+    assert!(
+        prompts.iter().any(|prompt| prompt.sources.len() == 2),
+        "the redirected hit offers both shields: {prompts:?}"
+    );
+    for nomad in nomads {
+        assert_eq!(runner.state().objects[&nomad].damage_marked, 0);
+        assert!(damage_dealt_to(&events, nomad).is_empty());
+    }
+    assert!(damage_dealt_to(&events, wall).is_empty());
+    assert_eq!(runner.state().objects[&wall].damage_marked, 0);
+    assert_eq!(prevented(&events), 2);
+    let completions = events[fight_cast..]
+        .iter()
+        .filter(|e| {
+            matches!(
+                e,
+                GameEvent::EffectResolved { kind: EffectKind::Fight, source_id, .. }
+                    if *source_id == pit_fight
+            )
+        })
+        .count();
+    assert_eq!(completions, 1);
+}
+
+/// CR 614.9 + CR 616.1 + CR 101.4d: a capped redirect chosen by an answer splits its 1 off to a
+/// creature the active player controls, while the remainder still needs the answering player's
+/// next choice. P0 active; Pit Fight between P0's Hill Giant and Nomads en-Kor, whose shield is
+/// aimed at P0's Wall and which P1 has since gained control of. The Nomads are under Test of
+/// Faith and Mending Hands too, so P1 orders three effects and picks the redirect first. The Wall's 1 meets
+/// its own two shields, P0's choice, and the Giant's other 2 still meets P1's two: P0, earlier in
+/// APNAP order, is asked before P1's next choice.
+#[test]
+fn an_answered_capped_redirect_asks_its_recipients_choice_in_apnap_order() {
+    let mut scenario = main_phase();
+    let giant = scenario.add_creature(P0, "Hill Giant", 3, 3).id();
+    let nomads = nomads_shielding(&mut scenario, "Nomads en-Kor");
+    let wall = scenario.add_creature(P0, "Wall", 0, 4).id();
+    let shields = [nomads, wall].map(|target| {
+        [
+            spell(&mut scenario, "Test of Faith", TEST_OF_FAITH, true),
+            spell(&mut scenario, "Mending Hands", MENDING_HANDS, true),
+        ]
+        .map(|shield| (shield, target))
+    });
+    let pit_fight = spell(&mut scenario, "Pit Fight", PIT_FIGHT, true);
+    let mut runner = scenario.build();
+    activate_shields_at(&mut runner, &[nomads], wall);
+    for (shield, target) in shields.into_iter().flatten() {
+        cast(&mut runner, shield, vec![TargetRef::Object(target)]);
+    }
+    // P1 gains control of the Nomads: `evaluate_layers` resets `controller` from
+    // `base_controller`, so both are set.
+    {
+        let object = runner
+            .state_mut()
+            .objects
+            .get_mut(&nomads)
+            .expect("the Nomads");
+        object.base_controller = Some(P1);
+        object.controller = P1;
+    }
+
+    let mut events = cast(
+        &mut runner,
+        pit_fight,
+        vec![TargetRef::Object(giant), TargetRef::Object(nomads)],
+    );
+
+    let mut askers = Vec::new();
+    for _ in 0..8 {
+        let WaitingFor::ReplacementChoice {
+            player, candidates, ..
+        } = runner.state().waiting_for.clone()
+        else {
+            break;
+        };
+        // The Nomads' redirect was set up first, so it is the first candidate of P1's three.
+        assert!(
+            !askers.is_empty() || candidates.len() == 3,
+            "{candidates:?}"
+        );
+        askers.push(player);
+        events.extend(
+            runner
+                .act(GameAction::ChooseReplacement { index: 0 })
+                .expect("answer")
+                .events,
+        );
+        drive(&mut runner, &mut Vec::new(), &mut events);
+    }
+
+    assert_settled(&runner);
+    assert_eq!(
+        askers,
+        vec![P1, P0, P1],
+        "P0's choice for the Wall before P1's next"
+    );
+    assert_eq!(runner.state().objects[&wall].damage_marked, 0);
+    assert_eq!(runner.state().objects[&nomads].damage_marked, 0);
+    // The Wall's redirected 1 and the Nomads' remaining 2, each prevented.
+    assert_eq!(prevented(&events), 2);
+}
+
 /// CR 701.14a + CR 616.1: a fight whose first direction parks on an order choice resumes its second
 /// direction under the fight's reading. Pit Fight with Nomads en-Kor fighting the Champion under
 /// Furnace of Rath, the Nomads' shield aimed at the Champion. The Nomads' 1 damage to the Champion

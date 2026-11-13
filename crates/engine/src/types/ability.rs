@@ -1854,6 +1854,25 @@ pub struct ParkedDamageBatch {
     /// damage is dealt.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub held: Vec<crate::types::game_state::HeldBatchRider>,
+    /// CR 614.9 + CR 120.4b: portions a capped redirect split off during replacement, still to go
+    /// through the batch's replacement.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub split: Vec<SplitDamagePortion>,
+}
+
+/// CR 614.9 + CR 614.5: the part of a portion a capped redirect ("The next 1 damage that would be
+/// dealt to this creature this turn is dealt to target creature you control instead.") sends to
+/// its new recipient. It is a portion of the same simultaneous batch, keeping the replacements
+/// already applied to it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SplitDamagePortion {
+    pub source: ObjectId,
+    pub target: TargetRef,
+    pub amount: u32,
+    #[serde(default)]
+    pub is_combat: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub applied: Vec<AppliedReplacementKey>,
 }
 
 /// Casting-time facts that flow with a spell from casting through resolution.

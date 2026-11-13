@@ -29779,6 +29779,10 @@ pub(crate) struct DamageBatchLedger {
     /// (`replacement::hold_damage_rider`) instead of running between those choices; the batch
     /// runs them after its damage. `None` everywhere else, where riders run at once.
     pub(crate) held_riders: Option<Vec<HeldBatchRider>>,
+    /// CR 614.9 + CR 120.4b: portions a capped redirect split off while the batch settles its
+    /// original choices (`replacement::redirect_damage_event`), for the batch to replace with
+    /// its other portions.
+    pub(crate) split_portions: Vec<crate::types::ability::SplitDamagePortion>,
 }
 
 /// Who owns a player-resource change (life, player counter, energy) whose final

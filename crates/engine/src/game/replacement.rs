@@ -13,7 +13,8 @@ use crate::types::ability::{
     EntryAttackDestination, ManaSpendPermission, PermissionGrantee, PostReplacementContinuation,
     PreventionAmount, PreventionFormula, QuantityExpr, QuantityModification, RedirectionLifetime,
     ReplacementChoiceAuthority, ReplacementCondition, ReplacementDefinition, ReplacementMode,
-    ResolvedAbility, RoundingMode, ShieldKind, TapStateChange, TargetFilter, TargetRef,
+    ResolvedAbility, RoundingMode, ShieldKind, SplitDamagePortion, TapStateChange, TargetFilter,
+    TargetRef,
 };
 use crate::types::actions::ReplacementAutoChoice;
 use crate::types::card_type::CoreType;
@@ -2754,6 +2755,36 @@ fn redirect_damage_event(
             }
 
             if let Some(new_target) = new_recipient.filter(|_| redirected_amount > 0) {
+                // CR 614.9 + CR 120.4b + CR 616.1: inside a batch settling its original choices,
+                // the redirected part is another portion of the same damage: the batch carries it
+                // through replacement with the rest, asks its choices in APNAP order and deals it
+                // with the rest.
+                if let Some(ledger) = state
+                    .damage_batch_ledger
+                    .as_mut()
+                    .filter(|ledger| ledger.held_riders.is_some())
+                {
+                    let mut kept: Vec<_> = applied.iter().copied().collect();
+                    kept.sort_unstable();
+                    ledger.split_portions.push(SplitDamagePortion {
+                        source: source_id,
+                        target: new_target,
+                        amount: redirected_amount,
+                        is_combat,
+                        applied: kept,
+                    });
+                    return if remaining_amount == 0 {
+                        ApplyResult::Prevented
+                    } else {
+                        ApplyResult::Modified(ProposedEvent::Damage {
+                            source_id,
+                            target,
+                            amount: remaining_amount,
+                            is_combat,
+                            applied,
+                        })
+                    };
+                }
                 let redirected_event = ProposedEvent::Damage {
                     source_id,
                     target: new_target,
@@ -3492,6 +3523,7 @@ fn with_settled_damage_guards<T>(
         settled_guards,
         paused_rider: None,
         held_riders: None,
+        split_portions: Vec::new(),
     });
     let result = body(state);
     state.damage_batch_ledger = restore;
@@ -13911,6 +13943,7 @@ pub(crate) fn replace_combat_damage_batch(
         settled_guards,
         paused_rider: None,
         held_riders: None,
+        split_portions: Vec::new(),
     });
     // The ledger's `applications` are keyed by AppliedReplacementKey, which is registry-index
     // based, exactly as combat_prevention_tally's keys are. Its `settled_guards` are keyed by
@@ -18715,6 +18748,7 @@ mod tests {
             settled_guards: guards,
             paused_rider: None,
             held_riders: None,
+            split_portions: Vec::new(),
         });
 
         let obj = state.objects.get_mut(&champion).unwrap();
@@ -18778,6 +18812,7 @@ mod tests {
             settled_guards: Vec::new(),
             paused_rider: None,
             held_riders: None,
+            split_portions: Vec::new(),
         });
         assert!(consumed_replacement_applies_in_combat_batch(
             &state,

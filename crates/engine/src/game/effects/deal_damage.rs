@@ -14,7 +14,7 @@ use crate::types::ability::{
     names_resolution_chosen_recipient, quantity_expr_uses_recipient, DamageContextSnapshot,
     DamageSource, DeferredDamageChoice, EachDamageRecipient, Effect, EffectError, EffectKind,
     ExcessRecipient, ParkedDamageBatch, PlayerFilter, QuantityExpr, RawDamagePortion,
-    ReplacedDamagePortion, ResolvedAbility, SubAbilityLink, TargetChoiceTiming,
+    ReplacedDamagePortion, ResolvedAbility, SplitDamagePortion, SubAbilityLink, TargetChoiceTiming,
     TargetDamageSourceBinding, TargetFilter, TargetRef,
 };
 use crate::types::card_type::CoreType;
@@ -1430,7 +1430,12 @@ fn run_damage_batch(
     parked: ParkedDamageBatch,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    let ParkedDamageBatch { mut deferred, held } = parked;
+    let ParkedDamageBatch {
+        mut deferred,
+        held,
+        split,
+    } = parked;
+    let mut split: std::collections::VecDeque<SplitDamagePortion> = split.into();
     // CR 104.1: "A game ends immediately when a player wins": a batch resumed after the game
     // ended has nothing left to replace, deal or complete.
     if state.game_end.is_some() {
@@ -1451,7 +1456,14 @@ fn run_damage_batch(
     // one whose player comes first in APNAP order. So who chooses is known for every portion
     // before anyone is asked.
     loop {
-        let (portion, asking) = match portions.pop_front() {
+        // CR 614.9: a capped redirect's split-off part (`SplitDamagePortion`) is a portion too,
+        // carried through its automatic replacements before any choice is asked.
+        let next = portions.pop_front().or_else(|| {
+            split
+                .pop_front()
+                .map(|part| split_portion(state, ability, part))
+        });
+        let (portion, asking) = match next {
             Some(portion) => (portion, false),
             None => {
                 let Some(index) = deferred
@@ -1494,6 +1506,7 @@ fn run_damage_batch(
             }
         };
         let result = replacement::replace_event(state, proposed, events);
+        split.extend(take_split_portions(state));
         // CR 104.1: a replacement that ended the game (Nefarious Lich's "If you can't, you lose
         // the game") ends the batch: nothing later is replaced or dealt.
         if state.game_end.is_some() {
@@ -1522,7 +1535,11 @@ fn run_damage_batch(
                         &replaced,
                         remaining,
                         None,
-                        ParkedDamageBatch { deferred, held },
+                        ParkedDamageBatch {
+                            deferred,
+                            held,
+                            split: split.into(),
+                        },
                         boundary,
                     )?;
                     return Ok(());
@@ -1554,7 +1571,11 @@ fn run_damage_batch(
                     &replaced,
                     remaining,
                     awaiting,
-                    ParkedDamageBatch { deferred, held },
+                    ParkedDamageBatch {
+                        deferred,
+                        held,
+                        split: split.into(),
+                    },
                     boundary,
                 )?;
                 return Ok(());
@@ -1586,8 +1607,8 @@ fn run_damage_batch(
                 Vec::new(),
                 None,
                 ParkedDamageBatch {
-                    deferred: Vec::new(),
                     held,
+                    ..ParkedDamageBatch::default()
                 },
                 boundary,
             )?;
@@ -1623,8 +1644,8 @@ fn run_damage_batch(
                 Vec::new(),
                 None,
                 ParkedDamageBatch {
-                    deferred: Vec::new(),
                     held: held.into(),
+                    ..ParkedDamageBatch::default()
                 },
                 boundary,
             )?;
@@ -1637,6 +1658,35 @@ fn run_damage_batch(
         subject: None,
     });
     Ok(())
+}
+
+/// CR 614.9: the portions capped redirects split off into the batch's ledger since the last take.
+fn take_split_portions(state: &mut GameState) -> Vec<SplitDamagePortion> {
+    state
+        .damage_batch_ledger
+        .as_mut()
+        .map(|ledger| std::mem::take(&mut ledger.split_portions))
+        .unwrap_or_default()
+}
+
+/// CR 614.9 + CR 614.5: a split-off part as a portion already through the gate, keeping the
+/// replacements applied to it, dealt by its source as it is now (CR 609.6).
+fn split_portion(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    part: SplitDamagePortion,
+) -> BatchPortion {
+    BatchPortion::Gated {
+        ctx: DamageContext::from_source(state, part.source)
+            .unwrap_or_else(|| DamageContext::fallback(part.source, ability.controller)),
+        event: ProposedEvent::Damage {
+            source_id: part.source,
+            target: part.target,
+            amount: part.amount,
+            is_combat: part.is_combat,
+            applied: part.applied.into_iter().collect(),
+        },
+    }
 }
 
 /// CR 616.1: the riders the batch's ledger held while its original choices were made, and stop
@@ -1759,8 +1809,10 @@ fn affected_rank(state: &GameState, order: &[PlayerId], target: &TargetRef) -> u
 /// (Pariah sending P1's damage to P3's creature while P2's choice is outstanding). The choice
 /// waits in the batch, which asks the earlier players first ("If a choice made by a nonactive
 /// player causes the active player, or a different nonactive player earlier in the turn order,
-/// to have to make a choice, APNAP order is restarted for all outstanding choices."). `false`
-/// when no outstanding choice comes earlier, so the choice is asked now.
+/// to have to make a choice, APNAP order is restarted for all outstanding choices."). So does a
+/// choice behind a part a capped redirect split off (CR 614.9): whose choice that part needs is
+/// found only by carrying it through its replacements, so the batch does that first. `false`
+/// when no outstanding choice comes earlier and nothing is split off, so the choice is asked now.
 pub(crate) fn defer_choice_behind_earlier_players(
     state: &mut GameState,
     chooser: PlayerId,
@@ -1804,7 +1856,13 @@ pub(crate) fn defer_choice_behind_earlier_players(
                 .map(|choice| player_rank(&order, choice.chooser)),
         )
         .min();
-    if !earliest_outstanding.is_some_and(|rank| rank < chooser_rank) {
+    let split_outstanding = frame
+        .chain
+        .context
+        .parked_damage_batch
+        .as_ref()
+        .is_some_and(|parked| !parked.split.is_empty());
+    if !split_outstanding && !earliest_outstanding.is_some_and(|rank| rank < chooser_rank) {
         return false;
     }
     let Some(choice) = take_pending_damage_choice(state, chooser) else {
@@ -1977,15 +2035,17 @@ pub(crate) fn hold_riders_for_awaited_portion<T>(
     });
     let result = answer(state);
     let held = take_held_riders(state);
+    // CR 614.9: a capped redirect the answer applied splits a portion off into the batch too.
+    let split = take_split_portions(state);
     state.damage_batch_ledger = saved;
-    if !held.is_empty() {
+    if !held.is_empty() || !split.is_empty() {
         if let Some(batch) = awaiting_batch(state, source) {
-            batch
+            let parked = batch
                 .context
                 .parked_damage_batch
-                .get_or_insert_with(Default::default)
-                .held
-                .extend(held);
+                .get_or_insert_with(Default::default);
+            parked.held.extend(held);
+            parked.split.extend(split);
         }
     }
     result
