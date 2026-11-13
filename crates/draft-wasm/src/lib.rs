@@ -1102,6 +1102,38 @@ pub fn filter_pool_listing(listing_json: &str, filter_json: &str) -> Result<JsVa
     )))
 }
 
+/// CR 702.139a + CR 100.4b: whether `companion` is backed by a drafted pool
+/// copy the main deck does not use. Both card lists are JSON arrays of card
+/// names (the pool's instance names and the main deck's names). Stateless —
+/// usable by P2P guests, and the one rule `validate_limited_deck` enforces at
+/// submission, so the deck builder never re-counts copies itself.
+#[wasm_bindgen]
+pub fn companion_has_drafted_copy_outside_deck(
+    pool_names_json: &str,
+    main_deck_json: &str,
+    companion: &str,
+) -> Result<bool, JsValue> {
+    companion_backed_inner(pool_names_json, main_deck_json, companion)
+        .map_err(|error| JsValue::from_str(&error))
+}
+
+/// Native-testable core for `companion_has_drafted_copy_outside_deck`.
+fn companion_backed_inner(
+    pool_names_json: &str,
+    main_deck_json: &str,
+    companion: &str,
+) -> Result<bool, String> {
+    let pool: Vec<String> = serde_json::from_str(pool_names_json)
+        .map_err(|error| format!("Failed to parse pool names: {error}"))?;
+    let main_deck: Vec<String> = serde_json::from_str(main_deck_json)
+        .map_err(|error| format!("Failed to parse main deck: {error}"))?;
+    Ok(
+        draft_core::validation::companion_has_drafted_copy_outside_deck(
+            &pool, &main_deck, companion,
+        ),
+    )
+}
+
 /// The complete engine-owned filter option lists for a pool, computed from
 /// the instances alone (review round 5): the stateless path a display uses
 /// when its delivered view predates the option fields, so legacy controls
@@ -1113,6 +1145,15 @@ pub fn pool_filter_options(pool_json: &str) -> Result<JsValue, JsValue> {
     Ok(to_js(&draft_core::view::pool_filter_options(&pool)))
 }
 
+/// CR 702.139a: the optional companion designation arrives as the bare card
+/// name (not JSON). An absent or blank value designates no companion.
+fn companion_designation(companion: Option<&str>) -> Option<String> {
+    companion
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(str::to_string)
+}
+
 /// Submit the human player's deck for limited play.
 ///
 /// `main_deck_json`: JSON array of card name strings.
@@ -1120,12 +1161,41 @@ pub fn pool_filter_options(pool_json: &str) -> Result<JsValue, JsValue> {
 /// commander(s) (CR 903.3 / CR 702.124h). CR 903.1 puts the designation inside
 /// the Commander variant, so `[]` is the correct and meaningful value for every
 /// non-Commander kind.
+/// `companion`: the optional bare card name (not JSON) this seat designates as
+/// its companion (CR 702.139a).
 /// The deck is validated against the pool via LimitedDeckValidator.
 #[wasm_bindgen]
-pub fn submit_deck(main_deck_json: &str, commanders_json: &str) -> Result<JsValue, JsValue> {
-    let view =
-        submit_deck_inner(main_deck_json, commanders_json).map_err(|e| JsValue::from_str(&e))?;
+pub fn submit_deck(
+    main_deck_json: &str,
+    commanders_json: &str,
+    companion: Option<String>,
+) -> Result<JsValue, JsValue> {
+    let view = submit_deck_inner(main_deck_json, commanders_json, companion.as_deref())
+        .map_err(|e| JsValue::from_str(&e))?;
     Ok(to_js(&view))
+}
+
+/// CR 702.139a/b: refuse an ineligible companion designation against the
+/// loaded card database BEFORE the reducer mutates, so the host never
+/// acknowledges (or persists a receipt for) a deck that match admission would
+/// reject. Shared by every wasm submit entry point (local, host, recovered).
+fn check_companion_before_submit(
+    session: &DraftSession,
+    main_deck: &[String],
+    commanders: &[String],
+    companion: Option<&str>,
+) -> Result<(), String> {
+    CARD_DB
+        .with(|cell| {
+            session::check_submission_companion(
+                session,
+                cell.borrow().as_ref(),
+                main_deck,
+                commanders,
+                companion,
+            )
+        })
+        .map_err(deck_submission_message)
 }
 
 /// Pure-Rust core for `submit_deck`, so both halves of the payload boundary are
@@ -1138,19 +1208,23 @@ pub fn submit_deck(main_deck_json: &str, commanders_json: &str) -> Result<JsValu
 fn submit_deck_inner(
     main_deck_json: &str,
     commanders_json: &str,
+    companion: Option<&str>,
 ) -> Result<draft_core::view::DraftPlayerView, String> {
     let main_deck: Vec<String> =
         serde_json::from_str(main_deck_json).map_err(|e| format!("Failed to parse deck: {e}"))?;
     let commanders: Vec<String> = serde_json::from_str(commanders_json)
         .map_err(|e| format!("Failed to parse commanders: {e}"))?;
+    let companion = companion_designation(companion);
 
     with_draft_mut_inner(|session| {
+        check_companion_before_submit(session, &main_deck, &commanders, companion.as_deref())?;
         session::apply(
             session,
             DraftAction::SubmitDeck {
                 seat: 0,
                 main_deck,
                 commanders,
+                companion,
                 // Dedicated local/P2P wrappers remain name-only.
                 printings: Vec::new(),
             },
@@ -1360,9 +1434,11 @@ pub fn submit_deck_for_seat(
     seat: u8,
     main_deck_json: &str,
     commanders_json: &str,
+    companion: Option<String>,
 ) -> Result<JsValue, JsValue> {
-    let view = submit_deck_for_seat_inner(seat, main_deck_json, commanders_json)
-        .map_err(|e| JsValue::from_str(&e))?;
+    let view =
+        submit_deck_for_seat_inner(seat, main_deck_json, commanders_json, companion.as_deref())
+            .map_err(|e| JsValue::from_str(&e))?;
     Ok(to_js(&view))
 }
 
@@ -1373,19 +1449,23 @@ fn submit_deck_for_seat_inner(
     seat: u8,
     main_deck_json: &str,
     commanders_json: &str,
+    companion: Option<&str>,
 ) -> Result<draft_core::view::DraftPlayerView, String> {
     let main_deck: Vec<String> =
         serde_json::from_str(main_deck_json).map_err(|e| format!("Failed to parse deck: {e}"))?;
     let commanders: Vec<String> = serde_json::from_str(commanders_json)
         .map_err(|e| format!("Failed to parse commanders: {e}"))?;
+    let companion = companion_designation(companion);
 
     with_draft_mut_inner(|session| {
+        check_companion_before_submit(session, &main_deck, &commanders, companion.as_deref())?;
         session::apply(
             session,
             DraftAction::SubmitDeck {
                 seat,
                 main_deck,
                 commanders,
+                companion,
                 printings: Vec::new(),
             },
             None,
@@ -4408,8 +4488,12 @@ mod create_multiplayer_draft_tests {
         session_cell::install(restored);
 
         let human_deck = seat_deck(0, 59);
-        let error = submit_deck_inner(&json(&human_deck), &json(&["Seat 0 Card 0".to_string()]))
-            .expect_err("a restored 59-card Commander deck is illegal");
+        let error = submit_deck_inner(
+            &json(&human_deck),
+            &json(&["Seat 0 Card 0".to_string()]),
+            None,
+        )
+        .expect_err("a restored 59-card Commander deck is illegal");
         assert!(
             error.contains("59") && error.contains("60"),
             "error = {error}"
@@ -5551,7 +5635,7 @@ mod create_multiplayer_draft_tests {
 
         let deck = seat_deck(0, 60);
         let commanders = vec!["Seat 0 Card 7".to_string(), "Seat 0 Card 3".to_string()];
-        submit_deck_inner(&json(&deck), &json(&commanders)).expect("a legal deck submits");
+        submit_deck_inner(&json(&deck), &json(&commanders), None).expect("a legal deck submits");
 
         session_cell::with_installed(|session| {
             // Paired positive reach-guard: the submission INSERTED. A refusal
@@ -5606,7 +5690,7 @@ mod create_multiplayer_draft_tests {
         premier_pod(0, 60);
 
         let deck = seat_deck(0, 60);
-        submit_deck_inner(&json(&deck), "[]").expect("an undesignated deck submits");
+        submit_deck_inner(&json(&deck), "[]", None).expect("an undesignated deck submits");
 
         session_cell::with_installed(|session| {
             assert_eq!(
@@ -5651,7 +5735,7 @@ mod create_multiplayer_draft_tests {
 
         let deck = seat_deck(0, 60);
         let absent = vec!["Seat 0 Card 99".to_string()];
-        let err = submit_deck_inner(&json(&deck), &json(&absent))
+        let err = submit_deck_inner(&json(&deck), &json(&absent), None)
             .expect_err("CR 702.124h: a designation must be backed by a copy in the deck");
         assert!(
             err.contains("is designated as commander"),
@@ -5665,7 +5749,8 @@ mod create_multiplayer_draft_tests {
         // Paired positive: the same call with a name the deck DOES back
         // succeeds, so this row cannot pass because everything is refused.
         let present = vec!["Seat 0 Card 4".to_string()];
-        submit_deck_inner(&json(&deck), &json(&present)).expect("a backed designation submits");
+        submit_deck_inner(&json(&deck), &json(&present), None)
+            .expect("a backed designation submits");
 
         clear_state();
     }
@@ -5685,7 +5770,8 @@ mod create_multiplayer_draft_tests {
     #[test]
     fn submit_deck_inner_parses_the_designation_before_the_session() {
         clear_state();
-        let err = submit_deck_inner("[]", "kenrith").expect_err("a bare word is not a JSON array");
+        let err =
+            submit_deck_inner("[]", "kenrith", None).expect_err("a bare word is not a JSON array");
         assert!(
             err.contains("Failed to parse commanders"),
             "the commanders decode is the one that fired: {err}"
@@ -5706,7 +5792,7 @@ mod create_multiplayer_draft_tests {
         // CR 903.3: a Commander pod requires a designation, and this guard's
         // job is only to show the insert IS reached. `Seat 0 Card 0` is backed
         // by the deck and the pool, so nothing but the floor changes.
-        submit_deck_inner(&json(&deck), &json(&["Seat 0 Card 0".to_string()]))
+        submit_deck_inner(&json(&deck), &json(&["Seat 0 Card 0".to_string()]), None)
             .expect("a well-formed payload applies");
         session_cell::with_installed(|session| {
             assert_eq!(session.submitted_decks.len(), 1);
@@ -5738,7 +5824,7 @@ mod create_multiplayer_draft_tests {
         let designated = vec![filler.clone(), filler.clone()];
 
         // Accepted: two added copies, both designated.
-        submit_deck_inner(&json(&deck), &json(&designated))
+        submit_deck_inner(&json(&deck), &json(&designated), None)
             .expect("CR 903.13e: added filler copies designated as commanders are legal");
         session_cell::with_installed(|session| {
             let submission = session
@@ -5749,7 +5835,7 @@ mod create_multiplayer_draft_tests {
         });
 
         // Refused: the SAME deck with no designation.
-        let err = submit_deck_inner(&json(&deck), "[]")
+        let err = submit_deck_inner(&json(&deck), "[]", None)
             .expect_err("CR 903.13e: undesignated added filler is not legal");
         assert!(
             err.contains("designated as commander(s)"),
@@ -5786,7 +5872,7 @@ mod create_multiplayer_draft_tests {
         // validator on a third -- which would test the wrong arm.
         let designated = vec![filler.clone(), filler.clone()];
 
-        let err = submit_deck_inner(&json(&deck), &json(&designated))
+        let err = submit_deck_inner(&json(&deck), &json(&designated), None)
             .expect_err("CR 903.13e: at most two copies may be added");
         assert!(
             err.contains("but at most 2 may be added"),
@@ -5821,12 +5907,12 @@ mod create_multiplayer_draft_tests {
 
         let seat0_deck = seat_deck(0, 60);
         let seat0_commanders = vec!["Seat 0 Card 0".to_string()];
-        submit_deck_for_seat_inner(0, &json(&seat0_deck), &json(&seat0_commanders))
+        submit_deck_for_seat_inner(0, &json(&seat0_deck), &json(&seat0_commanders), None)
             .expect("seat 0 submits from its own pool");
 
         let seat2_deck = seat_deck(2, 60);
         let seat2_commanders = vec!["Seat 2 Card 1".to_string()];
-        submit_deck_for_seat_inner(2, &json(&seat2_deck), &json(&seat2_commanders))
+        submit_deck_for_seat_inner(2, &json(&seat2_deck), &json(&seat2_commanders), None)
             .expect("seat 2 submits from its own pool");
 
         session_cell::with_installed(|session| {
@@ -5866,6 +5952,186 @@ mod create_multiplayer_draft_tests {
                 .is_none());
         });
 
+        clear_state();
+    }
+
+    #[test]
+    fn companion_backing_is_the_pool_count_beyond_the_decks_use() {
+        let names = |cards: &[&str]| serde_json::to_string(cards).unwrap();
+        let backed = |pool: &[&str], deck: &[&str]| {
+            companion_backed_inner(&names(pool), &names(deck), "Gyruda, Doom of Depths").unwrap()
+        };
+        // Moving the only drafted copy into the deck leaves nothing outside it.
+        assert!(!backed(
+            &["Gyruda, Doom of Depths"],
+            &["Gyruda, Doom of Depths"]
+        ));
+        assert!(backed(&["Gyruda, Doom of Depths"], &["Island"]));
+        assert!(backed(
+            &["Gyruda, Doom of Depths", "Gyruda, Doom of Depths"],
+            &["Gyruda, Doom of Depths"]
+        ));
+        assert!(!backed(&["Island"], &["Island"]));
+        assert!(companion_backed_inner("not json", "[]", "Gyruda, Doom of Depths").is_err());
+    }
+
+    /// A card database where `companion` is a Gyruda-class companion (CR
+    /// 702.139b: each nonland card in the starting deck has an even mana value)
+    /// and every `Seat 0 Card i` of the starting deck has mana value 2 -- except
+    /// `odd_card`, which has mana value 3.
+    fn install_gyruda_class_db(companion: &str, odd_card: Option<&str>) {
+        use engine::types::card::CardFace;
+        use engine::types::keywords::{CompanionCondition, Keyword};
+        use engine::types::mana::ManaCost;
+        let mut faces: std::collections::BTreeMap<String, serde_json::Value> = Default::default();
+        let mut add = |face: CardFace| {
+            faces.insert(
+                face.name.to_lowercase(),
+                serde_json::to_value(&face).unwrap(),
+            );
+        };
+        for i in 0..39 {
+            let name = format!("Seat 0 Card {i}");
+            let mana_value = if odd_card == Some(name.as_str()) {
+                3
+            } else {
+                2
+            };
+            add(CardFace {
+                name,
+                mana_cost: ManaCost::generic(mana_value),
+                ..CardFace::default()
+            });
+        }
+        add(CardFace {
+            name: companion.to_string(),
+            keywords: vec![Keyword::Companion(CompanionCondition::EvenManaValues)],
+            ..CardFace::default()
+        });
+        let db = CardDatabase::from_json_str(&serde_json::to_string(&faces).unwrap()).unwrap();
+        CARD_DB.with(|cell| *cell.borrow_mut() = Some(db));
+    }
+
+    fn submitted_companion(seat: u8) -> Option<Option<String>> {
+        session_cell::with_installed(|session| {
+            session
+                .submitted_decks
+                .get(&engine::types::player::PlayerId(seat))
+                .map(|submission| submission.companion.clone())
+        })
+    }
+
+    fn companion_test_deck() -> (Vec<String>, String) {
+        let mut deck = seat_deck(0, 39);
+        deck.push("Plains".to_string());
+        (deck, "Seat 0 Card 39".to_string())
+    }
+
+    #[test]
+    fn submit_deck_inner_carries_companion_to_the_session() {
+        clear_state();
+        premier_pod(0, 40);
+        let (deck, companion) = companion_test_deck();
+        install_gyruda_class_db(&companion, None);
+
+        submit_deck_inner(&json(&deck), "[]", Some(&companion))
+            .expect("an eligible companion with a drafted copy submits");
+
+        assert_eq!(submitted_companion(0), Some(Some(companion)));
+        clear_state();
+    }
+
+    /// CR 702.139b: the draft refuses, before the reducer mutates and so before
+    /// any acknowledgement, a companion whose starting-deck condition the deck
+    /// breaks -- the same verdict match admission would give.
+    #[test]
+    fn submission_refuses_a_companion_the_starting_deck_makes_ineligible() {
+        clear_state();
+        premier_pod(0, 40);
+        let (deck, companion) = companion_test_deck();
+        install_gyruda_class_db(&companion, Some("Seat 0 Card 7"));
+
+        for result in [
+            submit_deck_inner(&json(&deck), "[]", Some(&companion)),
+            submit_deck_for_seat_inner(0, &json(&deck), "[]", Some(&companion)),
+        ] {
+            let error = result.expect_err("an odd mana value breaks the Gyruda condition");
+            assert!(error.contains("not a legal companion"), "{error}");
+        }
+        assert_eq!(
+            submitted_companion(0),
+            None,
+            "a refused deck is not recorded"
+        );
+        // The same deck without the designation is an ordinary legal submission.
+        submit_deck_for_seat_inner(0, &json(&deck), "[]", None).expect("the deck itself is legal");
+        clear_state();
+    }
+
+    /// A designation cannot be verified without a card database, so it is not
+    /// admitted rather than trusted.
+    /// CR 903.11a: a Commander Draft submission is measured like Commander
+    /// admission -- the companion must fit the designated commander's color
+    /// identity. Here that is the ONLY failing condition (the companion's own
+    /// condition and the deck are fine), so only the commander context refuses it.
+    #[test]
+    fn commander_draft_submission_checks_the_companion_against_the_commander_identity() {
+        use engine::types::card::CardFace;
+        use engine::types::keywords::{CompanionCondition, Keyword};
+        use engine::types::mana::ManaColor;
+        let install = |companion_identity: ManaColor| {
+            let mut faces: std::collections::BTreeMap<String, serde_json::Value> =
+                Default::default();
+            let mut add = |face: CardFace| {
+                faces.insert(
+                    face.name.to_lowercase(),
+                    serde_json::to_value(&face).unwrap(),
+                );
+            };
+            add(CardFace {
+                name: "Seat 0 Card 0".to_string(),
+                color_identity: vec![ManaColor::White],
+                ..CardFace::default()
+            });
+            add(CardFace {
+                name: "Seat 0 Card 60".to_string(),
+                color_identity: vec![companion_identity],
+                keywords: vec![Keyword::Companion(CompanionCondition::MinManaValue(0))],
+                ..CardFace::default()
+            });
+            let db = CardDatabase::from_json_str(&serde_json::to_string(&faces).unwrap()).unwrap();
+            CARD_DB.with(|cell| *cell.borrow_mut() = Some(db));
+        };
+        clear_state();
+        granting_commander_pod(0, 61);
+        let deck = seat_deck(0, 60);
+        let commanders = json(&["Seat 0 Card 0".to_string()]);
+        let companion = "Seat 0 Card 60";
+
+        install(ManaColor::Blue);
+        let error = submit_deck_inner(&json(&deck), &commanders, Some(companion))
+            .expect_err("a blue companion is outside a white commander's identity");
+        assert!(error.contains("not a legal companion"), "{error}");
+        assert_eq!(submitted_companion(0), None);
+
+        install(ManaColor::White);
+        submit_deck_inner(&json(&deck), &commanders, Some(companion))
+            .expect("a companion inside the commander's identity is admitted");
+        assert_eq!(submitted_companion(0), Some(Some(companion.to_string())));
+        clear_state();
+    }
+
+    #[test]
+    fn submission_refuses_a_companion_it_cannot_verify() {
+        clear_state();
+        premier_pod(0, 40);
+        let (deck, companion) = companion_test_deck();
+        CARD_DB.with(|cell| *cell.borrow_mut() = None);
+
+        let error = submit_deck_for_seat_inner(0, &json(&deck), "[]", Some(&companion))
+            .expect_err("no card database, no verified designation");
+        assert!(error.contains("cannot be verified"), "{error}");
+        assert_eq!(submitted_companion(0), None);
         clear_state();
     }
 

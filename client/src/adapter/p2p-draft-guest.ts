@@ -63,7 +63,7 @@ export type DraftGuestEvent =
   | { type: "viewUpdated"; view: DraftPlayerView }
   | { type: "pickAcknowledged"; view: DraftPlayerView }
   | { type: "deckSubmissionAcknowledged"; submissionId: string; view: DraftPlayerView }
-  | { type: "recoveredDeckSubmissionAccepted"; mainDeck: string[]; commanders: string[]; view: DraftPlayerView }
+  | { type: "recoveredDeckSubmissionAccepted"; mainDeck: string[]; commanders: string[]; companion?: string | null; view: DraftPlayerView }
   | { type: "lobbyUpdate"; seats: SeatPublicView[]; joined: number; total: number }
   | { type: "draftPaused"; reason: DraftPauseReason }
   | { type: "draftResumed" }
@@ -170,6 +170,7 @@ interface DraftDeckSubmissionWaiter {
   activeAttempts: number;
   mainDeck: string[];
   commanders: string[];
+  companion?: string | null;
   callerAttempts: number;
   acknowledged: boolean;
   sessions: Set<DraftPeerSession>;
@@ -451,9 +452,9 @@ export class P2PDraftGuest {
     });
   }
 
-  submitDeck(mainDeck: string[], commanders: string[]): Promise<void> {
+  submitDeck(mainDeck: string[], commanders: string[], companion?: string | null): Promise<void> {
     if (this.pendingDeckSubmission) return this.pendingDeckSubmission;
-    const submission = this.submitDeckInner(mainDeck, commanders);
+    const submission = this.submitDeckInner(mainDeck, commanders, companion);
     this.pendingDeckSubmission = submission;
     void submission.then(
       () => {
@@ -466,7 +467,7 @@ export class P2PDraftGuest {
     return submission;
   }
 
-  private async submitDeckInner(mainDeck: string[], commanders: string[]): Promise<void> {
+  private async submitDeckInner(mainDeck: string[], commanders: string[], companion?: string | null): Promise<void> {
     const identity = this.deckSubmissionIdentity();
     if (!identity) throw new Error("Draft identity is unavailable");
     const existing = await loadDraftDeckSubmission(this.hostPeerId, identity);
@@ -476,13 +477,15 @@ export class P2PDraftGuest {
     // replay the STORED designation, discarding the player's change.
     const samePayload = existing !== null
       && deckSubmissionFingerprint(existing.mainDeck) === deckSubmissionFingerprint(mainDeck)
-      && deckSubmissionFingerprint(existing.commanders) === deckSubmissionFingerprint(commanders);
+      && deckSubmissionFingerprint(existing.commanders) === deckSubmissionFingerprint(commanders)
+      && (existing.companion ?? null) === (companion ?? null);
     if (existing && !samePayload) {
       throw new Error("A deck submission is still awaiting host confirmation");
     }
     const submissionId = existing?.submissionId ?? crypto.randomUUID();
     const payload = existing?.mainDeck ?? mainDeck;
     const designation = existing?.commanders ?? commanders;
+    const companionDesignation = existing ? existing.companion : companion;
     if (!existing) {
       await saveDraftDeckSubmission(this.hostPeerId, {
         ...identity,
@@ -490,15 +493,17 @@ export class P2PDraftGuest {
         submissionId,
         mainDeck: payload,
         commanders: designation,
+        companion: companionDesignation,
       });
     }
-    await this.sendDeckSubmission(submissionId, payload, designation, "caller");
+    await this.sendDeckSubmission(submissionId, payload, designation, companionDesignation, "caller");
   }
 
   private async sendDeckSubmission(
     submissionId: string,
     mainDeck: string[],
     commanders: string[],
+    companion: string | null | undefined,
     origin: DeckSubmissionOrigin,
   ): Promise<void> {
     const session = this.session;
@@ -514,7 +519,7 @@ export class P2PDraftGuest {
       });
       waiter = {
         acknowledgement, resolve, reject, activeAttempts: 0,
-        mainDeck, commanders, callerAttempts: 0, acknowledged: false,
+        mainDeck, commanders, companion, callerAttempts: 0, acknowledged: false,
         sessions: new Set(), routes: new Set(),
       };
       this.deckSubmissionWaiters.set(submissionId, waiter);
@@ -526,7 +531,13 @@ export class P2PDraftGuest {
     try {
       // Observe the receipt even if the session closes while encoding the send.
       await Promise.all([
-        session.send({ type: "draft_submit_deck", submissionId, mainDeck, commanders }),
+        session.send({
+          type: "draft_submit_deck",
+          submissionId,
+          mainDeck,
+          commanders,
+          ...(companion !== undefined ? { companion } : {}),
+        }),
         waiter.acknowledgement,
       ]);
     } catch (error) {
@@ -575,7 +586,7 @@ export class P2PDraftGuest {
     if (!pending || !this.session) return;
     // Do not await here: the reconnect handshake must finish before normal
     // state consumers run, while its durable submission can wait for its ack.
-    void this.sendDeckSubmission(pending.submissionId, pending.mainDeck, pending.commanders, "replay")
+    void this.sendDeckSubmission(pending.submissionId, pending.mainDeck, pending.commanders, pending.companion, "replay")
       .catch((error: unknown) => this.emit({
         type: "error",
         message: error instanceof Error ? error.message : String(error),
@@ -795,6 +806,7 @@ export class P2PDraftGuest {
               type: "recoveredDeckSubmissionAccepted",
               mainDeck: ackWaiter.mainDeck,
               commanders: ackWaiter.commanders,
+              companion: ackWaiter.companion,
               view: msg.view,
             });
           }

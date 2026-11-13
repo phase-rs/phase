@@ -184,6 +184,12 @@ describe("isFormatConfigShape", () => {
     expect(isFormatConfigShape({ ...builtInConfig(), supplies_fixed_deck: "yes" })).toBe(false);
   });
 
+  it("accepts the draft-session deck-size provenance and rejects an unknown one", () => {
+    expect(isFormatConfigShape({ ...builtInConfig(), deck_size_origin: "DraftSession" })).toBe(true);
+    expect(isFormatConfigShape({ ...builtInConfig(), deck_size_origin: "Registry" })).toBe(true);
+    expect(isFormatConfigShape({ ...builtInConfig(), deck_size_origin: "Host" })).toBe(false);
+  });
+
   it("rejects a bare integer deck_size (the pre-DeckSizeRule wire shape)", () => {
     expect(isFormatConfigShape({ ...builtInConfig(), deck_size: 100 })).toBe(false);
   });

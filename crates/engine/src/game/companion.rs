@@ -6,7 +6,7 @@ use crate::types::card_printing::DeckSection;
 use crate::types::card_type::CoreType;
 use crate::types::display_only::DisplayOnly;
 use crate::types::events::GameEvent;
-use crate::types::format::{GameFormat, SideboardPolicy};
+use crate::types::format::{CompanionSlot, GameFormat, SideboardPolicy};
 use crate::types::game_state::{
     CompanionChoiceSource, CompanionDeclaration, CompanionRevealChoice, GameState,
     ManaAbilityResume, PlayerDeckPool, WaitingFor,
@@ -66,6 +66,16 @@ fn is_creature(face: &CardFace) -> bool {
 pub fn validate_companion_condition(
     condition: &CompanionCondition,
     main_deck: &[DeckEntry],
+) -> bool {
+    validate_companion_condition_with_min_deck_size(condition, main_deck, 60)
+}
+
+/// CR 702.139: Validate that a main deck meets a companion's deckbuilding condition
+/// for a format with the given minimum deck size (e.g. 40 for Limited, 60 for Constructed).
+pub fn validate_companion_condition_with_min_deck_size(
+    condition: &CompanionCondition,
+    main_deck: &[DeckEntry],
+    min_deck_size: usize,
 ) -> bool {
     match condition {
         CompanionCondition::EvenManaValues => main_deck
@@ -141,8 +151,8 @@ pub fn validate_companion_condition(
 
         CompanionCondition::MinDeckSizeOver(over) => {
             let total: u32 = main_deck.iter().map(|e| e.count).sum();
-            // Yorion requires 80+ cards (60 minimum + 20 over)
-            total >= 60 + over
+            // Yorion requires min_deck_size + 20 cards (e.g. 60 in 40-card Limited, 80 in 60-card Constructed)
+            total >= (min_deck_size as u32) + over
         }
 
         CompanionCondition::PermanentsHaveActivatedAbilities => main_deck.iter().all(|entry| {
@@ -236,6 +246,24 @@ pub fn is_eligible_companion(
     commanders: &[DeckEntry],
     uses_commander: bool,
 ) -> bool {
+    is_eligible_companion_with_min_deck_size(
+        companion,
+        starting_deck,
+        commanders,
+        uses_commander,
+        60,
+    )
+}
+
+/// Tests one candidate against a complete starting deck for a format with the
+/// given minimum deck size.
+pub fn is_eligible_companion_with_min_deck_size(
+    companion: &DeckEntry,
+    starting_deck: &[DeckEntry],
+    commanders: &[DeckEntry],
+    uses_commander: bool,
+    min_deck_size: usize,
+) -> bool {
     // allow-raw-authority: DeckEntry carries a printed CardFace snapshot; deck validation has no GameState or live object to query.
     let Some(condition) = companion.card.keywords.iter().find_map(|keyword| {
         if let Keyword::Companion(condition) = keyword {
@@ -247,51 +275,97 @@ pub fn is_eligible_companion(
         return false;
     };
 
-    validate_companion_condition(condition, starting_deck)
+    validate_companion_condition_with_min_deck_size(condition, starting_deck, min_deck_size)
         && commander_allows_companion(companion, starting_deck, commanders, uses_commander)
 }
 
-/// Both facts are passed as already-resolved values rather than a bare
-/// `GameFormat`: `GameFormat::uses_commander()` panics for `Custom`, and
-/// `GameFormat::sideboard_policy()`'s disclosed `Custom` fallback
-/// (`Forbidden`) would silently discard a Custom format's real declared
-/// policy sitting in `custom_rules.structural.sideboard_policy` — the
-/// resolved `FormatConfig.uses_commander`/`.sideboard_policy` fields are the
-/// caller's only safe source of truth for either.
+/// CR 702.139a: the companions `pool` may reveal, by the format's resolved
+/// companion slot and sideboard policy (`FormatConfig::companion_slot` /
+/// `.sideboard_policy`; never the bare `GameFormat` methods, whose `Custom`
+/// answers cannot see a custom format's declared rules).
+///
+/// - Commander family: only the dedicated slot. Commander games use no
+///   sideboard (CR 903.5e).
+/// - Otherwise: "one card you own from outside the game" is any sideboard card
+///   (CR 400.11a), and a Limited designation is one more such card. Every
+///   eligible candidate is offered, so an ineligible designation (a Lurrus whose
+///   deck took on a three-drop between games) never hides an eligible sideboard
+///   companion. A name offered from the designated slot is not offered again
+///   from the sideboard.
 fn companion_offers(
     pool: &PlayerDeckPool,
+    companion_slot: CompanionSlot,
     sideboard_policy: SideboardPolicy,
     uses_commander: bool,
+    min_deck_size: usize,
 ) -> Vec<CompanionRevealChoice> {
     let starting =
         companion_starting_deck(&pool.current_main, &pool.current_commander, uses_commander);
-    let candidates: Vec<(CompanionChoiceSource, &DeckEntry)> = if uses_commander {
-        pool.current_companion
-            .first()
-            .map(|entry| (CompanionChoiceSource::Dedicated, entry))
-            .into_iter()
-            .collect()
-    } else if !matches!(sideboard_policy, SideboardPolicy::Forbidden) {
-        pool.current_sideboard
-            .iter()
-            .enumerate()
-            .map(|(index, entry)| (CompanionChoiceSource::Sideboard { index }, entry))
-            .collect()
-    } else {
-        Vec::new()
+    let eligible = |entry: &DeckEntry| {
+        is_eligible_companion_with_min_deck_size(
+            entry,
+            &starting,
+            &pool.current_commander,
+            uses_commander,
+            min_deck_size,
+        )
     };
 
-    candidates
-        .into_iter()
-        .filter_map(|(source, entry)| {
-            is_eligible_companion(entry, &starting, &pool.current_commander, uses_commander).then(
-                || CompanionRevealChoice {
-                    name: entry.card.name.clone(),
-                    source,
-                },
-            )
+    let mut offers: Vec<CompanionRevealChoice> = pool
+        .current_companion
+        .first()
+        .filter(|_| companion_slot != CompanionSlot::SideboardOnly)
+        .filter(|entry| eligible(entry))
+        .map(|entry| CompanionRevealChoice {
+            name: entry.card.name.clone(),
+            source: CompanionChoiceSource::Dedicated,
         })
-        .collect()
+        .into_iter()
+        .collect();
+
+    let sideboard_offers = match companion_slot {
+        CompanionSlot::CommanderFamily => false,
+        CompanionSlot::SideboardOnly | CompanionSlot::LimitedPool => {
+            !matches!(sideboard_policy, SideboardPolicy::Forbidden)
+        }
+    };
+    if sideboard_offers {
+        for (index, entry) in pool.current_sideboard.iter().enumerate() {
+            if offers.iter().any(|offer| {
+                offer.source == CompanionChoiceSource::Dedicated && offer.name == entry.card.name
+            }) || !eligible(entry)
+            {
+                continue;
+            }
+            offers.push(CompanionRevealChoice {
+                name: entry.card.name.clone(),
+                source: CompanionChoiceSource::Sideboard { index },
+            });
+        }
+    }
+    offers
+}
+
+/// CR 100.4b + CR 702.139a: closes the pregame companion reveal window. A
+/// Limited designation that was not revealed from its slot (declined, never
+/// offered, or passed over for a sideboard companion) is an ordinary pool card
+/// outside the deck, i.e. a sideboard card (CR 400.11a), for the rest of the
+/// game, where outside-the-game effects can find it. A revealed designation
+/// already left the slot when it was revealed.
+pub(crate) fn close_companion_reveals(state: &mut GameState) {
+    if state.format_config.companion_slot() != CompanionSlot::LimitedPool {
+        return;
+    }
+    for pool in &mut state.deck_pools {
+        if pool.current_companion.is_empty() {
+            continue;
+        }
+        let released = std::mem::take(std::sync::Arc::make_mut(&mut pool.current_companion));
+        let sideboard = std::sync::Arc::make_mut(&mut pool.current_sideboard);
+        for entry in released {
+            deck_loading::add_deck_copies(sideboard, &entry, entry.count);
+        }
+    }
 }
 
 /// CR 702.139a: Check if a player has eligible companions from their permitted
@@ -299,10 +373,13 @@ fn companion_offers(
 /// Returns CompanionReveal WaitingFor if eligible companions exist, otherwise None.
 pub fn check_companion_reveal(state: &GameState, player: PlayerId) -> Option<WaitingFor> {
     let pool = state.deck_pools.iter().find(|p| p.player == player)?;
+    let min_deck_size = state.format_config.deck_size.min_cards() as usize;
     let mut eligible = companion_offers(
         pool,
+        state.format_config.companion_slot(),
         state.format_config.sideboard_policy,
         state.format_config.uses_commander,
+        min_deck_size,
     );
     if state.format_config.format == GameFormat::TinyLeaders {
         eligible
@@ -370,6 +447,7 @@ pub fn handle_declare_companion(
             .iter_mut()
             .find(|pool| pool.player == player)
             .ok_or_else(|| "Player deck pool does not exist".to_string())?;
+        let min_deck_size = state.format_config.deck_size.min_cards() as usize;
         let starting = companion_starting_deck(
             &pool.current_main,
             &pool.current_commander,
@@ -383,11 +461,12 @@ pub fn handle_declare_companion(
                     .filter(|entry| entry.card.name == choice.name)
                     .cloned()
                     .ok_or_else(|| "Companion sideboard offer is stale".to_string())?;
-                if !is_eligible_companion(
+                if !is_eligible_companion_with_min_deck_size(
                     &entry,
                     &starting,
                     &pool.current_commander,
                     state.format_config.uses_commander,
+                    min_deck_size,
                 ) {
                     return Err("Companion is no longer eligible".to_string());
                 }
@@ -413,12 +492,13 @@ pub fn handle_declare_companion(
                     .filter(|entry| entry.card.name == choice.name)
                     .cloned()
                     .ok_or_else(|| "Dedicated companion offer is stale".to_string())?;
-                if !state.format_config.uses_commander
-                    || !is_eligible_companion(
+                if state.format_config.companion_slot() == CompanionSlot::SideboardOnly
+                    || !is_eligible_companion_with_min_deck_size(
                         &entry,
                         &starting,
                         &pool.current_commander,
                         state.format_config.uses_commander,
+                        min_deck_size,
                     )
                 {
                     return Err("Companion is no longer eligible".to_string());
@@ -466,8 +546,12 @@ pub(super) fn companion_reveals_or_agenda(
     state: &mut GameState,
     events: &mut Vec<GameEvent>,
 ) -> WaitingFor {
-    check_all_companion_reveals(state)
-        .unwrap_or_else(|| super::conspiracy::agenda_choices_or_mulligan(state, events))
+    check_all_companion_reveals(state).unwrap_or_else(|| {
+        // CR 100.4b + CR 702.139a: no reveal is offered, so the window closes
+        // now and any unrevealed Limited designation returns to the sideboard.
+        close_companion_reveals(state);
+        super::conspiracy::agenda_choices_or_mulligan(state, events)
+    })
 }
 
 /// CR 702.139a: Move past `current_player` to the next living player's
@@ -499,7 +583,9 @@ pub(super) fn advance_companion_reveal(
         }
     }
 
-    // All players done — proceed to the conspiracy agenda step, then mulligans.
+    // All players done — close the reveal window (CR 100.4b + CR 702.139a),
+    // then proceed to the conspiracy agenda step, then mulligans.
+    close_companion_reveals(state);
     super::conspiracy::agenda_choices_or_mulligan(state, events)
 }
 
@@ -682,7 +768,7 @@ pub(crate) fn resume_companion_to_hand_payment(
 mod tests {
     use super::*;
     use crate::types::card::CardFace;
-    use crate::types::card_type::{CardType, CoreType};
+    use crate::types::card_type::{CardType, CoreType, Supertype};
     use crate::types::keywords::CompanionCondition;
     use crate::types::mana::ManaCost;
 
@@ -943,6 +1029,50 @@ mod tests {
         assert!(!validate_companion_condition(
             &CompanionCondition::MinDeckSizeOver(20),
             &deck
+        ));
+    }
+
+    #[test]
+    fn min_deck_size_over_limited_valid() {
+        // In 40-card Limited, Yorion (+20) requires 60 cards
+        let deck = vec![DeckEntry {
+            card: CardFace {
+                name: "Plains".to_string(),
+                card_type: CardType {
+                    supertypes: vec![Supertype::Basic],
+                    core_types: vec![CoreType::Land],
+                    subtypes: vec![],
+                },
+                ..Default::default()
+            },
+            count: 60,
+        }];
+        assert!(validate_companion_condition_with_min_deck_size(
+            &CompanionCondition::MinDeckSizeOver(20),
+            &deck,
+            40,
+        ));
+    }
+
+    #[test]
+    fn min_deck_size_over_limited_invalid() {
+        // 59 cards is not enough for Yorion in 40-card Limited (needs 60)
+        let deck = vec![DeckEntry {
+            card: CardFace {
+                name: "Plains".to_string(),
+                card_type: CardType {
+                    supertypes: vec![Supertype::Basic],
+                    core_types: vec![CoreType::Land],
+                    subtypes: vec![],
+                },
+                ..Default::default()
+            },
+            count: 59,
+        }];
+        assert!(!validate_companion_condition_with_min_deck_size(
+            &CompanionCondition::MinDeckSizeOver(20),
+            &deck,
+            40,
         ));
     }
 

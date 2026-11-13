@@ -3138,7 +3138,9 @@ async fn serve() {
     // `hosting`) — see `server_core::game_log`.
     session_manager.game_log = Arc::clone(&game_log);
     let state: SharedState = Arc::new(Mutex::new(session_manager));
-    let draft_sessions: SharedDraftState = Arc::new(Mutex::new(DraftSessionManager::new()));
+    let draft_sessions: SharedDraftState = Arc::new(Mutex::new(
+        DraftSessionManager::new().with_card_db(db.clone()),
+    ));
     let draft_pools: SharedDraftPools = match data_bootstrap::load_data_file(
         data_path,
         data_bootstrap::DRAFT_POOLS_FILE,
@@ -22439,6 +22441,7 @@ mod handshake_tests {
                 seat: 0,
                 main_deck: vec![],
                 commanders: vec![],
+                companion: None,
                 printings: vec![],
             },
             draft_core::types::DraftAction::ReportMatchResult {

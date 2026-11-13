@@ -12,6 +12,7 @@ import { formatMetadata } from "../../data/formatRegistry";
 import {
   commanderPartnerCandidates,
   isCardCommanderEligibleForFormat,
+  isCardCompanion,
 } from "../../services/engineRuntime";
 import { menuButtonClass } from "../menu/buttonStyles";
 import { PopoverMenu } from "../menu/PopoverMenu";
@@ -26,6 +27,8 @@ import {
   type DeckCompatibilityResult,
 } from "../../services/deckCompatibility";
 import { draftSubmissionToParsedDeck } from "../../services/draftDeckAutosave";
+import { netCompanionFromPoolSideboard } from "../../services/savedDeckProjection";
+import { companionHasDraftedCopyOutsideDeck } from "../../viewmodel/limitedCompanion";
 import type {
   DraftCardInstance,
   DraftPlayerView,
@@ -412,6 +415,240 @@ function useCommanderDesignation({
   };
 }
 
+function useLimitedCompanion({
+  pool,
+  mainDeckNames,
+  initialCompanion = null,
+  onCompanionSelect,
+}: {
+  pool: DraftCardInstance[];
+  /** The main deck's card names, one entry per copy. */
+  mainDeckNames: readonly string[];
+  /**
+   * The companion the player's last accepted submission designated. The
+   * builder starts from it, so reopening a submitted deck keeps an unchanged
+   * designation and only an explicit removal clears it.
+   */
+  initialCompanion?: string | null;
+  onCompanionSelect?: (cardName: string) => void;
+}) {
+  const [selectedCompanion, setCompanion] = useState<string | null>(initialCompanion);
+  // The accepted designation can arrive AFTER mount (a rejoin restores it from
+  // the host's authoritative view once the handshake completes). Adopt it unless
+  // the player has already edited the designation this session: an unsaved local
+  // choice is never clobbered by a late restore. Once the host's accepted value
+  // equals the local one, that edit is saved and later restores apply again.
+  const selectedCompanionRef = useRef(selectedCompanion);
+  selectedCompanionRef.current = selectedCompanion;
+  const companionEditedLocally = useRef(false);
+  const lastInitialCompanion = useRef(initialCompanion);
+  useEffect(() => {
+    if (lastInitialCompanion.current === initialCompanion) return;
+    lastInitialCompanion.current = initialCompanion;
+    if (!companionEditedLocally.current) {
+      setCompanion(initialCompanion);
+    } else if (selectedCompanionRef.current === initialCompanion) {
+      companionEditedLocally.current = false;
+    }
+  }, [initialCompanion]);
+  const [companionCandidates, setCompanionCandidates] = useState<string[] | null>(null);
+  const [eligibilityFailed, setEligibilityFailed] = useState(false);
+
+  const poolCardNames = useMemo(
+    () => [...new Set(pool.map((c) => c.name).filter(Boolean))],
+    [pool],
+  );
+
+  useEffect(() => {
+    let cancelled = false;
+    Promise.all(
+      poolCardNames.map(async (name) => [name, await isCardCompanion(name)] as const),
+    )
+      .then((results) => {
+        if (cancelled) return;
+        setCompanionCandidates(results.filter(([, isComp]) => isComp).map(([name]) => name));
+        setEligibilityFailed(false);
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setCompanionCandidates(null);
+        setEligibilityFailed(true);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [poolCardNames]);
+
+  useEffect(() => {
+    if (
+      selectedCompanion
+      && companionCandidates !== null
+      && !companionCandidates.includes(selectedCompanion)
+    ) {
+      setCompanion(null);
+    }
+  }, [selectedCompanion, companionCandidates]);
+
+  // CR 702.139a + CR 100.4b: the designation is a card the player owns outside
+  // the game, i.e. a drafted copy the main deck does not use. The ENGINE decides
+  // that (the rule submission enforces); the selection stays, but only a backed
+  // one is designated, so moving the last copy into the deck never exports or
+  // submits a second card.
+  const poolNames = useMemo(() => pool.map((card) => card.name), [pool]);
+  const backingKey = useMemo(
+    () => JSON.stringify([selectedCompanion, poolNames, mainDeckNames]),
+    [selectedCompanion, poolNames, mainDeckNames],
+  );
+  const [backing, setBacking] = useState<{ key: string; backed: boolean } | null>(null);
+  useEffect(() => {
+    // The key carries every input by value, so a re-render handing this hook
+    // equal-content arrays does not re-ask the engine.
+    const [designated, pooled, deck] = JSON.parse(backingKey) as [string | null, string[], string[]];
+    if (!designated) return;
+    let cancelled = false;
+    companionHasDraftedCopyOutsideDeck(pooled, deck, designated)
+      .then((backed) => {
+        if (!cancelled) setBacking({ key: backingKey, backed });
+      })
+      .catch(() => {
+        // Unanswerable: stay unresolved. Submission is still gated by the engine.
+        if (!cancelled) setBacking(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [backingKey]);
+  const companionBacked: boolean | null = selectedCompanion && backing?.key === backingKey
+    ? backing.backed
+    : null;
+  const companion = companionBacked === false ? null : selectedCompanion;
+
+  const handleSetCompanion = useCallback((cardName: string) => {
+    companionEditedLocally.current = true;
+    setCompanion(cardName);
+    onCompanionSelect?.(cardName);
+  }, [onCompanionSelect]);
+
+  const handleRemoveCompanion = useCallback(() => {
+    companionEditedLocally.current = true;
+    setCompanion(null);
+  }, []);
+
+  return {
+    companion,
+    companionBacked,
+    companionCandidates,
+    eligibilityFailed,
+    handleSetCompanion,
+    handleRemoveCompanion,
+  };
+}
+
+interface LimitedCompanionPanelProps {
+  companion: string | null;
+  companionCandidates: string[];
+  onSetCompanion: (cardName: string) => void;
+  onRemoveCompanion: () => void;
+  onCardHover?: (info: CardHoverInfo | null) => void;
+  compatibilityReasons: string[];
+  compatibilityPending: boolean;
+  compatibilityUnavailable: boolean;
+  isCompatible: boolean;
+}
+
+function LimitedCompanionPanel({
+  companion,
+  companionCandidates,
+  onSetCompanion,
+  onRemoveCompanion,
+  onCardHover,
+  compatibilityReasons,
+  compatibilityPending,
+  compatibilityUnavailable,
+  isCompatible,
+}: LimitedCompanionPanelProps) {
+  const { t } = useTranslation("draft");
+  const { t: tDeckBuilder } = useTranslation("deck-builder");
+
+  if (companionCandidates.length === 0) return null;
+
+  return (
+    <section className="flex flex-col gap-2 rounded-xl border border-white/10 bg-white/5 p-3">
+      <h4 className="text-xs font-semibold uppercase text-gray-400">
+        {tDeckBuilder("commanderPanel.companion.heading")}
+      </h4>
+
+      {companion ? (
+        <div className="space-y-2">
+          <div
+            onMouseEnter={() => onCardHover?.({ name: companion })}
+            onMouseLeave={() => onCardHover?.(null)}
+            className="flex items-center justify-between rounded bg-blue-900/30 px-2.5 py-1.5 ring-1 ring-blue-500/20"
+          >
+            <span className="text-sm font-medium text-blue-300">{companion}</span>
+            <button
+              type="button"
+              onClick={onRemoveCompanion}
+              className="min-h-11 px-2 text-xs text-red-400 hover:text-red-300 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-300"
+            >
+              {tDeckBuilder("commanderPanel.companion.remove")}
+            </button>
+          </div>
+
+          {/* Visual indication for companion requirements */}
+          {compatibilityPending ? (
+            <p className="text-xs text-white/50">{t("limitedDeck.compatibilityPending")}</p>
+          ) : compatibilityUnavailable ? (
+            <p role="alert" className="text-xs text-amber-300/80">
+              {t("limitedDeck.compatibilityUnavailable")}
+            </p>
+          ) : isCompatible ? (
+            <div className="flex items-center gap-1.5 rounded border border-emerald-500/30 bg-emerald-950/40 px-2.5 py-1 text-xs text-emerald-400">
+              <span className="font-bold">✓</span>
+              <span>{t("limitedDeck.companionMet")}</span>
+            </div>
+          ) : (
+            <div className="space-y-1 rounded border border-amber-500/30 bg-amber-950/40 px-2.5 py-1.5 text-xs text-amber-300">
+              <div className="flex items-center gap-1.5 font-medium">
+                <span className="font-bold">⚠</span>
+                <span>{t("limitedDeck.companionUnmet")}</span>
+              </div>
+              {compatibilityReasons.length > 0 && (
+                <ul className="list-inside list-disc space-y-0.5 text-[11px] text-amber-200/80">
+                  {compatibilityReasons.map((reason) => (
+                    <li key={reason}>{reason}</li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          )}
+        </div>
+      ) : (
+        <div className="space-y-2">
+          <p className="text-xs text-gray-400">
+            {tDeckBuilder("commanderPanel.companion.noCompanion")}
+          </p>
+          <div className="space-y-1">
+            <span className="text-[10px] text-gray-500">{t("limitedDeck.setCompanion")}:</span>
+            {companionCandidates.map((name) => (
+              <button
+                key={name}
+                type="button"
+                onClick={() => onSetCompanion(name)}
+                onMouseEnter={() => onCardHover?.({ name })}
+                onMouseLeave={() => onCardHover?.(null)}
+                className="block min-h-11 w-full truncate rounded bg-blue-800/40 px-2 py-1 text-left text-xs text-blue-300 hover:bg-blue-700/40 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-300"
+              >
+                {name}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+    </section>
+  );
+}
+
 type DraftDeckCompatibilityState =
   | { key: string; status: "pending" }
   | { key: string; status: "resolved"; result: DeckCompatibilityResult }
@@ -423,18 +660,24 @@ function useCommanderDraftCompatibility({
   draftSetCodes,
   main,
   commanders,
+  companion = null,
+  minDeckSize,
 }: {
   enforceCompatibility: boolean;
-  selectedFormat: "CommanderDraft" | null;
+  selectedFormat: GameFormat | null;
   draftSetCodes: readonly string[];
   main: DeckEntry[];
   commanders: string[];
+  companion?: string | null;
+  /** The draft session's resolved minimum deck size (CR 100.2b + CR 702.139b). */
+  minDeckSize?: number | null;
 }) {
   const request = useMemo<ParsedDeck>(() => ({
     main,
     sideboard: [],
     commander: commanders,
-  }), [main, commanders]);
+    companion: companion ?? undefined,
+  }), [main, commanders, companion]);
   const key = useMemo(() => JSON.stringify({
     enforceCompatibility,
     selectedFormat,
@@ -445,8 +688,9 @@ function useCommanderDraftCompatibility({
     planarDeck: [],
     schemeDeck: [],
     signatureSpell: [],
-    companion: null,
-  }), [enforceCompatibility, selectedFormat, draftSetCodes, main, commanders]);
+    companion: companion ? [companion] : [],
+    minDeckSize: minDeckSize ?? null,
+  }), [enforceCompatibility, selectedFormat, draftSetCodes, main, commanders, companion, minDeckSize]);
   const [state, setState] = useState<DraftDeckCompatibilityState | null>(null);
   const generationRef = useRef(0);
 
@@ -456,6 +700,7 @@ function useCommanderDraftCompatibility({
     evaluateDeckCompatibility(request, {
       selectedFormat,
       draftSetCodes,
+      minDeckSize,
     })
       .then((result) => {
         if (generation === generationRef.current) {
@@ -465,13 +710,13 @@ function useCommanderDraftCompatibility({
       .catch(() => {
         if (generation === generationRef.current) setState({ key, status: "error" });
       });
-    // `enforceCompatibility`, `draftSetCodes`, and `selectedFormat` are deliberately absent from this
-    // dependency array: both ride in the `key` memo above, whose value is a
+    // `enforceCompatibility`, `draftSetCodes`, `selectedFormat`, and `minDeckSize` are deliberately absent from this
+    // dependency array: all of them ride in the `key` memo above, whose value is a
     // JSON.stringify string, and React compares dependencies with Object.is,
     // which is by value for strings — so a re-render handing this hook a
     // different array of equal content does not re-fire the evaluator while
-    // one of different content does. The exhaustive-deps warning naming those
-    // two is expected; do NOT silence it by adding them. `cd client && npx
+    // one of different content does. The exhaustive-deps warning naming them
+    // is expected; do NOT silence it by adding them. `cd client && npx
     // eslint src/components/draft/LimitedDeckBuilder.tsx` prints that warning,
     // and `cd client && npx vitest run --coverage.enabled=false
     // src/components/draft/__tests__/LimitedDeckBuilder.test.tsx` covers both
@@ -500,13 +745,12 @@ interface LimitedDeckBuilderProps {
   onRemoveFromDeck?: (cardName: string) => void;
   onSetLandCount?: (landName: string, count: number) => void;
   /**
-   * Receives the designated commanders (CR 903.3 / CR 702.124h).
-   * The argument now reaches `DraftAction::SubmitDeck.commanders`: through
-   * `multiplayerDraftStore.submitDeck` on the P2P transport, and explicitly as
-   * `[]` on the local wasm path, where `LocalDraftKind` is "Quick" | "Sealed"
-   * and CR 903.1 scopes the designation to the Commander variant (D6).
+   * Receives the designated commanders (CR 903.3 / CR 702.124h) and companion (CR 702.139a).
+   * The argument reaches `DraftAction::SubmitDeck`: through
+   * `multiplayerDraftStore.submitDeck` on the P2P transport, and
+   * on the local wasm path.
    */
-  onSubmitDeck?: (commanders: string[]) => Promise<void> | void;
+  onSubmitDeck?: (commanders: string[], companion?: string | null) => Promise<void> | void;
   submissionError?: string | null;
   showSuggestions?: boolean;
   local?: WorkspaceDeckBuilderController;
@@ -524,7 +768,13 @@ interface WorkspaceDeckBuilderControllerBase {
   interactionLocked: boolean;
   onWorkspaceChange: (next: DraftWorkspaceState) => void;
   onPreferencesChange: (next: DraftWorkspacePreferences) => void;
-  onSubmitDeck: (commanders?: string[]) => void | Promise<void>;
+  onSubmitDeck: (commanders?: string[], companion?: string | null) => void | Promise<void>;
+  /**
+   * CR 702.139a: the companion this player's last accepted submission
+   * designated, when the builder reopens a submitted deck (between rounds).
+   * The builder starts from it; only its remove control submits no companion.
+   */
+  initialCompanion?: string | null;
   onCardHover?: (info: CardHoverInfo | null) => void;
 }
 
@@ -744,12 +994,38 @@ function ControlledDeckBuilder({
     deckEntries: commanderDeckEntries,
     draftSetCodes,
   });
+  const {
+    companion,
+    companionCandidates,
+    handleSetCompanion,
+    handleRemoveCompanion,
+  } = useLimitedCompanion({
+    pool,
+    mainDeckNames: mainDeck,
+    // CR 100.4b: the designation is a pool card outside the main deck. Take a
+    // main-deck copy only when no copy is already outside it.
+    onCompanionSelect: (cardName) => {
+      const poolCopies = pool.filter((card) => card.name === cardName).length;
+      const mainCopies = mainDeck.filter((name) => name === cardName).length;
+      if (mainCopies > 0 && poolCopies <= mainCopies) {
+        removeFromDeck(cardName);
+      }
+    },
+  });
+  const effectiveFormat: GameFormat | null = commandersRequired > 0
+    ? "CommanderDraft"
+    : (companion ? "Limited" : null);
+  const enforceCompatibility = designationRequired || companion !== null;
+
   const compatibility = useCommanderDraftCompatibility({
-    enforceCompatibility: designationRequired,
-    selectedFormat: deckFormat,
+    enforceCompatibility,
+    selectedFormat: effectiveFormat,
     draftSetCodes,
     main: commanderDeckEntries,
     commanders,
+    companion,
+    // CR 100.2b + CR 702.139b: only a companion's condition reads the minimum.
+    minDeckSize: companion ? view?.min_deck_size : undefined,
   });
   const { cardDataCache } = useDeckCardData(
     commanderDeckEntries.map((entry) => entry.name),
@@ -804,7 +1080,12 @@ function ControlledDeckBuilder({
     setLocalSubmissionError(null);
     setIsSubmitting(true);
     try {
-      await submitDeck(commandersRequired > 0 ? commanders : []);
+      const designatedCommanders = commandersRequired > 0 ? commanders : [];
+      if (companion) {
+        await submitDeck(designatedCommanders, companion);
+      } else {
+        await submitDeck(designatedCommanders);
+      }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       setLocalSubmissionError(message || t("limitedDeck.submitFailed"));
@@ -997,6 +1278,10 @@ function ControlledDeckBuilder({
                 isCommanderEligible={isCommanderEligible}
                 onSetCommander={handleSetCommander}
                 onRemoveCommander={handleRemoveCommander}
+                companion={companion ?? undefined}
+                companionCandidates={companionCandidates}
+                onSetCompanion={handleSetCompanion}
+                onRemoveCompanion={handleRemoveCompanion}
                 onCardHover={setHoveredCard}
                 formatValidationReasons={compatibility.reasons}
               />
@@ -1009,6 +1294,21 @@ function ControlledDeckBuilder({
                 <p className="text-xs text-white/55">{t("limitedDeck.commanderRequired")}</p>
               )}
             </section>
+          )}
+
+          {/* Companion designation for non-Commander limited decks */}
+          {!designationRequired && companionCandidates && companionCandidates.length > 0 && (
+            <LimitedCompanionPanel
+              companion={companion}
+              companionCandidates={companionCandidates}
+              onSetCompanion={handleSetCompanion}
+              onRemoveCompanion={handleRemoveCompanion}
+              onCardHover={setHoveredCard}
+              compatibilityReasons={compatibility.reasons}
+              compatibilityPending={compatibility.pending}
+              compatibilityUnavailable={compatibility.unavailable}
+              isCompatible={compatibility.compatible}
+            />
           )}
 
           {/* Mana curve */}
@@ -1137,21 +1437,70 @@ function WorkspaceDeckBuilder({
     deckEntries: commanderDeckEntries,
     draftSetCodes,
   });
-  // The saved-deck form that submit and the library autosave produce:
-  // commanders leave `main` for the `[Commander]` section.
+  const handleCompanionSelectInWorkspace = useCallback((cardName: string) => {
+    // CR 100.4b: the designation is a pool card outside the main deck. Move a
+    // deck copy to the sideboard only when no copy is already outside the deck.
+    const copyOutsideDeck = pool.some(
+      (card) => card.name === cardName && workspace.placements[card.instance_id]?.zone !== "deck",
+    );
+    if (copyOutsideDeck) return;
+    const deckInstance = pool.find(
+      (card) => card.name === cardName && workspace.placements[card.instance_id]?.zone === "deck",
+    );
+    if (deckInstance) {
+      onWorkspaceChange({
+        ...workspace,
+        placements: {
+          ...workspace.placements,
+          [deckInstance.instance_id]: {
+            ...workspace.placements[deckInstance.instance_id],
+            zone: "sideboard",
+          },
+        },
+      });
+    }
+  }, [pool, workspace, onWorkspaceChange]);
+
+  const {
+    companion,
+    companionBacked,
+    companionCandidates,
+    handleSetCompanion,
+    handleRemoveCompanion,
+  } = useLimitedCompanion({
+    pool,
+    mainDeckNames: deckNames,
+    initialCompanion: controller.initialCompanion,
+    onCompanionSelect: handleCompanionSelectInWorkspace,
+  });
+  const effectiveFormat: GameFormat | null = commandersRequired > 0
+    ? "CommanderDraft"
+    : (companion ? "Limited" : null);
+  const enforceCompatibility = designationRequired || companion !== null;
+
+  // Use the same deck projection and companion handling as draft autosave.
   const exportableDeck = useMemo(
-    () => draftSubmissionToParsedDeck(
-      projectWorkspacePartition(workspace, pool),
-      commandersRequired > 0 ? commanders : [],
+    () => netCompanionFromPoolSideboard(
+      draftSubmissionToParsedDeck(
+        projectWorkspacePartition(workspace, pool),
+        commandersRequired > 0 ? commanders : [],
+        // CR 100.4b: exported only while an actual outside-the-deck copy backs
+        // it, so one drafted card never exports as two.
+        companionBacked === true ? companion : null,
+      ),
+      effectiveFormat ?? "Limited",
     ),
-    [workspace, pool, commandersRequired, commanders],
+    [workspace, pool, commandersRequired, commanders, companion, companionBacked, effectiveFormat],
   );
   const compatibility = useCommanderDraftCompatibility({
-    enforceCompatibility: designationRequired,
-    selectedFormat: deckFormat,
+    enforceCompatibility,
+    selectedFormat: effectiveFormat,
     draftSetCodes,
     main: commanderDeckEntries,
     commanders,
+    companion,
+    // CR 100.2b + CR 702.139b: only a companion's condition reads the minimum.
+    minDeckSize: companion ? view.min_deck_size : undefined,
   });
   const { cardDataCache } = useDeckCardData(
     commanderDeckEntries.map((entry) => entry.name),
@@ -1202,7 +1551,12 @@ function WorkspaceDeckBuilder({
     setLocalSubmissionError(null);
     setIsSubmitting(true);
     try {
-      await onSubmitDeck(commandersRequired > 0 ? commanders : []);
+      const designatedCommanders = commandersRequired > 0 ? commanders : [];
+      if (companion) {
+        await onSubmitDeck(designatedCommanders, companion);
+      } else {
+        await onSubmitDeck(designatedCommanders);
+      }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       setLocalSubmissionError(message || t("limitedDeck.submitFailed"));
@@ -1458,6 +1812,10 @@ function WorkspaceDeckBuilder({
         isCommanderEligible={isCommanderEligible}
         onSetCommander={handleSetCommander}
         onRemoveCommander={handleRemoveCommander}
+        companion={companion ?? undefined}
+        companionCandidates={companionCandidates}
+        onSetCompanion={handleSetCompanion}
+        onRemoveCompanion={handleRemoveCompanion}
         onCardHover={handleHover}
         formatValidationReasons={compatibility.reasons}
       />
@@ -1470,6 +1828,19 @@ function WorkspaceDeckBuilder({
         <p className="text-xs text-white/55">{t("limitedDeck.commanderRequired")}</p>
       )}
     </section>
+  ) : null;
+  const companionControls = (!designationRequired && companionCandidates && companionCandidates.length > 0) ? (
+    <LimitedCompanionPanel
+      companion={companion}
+      companionCandidates={companionCandidates}
+      onSetCompanion={handleSetCompanion}
+      onRemoveCompanion={handleRemoveCompanion}
+      onCardHover={handleHover}
+      compatibilityReasons={compatibility.reasons}
+      compatibilityPending={compatibility.pending}
+      compatibilityUnavailable={compatibility.unavailable}
+      isCompatible={compatibility.compatible}
+    />
   ) : null;
   const compactCommanderControls = commanderControls ? (
     <PopoverMenu
@@ -1494,6 +1865,31 @@ function WorkspaceDeckBuilder({
       )}
     >
       {() => <div className="overflow-y-auto p-3">{commanderControls}</div>}
+    </PopoverMenu>
+  ) : null;
+  const compactCompanionControls = companionControls ? (
+    <PopoverMenu
+      ariaLabel={tDeckBuilder("commanderPanel.companion.heading")}
+      variant="dialog"
+      menuWidthPx={320}
+      renderTrigger={({ ref, open, toggle }) => (
+        <button
+          ref={ref}
+          type="button"
+          aria-expanded={open}
+          aria-haspopup="dialog"
+          onClick={toggle}
+          className={menuButtonClass({
+            tone: companion ? "blue" : "neutral",
+            size: "sm",
+            className: "min-h-11 shrink-0",
+          })}
+        >
+          {companion ?? tDeckBuilder("commanderPanel.companion.heading")}
+        </button>
+      )}
+    >
+      {() => <div className="overflow-y-auto p-3">{companionControls}</div>}
     </PopoverMenu>
   ) : null;
 
@@ -1533,9 +1929,14 @@ function WorkspaceDeckBuilder({
             className={responsiveLayout === "desktop" || tabletLayout ? "w-full flex-1" : undefined}
           />
           {responsiveLayout === "desktop" && desktopSubmitControl}
-          {tabletLayout && <div className="ml-auto">{compactCommanderControls}</div>}
+          {tabletLayout && (
+            <div className="ml-auto flex items-center gap-2">
+              {compactCommanderControls}
+              {compactCompanionControls}
+            </div>
+          )}
         </div>
-        {responsiveLayout === "desktop" && !designationRequired && submissionAlert}
+        {responsiveLayout === "desktop" && !designationRequired && !companionControls && submissionAlert}
         </>
       )}
 
@@ -1680,12 +2081,13 @@ function WorkspaceDeckBuilder({
             </aside>
           )}
 
-          {!phoneLayout && designationRequired && (
+          {!phoneLayout && (designationRequired || Boolean(companionControls)) && (
           <div
             data-desktop-builder-analysis
             className="flex w-full min-w-[220px] flex-[1.25] flex-col gap-6 overflow-y-auto xl:w-auto"
           >
             {commanderControls}
+            {companionControls}
             {submissionAlert}
           </div>
           )}
@@ -1715,6 +2117,7 @@ function WorkspaceDeckBuilder({
             </span>
           </div>
           {compactCommanderControls}
+          {compactCompanionControls}
           <button
             type="button"
             onClick={() => void handleSubmit()}

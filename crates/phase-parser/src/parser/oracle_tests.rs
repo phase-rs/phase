@@ -13,6 +13,7 @@ use crate::types::ability::{
     DoorLockOp, PlayerRelation, SpellStackToGraveyardReplacement, SubAbilityLink, TargetReadOrigin,
 };
 use crate::types::counter::{CounterMatch, CounterType};
+use crate::types::keywords::CompanionCondition;
 use crate::types::phase::{PhaseGroup, TurnSegment};
 use crate::types::triggers::AttackTargetFilter;
 
@@ -35696,6 +35697,57 @@ fn self_exile_land_grant_class_parses_until_self_cast_and_self_permission() {
             link = def.sub_ability.as_deref();
         }
     }
+}
+
+/// CR 702.139a + CR 702.139b: Yorion, Sky Nomad's companion condition (printed Oracle text
+/// verified against Scryfall) is a surplus over the format's minimum deck size, not a fixed
+/// card count. It used to fall through to `SharedCardType`, so deck validation accepted
+/// Yorion with forty Plains.
+#[test]
+fn companion_deck_size_condition_parses_to_min_deck_size_over() {
+    const YORION: &str = "Companion — Your starting deck contains at least twenty cards more than the minimum deck size. (If this card is your chosen companion, you may put it into your hand from outside the game for {3} as a sorcery.)\nFlying\nWhen Yorion enters, exile any number of other nonland permanents you own and control. Return those cards to the battlefield at the beginning of the next end step.";
+    let parsed = parse_oracle_text(
+        YORION,
+        "Yorion, Sky Nomad",
+        &["Companion".into(), "Flying".into()],
+        &["Creature".into()],
+        &["Bird".into(), "Serpent".into()],
+    );
+    let companions: Vec<_> = parsed
+        .extracted_keywords
+        .iter()
+        .filter_map(|keyword| match keyword {
+            Keyword::Companion(condition) => Some(condition.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(companions, vec![CompanionCondition::MinDeckSizeOver(20)]);
+
+    // The surplus is read from the text, digits or words, not assumed.
+    for (fragment, surplus) in [
+        ("companion:— your starting deck contains at least 10 cards more than the minimum deck size.", 10),
+        ("companion:your starting deck contains at least five cards more than the minimum deck size", 5),
+    ] {
+        assert_eq!(
+            fragment.parse::<Keyword>().unwrap(),
+            Keyword::Companion(CompanionCondition::MinDeckSizeOver(surplus)),
+            "{fragment}"
+        );
+    }
+
+    // Paired control: another companion's condition (Gyruda's printed Oracle
+    // text, verified against Scryfall) still takes its own arm.
+    const GYRUDA_LINE: &str = "Companion — Your starting deck contains only cards with even mana values. (If this card is your chosen companion, you may put it into your hand from outside the game for {3} as a sorcery.)";
+    let gyruda = parse_oracle_text(
+        GYRUDA_LINE,
+        "Gyruda, Doom of Depths",
+        &["Companion".into()],
+        &["Creature".into()],
+        &["Demon".into(), "Kraken".into()],
+    );
+    assert!(gyruda
+        .extracted_keywords
+        .contains(&Keyword::Companion(CompanionCondition::EvenManaValues)));
 }
 
 /// CR 202.3 + CR 601.3a: the FIXED odd/even mana-value conjunct must reach

@@ -1,0 +1,7 @@
+{
+  "surfaces": [
+    "full",
+    "wire"
+  ],
+  "reason": "FormatConfig gains an optional deck_size_origin (Registry|DraftSession) so a draft match's engine state round-trips; the origin is conferred only by the draft-match initializer (initialize_game / initialize_multiplayer_host_game's draft_session_min_deck_size) and ingress validation refuses a payload that already claims it, so older peers refuse such a state at decode."
+}

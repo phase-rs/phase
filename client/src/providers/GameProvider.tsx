@@ -66,6 +66,7 @@ import {
   loadGameStrict,
 } from "../services/gamePersistence";
 import type { DraftRunState } from "../services/quickDraftPersistence";
+import { limitedFormatConfigForSession } from "../services/draftFormatConfig";
 import { SPECTATOR_PLAYER_ID } from "../constants/game";
 import { clearWsSession, loadWsSession, saveWsSession } from "../services/multiplayerSession";
 import {
@@ -304,11 +305,17 @@ function sameStringArray(value: unknown, expected: readonly string[]): boolean {
 /** Validate the name-only publication before decorating a separate in-memory submission. */
 function matchesPublishedDraftPayload(value: unknown, run: DraftRunState): boolean {
   if (!hasExactKeys(value, ["player", "opponent", "ai_decks"], ["booster_pack_pool"])) return false;
-  const matchesDeck = (deck: unknown, mainDeck: string[]) => hasExactKeys(deck, ["main_deck", "sideboard", "commander"])
+  const matchesDeck = (deck: unknown, mainDeck: string[], companion: readonly string[] = []) =>
+    hasExactKeys(deck, ["main_deck", "sideboard", "commander"], ["companion"])
     && sameStringArray(deck.main_deck, mainDeck)
     && sameStringArray(deck.sideboard, [])
-    && sameStringArray(deck.commander, []);
-  if (!matchesDeck(value.player, run.playerDeck) || !matchesDeck(value.opponent, run.opponentDeck)
+    && sameStringArray(deck.commander, [])
+    // CR 702.139a: the designation is published (even when empty) for the seat
+    // that drafted it; it must be exactly the stored run's, and an absent key
+    // means no designation.
+    && sameStringArray(deck.companion ?? [], companion);
+  if (!matchesDeck(value.player, run.playerDeck, run.companion ? [run.companion] : [])
+    || !matchesDeck(value.opponent, run.opponentDeck)
     || !Array.isArray(value.ai_decks) || value.ai_decks.length !== 0) return false;
   const pool = run.booster_pack_pool;
   if (pool === undefined) return !Object.prototype.hasOwnProperty.call(value, "booster_pack_pool");
@@ -1777,11 +1784,18 @@ export function GameProvider({
         }
         return run;
       };
+      // CR 100.2b + CR 702.139b: the draft match runs under the session's own
+      // minimum deck size, recorded on the run at launch.
+      const draftMatchFormatConfig = (run: DraftRunState | null) =>
+        formatConfig && run
+          ? limitedFormatConfigForSession(formatConfig, run.min_deck_size)
+          : formatConfig;
       const startDraftDeck = async (raw: string) => {
         try {
           const deckList = JSON.parse(raw) as DeckListPayload;
+          let run: DraftRunState | null = null;
           if (soloDraft) {
-            const run = await loadExactDraftRun();
+            run = await loadExactDraftRun();
             if (cancelled) return;
             if (!matchesPublishedDraftPayload(deckList, run)) throw unavailableDraftStage();
           }
@@ -1791,7 +1805,7 @@ export function GameProvider({
             gameId,
             adapter,
             submission,
-            formatConfig,
+            draftMatchFormatConfig(run),
             playerCount,
             matchConfig,
             firstPlayer,
@@ -1824,13 +1838,20 @@ export function GameProvider({
           if (cancelled) return;
           const deckList = {
             booster_pack_pool: run.booster_pack_pool,
-            player: { main_deck: run.playerDeck, sideboard: [], commander: [] },
+            player: {
+              main_deck: run.playerDeck,
+              sideboard: [],
+              commander: [],
+              companion: run.companion ? [run.companion] : [],
+            },
             opponent: { main_deck: run.opponentDeck, sideboard: [], commander: [] },
             ai_decks: [],
           };
           const submission = await submitLocalHandoff(deckList);
           if (cancelled) return;
-          await initGame(gameId, adapter, submission, formatConfig, playerCount, matchConfig, firstPlayer, "strict");
+          await initGame(
+            gameId, adapter, submission, draftMatchFormatConfig(run), playerCount, matchConfig, firstPlayer, "strict",
+          );
           if (cancelled) return;
           controller = createGameLoopController({
             mode: mode === "local" ? "local" : "ai", difficulty,
