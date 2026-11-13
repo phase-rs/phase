@@ -663,6 +663,20 @@ fn settle_recovered_outcome(
     events: Vec<GameEvent>,
     log_entries: Vec<GameLogEntry>,
 ) -> Result<ActionResult, EngineError> {
+    // CR 118.12: a suffix the departure made unpayable fails the payment, as
+    // it does on an ordinary replay (`replay`): a failed shadow is neither a
+    // completed payment nor a prompt to keep, whatever wait it stopped at.
+    if shadow.cost_payment_failed_flag {
+        let mut failed = transaction;
+        failed.recovered = None;
+        return settle_replay_outcome(
+            state,
+            failed,
+            ReplayOutcome::Failed {
+                recorded_failure: recorded_failure(&shadow),
+            },
+        );
+    }
     if returned_to_base_waiting(&shadow, &transaction.base_waiting_for) {
         let mut completed = transaction;
         completed.recovered = None;

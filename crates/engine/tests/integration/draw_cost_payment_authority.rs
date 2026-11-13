@@ -2494,6 +2494,102 @@ const HULLBREACHER_ORACLE: &str = "Flash\nIf an opponent would draw a card excep
 they draw in each of their draw steps, instead you create a Treasure token. (It's an artifact \
 with \"{T}, Sacrifice this token: Add one mana of any color.\")";
 
+/// CR 118.12 + CR 800.4a + CR 104.3a: a departure that makes a staged
+/// payment's later leg unpayable fails the payment whole, also when the
+/// departure itself settles the parked prompt. NOT a printed cost: the typed
+/// composite `[PayLife 1, Draw 1, Mana {1}]` (the five printed resolution-time
+/// composites are `[Mana, PayLife]`), with P0's only mana source an Island
+/// owned by P2 (lent as Control Magic lends a creature). The life leg is paid
+/// and the draw leg parks on Dredge while P2's Humility mutes Maralen. P2
+/// concedes: Humility and the Island leave, the draw can no longer happen and
+/// settles, and the mana leg cannot be paid. Nothing of the payment is
+/// committed: no life is lost, and the game goes on.
+#[test]
+fn a_departure_that_makes_a_later_leg_unpayable_fails_the_staged_payment_whole() {
+    let mut scenario = GameScenario::new_n_player(3, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    for player in 0..3 {
+        scenario.with_library_top(PlayerId(player), &STAGED_LIBRARY);
+    }
+    let source = scenario.add_creature(P0, "Draw Cost Source", 1, 1).id();
+    scenario
+        .add_creature_to_graveyard(P0, "Stinkweed Imp", 1, 2)
+        .from_oracle_text(STINKWEED_IMP_ORACLE);
+    scenario.add_creature_from_oracle(P1, "Maralen of the Mornsong", 2, 3, MARALEN_ORACLE);
+    scenario.add_enchantment_from_oracle(PlayerId(2), "Humility", HUMILITY_ORACLE);
+    let island = scenario.add_basic_land(PlayerId(2), engine::types::mana::ManaColor::Blue);
+    let mut runner = scenario.build();
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&island)
+        .expect("the lent Island exists")
+        .base_controller = Some(P0);
+    evaluate_layers(runner.state_mut());
+    assert_eq!(
+        runner.state().objects[&island].controller,
+        P0,
+        "reach guard: P0 controls the lent Island"
+    );
+    let root = ResolvedAbility::new(
+        pay_cost(AbilityCost::Composite {
+            costs: vec![
+                AbilityCost::PayLife {
+                    amount: QuantityExpr::Fixed { value: 1 },
+                },
+                draw_cost(1),
+                AbilityCost::Mana {
+                    cost: engine::types::mana::ManaCost::Cost {
+                        shards: vec![],
+                        generic: 1,
+                    },
+                },
+            ],
+        }),
+        vec![],
+        source,
+        P0,
+    );
+    let state = runner.state_mut();
+    let life_before = state.players[P0.0 as usize].life;
+    let hand_before = state.players[P0.0 as usize].hand.len();
+    resolve_ability_chain(state, &root, &mut Vec::new(), 0).expect("the staged payment resolves");
+    assert!(
+        is_dredge_prompt_for_p0(state),
+        "reach guard: the draw leg parks on Dredge: {:?}",
+        state.waiting_for
+    );
+
+    let departure = apply(
+        state,
+        PlayerId(2),
+        GameAction::Concede {
+            player_id: PlayerId(2),
+        },
+    )
+    .expect("a player can concede at any time");
+    assert!(
+        state.payment_transaction.is_none(),
+        "the unpayable payment is not kept"
+    );
+    assert_eq!(
+        state.players[P0.0 as usize].life, life_before,
+        "the life leg of a failed payment is not committed"
+    );
+    assert_eq!(state.players[P0.0 as usize].hand.len(), hand_before);
+    assert!(
+        !departure.events.iter().any(|event| matches!(
+            event,
+            GameEvent::LifeChanged { player_id, .. } if *player_id == P0
+        )),
+        "no life change of the failed payment is published"
+    );
+    let WaitingFor::Priority { player } = state.waiting_for else {
+        panic!("a living player has priority: {:?}", state.waiting_for);
+    };
+    apply(state, player, GameAction::PassPriority).expect("the game goes on");
+}
+
 /// CR 616.1 + CR 800.4a + CR 104.3a: the staged form of a departure that makes
 /// a replacement applicable. P0's draw leg parks on Dredge alone while P3's
 /// Humility mutes P1's Hullbreacher. P3 concedes, so Hullbreacher applies
