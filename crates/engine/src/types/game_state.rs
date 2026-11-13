@@ -16604,6 +16604,7 @@ impl GameState {
     /// action boundary.
     fn validate_payment_transaction(&self) -> Result<(), String> {
         self.validate_parked_unless_payment()?;
+        self.validate_parked_entry_payment()?;
         let Some(transaction) = self.payment_transaction.as_deref() else {
             return Ok(());
         };
@@ -16677,6 +16678,47 @@ impl GameState {
                     entry.semantic_owner
                 ));
             }
+        }
+        Ok(())
+    }
+
+    /// CR 614.12a + CR 616.1: an accepted entry `MayCost` retained behind a
+    /// leg's replacement choice
+    /// ([`PendingCostMoveResume::ReplacementMayCostInnerChoice`]) is restored
+    /// and answered by the engine itself once that choice settles
+    /// (`costs::resume_replacement_may_cost_after_inner_choice`), so a save
+    /// carries it only in the shape the replacement authority parks: the
+    /// accepted, optional entry event with the replacement that was accepted,
+    /// chosen for a player still in the game. Anything else would be answered
+    /// on behalf of nobody, or could not be answered at all.
+    fn validate_parked_entry_payment(&self) -> Result<(), String> {
+        let Some(PendingCostMoveResume::ReplacementMayCostInnerChoice {
+            outer_replacement: outer,
+        }) = &self.pending_cost_move_resume
+        else {
+            return Ok(());
+        };
+        if !outer.may_cost_paid
+            || !outer.is_optional
+            || outer.candidates.is_empty()
+            || !matches!(
+                outer.proposed,
+                crate::types::proposed_event::ProposedEvent::ZoneChange { .. }
+            )
+        {
+            return Err(
+                "a retained entry payment is not an accepted entry replacement".to_string(),
+            );
+        }
+        let in_game = |player: PlayerId| {
+            self.players
+                .iter()
+                .any(|seat| seat.id == player && !seat.is_eliminated)
+        };
+        if outer.choice_player.is_some_and(|player| !in_game(player)) {
+            return Err(
+                "a retained entry payment is chosen for a player not in the game".to_string(),
+            );
         }
         Ok(())
     }

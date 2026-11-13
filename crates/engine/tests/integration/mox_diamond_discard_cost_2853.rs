@@ -1178,6 +1178,54 @@ fn mox_diamond_owner_conceding_at_the_lands_replacement_order_ends_the_entry() {
     assert!(runner.state().pending_cost_move_resume.is_none());
 }
 
+/// CR 614.12a + CR 616.1: checked restore accepts the accepted entry payment retained behind the
+/// land's ordering prompt, and refuses a save whose retained replacement names no candidate: the
+/// engine answers that record itself once the ordering settles, and it could not be answered.
+/// The emptied record is forged; the engine writes none.
+#[test]
+fn checked_restore_refuses_a_retained_entry_payment_without_its_replacement() {
+    use engine::types::game_state::{PersistedGameState, PersistedRestoreError};
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let mox = scenario
+        .add_creature_to_hand(P0, "Mox Diamond", 0, 0)
+        .as_artifact()
+        .from_oracle_text(MOX_DIAMOND_ORACLE)
+        .id();
+    scenario.add_land_to_hand(P0, "Forest");
+    scenario.add_enchantment_from_oracle(P1, "Rest in Peace", REST_IN_PEACE_ORACLE);
+    scenario.add_enchantment_from_oracle(P1, "Leyline of the Void", LEYLINE_OF_THE_VOID_ORACLE);
+    let mut runner = scenario.build();
+    let mut events = runner.cast(mox).resolve().events().to_vec();
+    choose_replacement(&mut runner, 0, &mut events);
+    parked_outer_replacement(runner.state());
+
+    let round_trip = |state: &GameState| {
+        let saved = serde_json::to_string(&PersistedGameState::Raw(Box::new(state.clone())))
+            .expect("the state serializes");
+        serde_json::from_str::<PersistedGameState>(&saved)
+            .expect("the save decodes")
+            .into_game_state()
+    };
+    round_trip(runner.state()).expect("reach guard: the engine-written position restores");
+
+    let mut forged = runner.state().clone();
+    let Some(PendingCostMoveResume::ReplacementMayCostInnerChoice { outer_replacement }) =
+        forged.pending_cost_move_resume.as_mut()
+    else {
+        unreachable!("the retained entry payment was asserted above");
+    };
+    outer_replacement.candidates.clear();
+    assert!(
+        matches!(
+            round_trip(&forged),
+            Err(PersistedRestoreError::InvalidPaymentTransaction(_))
+        ),
+        "a retained entry payment with no replacement to accept is refused"
+    );
+}
+
 /// The draw leg's replacement in an entry-ordering row: which replacer, and the answer to its prompt.
 #[derive(Clone, Copy, Debug)]
 enum DrawLegAnswer {
