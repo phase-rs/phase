@@ -4376,28 +4376,167 @@ fn board_value_aggregate_read(filter: &TargetFilter, value: StateKind) -> RwProf
     p
 }
 
-/// CR 608.2h: the reads of every `QuantityExpr` threshold a filter's properties
-/// compare against (`FilterProp::Counters` / `Cmc` / `PtComparison`), wherever
-/// the filter grammar nests them — inside `AnyOf` / `Not` props and inside the
-/// `TargetFilter`s other props box, the same reach `member_bound_filter_prop`
-/// classifies. The walk is `filter_grammar_any`, whose exhaustive
-/// `filter_prop_grammar_any` is the authority on which props carry a quantity
-/// operand; this visitor only reads the operand of the props it routes there.
+/// CR 608.2h: the reads a filter's membership test makes through its own
+/// operands, wherever the filter grammar nests them — inside `AnyOf` / `Not`
+/// props, inside the `TargetFilter`s other props box, and across the player axis
+/// (`ControllerMatches` / `DealtDamageThisTurn` → `PlayerFilter`), the same reach
+/// `member_bound_filter_prop` classifies. The walk is `filter_grammar_any`; each
+/// node contributes only its own operand reads, and the walk visits the nodes it
+/// nests separately.
 fn filter_threshold_quantity_reads(filter: &TargetFilter) -> RwProfile {
+    use crate::types::ability::FilterGrammarNode;
     let reads = std::cell::RefCell::new(RwProfile::empty());
     crate::types::ability::filter_grammar_any(filter, &|node| {
-        if let crate::types::ability::FilterGrammarNode::Prop(
-            FilterProp::Counters { count: value, .. }
-            | FilterProp::Cmc { value, .. }
-            | FilterProp::PtComparison { value, .. },
-        ) = node
-        {
-            reads.borrow_mut().merge(rw_quantity_expr(value));
-        }
-        // Never stop early: every threshold in the filter contributes.
+        let node_reads = match node {
+            FilterGrammarNode::Prop(prop) => filter_prop_operand_reads(prop),
+            // CR 109.4: a player predicate reads its own operands
+            // (`ControlsCount { count }`, `PlayerAttribute { attr, value }`).
+            FilterGrammarNode::Player(player) => rw_player_filter(player),
+            // A `TargetFilter` node's reads are those of the props it carries,
+            // which the walk visits as `Prop` nodes.
+            FilterGrammarNode::Filter(_) => RwProfile::empty(),
+        };
+        reads.borrow_mut().merge(node_reads);
+        // Never stop early: every operand in the filter contributes.
         false
     });
     reads.into_inner()
+}
+
+/// CR 608.2h: the reads ONE `FilterProp` makes through its own operands, not
+/// counting the props, filters and player filters it nests (the
+/// `filter_grammar_any` walk visits those as their own nodes). Exhaustive and
+/// wildcard-free, so a future operand-carrying prop must be classified here.
+fn filter_prop_operand_reads(prop: &FilterProp) -> RwProfile {
+    match prop {
+        // CR 122.1 + CR 202.3 + CR 208.1: a compared threshold is evaluated with
+        // the filter, so whatever it reads (e.g. the source's counters) is read.
+        FilterProp::Counters { count: value, .. }
+        | FilterProp::Cmc { value, .. }
+        | FilterProp::PtComparison { value, .. } => rw_quantity_expr(value),
+        // CR 208.1: "with power greater than this creature's" reads the source's
+        // power.
+        FilterProp::PowerGTSource => {
+            let mut p = reads_src_of(StateKind::ObjectPt);
+            p.current_pt_reads.add(PtReadScope::Source);
+            p
+        }
+        // Props whose only operands are nested filters / props / player filters,
+        // which the walk visits as their own nodes.
+        FilterProp::CanEnchant { .. }
+        | FilterProp::DifferentNameFrom { .. }
+        | FilterProp::DistinctFrom { .. }
+        | FilterProp::AttachedTo {
+            to: AttachmentReferent::Host { .. },
+        }
+        | FilterProp::SharesQuality { .. }
+        | FilterProp::Targets { .. }
+        | FilterProp::TargetsOnly { .. }
+        | FilterProp::Not { .. }
+        | FilterProp::AnyOf { .. }
+        | FilterProp::ControllerMatches { .. }
+        | FilterProp::DealtDamageThisTurn { .. } => RwProfile::empty(),
+        // No quantity or source operand. Other mutable predicates (tapped state,
+        // keywords, ...) are outside this profile's covered axes.
+        FilterProp::Token
+        | FilterProp::NonToken
+        | FilterProp::RepresentedByCard
+        | FilterProp::ControllerChoseLabel { .. }
+        | FilterProp::WasPlayed
+        | FilterProp::Attacking { .. }
+        | FilterProp::Blocking
+        | FilterProp::BlockingSource
+        | FilterProp::CombatRelation { .. }
+        | FilterProp::BlockStatus { .. }
+        | FilterProp::AttackingAlone
+        | FilterProp::BlockingAlone
+        | FilterProp::Tapped
+        | FilterProp::Untapped
+        | FilterProp::IsSaddled
+        | FilterProp::SaddledSource
+        | FilterProp::CrewedThisTurn { .. }
+        | FilterProp::ConvokedSource
+        | FilterProp::ProtectorMatches { .. }
+        | FilterProp::HasHasteOrControlledSinceTurnBegan
+        | FilterProp::WithKeyword { .. }
+        | FilterProp::HasKeywordKind { .. }
+        | FilterProp::WithoutKeyword { .. }
+        | FilterProp::WithoutKeywordKind { .. }
+        | FilterProp::ManaValueParity { .. }
+        | FilterProp::ManaCostIn { .. }
+        | FilterProp::InZone { .. }
+        | FilterProp::Owned { .. }
+        | FilterProp::Foretold
+        | FilterProp::HasAdventure
+        | FilterProp::EnchantedBy
+        | FilterProp::EquippedBy
+        | FilterProp::AttachedTo {
+            to: AttachmentReferent::Source,
+        }
+        | FilterProp::AttachedTo {
+            to: AttachmentReferent::Recipient,
+        }
+        | FilterProp::AttachedTo {
+            to: AttachmentReferent::Player { .. },
+        }
+        | FilterProp::AttachedTo {
+            to: AttachmentReferent::DeclaredTarget { .. },
+        }
+        | FilterProp::HasAttachment { .. }
+        | FilterProp::HasAnyAttachmentOf { .. }
+        | FilterProp::Another
+        | FilterProp::Unpaired
+        | FilterProp::OtherThanTriggerObject
+        | FilterProp::HasColor { .. }
+        | FilterProp::ColorCount { .. }
+        | FilterProp::ManaSymbolCount { .. }
+        | FilterProp::HasSupertype { .. }
+        | FilterProp::IsChosenCreatureType
+        | FilterProp::MostPrevalentCreatureTypeIn { .. }
+        | FilterProp::IsChosenColor
+        | FilterProp::IsChosenCardType
+        | FilterProp::MatchesLastChosenCardPredicate
+        | FilterProp::HasSingleTarget
+        | FilterProp::Modal
+        | FilterProp::PrepareSpell
+        | FilterProp::NotColor { .. }
+        | FilterProp::NotSupertype { .. }
+        | FilterProp::Suspected
+        | FilterProp::Prepared
+        | FilterProp::Renowned
+        | FilterProp::Goaded
+        | FilterProp::ToughnessGTPower
+        | FilterProp::PowerExceedsBase
+        | FilterProp::InTrackedSet { .. }
+        | FilterProp::Modified
+        | FilterProp::Historic
+        | FilterProp::NotHistoric
+        | FilterProp::InAnyZone { .. }
+        | FilterProp::WasDealtDamageThisTurn
+        | FilterProp::EnteredThisTurn
+        | FilterProp::ControlledContinuouslySinceTurnBegan
+        | FilterProp::ZoneChangedThisTurn { .. }
+        | FilterProp::AttackedThisTurn { .. }
+        | FilterProp::BlockedThisTurn
+        | FilterProp::AttackedOrBlockedThisTurn
+        | FilterProp::CountersPutOnThisTurn { .. }
+        | FilterProp::FaceDown
+        | FilterProp::Transformed
+        | FilterProp::CouldBeTargetedByTriggeringSpell
+        | FilterProp::HasXInManaCost
+        | FilterProp::HasXInActivationCost
+        | FilterProp::WasKicked
+        | FilterProp::HasManaAbility
+        | FilterProp::HasNoAbilities
+        | FilterProp::Named { .. }
+        | FilterProp::SameName
+        | FilterProp::SameNameAsParentTarget
+        | FilterProp::SameNameAsExiledBySource
+        | FilterProp::NameMatchesAnyPermanent { .. }
+        | FilterProp::IsCommander
+        | FilterProp::SharesCreatureTypeWithCommander
+        | FilterProp::Other { .. } => RwProfile::empty(),
+    }
 }
 
 /// Read an object characteristic at a given scope (§2 read-carrier closure):
@@ -9488,6 +9627,35 @@ mod tests {
         assert!(conflicts(&mass_then_charge, &se_phase()));
         // The bare mass removal is one shared function of the board.
         assert!(!conflicts(&ra(removal(EffectScope::All)), &se_phase()));
+    }
+
+    /// CR 208.1 + CR 608.2h: a mass removal whose filter compares against the
+    /// source's power ("each creature with power greater than this creature's")
+    /// reads the source's P/T, through `AnyOf` / `Not` nesting too, so it is not
+    /// source-independent. The single scope's profile is unchanged.
+    #[test]
+    fn mass_counter_removal_power_gt_source_reads_source_pt() {
+        let removal = |prop: FilterProp, scope| Effect::RemoveCounter {
+            counter_type: Some(CounterType::Plus1Plus1),
+            count: qfix(1),
+            target: TargetFilter::Typed(TypedFilter::creature().properties(vec![prop])),
+            scope,
+        };
+        let nested = FilterProp::Not {
+            prop: Box::new(FilterProp::AnyOf {
+                props: vec![FilterProp::Tapped, FilterProp::PowerGTSource],
+            }),
+        };
+        for prop in [FilterProp::PowerGTSource, nested] {
+            let mass = ability_rw_profile(&ra(removal(prop.clone(), EffectScope::All)));
+            assert!(mass.reads_src.object_pt, "{prop:?}: {mass:?}");
+            assert!(!mass.source_independent(), "{prop:?}: {mass:?}");
+            let single = ability_rw_profile(&ra(removal(prop.clone(), EffectScope::Single)));
+            assert!(single.reads_src.is_empty(), "{prop:?}: {single:?}");
+        }
+        // Control: a source-free predicate in the same position reads no source.
+        let tapped = ability_rw_profile(&ra(removal(FilterProp::Tapped, EffectScope::All)));
+        assert!(tapped.reads_src.is_empty(), "{tapped:?}");
     }
 
     // ===================== (vi) event-object disjointness =====================
