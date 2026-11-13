@@ -20,6 +20,7 @@
  * it exactly once, on any terminal path.
  */
 import i18n from "i18next";
+import { STATE_CODEC_DECODE_TIMEOUT_MS } from "../adapter/state-codec-runtime";
 import type { StateCodecDecodeResult, StateCodecSession } from "../adapter/state-codec-runtime";
 import { AdapterError, AdapterErrorCode } from "../adapter/types";
 import type { PlayerId } from "../adapter/types";
@@ -440,6 +441,12 @@ export interface StateCodecSocketOptions {
   /** Actual send accounting for an uncompressed inner transport. */
   onFrameSent?: () => void;
   recoveryTimeoutMs?: number;
+  /**
+   * Bound on one decoder call. The session is injected and its `decode` carries
+   * no deadline of its own in the interface, so the socket owns one: a decode
+   * that never settles is a decoder failure, not an open, quiet socket.
+   */
+  decodeTimeoutMs?: number;
 }
 
 export class StateCodecSocket implements PhaseSocketTransport {
@@ -738,21 +745,37 @@ export class StateCodecSocket implements PhaseSocketTransport {
     try {
       // A session may throw synchronously (a closed-session guard, say): that is
       // the same decoder failure as a rejected promise, inside the same boundary.
-      pending = this.options.session.decode(frame);
+      pending = Promise.resolve(this.options.session.decode(frame));
     } catch {
       this.terminate("immediate", "decodeFailure", this.credentialsOf(text));
       return null;
     }
-    this.decoding = pending;
+    // The socket's own deadline, independent of the injected session: every
+    // waiter on this decode (the queue behind it, an owner deferring to
+    // `decodeInFlight`) is released by it even if the session never answers.
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const bounded = Promise.race([
+      pending,
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(
+          () => reject(new Error("State codec decode timed out")),
+          this.options.decodeTimeoutMs ?? STATE_CODEC_DECODE_TIMEOUT_MS,
+        );
+      }),
+    ]);
+    // The session's own late rejection, after the deadline won, is not unhandled.
+    pending.catch(() => undefined);
+    this.decoding = bounded;
     try {
-      return await pending;
+      return await bounded;
     } catch {
       // Decoder/RPC failure (unknown session, session closed, RPC timeout) is
       // a transport failure, not codec integrity: the socket cannot continue.
       this.terminate("immediate", "decodeFailure", this.credentialsOf(text));
       return null;
     } finally {
-      if (this.decoding === pending) this.decoding = null;
+      if (timer !== null) clearTimeout(timer);
+      if (this.decoding === bounded) this.decoding = null;
     }
   }
 

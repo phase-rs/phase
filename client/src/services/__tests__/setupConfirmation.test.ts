@@ -38,6 +38,17 @@ describe("SetupConfirmation", () => {
     expect(vi.getTimerCount()).toBe(0);
   });
 
+  it("bounds its one deferral itself when the decode it deferred to never settles", async () => {
+    const confirmation = new SetupConfirmation(
+      SETUP_CONFIRMATION_TIMEOUT_MS, () => new Promise<void>(() => undefined),
+    );
+    await vi.advanceTimersByTimeAsync(2 * SETUP_CONFIRMATION_TIMEOUT_MS - 1);
+    expect(confirmation.current).toBeNull();
+    await vi.advanceTimersByTimeAsync(1);
+    await expect(confirmation.settled).resolves.toBe("timeout");
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
   it("times out once the decode it deferred to has answered without settling it", async () => {
     let finishDecode!: () => void;
     let calls = 0;

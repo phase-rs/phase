@@ -38,6 +38,24 @@ export function whenAborted(signal: AbortSignal): Promise<"abort"> {
   });
 }
 
+/**
+ * `promise`'s result, or `fallback` once `timeoutMs` elapsed first. Bounds a
+ * wait on a promise an injected transport or provider owns (a setup write's
+ * receipt), which may never settle on a socket that stays open.
+ */
+export function settledWithin<T>(promise: Promise<T>, timeoutMs: number, fallback: T): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => resolve(fallback), timeoutMs);
+    promise.then((value) => {
+      clearTimeout(timer);
+      resolve(value);
+    }, (error: unknown) => {
+      clearTimeout(timer);
+      reject(error);
+    });
+  });
+}
+
 /** Frames a private candidate may buffer before its setup settles. */
 export const SETUP_BUFFER_MAX_FRAMES = 64;
 /** Expanded text (UTF-16, two bytes a unit) a private candidate may buffer. */
@@ -214,7 +232,7 @@ export class SetupConfirmation {
    * any; the bound defers once to it (see {@link SETUP_CONFIRMATION_TIMEOUT_MS}).
    */
   constructor(
-    timeoutMs: number = SETUP_CONFIRMATION_TIMEOUT_MS,
+    private readonly timeoutMs: number = SETUP_CONFIRMATION_TIMEOUT_MS,
     private readonly decodeInFlight: () => Promise<void> | null = () => null,
   ) {
     this.settled = new Promise((resolve) => { this.resolve = resolve; });
@@ -229,10 +247,15 @@ export class SetupConfirmation {
       this.finish("timeout");
       return;
     }
-    // One deferral: once the decode has answered, its delivery or its terminal
-    // close (both queued behind it) settles first; otherwise this times out.
+    // One deferral, with its own deadline: the decode comes from an injected
+    // session whose promise may never settle, so the deferral is bounded here,
+    // independently of it. Once the decode has answered, its delivery or its
+    // terminal close (both queued behind it) settles first; otherwise this
+    // times out, at the latest one further bound after the first.
+    this.timer = setTimeout(() => this.finish("timeout"), this.timeoutMs);
     void decoding.then(() => {
       if (this.outcome !== null || this.disposed) return;
+      if (this.timer !== null) clearTimeout(this.timer);
       this.timer = setTimeout(() => this.finish("timeout"), 0);
     });
   }

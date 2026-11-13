@@ -1077,6 +1077,7 @@ import type {
   StateCodecDecodeResult,
   StateCodecSession,
 } from "../../adapter/state-codec-runtime";
+import { STATE_CODEC_DECODE_TIMEOUT_MS } from "../../adapter/state-codec-runtime";
 import {
   STATE_CODEC_SOCKET_TIMEOUT_MS,
   StateCodecAttachment,
@@ -1603,6 +1604,27 @@ describe("openPhaseSocket — codec stream, recovery and teardown", () => {
     expect(fake.close).toHaveBeenCalledOnce();
     expect(raw.close).toHaveBeenCalledOnce();
     expect(raw.send).not.toHaveBeenCalledWith('{"type":"ResyncState"}');
+  });
+
+  it("terminates the socket once, at its own deadline, when the decoder never settles", async () => {
+    const fake = fakeSession();
+    fake.decode.mockImplementationOnce(() => new Promise(() => undefined));
+    const { raw, socket } = await negotiated(fake);
+    const closed = vi.fn();
+    socket.ws.onclose = closed;
+    vi.useFakeTimers();
+    try {
+      raw.deliverMessage(codecFrame("Full"));
+      await vi.advanceTimersByTimeAsync(STATE_CODEC_DECODE_TIMEOUT_MS - 1);
+      expect(closed).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(1);
+      await vi.waitFor(() => expect(closed).toHaveBeenCalledOnce());
+      expect(fake.close).toHaveBeenCalledOnce();
+      expect(raw.close).toHaveBeenCalledOnce();
+      expect(raw.send).not.toHaveBeenCalledWith('{"type":"ResyncState"}');
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   // A decoder/RPC failure is a transport failure, not codec integrity: the

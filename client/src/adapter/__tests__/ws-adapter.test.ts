@@ -6618,6 +6618,68 @@ describe("WebSocketAdapter — acquired socket ownership", () => {
       }
     });
 
+    it("retires both sockets and retries once when the bootstrap's decode never settles on a candidate that stays open", async () => {
+      const random = vi.spyOn(Math, "random").mockReturnValue(0);
+      const { adapter, raw, candidate, codec, events } = await sentCandidate();
+      try {
+        // The injected session's decode never answers and the peer never closes.
+        codec.decode.mockImplementationOnce(() => new Promise(() => undefined));
+        await vi.advanceTimersByTimeAsync(50_000);
+        deliverCodec(candidate, "Full", codecGameStarted(5, 5));
+        // Past the bound: the interval defers once to the decode in flight.
+        await vi.advanceTimersByTimeAsync(SETUP_CONFIRMATION_TIMEOUT_MS - 50_000 + 1000);
+        expect(candidate.close).not.toHaveBeenCalled();
+        expect(raw.close).not.toHaveBeenCalled();
+        // The deferral is bounded without the decode: by one further bound both
+        // sockets are retired and the one retry owner has retried.
+        await vi.advanceTimersByTimeAsync(SETUP_CONFIRMATION_TIMEOUT_MS);
+        await vi.waitFor(() => expect(raw.close).toHaveBeenCalledOnce());
+        expect(candidate.close).toHaveBeenCalled();
+        expect(codec.close).toHaveBeenCalled();
+        await vi.advanceTimersByTimeAsync(800);
+        await vi.waitFor(() => expect(MockWebSocket.last).not.toBe(candidate));
+        expect(events).not.toContainEqual({ type: "reconnectFailed" });
+        // The fence is gone with the interval.
+        expect((adapter as unknown as { confirmingPreparation: unknown }).confirmingPreparation).toBeNull();
+      } finally {
+        random.mockRestore();
+        adapter.dispose();
+      }
+    });
+
+    it("fails an initial join whose bootstrap decode never settles on a socket that stays open", async () => {
+      MockWebSocket.last = null;
+      const codec = scriptedCodec();
+      codec.decode.mockImplementationOnce(() => new Promise(() => undefined));
+      const adapter = new WebSocketAdapter(
+        "wss://localhost:9374/ws", "join", { main_deck: [], sideboard: [] }, "GAME01",
+        undefined, undefined, undefined,
+        { stateCodecSessionProvider: () => Promise.resolve(codec.session) },
+      );
+      const init = observe(adapter.initialize());
+      await vi.waitFor(() => expect(MockWebSocket.last).not.toBeNull());
+      const socket = latestSocket();
+      try {
+        socket.dispatchSynthetic("message", CODEC_SESSION_HELLO);
+        await vi.waitFor(() => expect(socket.send).toHaveBeenCalledWith(
+          expect.stringContaining('"type":"JoinGameWithPassword"'),
+        ));
+        socket.dispatchSynthetic("message", CODEC_CONFIRMATION);
+        await vi.advanceTimersByTimeAsync(0);
+        deliverCodec(socket, "Full", codecGameStarted(5, 5));
+        await vi.advanceTimersByTimeAsync(STATE_CODEC_DECODE_TIMEOUT_MS - 1000);
+        expect(codec.decode).toHaveBeenCalledOnce();
+        expect(socket.close).not.toHaveBeenCalled();
+        await vi.advanceTimersByTimeAsync(1000);
+        // The socket's own decode deadline ends the attachment and its lease.
+        await vi.waitFor(() => expect(socket.close).toHaveBeenCalled());
+        expect(codec.close).toHaveBeenCalledOnce();
+        expect(init.value()).not.toMatchObject({ resolvedWith: undefined });
+      } finally {
+        adapter.dispose();
+      }
+    });
+
     it("refuses new submissions unsent and keeps the incumbent's authority Error from ending the episode", async () => {
       const { adapter, raw, candidate, events } = await sentCandidate();
       try {
@@ -7361,6 +7423,55 @@ describe("WebSocketAdapter — acquired socket ownership", () => {
         await vi.waitFor(() => expect(MockWebSocket.last).not.toBe(candidate));
       } finally {
         random.mockRestore();
+        adapter.dispose();
+      }
+    });
+
+    it("adopts a confirmed candidate without waiting for a setup receipt its transport still holds", async () => {
+      const codec = scriptedCodec();
+      const provider = vi.fn(() => Promise.resolve(codec.session));
+      const { adapter, raw, events } = await establishCodecAdapter(provider);
+      try {
+        expect(adapter.tryReconnect(session() as never)).toBe(true);
+        await vi.waitFor(() => expect(MockWebSocket.last).not.toBe(raw));
+        const candidate = latestSocket();
+        candidate.sendReceipt = vi.fn(() => new Promise<void>(() => undefined));
+        candidate.dispatchSynthetic("message", CODEC_SESSION_HELLO);
+        await vi.waitFor(() => expect(candidate.sendReceipt).toHaveBeenCalledOnce());
+        // The server's answer proves it has the frame; the receipt never settles.
+        candidate.dispatchSynthetic("message", JSON.stringify(codecGameStarted(6, 6)));
+        await vi.waitFor(() => expect(events).toContainEqual({ type: "reconnected", inGame: true }));
+        expect(candidate.close).not.toHaveBeenCalled();
+        const internals = adapter as unknown as { confirmingPreparation: unknown; ws: unknown };
+        expect(internals.confirmingPreparation).toBeNull();
+        expect(vi.getTimerCount()).toBeLessThan(5);
+      } finally {
+        adapter.dispose();
+      }
+    });
+
+    it("fails an initial join at the bound when its setup receipt never settles on a socket that stays open", async () => {
+      MockWebSocket.last = null;
+      const codec = scriptedCodec();
+      const adapter = new WebSocketAdapter(
+        "wss://localhost:9374/ws", "join", { main_deck: [], sideboard: [] }, "GAME01",
+        undefined, undefined, undefined,
+        { stateCodecSessionProvider: () => Promise.resolve(codec.session) },
+      );
+      const init = observe(adapter.initialize());
+      await vi.waitFor(() => expect(MockWebSocket.last).not.toBeNull());
+      const candidate = latestSocket();
+      candidate.sendReceipt = vi.fn(() => new Promise<void>(() => undefined));
+      try {
+        candidate.dispatchSynthetic("message", CODEC_SESSION_HELLO);
+        await vi.waitFor(() => expect(candidate.sendReceipt).toHaveBeenCalledOnce());
+        await vi.advanceTimersByTimeAsync(SETUP_CONFIRMATION_TIMEOUT_MS - 1000);
+        expect(init.value()).toBe("never settled");
+        await vi.advanceTimersByTimeAsync(1000);
+        await vi.waitFor(() => expect(init.value()).toMatchObject({ code: "WS_CLOSED" }));
+        expect(candidate.close).toHaveBeenCalled();
+        expect(codec.close).toHaveBeenCalledOnce();
+      } finally {
         adapter.dispose();
       }
     });

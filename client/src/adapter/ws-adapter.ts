@@ -46,6 +46,7 @@ import {
 } from "../services/openPhaseSocket";
 import {
   SETUP_CONFIRMATION_TIMEOUT_MS,
+  settledWithin,
   SetupBufferBudget,
   SetupConfirmation,
   reportUncaughtError,
@@ -2787,7 +2788,13 @@ export class WebSocketAdapter implements EngineAdapter {
           preparation.signal.addEventListener("abort", onAbort, { once: true });
           writePending = true;
           try {
-            written = await write;
+            // The receipt belongs to the transport and may never settle on a
+            // socket that stays open: past the bound the frame counts as unsent
+            // and the candidate is retired with the failed attachment.
+            // (A transport without a receipt wrote synchronously: nothing to bound.)
+            written = socket.ws.sendReceipt === undefined
+              ? await write
+              : await settledWithin(write, SETUP_CONFIRMATION_TIMEOUT_MS, false);
           } finally {
             writePending = false;
             preparation.signal.removeEventListener("abort", onAbort);
@@ -2810,7 +2817,9 @@ export class WebSocketAdapter implements EngineAdapter {
           } else if (typeof first === "boolean") {
             written = first;
           } else if (first === "confirmed") {
-            written = await write;
+            // The server answered the setup, so it has the frame: the receipt,
+            // which the transport may still hold, is not waited for.
+            written = true;
           } else {
             // The receipt is still pending, so the frame's fate is unknown.
             // The server may already have it and have moved the seat's sender,
