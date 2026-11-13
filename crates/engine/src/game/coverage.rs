@@ -7879,11 +7879,13 @@ enum AbilityNodeGap<'a> {
 
 /// The coverage label for a GiveControl whose player recipient ("target player", "target
 /// opponent", "an opponent") is never announced or chosen: `resolve_give` binds it only when
-/// exactly one player qualifies, so it fails in multiplayer.
+/// exactly one player qualifies, so it fails with two or more qualifying players (every game for
+/// "target player").
 pub const GIVE_CONTROL_UNBOUND_RECIPIENT_GAP: &str = "Effect:give_control_unbound_recipient";
 
-/// CR 601.2c / CR 608.2d: the recipient shapes `gain_control::unique_recipient_from_filter`
-/// resolves only by finding a single qualifying player.
+/// CR 601.2c / CR 608.2d: a "target player/opponent" or "an opponent" recipient that no target
+/// slot or choice binds, so `unique_recipient_from_filter` resolves it only when one player
+/// qualifies.
 fn give_control_recipient_is_unbound(effect: &Effect) -> bool {
     matches!(
         effect,
