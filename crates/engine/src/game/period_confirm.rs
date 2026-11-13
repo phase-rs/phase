@@ -2135,7 +2135,7 @@ mod tests {
     }
 
     /// The first priority frame of a mandatory loop at which the recurrence span is known,
-    /// with the offers before it declined (CR 732.5), and that span.
+    /// with the offers before it declined (CR 732.2a), and that span.
     fn first_mandatory_recurrence(
         runner: &mut crate::game::scenario::GameRunner,
     ) -> (GameState, NamedSpan) {
@@ -2274,9 +2274,10 @@ mod tests {
     /// returned Animate Dead reanimates the Dragon, whose entry exiles it again: a loop with no
     /// choice in it, above the Sniper's trigger, which it never reaches (CR 405.5), and in
     /// which the Warden gains life each cycle. P1's Mountain and Lightning Bolt are the out
-    /// that turns the loop into an offer, declined (CR 732.5) so play reaches a priority frame
-    /// inside the loop. The counters are reset there, then `mandatory_period_holds` replays the
-    /// span and settles each replayed frame against `take_boundary`.
+    /// that turns the loop into an offer (CR 732.5). The offer is declined (CR 732.2a) so play
+    /// reaches a priority frame inside the loop. The counters are reset there, then
+    /// `mandatory_period_holds` replays the span and settles each replayed frame against
+    /// `take_boundary`.
     ///
     /// What it shows: the period holds and the take PERFORMS, so a replayed settle frame
     /// recurred against the boundary; the buried trigger owns the damage event and reads its

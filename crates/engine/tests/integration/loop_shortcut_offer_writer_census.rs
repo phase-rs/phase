@@ -314,7 +314,7 @@ fn census(needle: &str) -> Vec<Hit> {
 ///   declaration), minting none.
 /// * 29 ⇒ the pinned value: `first_mandatory_recurrence` in
 ///   `engine/src/game/period_confirm.rs`'s `#[cfg(test)]` module — a READ: it
-///   declines (CR 732.5) each offer play minted on its way to a priority frame
+///   declines (CR 732.2a) each offer play minted on its way to a priority frame
 ///   inside a mandatory loop, minting none.
 ///
 /// EVERY addition listed above is in a `#[cfg(test)]` scope — mints and reads
