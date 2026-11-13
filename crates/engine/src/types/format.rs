@@ -3862,6 +3862,24 @@ fn legality_table_format(table: LegalityFormat) -> GameFormat {
 }
 
 impl FormatConfig {
+    /// CR 903.12h: a save written while Brawl still carried CR 704.6c's
+    /// commander-damage threshold restores without it. Persistence ingress only;
+    /// network payloads keep the strict validator.
+    pub(crate) fn migrate_persisted_brawl_commander_damage_threshold(
+        config: &mut serde_json::Value,
+    ) {
+        let is_brawl = config
+            .get("format")
+            .and_then(|format| GameFormat::deserialize(format).ok())
+            .is_some_and(|format| matches!(format, GameFormat::Brawl | GameFormat::HistoricBrawl));
+        if let Some(threshold) = config
+            .get_mut("commander_damage_threshold")
+            .filter(|_| is_brawl)
+        {
+            *threshold = serde_json::Value::Null;
+        }
+    }
+
     pub fn topology(&self) -> FormatTopology {
         match self.format {
             GameFormat::TwoHeadedGiant => FormatTopology::FixedTeams {
