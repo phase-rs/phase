@@ -1390,12 +1390,16 @@ fn another_seat_concession_leaves_a_parked_owner_iteration_intact() {
         let (mender, brokkos) = add_pile(&mut scenario, P1);
         scenario.add_real_card(P1, "Ninth Bridge Patrol", Zone::Battlefield, db);
         let bystander = scenario.add_real_card(P2, "Circuit Mender", Zone::Battlefield, db);
+        let stolen_demon = scenario.add_real_card(P0, "Extractor Demon", Zone::Battlefield, db);
+        let turn_against = scenario.add_real_card(P2, "Turn Against", Zone::Hand, db);
         let warp = scenario.add_real_card(P0, "Chaos Warp", Zone::Hand, db);
         scenario.with_library_top(P1, &["Library Card A", "Library Card B"]);
         scenario.with_mana_pool(P0, mana(ManaType::Red, 5));
+        scenario.with_mana_pool(P2, mana(ManaType::Red, 5));
         let mut runner = scenario.build();
         let pile = merge_pile(&mut runner, Pile::BrokkosUnderMender, mender, brokkos, true);
         let label = format!("answer {answer_index}");
+        steal_for(&mut runner, P2, turn_against, stolen_demon);
 
         cast_until_resolved_or_asked(&mut runner, warp, &[pile.survivor]);
         assert_commander_prompt(runner.state(), P1, pile.brokkos);
@@ -1433,6 +1437,13 @@ fn another_seat_concession_leaves_a_parked_owner_iteration_intact() {
             mender_departure_triggers(runner.state()),
             vec![P1],
             "{label}: one merged permanent left, so its ability triggers once"
+        );
+        assert_eq!(
+            demon_triggers(runner.state()),
+            0,
+            "{label}: CR 603.10a + CR 800.4d: P2 conceded while P1's prompt was parked, so the \
+             Extractor Demon P2 had stolen looked back to a source P2 controlled for the merged \
+             permanent's retained departure, which the owner collected after P2 left"
         );
     }
 }

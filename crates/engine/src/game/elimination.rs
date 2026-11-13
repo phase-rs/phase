@@ -7,7 +7,7 @@ use crate::types::game_state::{
     PayCostKind, PendingCast, PendingCostMoveResume, PendingSacrificeCostCompletion, WaitingFor,
     ZoneDeparture,
 };
-use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
+use crate::types::identifiers::ObjectIncarnationRef;
 use crate::types::match_config::MatchPhase;
 use crate::types::player::PlayerId;
 use crate::types::resolution::{OptionalEffectFrame, ZoneChangeOwnerMut};
@@ -402,26 +402,10 @@ pub(crate) fn eliminate_players(
     // ability reads its source as it was immediately before that event, so an
     // observer a leaving player stole triggers under that player and is retired
     // with them (CR 800.4d) rather than handed to its owner.
-    // CR 603.10a + CR 800.4d: the permanents the leavers control right now, before
-    // their control effects end, for a parked owner's later collection.
-    let controlled_by_leavers: Vec<ObjectId> = state
-        .battlefield
-        .iter()
-        .copied()
-        .filter(|id| {
-            state
-                .objects
-                .get(id)
-                .is_some_and(|object| leaving_set.contains(&object.controller))
-        })
-        .collect();
-    if !controlled_by_leavers.is_empty() {
+    if !leaving_set.is_empty() {
         state
-            .departed_control
-            .push(crate::types::game_state::DepartedControl {
-                sources: controlled_by_leavers,
-                first_zone_change_record: first_record,
-            });
+            .first_departure_zone_change_record
+            .get_or_insert(first_record);
     }
     let mut looked_back_observers = (!leaving_set.is_empty())
         .then(|| super::triggers::ImmediatelyBeforeObservers::latch(state));

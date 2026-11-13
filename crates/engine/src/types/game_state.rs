@@ -1842,19 +1842,6 @@ pub struct LeavingGameDeparture {
     pub departure: ZoneDeparture,
 }
 
-/// CR 603.10a + CR 603.3a + CR 800.4d: the permanents the players who left the
-/// game controlled immediately before they left, and how many zone changes had
-/// been recorded this turn when they left (`GameState::departed_control`). A
-/// logical zone-change owner that retained a departure it performed before the
-/// loss collects it only when its tail finishes, after the leavers' control
-/// effects ended; what these sources triggered for such an earlier zone change
-/// was the leaver's trigger and leaves with them.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct DepartedControl {
-    pub sources: Vec<ObjectId>,
-    pub first_zone_change_record: usize,
-}
-
 /// Deserialization shape of [`ZoneChangeRecord`]; a record saved without `arrival` loads with arrival equal to departure.
 #[derive(Deserialize)]
 struct ZoneChangeRecordWire {
@@ -3713,6 +3700,13 @@ pub struct LogicalZoneChangeGroup {
     pub immediately_before_latched: bool,
     pub immediately_before_batched_triggers: Vec<LatchedBatchedTrigger>,
     pub immediately_before_suppress_triggers: Vec<LatchedSuppressTrigger>,
+    /// CR 603.10a + CR 603.3a: who controlled each permanent on the battlefield
+    /// immediately before the owner's event. An ordinary observer's abilities
+    /// that trigger for the owner's retained departures are controlled by that
+    /// player, even when the retained events are collected later, after a
+    /// control effect ended (a player who left, CR 800.4a).
+    #[serde(default)]
+    pub immediately_before_controllers: Vec<(ObjectId, PlayerId)>,
     /// `true` only after final delivery has flushed layers and captured every
     /// ordinary CR 603.10 observation. This stays explicit even when no retained
     /// occurrence admits an immediately-after definition.
@@ -3734,6 +3728,8 @@ struct LogicalZoneChangeGroupWire {
     immediately_before_latched: bool,
     immediately_before_batched_triggers: Vec<LatchedBatchedTrigger>,
     immediately_before_suppress_triggers: Vec<LatchedSuppressTrigger>,
+    #[serde(default)]
+    immediately_before_controllers: Vec<(ObjectId, PlayerId)>,
     immediately_after_latched: bool,
     immediately_after_batched_triggers: Vec<LatchedBatchedTrigger>,
     immediately_after_suppress_triggers: Vec<LatchedSuppressTrigger>,
@@ -3750,6 +3746,7 @@ impl From<LogicalZoneChangeGroupWire> for LogicalZoneChangeGroup {
             immediately_before_latched: wire.immediately_before_latched,
             immediately_before_batched_triggers: wire.immediately_before_batched_triggers,
             immediately_before_suppress_triggers: wire.immediately_before_suppress_triggers,
+            immediately_before_controllers: wire.immediately_before_controllers,
             immediately_after_latched: wire.immediately_after_latched,
             immediately_after_batched_triggers: wire.immediately_after_batched_triggers,
             immediately_after_suppress_triggers: wire.immediately_after_suppress_triggers,
@@ -3994,6 +3991,7 @@ impl LogicalZoneChangeGroup {
             immediately_before_latched: false,
             immediately_before_batched_triggers: Vec::new(),
             immediately_before_suppress_triggers: Vec::new(),
+            immediately_before_controllers: Vec::new(),
             immediately_after_latched: false,
             immediately_after_batched_triggers: Vec::new(),
             immediately_after_suppress_triggers: Vec::new(),
@@ -25655,11 +25653,15 @@ declare_game_state! {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub leaving_game_departure: Option<LeavingGameDeparture>,
 
-    /// CR 603.10a + CR 800.4d: the control the players who left this turn held
-    /// over permanents immediately before they left (see [`DepartedControl`]).
-    /// Cleared with the turn's zone-change records it indexes.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub departed_control: Vec<DepartedControl>,
+    /// CR 603.10a + CR 800.4a: how many zone changes this turn had been recorded
+    /// when the first player left the game this turn. A zone change recorded
+    /// before it happened while the leaver's control effects still applied, so a
+    /// parked owner collecting it later reads its observers' controllers as they
+    /// were immediately before it (`LogicalZoneChangeGroup::
+    /// immediately_before_controllers`); one recorded at or after it reads the
+    /// live game. Cleared with the zone-change records it indexes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first_departure_zone_change_record: Option<usize>,
 
     /// CR 705.2: Result of the most recent coin flip in the current resolution,
     /// carrying the flipper so `AbilityCondition::CoinFlipOutcome` is
@@ -34697,7 +34699,7 @@ impl GameState {
             resolving_created_token_seats: None,
             merged_card_component_route: None,
             leaving_game_departure: None,
-            departed_control: Vec::new(),
+            first_departure_zone_change_record: None,
             resolution_coin_flip: None,
             repeat_process_requested: None,
             pending_player_scope_sacrifice_choice: None,
@@ -38659,7 +38661,7 @@ fn _gamestate_partition_is_total(s: &GameState) {
         resolving_created_token_seats: _,
         merged_card_component_route: _,
         leaving_game_departure: _,
-        departed_control: _,
+        first_departure_zone_change_record: _,
         resolution_coin_flip: _,
         repeat_process_requested: _,
         may_trigger_auto_choices: _,
