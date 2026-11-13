@@ -49,11 +49,13 @@ use engine::types::mana::{ManaColor, ManaCost, ManaCostShard};
 use engine::types::phase::Phase;
 use engine::types::zones::Zone;
 
-/// Verbatim Oracle text (Scryfall): Kolaghan's Command, an instant.
+/// Verbatim Oracle text (Scryfall / MTGJSON): Kolaghan's Command, an instant.
+/// The four modes are in the card's PRINTED order — return, discard, destroy,
+/// damage — so a mode index in this file is the printed mode index.
 const KOLAGHANS_COMMAND_ORACLE: &str = "Choose two —\n\
-     • Destroy target artifact.\n\
-     • Target player discards a card.\n\
      • Return target creature card from your graveyard to your hand.\n\
+     • Target player discards a card.\n\
+     • Destroy target artifact.\n\
      • Kolaghan's Command deals 2 damage to any target.";
 
 /// CR 601.2c: the two clauses a caster who chose "Destroy target artifact" and
@@ -626,10 +628,10 @@ fn counterspell_save_taken_during_mana_payment_restores_and_resumes() {
 // ---------------------------------------------------------------------------
 
 /// CR 601.2b + CR 700.2: the modes the caster announces from Kolaghan's
-/// Command's printed "Choose two —" block — printed mode 0, "Destroy target
+/// Command's printed "Choose two —" block — printed mode 2, "Destroy target
 /// artifact", and printed mode 3, "… deals 2 damage to any target". The pairing
 /// walk judges exactly these two slots, in this printed order, one fact each.
-const CHOSEN_MODE_INDICES: [usize; 2] = [0, 3];
+const CHOSEN_MODE_INDICES: [usize; 2] = [2, 3];
 
 struct ParkedModalCommand {
     runner: GameRunner,
@@ -755,8 +757,18 @@ fn assert_modal_repeated_target_reach_guards(parked: &ParkedModalCommand) {
         "reach-guard: Kolaghan's Command prints four modes, got {:?}",
         parked.modal.mode_descriptions
     );
+    // The parsed block IS the printed block, in printed order: return, discard,
+    // destroy, damage. Asserting all four — not only the two announced — is what
+    // makes the indices in this file printed indices rather than fixture-local
+    // ones: a fixture reordered to put "Destroy target artifact" first would fail
+    // here instead of silently re-labelling the slots.
     for (index, expected) in [
-        (0, "Destroy target artifact"),
+        (
+            0,
+            "Return target creature card from your graveyard to your hand",
+        ),
+        (1, "Target player discards a card"),
+        (2, "Destroy target artifact"),
         (3, "deals 2 damage to any target"),
     ] {
         let description = parked
@@ -766,8 +778,7 @@ fn assert_modal_repeated_target_reach_guards(parked: &ParkedModalCommand) {
             .unwrap_or_else(|| panic!("reach-guard: printed mode {index} parses"));
         assert!(
             description.contains(expected),
-            "reach-guard: printed mode {index} is the clause the caster announced, got \
-             {description:?}"
+            "reach-guard: printed mode {index} is {expected:?}, got {description:?}"
         );
     }
 
@@ -794,7 +805,7 @@ fn assert_modal_repeated_target_reach_guards(parked: &ParkedModalCommand) {
 
     // CR 700.2 + CR 601.2b: the targeting prompt names the mode each slot came
     // from. This is the engine's own mode→slot mapping, read back before the
-    // save: the destruction slot is first (printed mode 0), the damage slot
+    // save: the destruction slot is first (printed mode 2), the damage slot
     // second (printed mode 3) — the order the pairing walk assumes.
     assert_eq!(
         parked.slot_mode_labels.len(),
@@ -809,7 +820,7 @@ fn assert_modal_repeated_target_reach_guards(parked: &ParkedModalCommand) {
     };
     assert!(
         label(0).contains("Destroy target artifact"),
-        "reach-guard: the first declared slot belongs to printed mode 0, got {:?}",
+        "reach-guard: the first declared slot belongs to printed mode 2, got {:?}",
         label(0)
     );
     assert!(
