@@ -2043,6 +2043,7 @@ fn earthbend_return_skips_shock_land_pay_life_prompt() {
         discard_frame: None,
         performed_by: None,
         ownership_actor: engine::types::proposed_event::EntryOwnershipActor::NoPlayer,
+        library_shuffle: engine::types::ability::LibraryShuffleMode::PerObject,
         applied: std::collections::HashSet::new(),
     };
 
@@ -2127,6 +2128,7 @@ fn plain_shock_land_etb_still_prompts_for_life_payment() {
         discard_frame: None,
         performed_by: None,
         ownership_actor: engine::types::proposed_event::EntryOwnershipActor::NoPlayer,
+        library_shuffle: engine::types::ability::LibraryShuffleMode::PerObject,
         applied: std::collections::HashSet::new(),
     };
 

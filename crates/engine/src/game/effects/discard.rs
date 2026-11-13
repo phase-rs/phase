@@ -82,6 +82,7 @@ pub(crate) fn complete_discard_to_graveyard(
         discard_frame,
         performed_by: None,
         ownership_actor: crate::types::proposed_event::EntryOwnershipActor::NoPlayer,
+        library_shuffle: crate::types::ability::LibraryShuffleMode::PerObject,
         applied,
     };
     match replacement::replace_event(state, proposed, events) {

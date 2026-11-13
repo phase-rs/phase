@@ -8614,15 +8614,15 @@ pub enum TargetFilter {
     OriginalController,
     /// CR 613.1f + CR 608.2c: Resolves to the ability's *original*, pre-rebind
     /// source identity — the object that put this ability on the stack — even
-    /// inside a `ChangeZone { forward_result: true }` sub-ability chain where
-    /// the runtime has rebound `ResolvedAbility::source_id` to the just-moved
-    /// object.
+    /// inside a `ChangeZone { forward_result: true }` chain whose legacy
+    /// object-relative child has rebound `ResolvedAbility::source_id` to the
+    /// just-moved object.
     ///
     /// Motivation (reanimator-Aura class: Animate Dead / Dance of the Dead):
     /// the ETB effect returns the enchanted creature card to the battlefield
-    /// via `ChangeZone { forward_result: true }`, which rebinds `source_id` to
-    /// the reanimated creature so trailing `SelfRef`/`ParentTarget` anaphora
-    /// (the attach, the leaves-battlefield sacrifice) bind to that creature.
+    /// via `ChangeZone { forward_result: true }`. Its legacy immediate generic
+    /// grant reads the reanimated object, while returned-object anaphora use the
+    /// forwarded context. A primary `SelfRef` still names the creating source.
     /// But the same effect ALSO rewrites the Aura's OWN enchant restriction
     /// ("it loses \"enchant creature card in a graveyard\" and gains \"enchant
     /// creature put onto the battlefield with this Aura\""). That keyword swap
@@ -8636,8 +8636,9 @@ pub enum TargetFilter {
     /// `effects/mod.rs`, at the one point where the pre-rebind `source_id` and
     /// the about-to-be-mutated sub-ability clone coexist.
     ///
-    /// Distinct from `SelfRef` (rebound to the moved object under
-    /// `forward_result`) and from `OriginalController` (a player reference).
+    /// Unlike the current ability's primary `SelfRef` or a moved-object
+    /// `ParentTarget`, this pins the pre-rebind producer for legacy grants.
+    /// `OriginalController` is the separate player reference.
     OriginalSource,
     /// CR 615.5 + CR 609.7: Resolves to the controller of the *prevented event's*
     /// damage source. Used by prevention follow-up sentences such as "the source's
@@ -10721,6 +10722,73 @@ pub fn effect_owns_resolution_zone_choice(effect: &Effect, timing: TargetChoiceT
     !selection_zones.is_empty()
         && !target.is_context_ref()
         && !effect_requires_parent_target_object(effect)
+}
+
+#[cfg(test)]
+mod r2_resolution_choice_authority_tests {
+    use super::*;
+
+    #[test]
+    fn zone_union_choice_ownership_requires_resolution_and_preserves_target_filter() {
+        let target = TargetFilter::Typed(TypedFilter {
+            type_filters: vec![TypeFilter::Subtype("Spacecraft".into())],
+            controller: Some(ControllerRef::You),
+            properties: vec![FilterProp::InAnyZone {
+                zones: vec![Zone::Hand, Zone::Graveyard],
+            }],
+        });
+        let mut effect: Effect =
+            serde_json::from_str(r#"{"type":"ChangeZone","destination":"Battlefield"}"#).unwrap();
+        let Effect::ChangeZone { target: slot, .. } = &mut effect else {
+            unreachable!()
+        };
+        *slot = target.clone();
+        assert!(effect_owns_resolution_zone_choice(
+            &effect,
+            TargetChoiceTiming::Resolution
+        ));
+        assert!(!effect_owns_resolution_zone_choice(
+            &effect,
+            TargetChoiceTiming::Stack
+        ));
+        assert_eq!(effect.target_filter(), Some(&target));
+        let Effect::ChangeZone { target: slot, .. } = &mut effect else {
+            unreachable!()
+        };
+        *slot = TargetFilter::ParentTarget;
+        assert!(!effect_owns_resolution_zone_choice(
+            &effect,
+            TargetChoiceTiming::Resolution
+        ));
+    }
+
+    #[test]
+    fn terminal_owner_movement_exposes_bound_parent_slots() {
+        for target in [
+            TargetFilter::ParentTarget,
+            TargetFilter::ParentTargetSlot { index: 1 },
+        ] {
+            let mut effect: Effect =
+                serde_json::from_str(r#"{"type":"ChangeZoneAll","destination":"Library"}"#)
+                    .unwrap();
+            let Effect::ChangeZoneAll {
+                target: slot,
+                library_shuffle,
+                ..
+            } = &mut effect
+            else {
+                unreachable!()
+            };
+            *slot = target.clone();
+            *library_shuffle = LibraryShuffleMode::TerminalShuffle;
+            assert_eq!(effect_parent_ref_slots(&effect), vec![&target]);
+            assert!(effect_requires_parent_target_object(&effect));
+            assert!(!effect_owns_resolution_zone_choice(
+                &effect,
+                TargetChoiceTiming::Resolution
+            ));
+        }
+    }
 }
 
 /// CR 608.2c + CR 400.7 + CR 115.10a: what one instruction can single out,
@@ -20695,8 +20763,15 @@ pub enum LibraryShuffleMode {
     TerminalShuffle,
 }
 
+impl LibraryShuffleMode {
+    /// Serde skip-helper: `PerObject` is the default and is omitted from JSON.
+    pub fn is_per_object(&self) -> bool {
+        matches!(self, Self::PerObject)
+    }
+}
+
 fn is_default_library_shuffle_mode(mode: &LibraryShuffleMode) -> bool {
-    matches!(mode, LibraryShuffleMode::PerObject)
+    mode.is_per_object()
 }
 
 /// CR 701.20a + CR 608.2c: How the *set* of matching cards found by an
@@ -26204,6 +26279,16 @@ fn effect_introduces_per_player_chosen_card_referent(effect: &Effect) -> bool {
 pub fn effect_introduces_per_iteration_referent(effect: &Effect) -> bool {
     effect_introduces_per_player_object_referent(effect)
         || effect_introduces_per_player_chosen_card_referent(effect)
+        // CR 608.2c: a single exiled top card is also an iteration-local
+        // referent for the following land-deploy or optional-cast instruction.
+        || matches!(
+            effect,
+            Effect::ExileTop {
+                count: QuantityExpr::Fixed { value: 1 },
+                position: LibraryPosition::Top,
+                ..
+            }
+        )
 }
 
 pub fn generic_effect_affected_uses_inherited_targets(filter: &TargetFilter) -> bool {
@@ -26385,6 +26470,76 @@ fn phase_out_or_in_filter_is_mass(filter: &TargetFilter) -> bool {
                 && tf.properties.is_empty()
         }
         _ => false,
+    }
+}
+
+/// CR 115.10a: a PhaseOut union of supported already-bound object references
+/// declares no new target. Keep this narrower than `TargetFilter::is_context_ref`:
+/// other context references need their own object authority before joining a
+/// phasing batch. This does not prove any supported reference is live.
+pub fn phase_out_filter_is_context_union(filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::Or { filters } => filters.iter().all(phase_out_filter_is_context_union),
+        TargetFilter::SelfRef
+        | TargetFilter::ParentTarget
+        | TargetFilter::ParentTargetSlot { .. }
+        | TargetFilter::TriggeringSource => true,
+        TargetFilter::None
+        | TargetFilter::Any
+        | TargetFilter::Player
+        | TargetFilter::Controller
+        | TargetFilter::SourceController
+        | TargetFilter::ControllerAndControlledPermanents { .. }
+        | TargetFilter::Opponent
+        | TargetFilter::GrantingObject { .. }
+        | TargetFilter::SourceOrPaired
+        | TargetFilter::Typed(_)
+        | TargetFilter::Not { .. }
+        | TargetFilter::And { .. }
+        | TargetFilter::StackAbility { .. }
+        | TargetFilter::StackSpell
+        | TargetFilter::CastingSpell
+        | TargetFilter::SpecificObject { .. }
+        | TargetFilter::SpecificPlayer { .. }
+        | TargetFilter::PlayerWhoChoseLabel { .. }
+        | TargetFilter::PlayerMatching { .. }
+        | TargetFilter::Neighbor { .. }
+        | TargetFilter::ScopedPlayer
+        | TargetFilter::AttachedTo
+        | TargetFilter::LastCreated
+        | TargetFilter::LastRevealed
+        | TargetFilter::LastZoneChanged
+        | TargetFilter::CostPaidObject
+        | TargetFilter::AmassedArmy
+        | TargetFilter::ChosenCard
+        | TargetFilter::TrackedSet { .. }
+        | TargetFilter::TrackedSetFiltered { .. }
+        | TargetFilter::ExiledBySource
+        | TargetFilter::ExiledCardByIndex { .. }
+        | TargetFilter::TriggeringSpellController
+        | TargetFilter::TriggeringSpellOwner
+        | TargetFilter::TriggeringPlayer
+        | TargetFilter::AttackedPlayerOrPlaneswalker
+        | TargetFilter::EventTarget
+        | TargetFilter::TriggeringSourceController
+        | TargetFilter::EventTargetController
+        | TargetFilter::DeclaredPlayer { .. }
+        | TargetFilter::ParentTargetController
+        | TargetFilter::ParentTargetOwner
+        | TargetFilter::AffectedObjectOwner
+        | TargetFilter::SourceChosenPlayer
+        | TargetFilter::OriginalController
+        | TargetFilter::OriginalSource
+        | TargetFilter::PostReplacementSourceController
+        | TargetFilter::PostReplacementDamageSource
+        | TargetFilter::PostReplacementDamageTarget
+        | TargetFilter::PostReplacementDamageTargetOwner
+        | TargetFilter::DefendingPlayer
+        | TargetFilter::HasChosenName
+        | TargetFilter::ChosenDamageSource { .. }
+        | TargetFilter::Named { .. }
+        | TargetFilter::Owner
+        | TargetFilter::AllPlayers => false,
     }
 }
 
@@ -26582,6 +26737,13 @@ pub fn extract_target_filter_from_effect(effect: &Effect) -> Option<&TargetFilte
             .is_some_and(phase_out_or_in_filter_is_mass)
     {
         return None;
+    }
+    // CR 115.10a: affecting the source and a previously selected target does
+    // not declare another target. PhaseOut collects these references as a union.
+    if let Effect::PhaseOut { target } = effect {
+        if phase_out_filter_is_context_union(target) {
+            return None;
+        }
     }
     effect.target_filter().filter(|t| !t.is_context_ref())
 }
@@ -29710,6 +29872,9 @@ impl TargetFilter {
                 // the source's live-or-LKI incarnation, never chosen while
                 // announcing the ability.
                 | TargetFilter::SourceController
+                // CR 108.3 + CR 115.10a: the source's owner is fixed by
+                // ownership, not selected when announcing this ability.
+                | TargetFilter::Owner
                 | TargetFilter::OriginalController
                 // CR 608.2c: the reanimator-Aura's pre-rebind source identity is
                 // resolved (concretized to SpecificObject) during resolution, never
@@ -35885,9 +36050,11 @@ pub struct AbilityDefinition {
     /// CR 601.2f: Self-referential cost reduction applied before activation.
     /// "This ability costs {N} less to activate for each [condition]"
     pub cost_reduction: Option<CostReduction>,
-    /// When true, after this ability's effect resolves, moved/created objects are forwarded
-    /// to the sub_ability: the moved object becomes sub's source_id, and the original source
-    /// becomes a target. Used for "put onto the battlefield attached to [source]" patterns.
+    /// Forward the settled moved/created objects to the sub-ability's result context.
+    /// Legacy object-relative children may also rebind their source to the moved
+    /// object; a primary `SelfRef`, delayed trigger, or repeat directive keeps its
+    /// creating source instead. Use the forwarded-object operands for the result,
+    /// independently of the printed source identity.
     pub forward_result: bool,
     /// Player scope for "each player/opponent [effect]" patterns.
     /// When set, the effect iterates over matching players (each becomes the acting player).
@@ -43384,6 +43551,94 @@ mod tests {
     use super::*;
     use crate::types::mana::ZoneSpendPolarity;
     use crate::types::zones::Zone;
+
+    #[test]
+    fn phase_out_context_union_extracts_no_new_target() {
+        let pair = TargetFilter::Or {
+            filters: vec![TargetFilter::SelfRef, TargetFilter::ParentTarget],
+        };
+        for target in [
+            pair.clone(),
+            TargetFilter::Or {
+                filters: vec![pair, TargetFilter::SelfRef],
+            },
+            TargetFilter::Or { filters: vec![] },
+            TargetFilter::Or {
+                filters: vec![TargetFilter::Or { filters: vec![] }],
+            },
+            TargetFilter::Any,
+            TargetFilter::SelfRef,
+            TargetFilter::Typed(TypedFilter::permanent().controller(ControllerRef::You)),
+        ] {
+            let effect = Effect::PhaseOut { target };
+            assert_eq!(extract_target_filter_from_effect(&effect), None);
+            assert!(!effect_has_stack_target_declaration(&effect));
+            let control = Effect::PhaseOut {
+                target: TargetFilter::Typed(TypedFilter::creature()),
+            };
+            assert!(std::ptr::eq(
+                extract_target_filter_from_effect(&control).unwrap(),
+                control.target_filter().unwrap()
+            ));
+            assert!(effect_has_stack_target_declaration(&control));
+        }
+    }
+
+    #[test]
+    fn phase_out_context_union_preserves_targeted_boundaries() {
+        let creature = TargetFilter::Typed(TypedFilter::creature());
+        let mixed = TargetFilter::Or {
+            filters: vec![TargetFilter::SelfRef, creature],
+        };
+        for target in [
+            mixed.clone(),
+            TargetFilter::Or {
+                filters: vec![TargetFilter::ParentTarget, mixed],
+            },
+            TargetFilter::Or {
+                filters: vec![TargetFilter::SelfRef, TargetFilter::Any],
+            },
+            TargetFilter::And {
+                filters: vec![TargetFilter::SelfRef, TargetFilter::ParentTarget],
+            },
+            TargetFilter::Not {
+                filter: Box::new(TargetFilter::SelfRef),
+            },
+        ] {
+            let effect = Effect::PhaseOut { target };
+            assert!(std::ptr::eq(
+                extract_target_filter_from_effect(&effect).unwrap(),
+                effect.target_filter().unwrap()
+            ));
+            assert!(effect_has_stack_target_declaration(&effect));
+        }
+        let pair = TargetFilter::Or {
+            filters: vec![TargetFilter::SelfRef, TargetFilter::ParentTarget],
+        };
+        for effect in [
+            Effect::PhaseIn {
+                target: pair.clone(),
+            },
+            Effect::Destroy {
+                target: pair,
+                cant_regenerate: false,
+            },
+        ] {
+            assert_eq!(
+                extract_target_filter_from_effect(&effect),
+                effect.target_filter()
+            );
+            assert!(effect_has_stack_target_declaration(&effect));
+        }
+        for target in [
+            TargetFilter::SelfRef,
+            TargetFilter::Typed(TypedFilter::permanent().controller(ControllerRef::You)),
+        ] {
+            let effect = Effect::PhaseIn { target };
+            assert_eq!(extract_target_filter_from_effect(&effect), None);
+            assert!(!effect_has_stack_target_declaration(&effect));
+        }
+    }
 
     fn goblin_token(attack_destination: TokenAttackDestination) -> Effect {
         Effect::Token {
