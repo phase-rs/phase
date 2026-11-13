@@ -5264,7 +5264,13 @@ fn settle_entries_before_instruction(
     {
         return;
     }
-    settle_entries_at_boundary(state, events, next, completed);
+    settle_entries_at_boundary(
+        state,
+        events,
+        next,
+        completed,
+        crate::game::triggers::CompletedEntryCollection::HeldInstruction,
+    );
 }
 
 /// The instruction boundary proper (everything after B0): `next` begins an instruction, or the
@@ -5274,6 +5280,7 @@ fn settle_entries_at_boundary(
     events: &[GameEvent],
     next: &ResolvedAbility,
     completed: Option<&ResolvedAbility>,
+    collection: crate::game::triggers::CompletedEntryCollection,
 ) {
     // CR 614.12a: an entry may still be in progress while a resolution choice or a parked
     // replacement is pending (G1).
@@ -5306,12 +5313,15 @@ fn settle_entries_at_boundary(
     crate::game::zones::settle_battlefield_entry_observations(state, events);
     // CR 603.6a + CR 603.6b + CR 611.3c: an entering instruction that was held across answers
     // has completed and its entrants are observed, so its entry event is matched now, against
-    // the board it left, before `next` can change which permanents observe or suppress it.
+    // the board it left, before `next` can change which permanents observe or suppress it. A
+    // completed performance of a repeated keyword action is matched now even when it was never
+    // held, so the action's scan does not batch it with the next performance (CR 608.2c).
     if instruction_completed {
-        crate::game::triggers::collect_completed_held_entry_instruction(
+        crate::game::triggers::collect_completed_entry_instruction(
             state,
             events,
             completed_through,
+            collection,
         );
     }
 }
@@ -5340,7 +5350,13 @@ fn settle_entries_before_repeat_occurrence(
             | Effect::Cloak { .. }
             | Effect::Amass { .. }
     ) {
-        settle_entries_at_boundary(state, events, occurrence, None);
+        settle_entries_at_boundary(
+            state,
+            events,
+            occurrence,
+            None,
+            crate::game::triggers::CompletedEntryCollection::Occurrence,
+        );
     }
 }
 

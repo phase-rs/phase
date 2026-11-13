@@ -9746,15 +9746,21 @@ pub(crate) fn collect_action_end_triggers_into_deferred(
 /// not collect them again, while delayed triggers keep their view of them (CR 603.7). The
 /// triggers are queued, not put on the stack: that waits for a player to receive priority
 /// (CR 603.3b). An instruction whose entries were never held is left to the action's scan, as
-/// it is for every other resolution.
-pub(crate) fn collect_completed_held_entry_instruction(
+/// it is for every other resolution (`CompletedEntryCollection::HeldInstruction`), unless the
+/// boundary separates two performances of a repeated keyword action
+/// (`CompletedEntryCollection::Occurrence`): those are successive entry events (CR 608.2c), so
+/// the completed one is collected here whether or not it was held, and the action's one scan
+/// cannot batch it with the next.
+pub(crate) fn collect_completed_entry_instruction(
     state: &mut GameState,
     events: &[GameEvent],
     first_row: usize,
+    collection: CompletedEntryCollection,
 ) {
     let held = std::mem::take(&mut state.unsettled_entry_batch_events);
-    if held.is_empty() {
-        return;
+    match collection {
+        CompletedEntryCollection::HeldInstruction if held.is_empty() => return,
+        CompletedEntryCollection::HeldInstruction | CompletedEntryCollection::Occurrence => {}
     }
     let completed_through = state.completed_instruction_ledger_len();
     let held_keys: Vec<_> = held.iter().filter_map(battlefield_entry_key).collect();
@@ -9777,6 +9783,9 @@ pub(crate) fn collect_completed_held_entry_instruction(
             });
         }
     }
+    if scan.is_empty() {
+        return;
+    }
     collect_triggers_into_deferred(state, &scan);
     resolve_and_apply_trigger_collection(
         state,
@@ -9785,6 +9794,15 @@ pub(crate) fn collect_completed_held_entry_instruction(
         },
     )
     .expect("an entry-instruction claim must have a live journal cause");
+}
+
+/// Which completed entering instructions an instruction boundary collects itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CompletedEntryCollection {
+    /// Only an instruction whose entries were held across answers.
+    HeldInstruction,
+    /// CR 608.2c: a completed performance of a repeated keyword action, held or not.
+    Occurrence,
 }
 
 /// CR 603.6a: the ledger identity of a battlefield-entry occurrence. The row
@@ -9922,7 +9940,7 @@ fn battlefield_entry_instruction_completed(state: &GameState, event: &GameEvent)
 /// once no entry is in progress, its instruction has completed, or the action
 /// has settled; or, when the instruction's own boundary comes first, it is
 /// collected there, before a later instruction of the same resolution can change
-/// what observes or suppresses it ([`collect_completed_held_entry_instruction`]). That collector matches the whole event in one scan against the
+/// what observes or suppresses it ([`collect_completed_entry_instruction`]). That collector matches the whole event in one scan against the
 /// completed state, so batched ("one or more", CR 603.2c) definitions and
 /// firing limits see it once. Nothing is held at a pause with no entry in
 /// progress (a later instruction's own choice, or the replacement of a later

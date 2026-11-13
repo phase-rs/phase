@@ -3946,6 +3946,234 @@ mod feldon_tokens {
         assert!(error.contains("disagrees with its own record"), "{error}");
     }
 
+    /// Soul Warden's life gain for the four-token Body Double batch (Doubling Season, Parallel
+    /// Lives) whose first three tokens copy Triskelion and whose fourth copies Hushbringer. The
+    /// game is saved at the pause after the first token entered, `tamper` is applied to the saved
+    /// state, and the game is restored through the persisted-state reader. Returns the life
+    /// gained and the instruction marks the restore kept.
+    fn four_token_hushbringer_last_life(
+        tamper: impl FnOnce(&mut engine::types::game_state::GameState),
+    ) -> (i32, Vec<usize>) {
+        use engine::types::game_state::{PersistedGameState, PersistedRestoreFinalization};
+        let (mut scenario, feldon) = setup();
+        scenario.add_enchantment_from_oracle(P0, "Doubling Season", SEASON);
+        scenario.add_enchantment_from_oracle(P0, "Parallel Lives", PARALLEL_LIVES);
+        let scales = scenario
+            .add_enchantment_from_oracle(P0, "Hardened Scales", SCALES)
+            .id();
+        let body_double = scenario
+            .add_creature_to_graveyard(P0, "Body Double", 0, 0)
+            .with_subtypes(vec!["Shapeshifter"])
+            .with_mana_cost(ManaCost::Cost {
+                shards: vec![ManaCostShard::Blue],
+                generic: 4,
+            })
+            .from_oracle_text(BODY_DOUBLE)
+            .id();
+        let triskelion = graveyard_triskelion(&mut scenario);
+        let hushbringer = graveyard_hushbringer(&mut scenario);
+        scenario.add_creature_from_oracle(P0, "Soul Warden", 1, 1, SOUL_WARDEN);
+        let mut runner = scenario.build();
+        let life = runner.life(P0);
+        enter_first_copy_before_second_offer(&mut runner, feldon, body_double, triskelion, scales);
+        let mut state = runner.state().clone();
+        assert_eq!(
+            state.unsettled_entry_batch_events.len(),
+            1,
+            "reach guard: the first entrant is held at the pause"
+        );
+        tamper(&mut state);
+        let wire = serde_json::to_value(PersistedGameState::capture(state)).unwrap();
+        let state = serde_json::from_value::<PersistedGameState>(wire)
+            .expect("the save restores")
+            .prepare_for_restore(PersistedRestoreFinalization::DeferUntilRehydrated)
+            .unwrap()
+            .finalize_after_rehydration(|_| Ok(()))
+            .unwrap();
+        let marks = state.instruction_boundary_marks.clone();
+        let mut runner = GameRunner::from_state(state);
+        for entered in 2..=3 {
+            let (token, _) = choose_copy(&mut runner, triskelion);
+            choose_token_counter_order(&mut runner, token, scales);
+            // The batch is unfinished: every entrant so far is still held, none matched.
+            assert_eq!(
+                runner.state().unsettled_entry_batch_events.len(),
+                entered,
+                "entries held while the fourth token is still to come"
+            );
+            assert!(runner.state().deferred_triggers.is_empty());
+            assert_eq!(
+                runner.life(P0),
+                life,
+                "nothing is matched before the batch ends"
+            );
+        }
+        choose_copy(&mut runner, hushbringer);
+        assert_token_entry_complete(&mut runner);
+        assert_eq!(
+            runner.state().objects[&hushbringer].zone,
+            Zone::Graveyard,
+            "the donor card stays in the graveyard"
+        );
+        (runner.life(P0) - life, marks)
+    }
+
+    /// CR 603.6a: a saved instruction mark is a ledger position, not proof that the instruction
+    /// below it completed. A save taken while the first of four co-entrants is held, with the
+    /// current ledger length appended as a mark, restores with that mark withheld: the held entry
+    /// still waits for the fourth token, Hushbringer ("Creatures entering and dying don't cause
+    /// abilities to trigger."), and Soul Warden gains nothing, exactly as in the untouched save.
+    #[test]
+    fn a_restored_completion_mark_cannot_release_a_held_entry_early() {
+        let (gained, marks) = four_token_hushbringer_last_life(|_| {});
+        assert_eq!(gained, 0, "control: the untouched save");
+        let valid_marks = marks;
+        let (gained, marks) = four_token_hushbringer_last_life(|state| {
+            let ledger_len = state.zone_changes_this_turn.len();
+            assert!(state
+                .instruction_boundary_marks
+                .last()
+                .is_none_or(|mark| *mark < ledger_len));
+            state.instruction_boundary_marks.push(ledger_len);
+        });
+        assert_eq!(
+            gained, 0,
+            "the held entry was not released before Hushbringer"
+        );
+        assert_eq!(marks, valid_marks, "the forged mark is not restored");
+    }
+
+    const SECRETS_OF_THE_KEY: &str = "Investigate. If this spell was cast from a graveyard, investigate twice instead. (Create a Clue token. It's an artifact with \"{2}, Sacrifice this token: Draw a card.\")\nFlashback {3}{U}";
+
+    /// Mister Fantastic's "Whenever one or more tokens you control enter, you may draw a card."
+    /// prompts for one spell cast with four blue mana: Secrets of the Key from the graveyard
+    /// (flashback), or Raise the Alarm from hand. Returns (prompts, tokens that entered).
+    fn fantastic_triggers_for(flashback_secrets: bool) -> (usize, usize) {
+        use engine::types::game_state::CastingVariant;
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        scenario.with_library_top(P0, &["Plains", "Island", "Swamp", "Mountain"]);
+        scenario.with_mana_pool(
+            P0,
+            (0..4)
+                .map(|index| {
+                    ManaUnit::new(
+                        if flashback_secrets || index > 0 {
+                            ManaType::Blue
+                        } else {
+                            ManaType::White
+                        },
+                        ObjectId(0),
+                        false,
+                        vec![],
+                    )
+                })
+                .collect(),
+        );
+        let fantastic = scenario
+            .add_creature_from_oracle(
+                P0,
+                "Mister Fantastic, Reed Richards",
+                2,
+                4,
+                MISTER_FANTASTIC,
+            )
+            .as_legendary()
+            .id();
+        let spell = if flashback_secrets {
+            scenario
+                .add_spell_to_graveyard(P0, "Secrets of the Key", true)
+                .with_mana_cost(ManaCost::Cost {
+                    shards: vec![ManaCostShard::Blue],
+                    generic: 0,
+                })
+                .from_oracle_text(SECRETS_OF_THE_KEY)
+                .id()
+        } else {
+            scenario
+                .add_spell_to_hand_from_oracle(
+                    P0,
+                    "Raise the Alarm",
+                    true,
+                    "Create two 1/1 white Soldier creature tokens.",
+                )
+                .id()
+        };
+        let mut runner = scenario.build();
+        let card_id = runner.state().objects[&spell].card_id;
+        runner
+            .act(GameAction::CastSpell {
+                object_id: spell,
+                card_id,
+                targets: vec![],
+                payment_mode: CastPaymentMode::Auto,
+            })
+            .expect("cast the spell");
+        let mut prompts = 0;
+        for _ in 0..40 {
+            match &runner.state().waiting_for {
+                WaitingFor::CastingVariantChoice { options, .. } => {
+                    let index = options
+                        .iter()
+                        .position(|option| option.variant == CastingVariant::Flashback)
+                        .expect("flashback is offered");
+                    runner
+                        .act(GameAction::ChooseCastingVariant { index })
+                        .unwrap();
+                }
+                WaitingFor::OptionalEffectChoice { source_id, .. } => {
+                    assert_eq!(*source_id, fantastic);
+                    prompts += 1;
+                    runner
+                        .act(GameAction::DecideOptionalEffect { accept: false })
+                        .unwrap();
+                }
+                WaitingFor::OrderTriggers { triggers, .. } => {
+                    let order = (0..triggers.len()).collect();
+                    runner.act(GameAction::OrderTriggers { order }).unwrap();
+                }
+                WaitingFor::Priority { .. } if runner.state().stack.is_empty() => break,
+                WaitingFor::Priority { .. } => {
+                    runner.act(GameAction::PassPriority).unwrap();
+                }
+                other => panic!("unexpected prompt: {other:?}"),
+            }
+        }
+        assert!(runner.state().deferred_triggers.is_empty());
+        if flashback_secrets {
+            assert_eq!(
+                runner.state().objects[&spell].zone,
+                Zone::Exile,
+                "the spell was cast with flashback"
+            );
+        }
+        let tokens = runner
+            .state()
+            .objects
+            .values()
+            .filter(|object| object.is_token && object.zone == Zone::Battlefield)
+            .count();
+        (prompts, tokens)
+    }
+
+    /// CR 608.2c + CR 701.16a: Secrets of the Key cast from a graveyard investigates twice, two
+    /// successive "Create a Clue token" actions with no pause between them, so Mister Fantastic's
+    /// "one or more tokens" ability triggers once for each. Control: Raise the Alarm creates its
+    /// two Soldiers in one instruction, one trigger.
+    #[test]
+    fn unpaused_repeated_keyword_actions_are_separate_entry_events() {
+        assert_eq!(
+            fantastic_triggers_for(true),
+            (2, 2),
+            "investigate twice: two Clues, two entry events"
+        );
+        assert_eq!(
+            fantastic_triggers_for(false),
+            (1, 2),
+            "control: two Soldiers created together, one entry event"
+        );
+    }
+
     #[test]
     fn t5a_decline_enters_and_dies_once_without_a_copy() {
         let (mut scenario, feldon) = setup();

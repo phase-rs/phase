@@ -13660,6 +13660,30 @@ fn validate_restored_entry_hold(state: &GameState) -> Result<(), String> {
     Ok(())
 }
 
+/// CR 603.6a + CR 608.2c: a saved instruction mark is a ledger position, not evidence that the
+/// instruction below it completed, and nothing else in a save records that for a held entry. A
+/// mark above a held entry's row would release that entry to the observer scan while its
+/// co-entrants may still be entering, so such marks are not restored: the held entries stay
+/// held until the engine establishes their completion again (the next instruction boundary it
+/// reaches, or the action settling). Marks at or below every held row are kept; they cut
+/// completed instructions that hold nothing.
+fn withhold_unestablished_entry_completion(state: &mut GameState) {
+    let Some(first_held_row) = state
+        .unsettled_entry_batch_events
+        .iter()
+        .filter_map(|event| match event {
+            GameEvent::ZoneChanged { record, .. } => Some(record.turn_zone_change_index),
+            _ => None,
+        })
+        .min()
+    else {
+        return;
+    };
+    state
+        .instruction_boundary_marks
+        .retain(|mark| *mark <= first_held_row);
+}
+
 /// CR 603.2c: the replay guard's occurrence key is a current-turn ledger
 /// position. Compacting stale rows changes that position, so current-turn keys
 /// must follow their exact row before typed replay-key validation runs.
@@ -28467,6 +28491,7 @@ impl GameStateDecode {
         validate_restored_attack_authority(&state, attack_map_present, &departure_targets_present)?;
         validate_restored_zone_change_replay_keys(&state)?;
         validate_restored_entry_hold(&state)?;
+        withhold_unestablished_entry_completion(&mut state);
         normalize_delayed_trigger_allocators(&mut state)?;
         normalize_resolution_cast_offer_allocator(&mut state)?;
         // The PERSISTED half of the projection gate; `decode` below carries the other.
@@ -44732,7 +44757,9 @@ mod tests {
                 "{marks:?}: {error}"
             );
         }
-        // Positive control: marks within the ledger restore.
+        // Positive control: marks within the ledger restore. The fixture holds the entry at
+        // row 0, so both marks lie above a held entry and are withheld (CR 603.6a): a saved
+        // position is not proof that the held entry's instruction completed.
         let persisted = serde_json::to_value(PersistedGameState::Raw(Box::new(
             persisted_entry_hold_fixture(vec![1, 2]),
         )))
@@ -44741,7 +44768,7 @@ mod tests {
             .expect("marks within the ledger restore")
             .into_game_state()
             .expect("checked restore");
-        assert_eq!(restored.instruction_boundary_marks, vec![1, 2]);
+        assert_eq!(restored.instruction_boundary_marks, Vec::<usize>::new());
         assert_eq!(restored.unsettled_entry_batch_events.len(), 1);
     }
 
