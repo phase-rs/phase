@@ -247,6 +247,17 @@ fn parse_during_their_untap_step_suffix(input: &str) -> OracleResult<'_, ()> {
     .parse(input)
 }
 
+/// CR 611.3a: AND a split leading "As long as" gate with any gate the effect
+/// parser already set, so neither is lost.
+fn attach_leading_condition(def: &mut StaticDefinition, leading: StaticCondition) {
+    def.condition = Some(match def.condition.take() {
+        Some(existing) => StaticCondition::And {
+            conditions: vec![leading, existing],
+        },
+        None => leading,
+    });
+}
+
 /// CR 502.3 + CR 611.3a + CR 604.1: "[As long as <condition>, ]players can't
 /// untap more than <N> <type> during their untap steps[ as long as
 /// <condition>]." — the Smoke / Damping Field / Imi Statue / Stoic Angel
@@ -1033,7 +1044,7 @@ pub(crate) fn parse_static_line_inner(
                             text: split.condition_text.clone(),
                         },
                     );
-                    def.condition = Some(condition);
+                    attach_leading_condition(&mut def, condition);
                     def.description = Some(text.to_string());
                     return Some(def);
                 }
@@ -1057,7 +1068,7 @@ pub(crate) fn parse_static_line_inner(
                             text: split.condition_text.clone(),
                         },
                     );
-                    def.condition = Some(condition);
+                    attach_leading_condition(&mut def, condition);
                     def.description = Some(text.to_string());
                     return Some(def);
                 }
@@ -1094,7 +1105,7 @@ pub(crate) fn parse_static_line_inner(
                             text: split.condition_text.clone(),
                         },
                     );
-                    def.condition = Some(condition);
+                    attach_leading_condition(&mut def, condition);
                     def.description = Some(text.to_string());
                     return Some(def);
                 }

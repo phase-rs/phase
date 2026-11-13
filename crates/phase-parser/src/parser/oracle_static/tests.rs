@@ -42593,6 +42593,7 @@ fn static_radagast_first_creature_spell_costs_less_and_has_flash() {
 
 #[test]
 fn static_first_creature_spell_during_your_turns_costs_less_and_has_flash() {
+    // No printed first-spell flash card uses this timing (nearest: Radagast of Rhosgobel, "each turn"); it pins that the builder accepts the controller-turn axis.
     let defs = parse_static_line_multi(
         "The first creature spell you cast during each of your turns costs {1} less to cast and can be cast as though it had flash.",
     );
@@ -42609,6 +42610,7 @@ fn nth_qualified_spell_keyword_grant_declines_unsupported_timing() {
         "",
     )
     .is_some());
+    // No printed first-spell flash card uses this timing (nearest: The Blue Spirit, "each turn"); it pins that the builder declines the opponent-turn axis.
     assert!(nth_qualified_spell_keyword_grant(
         "the first creature spell you cast during each opponent's turn",
         Keyword::Flash,
@@ -42626,4 +42628,28 @@ fn static_blue_spirit_may_cast_first_creature_spell_as_though_flash() {
     )
     .unwrap();
     assert_you_creature_flash_grant(&def, false);
+}
+
+#[test]
+fn leading_condition_keeps_first_spell_flash_gate() {
+    // CR 611.3a: Hungering Yeti's leading gate on The Blue Spirit's permission; no printed card combines them.
+    let def = parse_static_line(
+        "As long as you control a green or blue permanent, you may cast the first creature spell you cast each turn as though it had flash.",
+    )
+    .unwrap();
+    assert_eq!(
+        def.mode,
+        StaticMode::CastWithKeyword {
+            keyword: Keyword::Flash,
+        }
+    );
+    let Some(StaticCondition::And { conditions }) = &def.condition else {
+        panic!("expected And of both gates, got {:?}", def.condition);
+    };
+    assert_eq!(conditions.len(), 2, "{conditions:?}");
+    assert_eq!(
+        Some(&conditions[0]),
+        parse_static_condition("you control a green or blue permanent").as_ref()
+    );
+    assert_first_spell_gate(&conditions[1], false);
 }
