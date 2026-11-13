@@ -12,6 +12,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useLocation, useNavigate, useSearchParams } from "react-router";
 
+import { ConfirmDialog } from "../components/ui/ConfirmDialog";
 import { MenuSelect } from "../components/ui/MenuSelect";
 import type { CardHoverInfo } from "../components/card/CardPreview";
 import { HoverCardPreview } from "../components/card/HoverCardPreview";
@@ -167,6 +168,9 @@ function PodSetup() {
   );
   const packDistribution = useDraftPodStore((s) => s.packDistribution);
   const allowedSetLayouts = useDraftPodStore((s) => s.allowedSetLayouts);
+  const postDraftPlay = useDraftPodStore((s) => s.postDraftPlay);
+  // Only an engine-published TournamentPairings procedure plays rounds; unpublished is not offered.
+  const playsRounds = postDraftPlay === "TournamentPairings";
   const packsPerPlayer = useDraftPodStore((s) => s.packsPerPlayer);
   const cubeMinDeckSize = useDraftPodStore((s) =>
     s.procedureCacheKey?.kind === s.config.kind
@@ -215,8 +219,8 @@ function PodSetup() {
     ? t("podSetup.tournamentSwissDesc")
     : t("podSetup.tournamentEliminationDesc");
   const policyDescription = config.podPolicy === "Competitive"
-    ? t("podSetup.policyCompetitiveDesc")
-    : t("podSetup.policyCasualDesc");
+    ? (playsRounds ? t("podSetup.policyCompetitiveDesc") : t("podSetup.policyCompetitiveNoRoundsDesc"))
+    : (playsRounds ? t("podSetup.policyCasualDesc") : t("podSetup.policyCasualNoRoundsDesc"));
   const podSizeDescription = t("podSetup.podSizeDesc", { count: config.podSize });
   const podSizeItems = useMemo(
     () => (allowedPodSizes ?? []).map((podSize) => ({
@@ -394,36 +398,38 @@ function PodSetup() {
         </div>
 
         {/* Tournament Format (D-04) */}
-        <div className="flex flex-col gap-1">
-          <label className="text-sm font-medium text-white/60">
-            {t("podSetup.tournamentFormat")}
-          </label>
-          <div className="flex gap-4">
-            <label className="flex items-center gap-2 text-sm text-white/70">
-              <input
-                type="radio"
-                name="tournamentFormat"
-                checked={config.tournamentFormat === "Swiss"}
-                onChange={() => setConfig({ tournamentFormat: "Swiss" })}
-                className="accent-emerald-400"
-              />
-              {t("podSetup.tournamentSwiss")}
+        {playsRounds && (
+          <div className="flex flex-col gap-1">
+            <label className="text-sm font-medium text-white/60">
+              {t("podSetup.tournamentFormat")}
             </label>
-            <label className="flex items-center gap-2 text-sm text-white/70">
-              <input
-                type="radio"
-                name="tournamentFormat"
-                checked={config.tournamentFormat === "SingleElimination"}
-                onChange={() =>
-                  setConfig({ tournamentFormat: "SingleElimination" })
-                }
-                className="accent-emerald-400"
-              />
-              {t("podSetup.tournamentElimination")}
-            </label>
+            <div className="flex gap-4">
+              <label className="flex items-center gap-2 text-sm text-white/70">
+                <input
+                  type="radio"
+                  name="tournamentFormat"
+                  checked={config.tournamentFormat === "Swiss"}
+                  onChange={() => setConfig({ tournamentFormat: "Swiss" })}
+                  className="accent-emerald-400"
+                />
+                {t("podSetup.tournamentSwiss")}
+              </label>
+              <label className="flex items-center gap-2 text-sm text-white/70">
+                <input
+                  type="radio"
+                  name="tournamentFormat"
+                  checked={config.tournamentFormat === "SingleElimination"}
+                  onChange={() =>
+                    setConfig({ tournamentFormat: "SingleElimination" })
+                  }
+                  className="accent-emerald-400"
+                />
+                {t("podSetup.tournamentElimination")}
+              </label>
+            </div>
+            <p className="text-xs text-white/40">{tournamentDescription}</p>
           </div>
-          <p className="text-xs text-white/40">{tournamentDescription}</p>
-        </div>
+        )}
 
         {/* Pod Policy (D-07) */}
         <div className="flex flex-col gap-1">
@@ -848,9 +854,33 @@ function MatchInProgressView() {
   );
 }
 
-function RoundCompleteView() {
+function RoundCompleteView({ responsiveLayout }: { responsiveLayout: ResponsiveDraftLayout }) {
   const { t } = useTranslation("draft");
   const podPolicy = useMultiplayerDraftStore((s) => s.view?.pod_policy);
+  // Engine-published (MTR 7.3): true only where this pod may revise a deck
+  // between rounds. Absent from older hosts, so nothing new renders there.
+  const deckSubmissionOpen = useMultiplayerDraftStore((s) => s.view?.deck_submission_open === true);
+  const [editing, setEditing] = useState(false);
+
+  if (deckSubmissionOpen && editing) {
+    return (
+      <div className="flex w-full flex-col gap-3">
+        <div className="flex flex-wrap items-center justify-between gap-3 px-2">
+          <p className="text-sm text-white/60">{t("podPhaseView.editDeckHint")}</p>
+          <button
+            onClick={() => setEditing(false)}
+            className={menuButtonClass({ tone: "neutral", size: "sm" })}
+          >
+            {t("podPhaseView.backToStandings")}
+          </button>
+        </div>
+        <PodDeckBuilder
+          responsiveLayout={responsiveLayout}
+          mode={{ kind: "betweenRounds", onSubmitted: () => setEditing(false) }}
+        />
+      </div>
+    );
+  }
 
   return (
     <div className="mx-auto flex w-full max-w-2xl flex-col gap-6 py-8">
@@ -864,6 +894,14 @@ function RoundCompleteView() {
           ? t("podPhaseView.waitingNextRound")
           : t("podPhaseView.nextRoundShortly")}
       </p>
+      {deckSubmissionOpen && (
+        <button
+          onClick={() => setEditing(true)}
+          className={menuButtonClass({ tone: "emerald", size: "md", className: "self-center" })}
+        >
+          {t("podPhaseView.editDeck")}
+        </button>
+      )}
     </div>
   );
 }
@@ -1349,7 +1387,31 @@ function DraftingPhaseContent({
   );
 }
 
-function PodDeckBuilder({ responsiveLayout }: { responsiveLayout: ResponsiveDraftLayout }) {
+/** A deck submission held until the player answers the confirmation dialog. */
+interface PendingDeckSubmission {
+  commanders: string[];
+  resolve: () => void;
+  reject: (error: unknown) => void;
+}
+
+/**
+ * The context `PodDeckBuilder` is rendered in, chosen by its caller. Land
+ * suggestion is deckbuilding-only on both seams (the store's
+ * `autoSuggestLands` and the host's `suggestLandsForSeatInner`), so the
+ * between-rounds editor turns the builder's suggestion control off.
+ */
+type PodDeckBuilderMode =
+  | { kind: "deckbuilding" }
+  | { kind: "betweenRounds"; onSubmitted: () => void };
+
+function PodDeckBuilder({
+  responsiveLayout,
+  mode,
+}: {
+  responsiveLayout: ResponsiveDraftLayout;
+  mode: PodDeckBuilderMode;
+}) {
+  const { t } = useTranslation("draft");
   const view = useMultiplayerDraftStore((s) => s.view);
   const workspace = useMultiplayerDraftStore((s) => s.workspaceState);
   const interactionLocked = useMultiplayerDraftStore((s) => s.pickInteractionLocked);
@@ -1357,6 +1419,12 @@ function PodDeckBuilder({ responsiveLayout }: { responsiveLayout: ResponsiveDraf
   const autoSuggestLands = useMultiplayerDraftStore((s) => s.autoSuggestLands);
   const submissionError = useMultiplayerDraftStore((s) => s.error);
   const [preferences, setPreferences] = useState<DraftWorkspacePreferences>(loadDraftWorkspacePreferences);
+  const [confirmOpen, setConfirmOpen] = useState(false);
+  // Single-use: `ConfirmDialog` exits through `AnimatePresence`, which keeps
+  // the exiting buttons clickable with their previous handlers. Each handler
+  // takes and clears this ref, so a second click during the exit finds
+  // nothing and the deck is submitted at most once.
+  const pendingSubmission = useRef<PendingDeckSubmission | null>(null);
   const handlePreferencesChange = useCallback((next: DraftWorkspacePreferences) => {
     setPreferences(next);
     saveDraftWorkspacePreferences(next);
@@ -1364,25 +1432,70 @@ function PodDeckBuilder({ responsiveLayout }: { responsiveLayout: ResponsiveDraf
 
   if (!view || !workspace) return null;
 
+  // The deck builder awaits this promise, so its submitting state and error
+  // display stay in force until the player answers the dialog: Confirm settles
+  // it with the store submission's outcome, Cancel resolves it unsubmitted.
+  const confirmSubmitDeck = (commanders: string[] = []) =>
+    new Promise<void>((resolve, reject) => {
+      pendingSubmission.current = { commanders, resolve, reject };
+      setConfirmOpen(true);
+    });
+  const takePendingSubmission = () => {
+    const pending = pendingSubmission.current;
+    pendingSubmission.current = null;
+    setConfirmOpen(false);
+    return pending;
+  };
+  const handleConfirmSubmit = () => {
+    const pending = takePendingSubmission();
+    if (!pending) return;
+    submitDeck(pending.commanders).then(() => {
+      if (mode.kind === "betweenRounds") mode.onSubmitted();
+      pending.resolve();
+    }, pending.reject);
+  };
+  const handleCancelSubmit = () => takePendingSubmission()?.resolve();
+
+  // Worded from engine-published facts only. A pod that plays no in-session
+  // rounds (`CompleteImmediately`, e.g. Commander Draft) — or an older host
+  // that omits `post_draft_play` — gets the wording that promises nothing.
+  const confirmMessage = () => {
+    if (view.post_draft_play !== "TournamentPairings") return t("deckSubmitConfirm.final");
+    return view.pod_policy === "Competitive"
+      ? t("deckSubmitConfirm.competitive")
+      : t("deckSubmitConfirm.casual");
+  };
+
   return (
-    <LimitedDeckBuilder
-      local={{
-        view,
-        workspace,
-        preferences,
-        interactionLocked,
-        capabilities: { kind: "editable-pool", suggestions: true },
-        onWorkspaceChange: (next) => useMultiplayerDraftStore.getState().setWorkspaceState(next),
-        onPreferencesChange: handlePreferencesChange,
-        onAddBasicLand: (name) => useMultiplayerDraftStore.getState().addBasicLand(name),
-        onRemoveBasicLand: (name) => useMultiplayerDraftStore.getState().removeBasicLand(name),
-        onAutoSuggestLands: autoSuggestLands,
-        onSubmitDeck: submitDeck,
-      }}
-      submissionError={submissionError}
-      showSuggestions
-      responsiveLayout={responsiveLayout}
-    />
+    <>
+      <LimitedDeckBuilder
+        local={{
+          view,
+          workspace,
+          preferences,
+          interactionLocked,
+          capabilities: { kind: "editable-pool", suggestions: mode.kind === "deckbuilding" },
+          onWorkspaceChange: (next) => useMultiplayerDraftStore.getState().setWorkspaceState(next),
+          onPreferencesChange: handlePreferencesChange,
+          onAddBasicLand: (name) => useMultiplayerDraftStore.getState().addBasicLand(name),
+          onRemoveBasicLand: (name) => useMultiplayerDraftStore.getState().removeBasicLand(name),
+          onAutoSuggestLands: autoSuggestLands,
+          onSubmitDeck: confirmSubmitDeck,
+        }}
+        submissionError={submissionError}
+        showSuggestions
+        responsiveLayout={responsiveLayout}
+      />
+      <ConfirmDialog
+        open={confirmOpen}
+        tone="primary"
+        title={t("deckSubmitConfirm.title")}
+        message={confirmMessage()}
+        confirmLabel={t("deckSubmitConfirm.confirm")}
+        onConfirm={handleConfirmSubmit}
+        onCancel={handleCancelSubmit}
+      />
+    </>
   );
 }
 
@@ -1604,7 +1717,7 @@ function phaseContent(
         />
       );
     case "deckbuilding":
-      return <PodDeckBuilder responsiveLayout={responsiveLayout} />;
+      return <PodDeckBuilder responsiveLayout={responsiveLayout} mode={{ kind: "deckbuilding" }} />;
     case "betweenGames":
       return <BetweenGamesView responsiveLayout={responsiveLayout} fillEmbeddedHeight={fillEmbeddedHeight} onDismiss={onDismissOverlay} />;
     case "pairing":
@@ -1612,7 +1725,7 @@ function phaseContent(
     case "matchInProgress":
       return <MatchInProgressView />;
     case "roundComplete":
-      return <RoundCompleteView />;
+      return <RoundCompleteView responsiveLayout={responsiveLayout} />;
     case "complete":
       return <CompleteView onLeave={onLeave} />;
     case "error":

@@ -14,10 +14,14 @@
 //! Release builds skipped that check and kept the stranded frame and its live
 //! carrier in the terminal state.
 //!
-//! The finished game's resolution is retired at the action boundary
-//! (`engine::settle_finished_game`), after every resolver has unwound and keyed on
-//! the recorded terminal result (`GameState::game_end`), not on the wait. The work
-//! the resolution parked outside the resolution stack goes first: its own paused
+//! The recorded game result (`GameState::game_end`) authorizes retirement at the
+//! action boundary (`engine::settle_finished_game`), after every resolver has
+//! unwound. An admitted trusted match forfeit (`MatchPhase::Completed` together
+//! with `GameState::match_forfeit_result`) authorizes retirement at
+//! `match_flow::apply_trusted_match_forfeit`'s own synchronous terminal boundary.
+//! Those trusted rows are application-policy match completion without a
+//! `game_end`, not a CR 104.3a game loss. Neither authority is the wait alone.
+//! The work the resolution parked outside the resolution stack goes first: its own paused
 //! cost cursors, the CR 616.1 replacement choices its moves raised, its legacy
 //! suspended-instruction batches, a CR 608.2g instructed cast's parked cost,
 //! payment prompt and reversal record, and the sessions it opened (a library
@@ -30,6 +34,7 @@
 //! survivors' resolution.
 
 use engine::game::engine::apply;
+use engine::game::match_flow::apply_trusted_match_forfeit;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::scenario_db::GameScenarioDbExt;
 use engine::game::zones::move_to_zone;
@@ -42,13 +47,16 @@ use engine::types::actions::{CastChoice, GameAction, ResolutionOptionalPaymentCh
 use engine::types::events::GameEvent;
 use engine::types::format::{ChallengeDeck, FormatConfig};
 use engine::types::game_state::{
-    GameState, PayCostKind, PendingCostMoveResume, PendingSacrificeCostCompletion,
-    PersistedGameState, PersistedRestoreFinalization, StackEntryKind, WaitingFor,
+    ActiveSearchDecisionAuthority, GameState, PayCostKind, PendingCostMoveResume,
+    PendingSacrificeCostCompletion, PersistedGameState, PersistedRestoreFinalization,
+    StackEntryKind, WaitingFor,
 };
 use engine::types::identifiers::ObjectId;
 use engine::types::keywords::Keyword;
 use engine::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit};
-use engine::types::match_config::{MatchConfig, MatchPhase, MatchType};
+use engine::types::match_config::{
+    MatchConfig, MatchForfeitCause, MatchForfeitResult, MatchPhase, MatchScore, MatchType,
+};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 use engine::types::replacements::ReplacementEvent;
@@ -107,7 +115,7 @@ fn json_key_absent(state: &GameState, key: &str) -> bool {
 /// The terminal state survives a save and restore: capture, decode (which runs
 /// every decode validator and, in debug builds, the runtime resolution
 /// invariants), admit, and finalize.
-fn assert_round_trips(runner: &GameRunner) {
+fn assert_round_trips(runner: &GameRunner) -> GameState {
     let json = serde_json::to_string(&PersistedGameState::capture(runner.state().clone()))
         .expect("capture: the state serializes");
     let restored = serde_json::from_str::<PersistedGameState>(&json)
@@ -134,6 +142,7 @@ fn assert_round_trips(runner: &GameRunner) {
         restored.pending_damage_post_loss,
         runner.state().pending_damage_post_loss
     );
+    restored
 }
 
 /// CR 104.1: none of the work a resolution parked outside the resolution stack,
@@ -259,7 +268,7 @@ fn assert_no_parked_resolution_work(state: &GameState) {
         .collect();
     assert!(
         left.is_empty(),
-        "CR 104.1: a finished game keeps none of its resolution's parked work, found {left:?}"
+        "a terminal state keeps none of its resolution's parked work, found {left:?}"
     );
 }
 
@@ -274,18 +283,37 @@ fn assert_resolution_retired(runner: &GameRunner, winner: Option<PlayerId>) {
         Some(winner),
         "the game ended with the expected result"
     );
+    assert_resolution_state_retired(state);
+    assert_round_trips(runner);
+}
+
+/// Common assertions after terminal retirement or normal resolution settlement.
+/// Terminal retirement does not run an abandoned spell's CR 608.2n final part.
+fn assert_resolution_state_retired(state: &GameState) {
     assert!(
         state.resolution_stack.is_empty(),
-        "a finished game keeps no resolution frame, found {:?}",
-        frame_kinds(runner)
+        "a terminal state keeps no resolution frame, found {:?}",
+        state
+            .resolution_stack
+            .iter()
+            .map(|frame| frame.kind())
+            .collect::<Vec<_>>()
     );
     assert!(
         state.resolving_stack_entry.is_none(),
-        "a finished game keeps no resolution carrier"
+        "a terminal state keeps no resolution carrier"
     );
     assert!(
         state.owed_spell_final_part().is_none(),
-        "CR 104.1: no CR 608.2n final part is owed to a finished game"
+        "a terminal state owes no spell final part"
+    );
+    assert!(
+        json_key_absent(state, "resolving_stack_object"),
+        "a terminal state keeps no resolving object pin"
+    );
+    assert!(
+        state.resolution_source_relatch.is_none(),
+        "a terminal state keeps no resolution source relatch"
     );
     assert!(
         state.return_result_frames.is_empty() && state.active_return_result_occurrence.is_none(),
@@ -308,7 +336,69 @@ fn assert_resolution_retired(runner: &GameRunner, winner: Option<PlayerId>) {
         "a finished game keeps no open Gotcha offer"
     );
     assert_no_parked_resolution_work(state);
-    assert_round_trips(runner);
+}
+
+/// The trusted boundary freezes the existing match policy, retires the abandoned
+/// resolution and publishes the same durable result after real persistence.
+fn assert_trusted_match_retired(
+    runner: &GameRunner,
+    result: MatchForfeitResult,
+    score: MatchScore,
+    game_number: u8,
+) {
+    assert_resolution_state_retired(runner.state());
+    let restored = assert_round_trips(runner);
+    for state in [runner.state(), &restored] {
+        assert_eq!(state.match_phase, MatchPhase::Completed);
+        assert_eq!(state.match_forfeit_result, Some(result));
+        assert_eq!(state.match_score, score);
+        assert_eq!(state.game_number, game_number);
+        assert_eq!(
+            state.waiting_for,
+            WaitingFor::GameOver {
+                winner: Some(result.winner)
+            }
+        );
+        assert!(state.sideboard_submitted.is_empty());
+        assert_eq!(state.next_game_chooser, None);
+        assert_resolution_state_retired(state);
+    }
+    // `game_end` is serde-skipped; the separate match result is durable.
+    assert!(restored.game_end.is_none());
+}
+
+fn assert_match_forfeit_refused(runner: &mut GameRunner, player: PlayerId, expected_error: &str) {
+    let before = runner.state().clone();
+    let persisted_before = serde_json::to_value(PersistedGameState::capture(before.clone()))
+        .expect("the pending state can be captured");
+
+    let error =
+        apply_trusted_match_forfeit(runner.state_mut(), player, MatchForfeitCause::HostKick)
+            .expect_err("the unadmitted request is refused");
+
+    assert_eq!(error, expected_error);
+    assert_eq!(runner.state(), &before);
+    // GameState equality deliberately omits the transient game result.
+    assert_eq!(runner.state().game_end, before.game_end);
+    assert_eq!(runner.state().state_revision, before.state_revision);
+    assert_eq!(runner.state().resolution_stack, before.resolution_stack);
+    assert_eq!(
+        runner.state().resolving_stack_entry,
+        before.resolving_stack_entry
+    );
+    assert_eq!(
+        runner.state().active_library_searches,
+        before.active_library_searches
+    );
+    assert_eq!(
+        runner.state().active_search_decision_controls,
+        before.active_search_decision_controls
+    );
+    assert_eq!(
+        serde_json::to_value(PersistedGameState::capture(runner.state().clone()))
+            .expect("the refused state can still be captured"),
+        persisted_before
+    );
 }
 
 /// The terminal wait is `GameOver { winner }` and the resolution is retired.
@@ -376,6 +466,29 @@ fn carrier_is_live(runner: &GameRunner) -> bool {
     runner.state().resolving_stack_entry.is_some()
 }
 
+fn assert_live_spell_carrier(runner: &GameRunner, spell: ObjectId) {
+    let carrier = runner
+        .state()
+        .resolving_stack_entry
+        .as_ref()
+        .expect("reach guard: the spell's resolution carrier is live");
+    assert_eq!(
+        (carrier.id, carrier.source_id, carrier.controller),
+        (spell, spell, P0)
+    );
+    assert!(matches!(
+        &carrier.kind,
+        StackEntryKind::Spell {
+            ability: Some(_),
+            ..
+        }
+    ));
+    assert!(
+        !json_key_absent(runner.state(), "resolving_stack_object"),
+        "reach guard: the carrier pins the resolving spell object"
+    );
+}
+
 fn assert_face_text(name: &str, text: &str) {
     let db = shared_card_db().expect("production fixtures must load");
     assert_eq!(
@@ -402,6 +515,7 @@ fn announced_spell_on_stack(state: &GameState, id: ObjectId) -> bool {
 
 /// Cast Vraska's Scorn at P1 (20 life) and pass until its search offer is asked.
 fn vraskas_scorn_at_its_offer(match_config: Option<MatchConfig>) -> GameRunner {
+    assert_face_text("Vraska's Scorn", VRASKAS_SCORN);
     let mut scenario = board(2);
     add_swamps(&mut scenario, 4);
     let spell = scenario
@@ -421,15 +535,71 @@ fn vraskas_scorn_at_its_offer(match_config: Option<MatchConfig>) -> GameRunner {
     assert!(
         matches!(
             runner.state().waiting_for,
-            WaitingFor::OptionalEffectChoice { player, .. } if player == P0
+            WaitingFor::OptionalEffectChoice { player, source_id, .. }
+                if player == P0 && source_id == spell
         ),
         "reach guard: the search offer is asked, got {:?}",
         runner.state().waiting_for
     );
     assert_eq!(frame_kinds(&runner), vec![FrameKind::OptionalEffect]);
+    assert_live_spell_carrier(&runner, spell);
+    assert!(runner.state().owed_spell_final_part().is_some());
     assert!(runner.state().game_end.is_none());
+    assert!(runner.state().match_forfeit_result.is_none());
+    // CR 608.2c + CR 608.2d: the first instruction happens before the may choice.
     assert_eq!(runner.state().players[1].life, 16);
     runner
+}
+
+/// CR 702.99a: Shadow Slice's last instruction offers either of two distinct
+/// creatures P0 controls. The Oracle line break and Cipher keyword are retained.
+fn shadow_slice_at_its_offer(
+    match_config: Option<MatchConfig>,
+) -> (GameRunner, ObjectId, [ObjectId; 2]) {
+    assert_face_text("Shadow Slice", SHADOW_SLICE);
+    let mut scenario = board(2);
+    add_swamps(&mut scenario, 5);
+    let hosts = [
+        scenario.add_creature(P0, "First Host", 2, 2).id(),
+        scenario.add_creature(P0, "Second Host", 3, 3).id(),
+    ];
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Shadow Slice", false, SHADOW_SLICE)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Black],
+            generic: 4,
+        })
+        .with_keyword(Keyword::Cipher)
+        .id();
+    let mut runner = scenario.build();
+    if let Some(config) = match_config {
+        runner.state_mut().set_match_config(config);
+    }
+    runner.cast(spell).target_player(P1).commit();
+    pass(&mut runner);
+    pass(&mut runner);
+    let WaitingFor::CipherEncodeChoice {
+        player,
+        card_id,
+        creatures,
+    } = &runner.state().waiting_for
+    else {
+        panic!(
+            "reach guard: the cipher offer is asked, got {:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert_eq!((*player, *card_id), (P0, spell));
+    assert_eq!(creatures.len(), 2);
+    assert!(hosts.iter().all(|host| creatures.contains(host)));
+    assert_eq!(frame_kinds(&runner), vec![FrameKind::CipherEncode]);
+    assert_live_spell_carrier(&runner, spell);
+    assert!(runner.state().owed_spell_final_part().is_none());
+    assert!(runner.state().game_end.is_none());
+    assert!(runner.state().match_forfeit_result.is_none());
+    // CR 608.2c: the loss precedes the optional encoding instruction.
+    assert_eq!(runner.state().players[1].life, 17);
+    (runner, spell, hosts)
 }
 
 /// Cast Mer Man and pass until its enters trigger asks the "you may".
@@ -804,32 +974,7 @@ fn the_prompt_owner_conceding_ends_the_game() {
 /// a spell carrier that owes no final part.
 #[test]
 fn conceding_under_a_cipher_offer_ends_the_game() {
-    let mut scenario = board(2);
-    add_swamps(&mut scenario, 5);
-    scenario.add_creature(P0, "Host", 2, 2);
-    let spell = scenario
-        .add_spell_to_hand_from_oracle(P0, "Shadow Slice", false, SHADOW_SLICE)
-        .with_mana_cost(ManaCost::Cost {
-            shards: vec![ManaCostShard::Black],
-            generic: 4,
-        })
-        .with_keyword(Keyword::Cipher)
-        .id();
-    let mut runner = scenario.build();
-
-    runner.cast(spell).target_player(P1).commit();
-    pass(&mut runner);
-    pass(&mut runner);
-    assert!(
-        matches!(
-            runner.state().waiting_for,
-            WaitingFor::CipherEncodeChoice { player, .. } if player == P0
-        ),
-        "reach guard: the cipher offer is asked, got {:?}",
-        runner.state().waiting_for
-    );
-    assert_eq!(frame_kinds(&runner), vec![FrameKind::CipherEncode]);
-    assert!(carrier_is_live(&runner));
+    let (mut runner, _, _) = shadow_slice_at_its_offer(None);
 
     concede(&mut runner, P1);
 
@@ -877,6 +1022,405 @@ fn a_best_of_three_concession_under_a_may_prompt() {
         runner.state().waiting_for
     );
     assert_resolution_retired(&runner, Some(P0));
+}
+
+/// Application policy: every trusted cause and either forfeiting seat completes
+/// the match without a current-game loss or another instruction of Vraska's Scorn.
+#[test]
+fn trusted_match_forfeit_retires_an_optional_spell_for_every_seat_and_cause() {
+    for forfeiting_player in [P0, P1] {
+        for cause in [
+            MatchForfeitCause::MatchConcede,
+            MatchForfeitCause::HostKick,
+            MatchForfeitCause::DisconnectedForfeit,
+        ] {
+            let mut runner = vraskas_scorn_at_its_offer(Some(MatchConfig {
+                match_type: MatchType::Bo3,
+                ..Default::default()
+            }));
+            let spell = runner.state().resolving_stack_entry.as_ref().unwrap().id;
+            let zone_before = runner.state().objects[&spell].zone;
+            let hand_before = hand_size(&runner, P0);
+            assert_eq!(runner.state().players.len(), 2);
+            assert_eq!(runner.state().match_phase, MatchPhase::InGame);
+            assert!(runner
+                .state()
+                .players
+                .iter()
+                .all(|player| !player.is_eliminated));
+            runner.state_mut().match_score = MatchScore {
+                p0_wins: 1,
+                p1_wins: 1,
+                draws: 1,
+            };
+            runner.state_mut().game_number = 4;
+            runner.state_mut().sideboard_submitted = vec![P0, P1];
+            runner.state_mut().next_game_chooser = Some(P1);
+            let revision_before = runner.state().state_revision;
+            let winner = if forfeiting_player == P0 { P1 } else { P0 };
+
+            let events = apply_trusted_match_forfeit(runner.state_mut(), forfeiting_player, cause)
+                .expect("the authenticated two-seat Bo3 forfeit is admitted");
+
+            assert_eq!(
+                events,
+                vec![GameEvent::GameOver {
+                    winner: Some(winner)
+                }]
+            );
+            assert_eq!(
+                runner.state().state_revision,
+                revision_before.wrapping_add(1)
+            );
+            assert!(runner.state().game_end.is_none());
+            assert!(runner
+                .state()
+                .players
+                .iter()
+                .all(|player| !player.is_eliminated));
+            assert_eq!(
+                (
+                    runner.state().players[0].life,
+                    runner.state().players[1].life
+                ),
+                (20, 16)
+            );
+            assert_eq!(runner.state().objects[&spell].zone, zone_before);
+            assert_eq!(hand_size(&runner, P0), hand_before);
+            let result = MatchForfeitResult {
+                winner,
+                forfeiting_player,
+                cause,
+            };
+            let score = MatchScore {
+                p0_wins: if winner == P0 { 2 } else { 1 },
+                p1_wins: if winner == P1 { 2 } else { 1 },
+                draws: 1,
+            };
+            assert_trusted_match_retired(&runner, result, score, 4);
+
+            // This is the actual completed result above, not an assigned phase.
+            assert_eq!(runner.state().match_config.match_type, MatchType::Bo3);
+            assert_eq!(runner.state().players.len(), 2);
+            assert_eq!(runner.state().match_phase, MatchPhase::Completed);
+            assert_match_forfeit_refused(&mut runner, winner, "Match is already complete");
+            assert_eq!(runner.state().match_forfeit_result, Some(result));
+            assert_eq!(runner.state().match_score, score);
+        }
+    }
+}
+
+/// Application policy: P1's trusted match forfeit abandons P0's distinct cipher
+/// frame without accepting or declining its offer, moving the spell or encoding it.
+#[test]
+fn trusted_match_forfeit_retires_a_cipher_offer_without_encoding_or_moving_cards() {
+    let (mut runner, spell, hosts) = shadow_slice_at_its_offer(Some(MatchConfig {
+        match_type: MatchType::Bo3,
+        ..Default::default()
+    }));
+    let zones_before = [spell, hosts[0], hosts[1]].map(|id| runner.state().objects[&id].zone);
+    let links_before = runner.state().exile_links.clone();
+    assert!(hosts
+        .iter()
+        .all(
+            |host| engine::game::cipher::encoded_cards_on_creature(runner.state(), *host)
+                .is_empty()
+        ));
+    let revision_before = runner.state().state_revision;
+
+    let events = apply_trusted_match_forfeit(runner.state_mut(), P1, MatchForfeitCause::HostKick)
+        .expect("the trusted match forfeit is admitted at the cipher offer");
+
+    assert_eq!(events, vec![GameEvent::GameOver { winner: Some(P0) }]);
+    assert_eq!(
+        runner.state().state_revision,
+        revision_before.wrapping_add(1)
+    );
+    assert!(runner.state().game_end.is_none());
+    assert!(runner
+        .state()
+        .players
+        .iter()
+        .all(|player| !player.is_eliminated));
+    assert_eq!(runner.state().players[1].life, 17);
+    assert_eq!(
+        [spell, hosts[0], hosts[1]].map(|id| runner.state().objects[&id].zone),
+        zones_before
+    );
+    assert_eq!(runner.state().exile_links, links_before);
+    assert_trusted_match_retired(
+        &runner,
+        MatchForfeitResult {
+            winner: P0,
+            forfeiting_player: P1,
+            cause: MatchForfeitCause::HostKick,
+        },
+        MatchScore {
+            p0_wins: 2,
+            p1_wins: 0,
+            draws: 0,
+        },
+        1,
+    );
+}
+
+/// Application policy: a trusted match forfeit closes the positively live search
+/// session and its decision control without delivering Demonic Tutor's found card.
+#[test]
+fn trusted_match_forfeit_retires_a_library_search_without_finding_a_card() {
+    let (mut runner, found) = demonic_tutor_at_its_search(
+        2,
+        Some(MatchConfig {
+            match_type: MatchType::Bo3,
+            ..Default::default()
+        }),
+    );
+    let tutor = runner.state().resolving_stack_entry.as_ref().unwrap().id;
+    let zone_before = runner.state().objects[&tutor].zone;
+    let hand_before = hand_size(&runner, P0);
+    let revision_before = runner.state().state_revision;
+
+    let events = apply_trusted_match_forfeit(
+        runner.state_mut(),
+        P1,
+        MatchForfeitCause::DisconnectedForfeit,
+    )
+    .expect("the trusted match forfeit is admitted during the search");
+
+    assert_eq!(events, vec![GameEvent::GameOver { winner: Some(P0) }]);
+    assert_eq!(
+        runner.state().state_revision,
+        revision_before.wrapping_add(1)
+    );
+    assert!(runner.state().game_end.is_none());
+    assert!(runner
+        .state()
+        .players
+        .iter()
+        .all(|player| !player.is_eliminated));
+    assert_eq!(hand_size(&runner, P0), hand_before);
+    assert_eq!(runner.state().objects[&found].zone, Zone::Library);
+    assert_eq!(runner.state().objects[&tutor].zone, zone_before);
+    assert_trusted_match_retired(
+        &runner,
+        MatchForfeitResult {
+            winner: P0,
+            forfeiting_player: P1,
+            cause: MatchForfeitCause::DisconnectedForfeit,
+        },
+        MatchScore {
+            p0_wins: 2,
+            p1_wins: 0,
+            draws: 0,
+        },
+        1,
+    );
+}
+
+#[test]
+fn a_refused_non_bo3_forfeit_preserves_the_optional_spell_until_declined() {
+    let mut runner = vraskas_scorn_at_its_offer(None);
+    let spell = runner.state().resolving_stack_entry.as_ref().unwrap().id;
+    assert_eq!(runner.state().match_config.match_type, MatchType::Bo1);
+    assert_eq!(runner.state().players.len(), 2);
+    assert_eq!(runner.state().match_phase, MatchPhase::InGame);
+
+    assert_match_forfeit_refused(
+        &mut runner,
+        P1,
+        "Match forfeits require a best-of-three match",
+    );
+    runner
+        .act(GameAction::DecideOptionalEffect { accept: false })
+        .expect("the unretired Vraska offer can still be declined");
+
+    // CR 608.2c + CR 608.2d: declining performs no search; the earlier loss stays.
+    assert_eq!(runner.state().players[1].life, 16);
+    // CR 608.2n + CR 117.3b: the final part finishes and P0 receives priority.
+    assert_eq!(runner.state().objects[&spell].zone, Zone::Graveyard);
+    assert!(matches!(runner.state().waiting_for, WaitingFor::Priority { player } if player == P0));
+    assert!(runner.state().stack.is_empty());
+    assert_resolution_state_retired(runner.state());
+    assert!(runner.state().game_end.is_none());
+    assert!(runner.state().match_forfeit_result.is_none());
+    assert_eq!(runner.state().match_phase, MatchPhase::InGame);
+    assert_eq!(runner.state().match_score, MatchScore::default());
+}
+
+/// CR 702.99a + CR 702.99b + CR 608.2n: the refused match request leaves both
+/// public cipher responses usable, including a non-first-host encoding.
+#[test]
+fn a_refused_wrong_seat_forfeit_preserves_both_cipher_responses() {
+    for host_index in [Some(1), None] {
+        let (mut runner, spell, hosts) = shadow_slice_at_its_offer(Some(MatchConfig {
+            match_type: MatchType::Bo3,
+            ..Default::default()
+        }));
+        assert_eq!(runner.state().match_config.match_type, MatchType::Bo3);
+        assert_eq!(runner.state().players.len(), 2);
+        assert_eq!(runner.state().match_phase, MatchPhase::InGame);
+        assert_match_forfeit_refused(&mut runner, P2, "Forfeiting player is not a match seat");
+        assert_eq!(frame_kinds(&runner), vec![FrameKind::CipherEncode]);
+        assert_live_spell_carrier(&runner, spell);
+        assert!(runner.state().game_end.is_none());
+        assert!(runner.state().match_forfeit_result.is_none());
+        let creature = host_index.map(|index| hosts[index]);
+
+        runner
+            .act(GameAction::CipherEncode { creature })
+            .expect("the unretired cipher offer accepts the public response");
+
+        if creature.is_some() {
+            assert_eq!(runner.state().objects[&spell].zone, Zone::Exile);
+            assert_eq!(
+                engine::game::cipher::encoded_cards_on_creature(runner.state(), hosts[1]),
+                vec![spell]
+            );
+        } else {
+            assert_eq!(runner.state().objects[&spell].zone, Zone::Graveyard);
+            assert!(
+                engine::game::cipher::encoded_cards_on_creature(runner.state(), hosts[1])
+                    .is_empty()
+            );
+        }
+        assert!(
+            engine::game::cipher::encoded_cards_on_creature(runner.state(), hosts[0]).is_empty()
+        );
+        // Both candidate hosts remain on the battlefield in this fixture.
+        assert!(hosts
+            .iter()
+            .all(|host| runner.state().objects[host].zone == Zone::Battlefield));
+        // CR 117.3b: either final response returns priority to the active player.
+        assert!(
+            matches!(runner.state().waiting_for, WaitingFor::Priority { player } if player == P0)
+        );
+        assert!(runner.state().stack.is_empty());
+        assert!(runner.state().resolution_stack.is_empty());
+        assert_eq!(runner.state().players[1].life, 17);
+        assert!(runner.state().game_end.is_none());
+        assert!(runner.state().match_forfeit_result.is_none());
+        assert!(runner
+            .state()
+            .players
+            .iter()
+            .all(|player| !player.is_eliminated));
+        assert_eq!(runner.state().match_phase, MatchPhase::InGame);
+        assert_eq!(runner.state().match_score, MatchScore::default());
+        assert_eq!(runner.state().game_number, 1);
+
+        // CR 117.3d: P0's pass gives P1 priority; settling the completed
+        // resolution at this action boundary must not reset that succession.
+        runner
+            .act(GameAction::PassPriority)
+            .expect("the completed cipher response leaves the next action usable");
+        assert!(
+            matches!(runner.state().waiting_for, WaitingFor::Priority { player } if player == P1)
+        );
+        assert_resolution_state_retired(runner.state());
+    }
+}
+
+#[test]
+fn a_refused_three_player_match_forfeit_preserves_the_search_until_selected() {
+    let (mut runner, found) = demonic_tutor_at_its_search(
+        3,
+        Some(MatchConfig {
+            match_type: MatchType::Bo3,
+            ..Default::default()
+        }),
+    );
+    let tutor = runner.state().resolving_stack_entry.as_ref().unwrap().id;
+    assert_eq!(runner.state().match_config.match_type, MatchType::Bo3);
+    assert_eq!(runner.state().players.len(), 3);
+    assert_eq!(runner.state().match_phase, MatchPhase::InGame);
+    assert_match_forfeit_refused(
+        &mut runner,
+        P1,
+        "Match forfeits require exactly two players",
+    );
+
+    runner
+        .act(GameAction::SelectCards { cards: vec![found] })
+        .expect("the unretired search accepts its offered card");
+
+    // CR 701.23a + CR 608.2c: Demonic Tutor puts the selected card into P0's hand.
+    assert_eq!(runner.state().objects[&found].zone, Zone::Hand);
+    // CR 608.2n + CR 117.3b: the spell finishes and P0 receives priority.
+    assert_eq!(runner.state().objects[&tutor].zone, Zone::Graveyard);
+    assert!(matches!(runner.state().waiting_for, WaitingFor::Priority { player } if player == P0));
+    assert!(runner.state().stack.is_empty());
+    assert_resolution_state_retired(runner.state());
+    assert!(runner.state().game_end.is_none());
+    assert!(runner.state().match_forfeit_result.is_none());
+    assert!(runner
+        .state()
+        .players
+        .iter()
+        .all(|player| !player.is_eliminated));
+    assert_eq!(runner.state().match_phase, MatchPhase::InGame);
+    assert_eq!(runner.state().match_score, MatchScore::default());
+}
+
+#[test]
+fn a_trusted_match_forfeit_preserves_the_different_earned_game_result() {
+    let mut runner = vraskas_scorn_at_its_offer(Some(MatchConfig {
+        match_type: MatchType::Bo3,
+        ..Default::default()
+    }));
+    // CR 104.3a + CR 104.2a: P1's ordinary game concession earns P0 the game.
+    concede(&mut runner, P1);
+    assert_resolution_retired(&runner, Some(P0));
+    // CR 100.4 permits sideboarding; the score and game number are match policy.
+    assert_eq!(
+        runner.state().match_score,
+        MatchScore {
+            p0_wins: 1,
+            p1_wins: 0,
+            draws: 0
+        }
+    );
+    assert_eq!(runner.state().game_number, 2);
+    assert_eq!(runner.state().match_phase, MatchPhase::BetweenGames);
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::BetweenGamesSideboard { .. }
+    ));
+    let game_end_before = runner.state().game_end;
+    assert!(!runner.state().players[0].is_eliminated);
+    assert!(runner.state().players[1].is_eliminated);
+    let revision_before = runner.state().state_revision;
+
+    let events =
+        apply_trusted_match_forfeit(runner.state_mut(), P0, MatchForfeitCause::MatchConcede)
+            .expect("P0 can forfeit the unfinished match after winning its first game");
+
+    assert_eq!(events, vec![GameEvent::GameOver { winner: Some(P1) }]);
+    assert_eq!(
+        runner.state().state_revision,
+        revision_before.wrapping_add(1)
+    );
+    assert_eq!(runner.state().game_end, game_end_before);
+    assert_eq!(
+        runner.state().game_end.as_ref().map(|end| end.winner),
+        Some(Some(P0))
+    );
+    assert!(!runner.state().players[0].is_eliminated);
+    assert!(runner.state().players[1].is_eliminated);
+    assert_eq!(runner.state().players[1].life, 16);
+    assert_trusted_match_retired(
+        &runner,
+        MatchForfeitResult {
+            winner: P1,
+            forfeiting_player: P0,
+            cause: MatchForfeitCause::MatchConcede,
+        },
+        MatchScore {
+            p0_wins: 1,
+            p1_wins: 2,
+            draws: 0,
+        },
+        2,
+    );
 }
 
 /// CR 104.2b + CR 614.6: an effect wins the game while a repeat and its
@@ -1410,7 +1954,10 @@ fn conceding_inside_a_cascaded_casts_target_choice_retires_its_reversal() {
 /// search asks P0 to choose from P0's library. Reach guard: the search session
 /// and its decision control are open under the live carrier. Returns the runner
 /// and the first offered card.
-fn demonic_tutor_at_its_search(players: u8) -> (GameRunner, ObjectId) {
+fn demonic_tutor_at_its_search(
+    players: u8,
+    match_config: Option<MatchConfig>,
+) -> (GameRunner, ObjectId) {
     assert_face_text("Demonic Tutor", DEMONIC_TUTOR);
     let mut scenario = board(players);
     add_swamps(&mut scenario, 2);
@@ -1422,6 +1969,9 @@ fn demonic_tutor_at_its_search(players: u8) -> (GameRunner, ObjectId) {
         })
         .id();
     let mut runner = scenario.build();
+    if let Some(config) = match_config {
+        runner.state_mut().set_match_config(config);
+    }
     runner.cast(tutor).commit();
     pass_until_prompt(&mut runner);
     let WaitingFor::SearchChoice {
@@ -1437,15 +1987,35 @@ fn demonic_tutor_at_its_search(players: u8) -> (GameRunner, ObjectId) {
         );
     };
     assert_eq!((player, library_owner), (P0, Some(P0)));
-    assert!(runner.state().active_library_searches.get(&P0).is_some());
-    assert!(runner
+    let search = runner
+        .state()
+        .active_library_searches
+        .get(&P0)
+        .expect("reach guard: the search session is live");
+    assert_eq!(
+        (
+            search.searcher(),
+            search.searched_zone_owner(),
+            search.effective_library_owner()
+        ),
+        (P0, P0, Some(P0))
+    );
+    let decision = runner
         .state()
         .active_search_decision_controls
         .get(&P0)
-        .is_some());
-    assert!(carrier_is_live(&runner));
+        .expect("reach guard: the search's decision controller is live");
+    assert_eq!((decision.searcher, decision.searched_zone_owner), (P0, P0));
+    assert_eq!(
+        decision.authority,
+        ActiveSearchDecisionAuthority::LatchedController { controller: P0 }
+    );
+    assert_live_spell_carrier(&runner, tutor);
+    assert!(runner.state().owed_spell_final_part().is_some());
     assert!(runner.state().game_end.is_none());
+    assert!(runner.state().match_forfeit_result.is_none());
     let found = *cards.first().expect("P0's library offers a card");
+    assert_eq!(runner.state().objects[&found].zone, Zone::Library);
     (runner, found)
 }
 
@@ -1454,7 +2024,7 @@ fn demonic_tutor_at_its_search(players: u8) -> (GameRunner, ObjectId) {
 /// and no card is found (CR 104.1).
 #[test]
 fn conceding_during_a_library_search_retires_the_search_session() {
-    let (mut runner, found) = demonic_tutor_at_its_search(2);
+    let (mut runner, found) = demonic_tutor_at_its_search(2, None);
     let hand_before = hand_size(&runner, P0);
 
     concede(&mut runner, P1);
@@ -1470,7 +2040,7 @@ fn conceding_during_a_library_search_retires_the_search_session() {
 /// normally: the card goes to P0's hand and the search session closes.
 #[test]
 fn a_three_player_game_keeps_the_survivors_library_search() {
-    let (mut runner, found) = demonic_tutor_at_its_search(3);
+    let (mut runner, found) = demonic_tutor_at_its_search(3, None);
 
     concede(&mut runner, P1);
 
@@ -1501,6 +2071,9 @@ fn a_three_player_game_keeps_the_survivors_library_search() {
     assert!(runner.state().resolution_stack.is_empty());
     assert!(runner.state().resolving_stack_entry.is_none());
     assert!(runner.state().game_end.is_none());
+    assert!(runner.state().stack.is_empty());
+    // CR 117.3b: with the search completed, the active player receives priority.
+    assert!(matches!(runner.state().waiting_for, WaitingFor::Priority { player } if player == P0));
 }
 
 /// CR 104.3a + CR 701.20e: P1 concedes while Birthing Ritual's end-step trigger

@@ -11182,6 +11182,17 @@ pub struct PendingManaAbility {
     /// surfaces `WaitingFor::PayManaAbilityMana` for a genuine choice.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chosen_mana_payment: Option<Vec<ManaType>>,
+    /// CR 602.2b + CR 601.2g-h: the activation's mana-payment preference, the same
+    /// opt-in `GameAction::ActivateAbility` carries. `Manual` stops in
+    /// `WaitingFor::ManaAbilityManaPayment` before a mana sub-cost is paid so the
+    /// player activates mana abilities and directs pool units themself.
+    #[serde(default, skip_serializing_if = "CastPaymentMode::is_auto")]
+    pub payment_mode: CastPaymentMode,
+    /// CR 118.3a: pool units the player directed to pay this mana ability's mana
+    /// sub-cost while its manual window is open — ordering hints for the spend,
+    /// mirroring `PendingCast::pinned_pool_units`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pinned_pool_units: Vec<ManaPipId>,
     /// CR 107.3a (literal "Remove X counters") / CR 107.1c (literal "any
     /// number of" counters): chosen counts for a mana-ability cost's
     /// self-RemoveCounter components that require an announced count. One
@@ -18415,6 +18426,13 @@ pub enum WaitingFor {
         game_number: u8,
         score: MatchScore,
     },
+    /// CR 103.1: the player chosen to decide who takes the first turn chooses
+    /// one of `candidates` (seats in seat order). CR 103.1a: under shared team
+    /// turns the choice names the starting team.
+    ChooseStartingPlayer {
+        player: PlayerId,
+        candidates: Vec<PlayerId>,
+    },
     /// Player must choose from a named set of options (creature type, color, etc.).
     NamedChoice {
         player: PlayerId,
@@ -20632,6 +20650,7 @@ impl WaitingFor {
             WaitingFor::TriggerTargetSelection { .. } => "TriggerTargetSelection",
             WaitingFor::BetweenGamesSideboard { .. } => "BetweenGamesSideboard",
             WaitingFor::BetweenGamesChoosePlayDraw { .. } => "BetweenGamesChoosePlayDraw",
+            WaitingFor::ChooseStartingPlayer { .. } => "ChooseStartingPlayer",
             WaitingFor::NamedChoice { .. } => "NamedChoice",
             WaitingFor::OpponentGuess { .. } => "OpponentGuess",
             WaitingFor::SpellbookDraft { .. } => "SpellbookDraft",
@@ -20800,6 +20819,7 @@ impl WaitingFor {
             | WaitingFor::TriggerTargetSelection { player, .. }
             | WaitingFor::BetweenGamesSideboard { player, .. }
             | WaitingFor::BetweenGamesChoosePlayDraw { player, .. }
+            | WaitingFor::ChooseStartingPlayer { player, .. }
             | WaitingFor::NamedChoice { player, .. }
             | WaitingFor::OpponentGuess { player, .. }
             | WaitingFor::SpellbookDraft { player, .. }
@@ -21169,6 +21189,7 @@ impl WaitingFor {
             | WaitingFor::TriggerTargetSelection { .. }
             | WaitingFor::BetweenGamesSideboard { .. }
             | WaitingFor::BetweenGamesChoosePlayDraw { .. }
+            | WaitingFor::ChooseStartingPlayer { .. }
             | WaitingFor::NamedChoice { .. }
             | WaitingFor::OpponentGuess { .. }
             | WaitingFor::SpellbookDraft { .. }
@@ -21377,6 +21398,7 @@ impl WaitingFor {
             | WaitingFor::TriggerTargetSelection { .. }
             | WaitingFor::BetweenGamesSideboard { .. }
             | WaitingFor::BetweenGamesChoosePlayDraw { .. }
+            | WaitingFor::ChooseStartingPlayer { .. }
             | WaitingFor::NamedChoice { .. }
             | WaitingFor::OpponentGuess { .. }
             | WaitingFor::SpellbookDraft { .. }
@@ -22147,7 +22169,8 @@ pub enum AutoPassMode {
 ///   client-only preference is invisible to it. Inside a rechecking
 ///   (`RecheckNoMeaningfulPriorityAction`) stack-resolution session that loop
 ///   also executes the ladder's standing rungs (Full Control, yields, own
-///   object on top unless held for a removable mana source) through
+///   object on top unless held for a mana source it can remove, or, for an
+///   activated ability, waste an untap on as its own source) through
 ///   `priority::standing_priority_pass`, the same
 ///   authority the recommendation uses; a Committed session consults only its
 ///   Full Control rung.
@@ -27830,6 +27853,7 @@ fn visit_waiting_for_chains<'a>(
         | WaitingFor::TriggerTargetSelection { .. }
         | WaitingFor::BetweenGamesSideboard { .. }
         | WaitingFor::BetweenGamesChoosePlayDraw { .. }
+        | WaitingFor::ChooseStartingPlayer { .. }
         | WaitingFor::NamedChoice { .. }
         | WaitingFor::OpponentGuess { .. }
         | WaitingFor::SpellbookDraft { .. }
@@ -47261,6 +47285,8 @@ mod tests {
                         chosen_tappers,
                         chosen_discards: Vec::new(),
                         chosen_mana_payment: None,
+                        payment_mode: CastPaymentMode::Auto,
+                        pinned_pool_units: Vec::new(),
                         chosen_counter_counts: Vec::new(),
                         chosen_x: None,
                         collected_evidence: Vec::new(),
@@ -47376,6 +47402,8 @@ mod tests {
                     chosen_tappers: None,
                     chosen_discards: Vec::new(),
                     chosen_mana_payment: None,
+                    payment_mode: CastPaymentMode::Auto,
+                    pinned_pool_units: Vec::new(),
                     chosen_counter_counts,
                     chosen_x: None,
                     collected_evidence: Vec::new(),
@@ -50573,6 +50601,8 @@ mod tests {
                 chosen_tappers: None,
                 chosen_discards: Vec::new(),
                 chosen_mana_payment: None,
+                payment_mode: CastPaymentMode::Auto,
+                pinned_pool_units: Vec::new(),
                 chosen_counter_counts: Vec::new(),
                 chosen_x: None,
                 collected_evidence: Vec::new(),
@@ -53885,6 +53915,8 @@ mod tests {
                     chosen_tappers: None,
                     chosen_discards: Vec::new(),
                     chosen_mana_payment: None,
+                    payment_mode: CastPaymentMode::Auto,
+                    pinned_pool_units: Vec::new(),
                     chosen_counter_counts: Vec::new(),
                     chosen_x: None,
                     collected_evidence: Vec::new(),
@@ -54147,6 +54179,8 @@ mod tests {
             chosen_tappers: None,
             chosen_discards: Vec::new(),
             chosen_mana_payment: None,
+            payment_mode: CastPaymentMode::Auto,
+            pinned_pool_units: Vec::new(),
             chosen_counter_counts: Vec::new(),
             chosen_x: None,
             collected_evidence: Vec::new(),
@@ -59115,6 +59149,8 @@ mod restored_exact_attack_authority_tests {
             chosen_tappers: None,
             chosen_discards: Vec::new(),
             chosen_mana_payment: None,
+            payment_mode: CastPaymentMode::Auto,
+            pinned_pool_units: Vec::new(),
             chosen_counter_counts: Vec::new(),
             chosen_x: None,
             collected_evidence: Vec::new(),

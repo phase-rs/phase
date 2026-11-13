@@ -575,9 +575,11 @@
     "tournamentEliminationDesc": "Players are eliminated after a match loss until one winner remains.",
     "podPolicy": "Pod Policy",
     "policyCompetitive": "Competitive",
-    "policyCompetitiveDesc": "Timed picks, automatic picks on timeout, and automatic round advancement.",
+    "policyCompetitiveDesc": "Timed picks, automatic picks on timeout, and automatic round advancement. Submitted decks are final; you can only sideboard between games of a match.",
+    "policyCompetitiveNoRoundsDesc": "Timed picks and automatic picks on timeout.",
     "policyCasual": "Casual",
-    "policyCasualDesc": "Untimed picks, manual round advancement, and host controls for resolving issues.",
+    "policyCasualDesc": "Untimed picks, manual round advancement, host controls for resolving issues, and deck changes between rounds.",
+    "policyCasualNoRoundsDesc": "Untimed picks and host controls for resolving issues.",
     "podSize": "Pod Size",
     "podSizeDesc": "{{count}} total seats. Empty seats can be filled with bots from the lobby before the draft starts.",
     "playerCount": "{{count}} players",
@@ -623,11 +625,21 @@
     "roundComplete": "Round Complete",
     "waitingNextRound": "Waiting for host to start next round...",
     "nextRoundShortly": "Next round starting shortly...",
+    "editDeck": "Edit Deck",
+    "backToStandings": "Back to Standings",
+    "editDeckHint": "Casual pod: you can change your deck before the next round starts.",
     "pauseReason": {
       "PlayerDisconnected": "Draft paused — a player disconnected.",
       "PausedByHost": "Draft paused by host.",
       "DisconnectGraceExpired": "A player did not return in time."
     }
+  },
+  "deckSubmitConfirm": {
+    "title": "Submit this deck?",
+    "confirm": "Confirm Submission",
+    "competitive": "This is a Competitive pod: your submitted deck is final for every round. You can still sideboard between games of a best-of-three match.",
+    "casual": "You can still change your deck between rounds.",
+    "final": "Your submitted deck is final."
   },
   "betweenGames": {
     "game": "Game {{number}}",

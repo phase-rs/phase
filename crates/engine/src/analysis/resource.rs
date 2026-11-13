@@ -23,6 +23,8 @@ use crate::analysis::decision_template::{
     DecisionTemplate, IterationIndex,
 };
 use crate::game::game_object::GameObject;
+use crate::game::players::{self, PoisonLossScope};
+use crate::game::topology;
 use crate::types::ability::{
     AbilityCondition, AbilityDefinition, AbilityUseTally, ActivationRestriction, CastingPermission,
     DamageModification, QuantityRef, TargetRef,
@@ -1057,7 +1059,7 @@ impl CleanupPair {
     fn repetitions(self, state: &GameState, caster: PlayerId) -> Option<i64> {
         let max_hand = crate::game::turns::maximum_hand_size(state, caster)? as i64;
         let hand = state.players.iter().find(|p| p.id == caster)?.hand.len() as i64;
-        ResourceVector::narrowed_repetitions(&[(
+        ResourceVector::narrowed_repetitions([(
             max_hand - (hand + self.to_cleanup) + self.growth,
             self.growth,
         )])
@@ -1822,9 +1824,10 @@ impl PeriodicDelta {
     /// crosses a CR 704 threshold under `declaration`, or `None` when no axis takes it there.
     ///
     /// The minimum over the three axes, each measured against the headroom its own rule leaves:
-    /// the seat's whole life total (CR 704.5a: 0 or less loses), one short of ten poison
-    /// (CR 704.5c), and the whole remaining library (CR 104.3c + CR 121.4: an empty library is
-    /// lethal at the next DRAW ATTEMPT and not on state alone, so every card left is headroom).
+    /// the seat's whole life total (CR 704.5a: 0 or less loses), one short of the poison-loss
+    /// threshold the SBA applies to this seat ([`ResourceVector::poison_axis`]), and the whole
+    /// remaining library (CR 104.3c + CR 121.4: an empty library is lethal at the next DRAW
+    /// ATTEMPT and not on state alone, so every card left is headroom).
     ///
     /// `horizon` is the WALK's, not this seat's, for the reason
     /// [`PeriodicDelta::elimination_cascade`] states where it derives it.
@@ -1863,16 +1866,12 @@ impl PeriodicDelta {
         // The strict answer is the largest count after which no axis has crossed, so the
         // crossing is the next one — `narrowed_repetitions` is the same division
         // `seat_headroom_bound` performs, over these two axes' own headrooms.
-        let non_life = ResourceVector::narrowed_repetitions(&[
-            (
-                9 - i64::from(p.poison_counters),
-                self.delta.poison.get(&p.id).copied().unwrap_or(0),
-            ),
-            (
+        let non_life = ResourceVector::narrowed_repetitions(
+            self.delta.poison_axis(state, p).into_iter().chain([(
                 state.library_of(p.id).len() as i64,
                 -self.delta.library_delta.get(&p.id).copied().unwrap_or(0),
-            ),
-        ])
+            )]),
+        )
         .and_then(|strict| u32::try_from(strict.saturating_add(1)).ok());
         [life, non_life].into_iter().flatten().min()
     }
@@ -3077,11 +3076,36 @@ impl ResourceVector {
     /// ONE STATEMENT OF THE ARITHMETIC, over explicit pairs rather than over a seat, because the
     /// headroom a caller divides is not always the seat's full one — a walk that has already
     /// spent repetitions divides what is LEFT through the same division.
-    fn narrowed_repetitions(axes: &[(i64, i64)]) -> Option<i64> {
-        axes.iter()
-            .filter(|(_, magnitude)| *magnitude > 0)
-            .map(|&(headroom, magnitude)| headroom.max(0) / magnitude)
+    fn narrowed_repetitions(axes: impl IntoIterator<Item = (i64, i64)>) -> Option<i64> {
+        axes.into_iter()
+            .filter(|&(_, magnitude)| magnitude > 0)
+            .map(|(headroom, magnitude)| headroom.max(0) / magnitude)
             .min()
+    }
+
+    /// CR 704.5c / CR 704.6b: `p`'s poison axis as a [`ResourceVector::narrowed_repetitions`]
+    /// pair, measured on the poison-loss rule the SBA applies
+    /// ([`players::poison_loss_measure`]): the headroom one short of that rule's threshold, and
+    /// the per-period gain of the count it measures. `None` when no poison-loss rule applies to
+    /// `p`, so the axis is unarmed.
+    ///
+    /// CR 810.10: poison counters a team shares rise by every member's own gain, so a
+    /// shared-poison seat's magnitude is its team's summed gain, over the same members
+    /// [`players::team_poison_total`] counts.
+    fn poison_axis(&self, state: &GameState, p: &Player) -> Option<(i64, i64)> {
+        let measure = players::poison_loss_measure(state, p)?;
+        let gain = |seat: &PlayerId| self.poison.get(seat).copied().unwrap_or(0);
+        let magnitude = match measure.scope {
+            PoisonLossScope::Player => gain(&p.id),
+            PoisonLossScope::Team => topology::shared_poison_members(state, p.id)
+                .iter()
+                .map(gain)
+                .sum(),
+        };
+        Some((
+            i64::from(measure.threshold) - 1 - i64::from(measure.count),
+            magnitude,
+        ))
     }
 
     /// CR 704.5a / CR 704.5c / CR 104.3c + CR 121.4: ONE seat's strict headroom in whole
@@ -3120,21 +3144,18 @@ impl ResourceVector {
             .iter()
             .find(|(seat, _)| *seat == p.id)
             .map_or(0, |(_, magnitude)| *magnitude);
-        Self::narrowed_repetitions(&[
-            (p.life as i64 - 1, life_magnitude),
-            // CR 704.5c (ten or more poison counters lose): a positive poison delta is the
-            // per-period gain.
-            (
-                9 - p.poison_counters as i64,
-                self.poison.get(&p.id).copied().unwrap_or(0),
-            ),
-            // CR 104.3c + CR 121.4 (drawing from an empty library loses): a negative
-            // library delta is the per-period drain.
-            (
-                state.library_of(p.id).len() as i64,
-                -self.library_delta.get(&p.id).copied().unwrap_or(0),
-            ),
-        ])
+        Self::narrowed_repetitions(
+            [(p.life as i64 - 1, life_magnitude)]
+                .into_iter()
+                // CR 704.5c / CR 704.6b: the poison-loss rule the SBA applies to this seat.
+                .chain(self.poison_axis(state, p))
+                // CR 104.3c + CR 121.4 (drawing from an empty library loses): a negative
+                // library delta is the per-period drain.
+                .chain([(
+                    state.library_of(p.id).len() as i64,
+                    -self.library_delta.get(&p.id).copied().unwrap_or(0),
+                )]),
+        )
     }
 
     /// CR 732.2a: **controller-scoped** net-progress. Returns true iff the cycle makes
@@ -29344,6 +29365,98 @@ mod tests {
             count(8, 24, drawing),
             Some((0, 0)),
             "an over-full hand allows none"
+        );
+    }
+
+    /// CR 704.5c + CR 732.2a: the cascade's poison crossing is measured against the poison-loss
+    /// rule the SBA applies (`players::poison_loss_measure`), so the count a bounded shortcut
+    /// offers moves with the format's configured threshold, and a format with no individual
+    /// threshold arms no poison axis at all.
+    ///
+    /// CR 704.6b + CR 810.10: a shared-poison seat is measured on its team's total against
+    /// fifteen, and the team's total rises by every member's per-period gain.
+    ///
+    /// # Discrimination
+    ///
+    /// Restore the literal ten-counter headroom and every leg answers 10: the 15 and 5 legs fire,
+    /// the `None` leg finds a crossing where no rule makes one, and the Two-Headed Giant leg
+    /// answers 10 where the team crosses at 8. Measure the shared team's count but divide by one
+    /// member's gain and that leg answers 15.
+    #[test]
+    fn the_cascades_poison_crossing_reads_the_configured_loss_threshold() {
+        // One poison counter per period on each victim and nothing else, so poison is the only
+        // axis.
+        let poisoned = |victims: &[u8]| {
+            let mut delta = ResourceVector::default();
+            for &seat in victims {
+                delta.poison.insert(PlayerId(seat), 1);
+            }
+            charged_signature(delta, &[], &[])
+        };
+        let cascade = |state: &GameState, victims: &[u8]| {
+            poisoned(victims)
+                .elimination_cascade(
+                    state,
+                    PlayerId(0),
+                    None,
+                    None,
+                    &[],
+                    ChargeBound::Ceiling,
+                    AnnouncedLead::None,
+                )
+                .map(|cascade| (cascade.count, cascade.entries))
+        };
+        let departs = |repetition: u32, seats: &[u8]| {
+            vec![PredictedDeparture {
+                repetition,
+                seats: seats.iter().copied().map(PlayerId).collect(),
+            }]
+        };
+        let with_threshold = |threshold: Option<u8>| {
+            let mut state = bound_board(&[40, 40]);
+            state.format_config.poison_counter_threshold = threshold;
+            state
+        };
+
+        assert_eq!(
+            bound_board(&[40, 40])
+                .format_config
+                .poison_counter_threshold,
+            Some(10),
+            "REACH-GUARD: the default board carries the CR 704.5c threshold of ten"
+        );
+        assert_eq!(
+            cascade(&with_threshold(Some(10)), &[1]),
+            Some((10, departs(10, &[1]))),
+            "CR 704.5c: the tenth counter arrives on the tenth repetition"
+        );
+        assert_eq!(
+            cascade(&with_threshold(Some(15)), &[1]),
+            Some((15, departs(15, &[1]))),
+            "a fifteen-counter house threshold keeps P1 in the game until the fifteenth"
+        );
+        assert_eq!(
+            cascade(&with_threshold(Some(5)), &[1]),
+            Some((5, departs(5, &[1]))),
+            "a five-counter house threshold takes P1 out on the fifth"
+        );
+        assert_eq!(
+            cascade(&with_threshold(None), &[1]),
+            None,
+            "no individual poison-loss rule, so poison is no CR 704 axis and nothing is measured"
+        );
+
+        // CR 704.6b + CR 810.10: each opponent gets a counter, so the opposing team's shared
+        // total rises by two a period: 14 of headroom under fifteen is 7 strict, crossing on 8.
+        let giant = GameState::new(crate::types::format::FormatConfig::two_headed_giant(), 4, 7);
+        assert_eq!(
+            giant.format_config.poison_counter_threshold, None,
+            "REACH-GUARD: the shared-poison format has no individual threshold"
+        );
+        assert_eq!(
+            cascade(&giant, &[2, 3]),
+            Some((8, departs(8, &[2, 3]))),
+            "the opposing team crosses together when its shared total reaches fifteen"
         );
     }
 

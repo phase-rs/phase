@@ -72,6 +72,22 @@ export interface DungeonPreview {
   room_count: number;
 }
 
+// Mirrors `engine::game::players::PoisonLossScope` — whose poison counters a
+// poison loss is measured on.
+export type PoisonLossScope = "Player" | "Team";
+
+// Mirrors `engine::game::derived_views::PoisonLossProximity` — the display
+// classification of how close a poison-loss count is to its threshold.
+export type PoisonLossProximity = "Normal" | "NearLethal";
+
+// Mirrors `engine::game::derived_views::PoisonLossView`, delivered on
+// `GameState.derived.poison_loss`.
+export interface PoisonLossView {
+  scope: PoisonLossScope;
+  threshold: number;
+  proximity: PoisonLossProximity;
+}
+
 // Mirrors `engine::game::derived_views::DungeonRoomView` — where one player's
 // venture marker currently sits, named. Delivered on
 // `GameState.derived.dungeon_rooms`, not on `dungeon_progress`, which carries
@@ -290,6 +306,9 @@ export interface StructuralRules {
   team_based: boolean;
   sideboard_policy: SideboardPolicy;
   default_deck_copy_limit: DeckCopyLimit;
+  /** CR 704.5c individual poison threshold. Optional because it postdates the
+   *  Axis-A save path; absent means ten (the engine's serde default). */
+  poison_counter_threshold?: number;
 }
 
 /** `legal_sets: null` means unrestricted; a list restricts to exactly it. */
@@ -534,6 +553,11 @@ export type DeckCopyLimit =
   | { type: "Unlimited" }
   | { type: "UpTo"; data: number };
 
+/** The largest value an engine `u8` field holds — the bound on
+ *  `FormatConfig`'s `u8` thresholds (`poison_counter_threshold`,
+ *  `commander_damage_threshold`). */
+export const U8_MAX = 255;
+
 export interface FormatConfig {
   format: GameFormat;
   starting_life: number;
@@ -543,6 +567,10 @@ export interface FormatConfig {
   singleton: boolean;
   command_zone: boolean;
   commander_damage_threshold: number | null;
+  /** CR 704.5c: the poison-counter count at which an individual player loses
+   *  (a host-adjustable house-rule dial). `null` for the Two-Headed Giant
+   *  family, which ignores CR 704.5c and loses to team poison instead. */
+  poison_counter_threshold: number | null;
   range_of_influence: RangeOfInfluenceConfig | null;
   team_based: boolean;
   /** Engine-authoritative sideboard policy. This must be sent with every
@@ -3073,6 +3101,7 @@ export type WaitingFor =
   | { type: "TriggerTargetSelection"; data: { player: PlayerId; trigger_controller?: PlayerId; trigger_event?: GameEvent; trigger_events?: GameEvent[]; target_slots: TargetSelectionSlot[]; mode_labels?: (string | null)[]; target_constraints?: TargetSelectionConstraint[]; selection: TargetSelectionProgress; source_id?: ObjectId; description?: string } }
   | { type: "BetweenGamesSideboard"; data: { player: PlayerId; game_number: number; score: MatchScore; min_main_deck_size: number; max_sideboard_size: number | null } }
   | { type: "BetweenGamesChoosePlayDraw"; data: { player: PlayerId; game_number: number; score: MatchScore } }
+  | { type: "ChooseStartingPlayer"; data: { player: PlayerId; candidates: PlayerId[] } }
   | { type: "NamedChoice"; data: { player: PlayerId; choice_type: string | Record<string, unknown>; options: string[]; source?: { prompt: { identity: unknown; controller: PlayerId; display_name: string }; binding: "ResolutionContext" | "ExactObjectAndResolution" | "PendingEntry" }; persist_player?: PlayerId; free_entry?: FreeEntry } }
   | { type: "OpponentGuess"; data: { player: PlayerId; options: string[]; choice_type: string | Record<string, unknown>; source: { prompt: { identity: unknown; controller: PlayerId; display_name: string } }; proposition_truth?: boolean } }
   | { type: "SpellbookDraft"; data: { player: PlayerId; source_id: ObjectId; options: string[]; destination: Zone; tapped?: boolean } }
@@ -3679,6 +3708,7 @@ export type GameAction =
   | { type: "TurnFaceUp"; data: { object_id: ObjectId } }
   | { type: "SubmitSideboard"; data: { main: DeckCardCount[]; sideboard: DeckCardCount[] } }
   | { type: "ChoosePlayDraw"; data: { play_first: boolean } }
+  | { type: "ChooseStartingPlayer"; data: { player: PlayerId } }
   | { type: "ChooseOption"; data: { choice: string } }
   // CR 701.38b: Cast a vote for one object candidate in an object-pool vote.
   // `candidate_index` indexes `WaitingFor::VoteChoice.candidate_objects`.
@@ -4074,6 +4104,16 @@ export interface PlayerStatusView {
   source?: ObjectId | null;
 }
 
+/**
+ * CR 601.2g + CR 605.3a: display data for a manual mana ability's payment
+ * window. Mirrors `engine::game::derived_views::ManaAbilityPaymentView`.
+ */
+export interface ManaAbilityPaymentView {
+  source_id: ObjectId;
+  cost: ManaCost;
+  pinned_pool_units: number[];
+}
+
 export interface PlanechaseView {
   active_plane?: ObjectId | null;
   planar_controller?: PlayerId | null;
@@ -4425,8 +4465,10 @@ export interface TurnOrderSlotView {
   turns_from_now: number;
   turn_number: number;
   is_viewer?: boolean;
-  is_starting_player?: boolean;
 }
+
+/** Mirrors `engine::game::derived_views::PlayDrawPosition` (CR 103.1 + CR 103.1a). */
+export type PlayDrawPosition = "OnThePlay" | "OnTheDraw";
 
 /** CR 509.1g: engine-authored public `(blocker, attacker)` combat display pair. */
 export type BlockerAssignmentPair = [ObjectId, ObjectId];
@@ -4566,6 +4608,14 @@ export interface DerivedViews {
    */
   dungeon_rooms?: Record<string, DungeonRoomView>;
   /**
+   * CR 704.5c / CR 704.6b: the poison-loss rule each poisoned player is
+   * measured against (scope, threshold, near-lethal), keyed by
+   * PlayerId-as-string — the threshold the SBA actually uses, so the HUD never
+   * hard-codes ten. Omitted when nobody is poisoned. Mirrors
+   * `engine::game::derived_views::DerivedViews::poison_loss`.
+   */
+  poison_loss?: Record<string, PoisonLossView>;
+  /**
    * Engine-authored coalesced view of the stack. Empty (and omitted from
    * the wire payload) when the stack is empty. StackDisplay consumes this
    * directly — never re-compute the grouping client-side. Mirrors
@@ -4637,14 +4687,22 @@ export interface DerivedViews {
   player_status?: PlayerStatusView[];
   /**
    * CR 118.3a + CR 601.2g: during the viewing player's own manual mana payment
-   * for a spell, the portion of the locked cost still UNPAID by the pool units
-   * they have pinned (selected). The payment UI renders this as the cost shrinks
-   * while the player picks mana; an empty/`NoCost` value means their selection
-   * alone covers the whole cost. Omitted outside a non-convoke spell payment the
-   * viewer controls. Mirrors
+   * for a spell or a manual mana ability, the portion of the locked cost still
+   * UNPAID by the pool units they have pinned (selected). The payment UI renders
+   * this as the cost shrinks while the player picks mana; an empty/`NoCost`
+   * value means their selection alone covers the whole cost. Omitted outside a
+   * non-convoke spell payment or a manual mana-ability payment the viewer
+   * controls. Mirrors
    * `engine::game::derived_views::DerivedViews::pending_payment_remaining`.
    */
   pending_payment_remaining?: ManaCost;
+  /**
+   * CR 601.2g + CR 602.2b + CR 605.3a: the viewing player's own manual payment
+   * of a mana ability's mana cost — its source, the mana it costs (X announced)
+   * and the pool units they've directed. Omitted outside that window. Mirrors
+   * `engine::game::derived_views::DerivedViews::mana_ability_payment`.
+   */
+  mana_ability_payment?: ManaAbilityPaymentView;
   /** Engine-authored Planechase state and planar-die legality. */
   planechase?: PlanechaseView | null;
   /** Engine-authored Archenemy state. */
@@ -4656,6 +4714,13 @@ export interface DerivedViews {
   turn_order?: TurnOrderSlotView[];
   /** One-based projected turn position for the current viewer. */
   viewer_turn_number?: number;
+  /**
+   * Engine-authored side-relative play/draw position for the viewer in a
+   * two-sided game; absent before the starting player is determined and in
+   * multiplayer pods (use `viewer_turn_number`). Mirrors
+   * `engine::game::derived_views::DerivedViews::viewer_play_draw`.
+   */
+  viewer_play_draw?: PlayDrawPosition;
   /**
    * CR 732.2a: `∞` HUD rows — one per (engine-attributed player, pumped axis)
    * of every unbounded-resource loop. Empty/omitted when no loop is active. The
@@ -4730,6 +4795,27 @@ export interface DerivedViews {
    * it through `lifeReadout`. Mirrors `engine::game::derived_views::DerivedViews::life_magnitude`.
    */
   life_magnitude?: Record<string, DisplayMagnitude>;
+  /**
+   * CR 508.1a + CR 510.1a + CR 120.3a/b: per-candidate-attacker projection of unblocked damage,
+   * published only while the attack declaration prompt is open; keyed by attacker id. Display-only;
+   * before replacement and prevention effects. Mirrors
+   * `engine::game::derived_views::DerivedViews::unblocked_attack_previews`.
+   */
+  unblocked_attack_previews?: Record<string, UnblockedAttackPreview>;
+  /**
+   * CR 506.4c: each attacking creature's current attack target, keyed by attacker id. An attacker
+   * whose relation has ended is absent: it is still attacking, but not any player, planeswalker,
+   * or battle. Mirrors `engine::game::derived_views::DerivedViews::attack_targets`.
+   */
+  attack_targets?: Record<string, AttackTarget>;
+}
+
+/** Mirrors `engine::game::derived_views::UnblockedAttackPreview`. */
+export interface UnblockedAttackPreview {
+  /** CR 510.1a + CR 702.4b: combat damage across every damage step it would assign in. */
+  damage: number;
+  /** CR 120.3a / CR 120.3b: life loss that damage causes a player (0 for infect). */
+  life_loss: number;
 }
 
 /** Mirrors `engine::types::game_state::NextSpellModifier` (serde tag="type"). */

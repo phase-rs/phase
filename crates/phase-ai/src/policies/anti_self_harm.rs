@@ -1666,7 +1666,8 @@ fn pump_taps_blocker_penalty(ctx: &PolicyContext<'_>) -> f64 {
                     && obj.card_types.core_types.contains(&CoreType::Creature)
                     && !obj.card_types.core_types.contains(&CoreType::Land)
                     && !combat::has_summoning_sickness(obj)
-                    && obj.abilities.iter().any(mana_abilities::is_mana_ability)
+                    // CR 701.10f: a pool doubling is a mana ability but adds no mana by itself.
+                    && obj.abilities.iter().any(mana_abilities::is_mana_source_ability)
             })
         })
         .count();
