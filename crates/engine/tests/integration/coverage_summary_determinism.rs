@@ -5,7 +5,7 @@ use std::collections::BTreeSet;
 use engine::database::CardDatabase;
 use engine::game::coverage::{
     analyze_coverage, audit_resolver_features, audit_semantic, build_warning_drilldown,
-    format_semantic_audit_markdown,
+    format_semantic_audit_markdown, CoverageSupport, WarningDrilldownCard,
 };
 use flate2::read::GzDecoder;
 use serde::Serialize;
@@ -160,4 +160,33 @@ fn warning_drilldown_joins_by_face_key_and_breaks_name_ties_by_key() {
         2,
         "the face walk must lead with each Channel in some load"
     );
+}
+
+#[test]
+fn warning_drilldown_support_keeps_its_boolean_wire_shape() {
+    for (support, wire) in [
+        (Some(CoverageSupport::Supported), serde_json::json!(true)),
+        (Some(CoverageSupport::Unsupported), serde_json::json!(false)),
+        (None, serde_json::Value::Null),
+    ] {
+        let card = WarningDrilldownCard {
+            name: "Channel".into(),
+            key: CHANNEL.into(),
+            supported: support,
+            gap_count: None,
+            printings: vec![],
+            oracle_text: None,
+            warnings: vec![],
+            parsed_labels: vec![],
+            gap_details: vec![],
+            parse_details: None,
+            card: None,
+        };
+        let json = serde_json::to_value(&card).expect("card serializes");
+        assert_eq!(json.get("supported"), Some(&wire), "{support:?}");
+        assert_eq!(
+            serde_json::from_value::<Option<CoverageSupport>>(wire).expect("wire deserializes"),
+            support
+        );
+    }
 }

@@ -6645,11 +6645,35 @@ pub struct WarningDrilldown {
     pub cards: Vec<WarningDrilldownCard>,
 }
 
+/// A face's coverage verdict; boolean on the wire so drilldown JSON keeps `true`/`false`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(from = "bool", into = "bool")]
+pub enum CoverageSupport {
+    Supported,
+    Unsupported,
+}
+
+impl From<bool> for CoverageSupport {
+    fn from(supported: bool) -> Self {
+        if supported {
+            Self::Supported
+        } else {
+            Self::Unsupported
+        }
+    }
+}
+
+impl From<CoverageSupport> for bool {
+    fn from(support: CoverageSupport) -> Self {
+        matches!(support, CoverageSupport::Supported)
+    }
+}
+
 #[derive(Debug, Serialize)]
 pub struct WarningDrilldownCard {
     pub name: String,
     pub key: String,
-    pub supported: Option<bool>,
+    pub supported: Option<CoverageSupport>,
     pub gap_count: Option<usize>,
     pub printings: Vec<String>,
     pub oracle_text: Option<String>,
@@ -6733,7 +6757,7 @@ pub fn build_warning_drilldown(
         cards.push(WarningDrilldownCard {
             name: face.name.clone(),
             key: key.to_string(),
-            supported: coverage.map(|card| card.supported),
+            supported: coverage.map(|card| CoverageSupport::from(card.supported)),
             gap_count: coverage.map(|card| card.gap_count),
             printings: coverage
                 .map(|card| card.printings.clone())
@@ -6755,11 +6779,11 @@ pub fn build_warning_drilldown(
         });
     }
 
+    let unsupported =
+        |card: &WarningDrilldownCard| card.supported != Some(CoverageSupport::Supported);
     cards.sort_by(|left, right| {
-        let left_supported = left.supported.unwrap_or(false);
-        let right_supported = right.supported.unwrap_or(false);
-        right_supported
-            .cmp(&left_supported)
+        unsupported(left)
+            .cmp(&unsupported(right))
             .then_with(|| {
                 left.gap_count
                     .unwrap_or(usize::MAX)
@@ -6772,7 +6796,7 @@ pub fn build_warning_drilldown(
     let matched_cards = cards.len();
     let supported_cards = cards
         .iter()
-        .filter(|card| card.supported == Some(true))
+        .filter(|card| card.supported == Some(CoverageSupport::Supported))
         .count();
     let single_gap_cards = cards
         .iter()
