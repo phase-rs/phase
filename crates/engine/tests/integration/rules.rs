@@ -151,12 +151,7 @@ pub fn run_combat(
     attacker_ids: Vec<ObjectId>,
     blocker_assignments: Vec<(ObjectId, ObjectId)>,
 ) {
-    drop(run_combat_with_blocker_divisions_and_events(
-        runner,
-        attacker_ids,
-        blocker_assignments,
-        &[],
-    ));
+    run_combat_with_blocker_divisions(runner, attacker_ids, blocker_assignments, &[]);
 }
 
 /// [`run_combat`] with the `GameEvent`s emitted by the combat actions.
