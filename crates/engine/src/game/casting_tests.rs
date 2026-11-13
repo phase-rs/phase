@@ -64698,3 +64698,133 @@ fn copy_cast_without_a_stack_entry_is_refused_and_records_nothing() {
         "a refused copy cast stamps no occurrence on the copy"
     );
 }
+
+// ---------------------------------------------------------------------------
+// CR 303.4 + CR 301.5 + CR 601.2c + CR 608.2h: an announcement's target fact
+// states the ATTACHMENT relation the caster saw, because `LKISnapshot` is the
+// whole record of that choice once the target's live band is gone.
+//
+// `GameObject::snapshot_public_characteristics` cannot state it: classifying an
+// attached object as Aura/Equipment requires a `GameState` lookup and the method
+// holds only `&self`. The capture therefore completes the snapshot with
+// `zones::capture_attachment_snapshot` — the same authority the battlefield-exit
+// capture uses. An empty set would read as "nothing was attached", which is the
+// opposite of what an Aura-enchanted target's record must say: `EnchantedBy`
+// (Venomous Vines' "Destroy target enchanted permanent") would answer a definite
+// FALSE and the restore guard would refuse the honest save.
+// ---------------------------------------------------------------------------
+
+/// Venomous Vines' declared slot: `EnchantedBy` on a permanent (CR 303.4b).
+fn an_enchanted_permanent_filter() -> TargetFilter {
+    TargetFilter::Typed(
+        TypedFilter::default()
+            .with_type(TypeFilter::Permanent)
+            .properties(vec![FilterProp::EnchantedBy]),
+    )
+}
+
+/// CR 303.4b: attach `aura` to `host` through both back-edges, so the board is
+/// the shape a real Aura leaves behind.
+fn attach_aura(state: &mut GameState, aura: ObjectId, host: ObjectId) {
+    state.objects.get_mut(&aura).unwrap().attached_to =
+        Some(crate::game::game_object::AttachTarget::Object(host));
+    let host_obj = state.objects.get_mut(&host).unwrap();
+    if !host_obj.attachments.contains(&aura) {
+        host_obj.attachments.push(aura);
+    }
+}
+
+#[test]
+fn announced_target_fact_states_the_attachment_relation_the_caster_saw() {
+    use crate::types::ability::AttachmentKind;
+    use crate::types::game_state::ActivationTargetFact;
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let enchanted = scenario.add_creature(P1, "Grizzly Bears", 2, 2).id();
+    let bare = scenario.add_creature(P1, "Savannah Lions", 2, 1).id();
+    let aura = scenario
+        .add_creature(P0, "Pacifism", 0, 0)
+        .as_enchantment()
+        .with_subtypes(vec!["Aura"])
+        .id();
+    let mut state = scenario.state;
+    attach_aura(&mut state, aura, enchanted);
+
+    // CR 601.2c: both announced objects are captured the way the cast path does.
+    let facts = capture_target_facts(
+        &state,
+        &[TargetRef::Object(enchanted), TargetRef::Object(bare)],
+    );
+    assert_eq!(
+        facts.len(),
+        2,
+        "reach: both announced targets produced a fact"
+    );
+    let ActivationTargetFact::Object {
+        lki: enchanted_lki,
+        zone: enchanted_zone,
+        token: enchanted_token,
+        ..
+    } = &facts[0]
+    else {
+        panic!("reach: the first fact is an object fact");
+    };
+    let ActivationTargetFact::Object {
+        lki: bare_lki,
+        zone: bare_zone,
+        token: bare_token,
+        ..
+    } = &facts[1]
+    else {
+        panic!("reach: the second fact is an object fact");
+    };
+
+    assert_eq!(
+        enchanted_lki
+            .attachments
+            .iter()
+            .map(|attachment| (attachment.object_id, attachment.kind.clone()))
+            .collect::<Vec<_>>(),
+        vec![(aura, AttachmentKind::Aura)],
+        "CR 303.4b + CR 608.2h: the announcement records the Aura that enchants the target"
+    );
+    assert!(
+        bare_lki.attachments.is_empty(),
+        "CR 303.4: an unenchanted target's record states no attachment — the honest answer, \
+         which is what makes the EnchantedBy refusal below attributable to the capture"
+    );
+
+    // CR 115.1 + CR 601.2c: the recorded announcement answers the slot's own
+    // predicate from the capture. The bare creature's record contradicts an
+    // "enchanted permanent" slot (a definite `false`), while an unstated axis
+    // would be `None` — UNRECORDED, which the restore guard treats as no check.
+    let filter = an_enchanted_permanent_filter();
+    let ctx = crate::game::filter::FilterContext::neutral();
+    assert_eq!(
+        crate::game::filter::matches_target_filter_on_recorded_announcement(
+            &state,
+            enchanted,
+            enchanted_lki,
+            &filter,
+            &ctx,
+            enchanted_zone.zone(),
+            enchanted_token.bit(),
+        ),
+        Some(true),
+        "CR 303.4b: the Aura-enchanted target satisfies 'enchanted permanent' on its own record"
+    );
+    assert_eq!(
+        crate::game::filter::matches_target_filter_on_recorded_announcement(
+            &state,
+            bare,
+            bare_lki,
+            &filter,
+            &ctx,
+            bare_zone.zone(),
+            bare_token.bit(),
+        ),
+        Some(false),
+        "a recorded empty attachment set is a DEFINITE answer, not an unrecorded one"
+    );
+}

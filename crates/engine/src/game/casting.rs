@@ -32164,13 +32164,14 @@ pub(crate) fn record_activation_announcement(
 /// CR 115.1 + CR 601.2c + CR 400.7: snapshot one committed target list into the
 /// repo's typed "one committed target, as it was when committed" vocabulary. A
 /// player fact needs no snapshot; an object fact carries the target's public
-/// characteristics as they were at commitment, together with the zone it
-/// occupied then (CR 109.2 needs the zone to read a bare type description as a
-/// battlefield permanent). An id absent from `state.objects` (a target that has
-/// ceased — only reachable for a token) is dropped: a fact that cannot be
-/// snapshotted is not invented. CR 115.9b's "a departed target is ignored" rule
-/// belongs to the live reader in `filter::stack_entry_targets_satisfy`, not to
-/// this capture.
+/// characteristics as they were at commitment — including the attachment relation
+/// that may be the whole reason it was legal ([`capture_announced_target_lki`]) —
+/// together with the zone it occupied then (CR 109.2 needs the zone to read a bare
+/// type description as a battlefield permanent). An id absent from `state.objects`
+/// (a target that has ceased — only reachable for a token) is dropped: a fact that
+/// cannot be snapshotted is not invented. CR 115.9b's "a departed target is
+/// ignored" rule belongs to the live reader in
+/// `filter::stack_entry_targets_satisfy`, not to this capture.
 pub(crate) fn capture_target_facts(
     state: &GameState,
     targets: &[TargetRef],
@@ -32185,7 +32186,7 @@ pub(crate) fn capture_target_facts(
                     .get(id)
                     .map(|obj| ActivationTargetFact::Object {
                         id: *id,
-                        lki: Box::new(obj.snapshot_public_characteristics()),
+                        lki: Box::new(capture_announced_target_lki(state, obj)),
                         // CR 601.2c: the zone the announced target was legal in.
                         zone: crate::types::game_state::AnnouncedTargetZone::Known(obj.zone),
                         // CR 111.1 + CR 115.9: the token bit the target held at
@@ -32198,6 +32199,36 @@ pub(crate) fn capture_target_facts(
             }
         })
         .collect()
+}
+
+/// CR 303.4 + CR 301.5 + CR 608.2h: the announcement-time snapshot of an object
+/// the caster just chose as a target, COMPLETE with the attachment relation it
+/// carried then.
+///
+/// [`GameObject::snapshot_public_characteristics`] cannot state attachments: a
+/// `LKISnapshot` classifies an attached object as Aura/Equipment by looking it up
+/// in `GameState`, and that method holds only `&self`. The announcement is one of
+/// the two moments a snapshot is the only surviving authority for the relation —
+/// the other is the battlefield exit (`apply_zone_exit_cleanup`), which supplies
+/// the same capture — so this caller, which does have the board, supplies it here
+/// rather than leaving the field empty. An empty set is otherwise indistinguishable
+/// from "nothing was attached", which is the OPPOSITE answer.
+///
+/// CR 115.1 + CR 601.2c: a target the caster could choose ("Destroy target
+/// enchanted permanent" — Venomous Vines) may owe its legality entirely to this
+/// relation, and `LKISnapshot` is the whole record of that choice once the
+/// target's live band is gone. CR 608.2h: a look-back question about the announced
+/// object ("was it enchanted") reads what the announcement saw. CR 303.4b
+/// defines "enchanted" as having an Aura attached, CR 301.5a defines "equipped"
+/// the same way for Equipment; [`crate::game::zones::capture_attachment_snapshot`]
+/// is the one authority that classifies both, exactly as it does for a departure.
+fn capture_announced_target_lki(
+    state: &GameState,
+    obj: &crate::game::game_object::GameObject,
+) -> crate::types::game_state::LKISnapshot {
+    let mut lki = obj.snapshot_public_characteristics();
+    lki.attachments = crate::game::zones::capture_attachment_snapshot(state, obj);
+    lki
 }
 
 /// CR 115.1 + CR 601.2c + CR 400.7: latch the spell's just-declared targets onto

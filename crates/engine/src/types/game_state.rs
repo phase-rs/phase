@@ -680,7 +680,15 @@ pub struct LKISnapshot {
     ///
     /// Captured via [`capture_attachment_snapshot`](crate::game::zones::capture_attachment_snapshot),
     /// the same authority that fills `ZoneChangeRecord::attachments` — one snapshot
-    /// shape, one capture site.
+    /// shape. That capture runs at the TWO moments a snapshot is the only surviving
+    /// authority for the relation: the battlefield exit (CR 608.2h look-back) and the
+    /// announcement of a committed target
+    /// ([`capture_announced_target_lki`](crate::game::casting)), where the relation
+    /// may be the whole reason the target was legal ("Destroy target enchanted
+    /// permanent" — Venomous Vines, CR 303.4b). An empty set is a RECORDED "nothing
+    /// was attached", never a stand-in for "not captured": a reader that asks an
+    /// attachment predicate is answered from it, so a call site that could have
+    /// captured it must.
     ///
     /// `#[serde(default)]` ⇒ pre-existing saved states deserialize to an empty set,
     /// which is exactly the pre-change fail-closed behavior.

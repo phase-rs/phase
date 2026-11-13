@@ -3419,11 +3419,14 @@ impl GameObject {
             // Empty by construction, NOT by choice: classifying an attachment as
             // Aura/Equipment requires looking each attached object up in `GameState`
             // (see `zones::capture_attachment_snapshot`), and this method has only
-            // `&self`. Callers that need the attachment look-back (the CR 608.2h
-            // battlefield-exit LKI) go through `apply_zone_exit_cleanup`, which does
-            // have `&GameState` and populates it. The damage-source and mana-spent
-            // snapshots that use this method never ask an attachment predicate, so an
-            // empty set here is the same fail-closed answer they got before.
+            // `&self`. Both callers that need an attachment look-back populate it with
+            // that capture: the CR 608.2h battlefield exit (`apply_zone_exit_cleanup`)
+            // and the announcement of a committed target
+            // (`casting::capture_announced_target_lki`), which is when the target's
+            // legality may have rested on the relation ("Destroy target enchanted
+            // permanent"). The damage-source and mana-spent snapshots that use this
+            // method never ask an attachment predicate, so an empty set here is the
+            // same fail-closed answer they got before.
             attachments: Vec::new(),
             // CR 608.2h: the trigger-time copy a latched source falls back to
             // when no exit record survives for its incarnation.
