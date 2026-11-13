@@ -985,6 +985,40 @@ describe("HostSetup", () => {
     );
   });
 
+  it("hosts with the poison-counter threshold the user typed", async () => {
+    const user = userEvent.setup();
+    const onHost = vi.fn();
+
+    render(<HostSetup preparationEpoch={testPreparationEpoch} onHost={onHost} onBack={vi.fn()} connectionMode="server" onConnectionModeChange={vi.fn()} />);
+
+    const poison = screen.getByLabelText("Poison Counters");
+    expect(poison).toHaveValue(10);
+    await user.clear(poison);
+    await user.type(poison, "15");
+
+    await user.click(screen.getByRole("button", { name: "Host Game" }));
+
+    expect(onHost).toHaveBeenCalledWith(
+      expect.objectContaining({
+        formatConfig: expect.objectContaining({ poison_counter_threshold: 15 }),
+      }),
+      expect.any(String),
+    );
+  });
+
+  it("offers no poison-counter threshold for Two-Headed Giant's team poison", async () => {
+    const user = userEvent.setup();
+
+    render(<HostSetup preparationEpoch={testPreparationEpoch} onHost={vi.fn()} onBack={vi.fn()} connectionMode="server" onConnectionModeChange={vi.fn()} />);
+
+    expect(screen.getByLabelText("Poison Counters")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Format" }));
+    await user.click(screen.getByRole("option", { name: "Two-Headed Giant" }));
+
+    expect(screen.getByLabelText("Starting Life")).toBeInTheDocument();
+    expect(screen.queryByLabelText("Poison Counters")).not.toBeInTheDocument();
+  });
+
   /**
    * `FORMAT_DEFAULTS` is built from the BUILT-IN registry and has no entry for
    * any `Custom:<id>` key. The seat-ceiling check used to index it directly
@@ -1009,6 +1043,7 @@ describe("HostSetup", () => {
         singleton: false,
         command_zone: false,
         commander_damage_threshold: null,
+        poison_counter_threshold: 10,
         range_of_influence: null,
         team_based: false,
         uses_commander: false,

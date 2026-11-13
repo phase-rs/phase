@@ -88,6 +88,7 @@ mod attach_role_selection_timing;
 mod attached_set_qualifier;
 mod attached_to_declared_target;
 mod attachment_host_reference_untargeted;
+mod attack_damage_preview;
 mod attack_owner_riders;
 mod attack_target_latch;
 mod attacked_player_referent;

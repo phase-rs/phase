@@ -101,6 +101,7 @@ impl CastUndoAction {
             | GameAction::TurnFaceUp { .. }
             | GameAction::SubmitSideboard { .. }
             | GameAction::ChoosePlayDraw { .. }
+            | GameAction::ChooseStartingPlayer { .. }
             | GameAction::ChooseOption { .. }
             | GameAction::SubmitVoteCandidate { .. }
             | GameAction::SubmitSpellbookDraft { .. }
