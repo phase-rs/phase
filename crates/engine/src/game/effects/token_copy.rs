@@ -546,6 +546,11 @@ fn drain_copy_token_resolution(
                 .unwrap_or_default(),
         };
 
+        // CR 614.6 + CR 608.2c: this offered batch owns only its creation's
+        // ledger. Its earlier batches are already in `pending.created_ids`.
+        // Reset before replacements run so prevention publishes nothing, while
+        // a substitute creation may still publish the ids this owner adopts.
+        state.last_created_token_ids.clear();
         match crate::game::replacement::replace_event(state, proposed, events) {
             crate::game::replacement::ReplacementResult::Execute(event) => {
                 // CR 614.1a + CR 608.2c: the frame is taken, so the delivery
@@ -6586,6 +6591,96 @@ mod tests {
             runner.state().waiting_for,
             WaitingFor::Priority { .. }
         ));
+    }
+
+    /// CR 614.6 + CR 608.2c: a wholly prevented offered batch contributes
+    /// nothing, even when the global ledger still names an earlier creation.
+    /// Constructed fixture: no printed CreateToken replacement uses Prevent.
+    #[test]
+    fn prevented_offered_copy_batch_does_not_adopt_a_prior_ledger() {
+        use crate::game::scenario::{GameScenario, P0};
+        for owner_has_earlier in [false, true] {
+            let mut runner = GameScenario::new().build();
+            let state = runner.state_mut();
+            let source_id = add_copy_source(state, "Ledger donor");
+            let earlier = add_copy_source(state, "Earlier creation");
+            state.last_created_token_ids = vec![earlier];
+            let preventer = add_copy_source(state, "Constructed token preventer");
+            let mut definition = ReplacementDefinition::new(ReplacementEvent::CreateToken)
+                .quantity_modification(QuantityModification::Prevent);
+            definition.mode = crate::types::ability::ReplacementMode::Optional { decline: None };
+            let object = state.objects.get_mut(&preventer).unwrap();
+            object.base_replacement_definitions = Arc::new(vec![definition.clone()]);
+            object.replacement_definitions = vec![definition].into();
+            let mut copy = named_attack_copy_spec(state, source_id, Vec::new());
+            copy.tapped = false;
+            copy.enters_attacking = false;
+            copy.attack_request = crate::types::proposed_event::TokenAttackRequest::Unspecified;
+            let want = if owner_has_earlier {
+                vec![earlier]
+            } else {
+                Vec::new()
+            };
+            let set = TrackedSetId(100);
+            state.tracked_object_sets.insert(set, want.clone());
+            state.push_copy_token(PendingCopyTokenResolution {
+                created_ids: want.clone(),
+                remaining: VecDeque::from([PendingCopyTokenBatch {
+                    owner: P0,
+                    copy: Box::new(copy),
+                    count: 1,
+                }]),
+                effect_kind: EffectKind::CopyTokenOf,
+                source_id,
+                referent_set: Some(set),
+                offered_batch: OfferedBatchCustody::Settled,
+            });
+            let mut events = Vec::new();
+            drain_pending_copy_token_resolution(state, &mut events);
+            let WaitingFor::ReplacementChoice {
+                player, candidates, ..
+            } = &runner.state().waiting_for
+            else {
+                panic!(
+                    "required prevention prompt: {:?}",
+                    runner.state().waiting_for
+                );
+            };
+            assert_eq!(*player, P0);
+            let accept = candidates
+                .iter()
+                .position(|candidate| candidate.description != "Decline")
+                .expect("prevention offered");
+            assert_eq!(
+                runner
+                    .state()
+                    .active_copy_token()
+                    .expect("parked owner")
+                    .offered_batch,
+                OfferedBatchCustody::AtReplacementPrompt
+            );
+            events.extend(
+                runner
+                    .act(GameAction::ChooseReplacement { index: accept })
+                    .expect("prevention accepted")
+                    .events,
+            );
+            assert!(runner.state().resolution_stack.is_empty());
+            assert!(matches!(
+                runner.state().waiting_for,
+                WaitingFor::Priority { .. }
+            ));
+            assert_eq!(copy_token_of_resolved(&events), 1);
+            assert!(!events
+                .iter()
+                .any(|event| matches!(event, GameEvent::TokenCreated { .. })));
+            assert_eq!(
+                runner.state().last_created_token_ids,
+                want,
+                "prevented batch adds no stale or duplicate ids"
+            );
+            assert_eq!(runner.state().tracked_object_sets[&set], want);
+        }
     }
 
     /// CR 608.2c + CR 111.1: the liminal batch terminal of

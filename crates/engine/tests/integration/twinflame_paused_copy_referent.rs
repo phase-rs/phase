@@ -2447,3 +2447,78 @@ fn r23_esix_gargantuan(carry: PauseCarry) {
     driven.sources = driven.pre.iter().copied().collect();
     assert_end_step_exiles_every_token(driven);
 }
+
+/// CR 614.12a + CR 117.2e + CR 608.2c: both doubled copies complete their
+/// acquired as-enters color choices before priority and belong to Twinflame's cleanup.
+#[test]
+fn r24_doubled_gargantuan_own_entry_choices_keep_the_full_batch() {
+    let mut choices = 0;
+    let mut offers = 0;
+    let mut colors = 0;
+    let driven = cast_twinflame_with(
+        &[QUICKSILVER_GARGANTUAN],
+        &[(P0, PARALLEL_LIVES), (P0, PAINTERS_SERVANT)],
+        |waiting, driven| match waiting {
+            WaitingFor::ReplacementChoice {
+                player, candidates, ..
+            } => {
+                assert_eq!(*player, P0);
+                assert_eq!(candidates.len(), 2);
+                assert!(candidates
+                    .iter()
+                    .all(|candidate| !driven.pre.contains(&candidate.source_id)));
+                offers += 1;
+                Some(GameAction::ChooseReplacement {
+                    index: candidates
+                        .iter()
+                        .position(|candidate| candidate.description != "Decline")
+                        .expect("entry copy acceptance offered"),
+                })
+            }
+            WaitingFor::CopyTargetChoice {
+                player,
+                valid_targets,
+                ..
+            } => {
+                assert_eq!(*player, P0);
+                let donor = driven
+                    .pre
+                    .iter()
+                    .copied()
+                    .find(|id| driven.runner.state().objects[id].name == PAINTERS_SERVANT)
+                    .expect("original Painter's Servant exists");
+                assert!(valid_targets.contains(&donor));
+                choices += 1;
+                Some(GameAction::ChooseTarget {
+                    target: Some(TargetRef::Object(donor)),
+                })
+            }
+            WaitingFor::NamedChoice {
+                player, options, ..
+            } => {
+                assert_eq!(*player, P0);
+                colors += 1;
+                Some(GameAction::ChooseOption {
+                    choice: options[0].clone(),
+                })
+            }
+            _ => None,
+        },
+    );
+    let Some(mut driven) = driven else {
+        return;
+    };
+    assert_eq!(offers, 2, "both tokens offer their entry copy choice");
+    assert_eq!(choices, 2, "both tokens choose the Painter donor");
+    assert_eq!(
+        colors, 2,
+        "both tokens answer their acquired as-enters choice"
+    );
+    let tokens = driven.created_tokens();
+    assert_eq!(tokens.len(), 2, "Parallel Lives keeps both tokens");
+    assert_eq!(named(&driven, PAINTERS_SERVANT), tokens);
+    assert_eq!(driven.runner.state().last_created_token_ids, tokens);
+    assert_eq!(assert_referent_is_every_token(&driven), tokens);
+    driven.sources = driven.pre.iter().copied().collect();
+    assert_end_step_exiles_every_token(driven);
+}
