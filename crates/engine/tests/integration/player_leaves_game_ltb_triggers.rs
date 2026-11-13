@@ -1148,8 +1148,10 @@ fn combat_damage_loss_after_stealing_an_observer_retires_the_stolen_observers_tr
     );
 }
 
-/// CR 704.5a + CR 603.3 + CR 117.5: a loss applied at a prompt that leaves no
-/// resolution to resume. P1 is at 1 life, owns a Grizzly Bears, and casts Ad
+/// CR 603.3 + CR 117.5: a loss applied at a prompt that leaves no resolution to
+/// resume. The engine's #962 safety net applies P1's CR 704.5a loss at the prompt
+/// rather than at the next priority check (CR 704.3), a deliberate divergence.
+/// P1 is at 1 life, owns a Grizzly Bears, and casts Ad
 /// Nauseam; the revealed card costs P1 2 life and Ad Nauseam asks whether to
 /// repeat. P1 has lost, so the loss is applied at that prompt, and the spell
 /// leaves with its controller. The ability the departure triggered, P0's Super
@@ -1186,7 +1188,7 @@ fn losing_at_a_prompt_with_nothing_to_resume_puts_the_departure_triggers_on_the_
     }
     assert!(
         runner.state().players[1].is_eliminated,
-        "CR 704.5a: P1 lost at Ad Nauseam's repeat prompt: {:?}",
+        "#962 safety net: P1's CR 704.5a loss applied at Ad Nauseam's repeat prompt: {:?}",
         runner.state().waiting_for
     );
     assert_eq!(zone(&runner, bears), Zone::Exile);
