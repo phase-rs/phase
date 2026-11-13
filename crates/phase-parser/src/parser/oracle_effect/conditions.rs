@@ -12821,7 +12821,7 @@ mod tests {
                 panic!("reach guard: {text}: one clause");
             };
             root.condition = Some(gate.clone());
-            super::super::keep_own_target_gate_readable(&mut ir, Some(&gate));
+            super::super::keep_own_target_gate_readable(&mut ir, &gate, &[]);
             assert_eq!(ir.clauses[0].condition.is_some(), kept, "{text}");
             assert_eq!(
                 ir.clauses[0]
@@ -13005,7 +13005,9 @@ mod tests {
     /// one target creature gets +1/+1 until end of turn." (optional target), a
     /// synthetic "Target player draws a card." (player target; nearest printed
     /// analogue for all three: Run Away Together's two separately resolved
-    /// targets), and the same Shatter tail on Skulking Killer's printed trigger.
+    /// targets), a coin flip whose winning outcome is Shatter's instruction
+    /// (printed shape of a targeted coin outcome: Chaotic Strike), and the same
+    /// Shatter tail on Skulking Killer's printed trigger.
     /// Reach guards: the same head followed by an untargeted "Draw a card."
     /// binds, and each tail announces a target below the head.
     #[test]
@@ -13032,20 +13034,30 @@ mod tests {
             );
             assert!(!chain_announces_target_below(&bound), "reach guard");
         }
-        for (head, types, tail) in [
-            (&spell, "Instant", "Destroy target artifact."),
+        for (head, types, tail, seen_by_walk) in [
+            // The target sits inside the coin flip's outcome, which the
+            // definition walk does not enter; the printed word declines it.
+            (
+                &spell,
+                "Instant",
+                "Flip a coin. If you win the flip, destroy target artifact.",
+                false,
+            ),
+            (&spell, "Instant", "Destroy target artifact.", true),
             (
                 &spell,
                 "Instant",
                 "Up to one target creature gets +1/+1 until end of turn.",
+                true,
             ),
-            (&spell, "Instant", "Target player draws a card."),
-            (&trigger, "Creature", "Destroy target artifact."),
+            (&spell, "Instant", "Target player draws a card.", true),
+            (&trigger, "Creature", "Destroy target artifact.", true),
         ] {
             let text = format!("{head} {tail}");
             let (root, warnings) = roots(&text, types);
             assert!(
-                chain_announces_target_below(&root),
+                chain_announces_target_below(&root) == seen_by_walk
+                    && nom_primitives::scan_contains(&tail.to_lowercase(), "target"),
                 "reach guard: {text}: the tail announces its own target: {root:?}"
             );
             assert_eq!(root.condition, None, "{text}");
@@ -13064,6 +13076,46 @@ mod tests {
                 "{text}: the gated instruction must be an explicit gap: {:?} {warnings:?}",
                 root.effect
             );
+        }
+    }
+
+    /// CR 101.1 over CR 608.2b: Gilded Drake's printed "This ability still
+    /// resolves if its target becomes illegal." lets a trigger resolve with its
+    /// pruned target, where a gate on that target's controller would read no
+    /// controller. A trigger carrying that sentence gets no root proof.
+    /// Synthetic: Skulking Killer's printed trigger, an untargeted draw, and
+    /// that sentence. Reach guards: without the sentence the trigger binds,
+    /// and with it the trigger is stamped `StillResolves`.
+    #[test]
+    fn target_controller_suffix_on_a_still_resolves_trigger_is_not_bound() {
+        let body = "When this creature enters, target creature an opponent controls gets -2/-2 \
+                    until end of turn if that opponent controls no other creatures. Draw a card.";
+        let trigger = |text: &str| {
+            let parsed = parse_oracle_text(text, "Synthetic", &[], &["Creature".to_owned()], &[]);
+            let [trigger] = parsed.triggers.as_slice() else {
+                panic!("{text}: expected one trigger: {parsed:?}");
+            };
+            trigger.clone()
+        };
+        let plain = trigger(body);
+        assert!(
+            plain
+                .execute
+                .as_deref()
+                .is_some_and(|root| root.condition.is_some()),
+            "reach guard: the trigger binds without the override"
+        );
+        let overridden = trigger(&format!(
+            "{body} This ability still resolves if its target becomes illegal."
+        ));
+        let root = overridden.execute.as_deref().expect("trigger body");
+        assert_eq!(
+            root.illegal_targets_disposition,
+            crate::types::ability::IllegalTargetsDisposition::StillResolves,
+            "reach guard: the override sentence was recognized"
+        );
+        for def in std::iter::once(root).chain(sub_chain(root)) {
+            assert_eq!(def.condition, None, "{:?}", def.effect);
         }
     }
 
@@ -13099,7 +13151,7 @@ mod tests {
                 panic!("reach guard: one clause");
             };
             root.condition = Some(condition);
-            super::super::keep_own_target_gate_readable(&mut ir, Some(&gate));
+            super::super::keep_own_target_gate_readable(&mut ir, &gate, &[]);
             assert_eq!(
                 ir.clauses[0]
                     .parsed

@@ -2229,8 +2229,12 @@ pub(crate) fn parse_trigger_line_with_index_ir(
                 //   announced before the body's own target;
                 // - CR 603.3d + CR 115.6: the body-wide optional-target phrasing
                 //   (`has_up_to`, from an "up to one" anywhere in the body)
-                //   makes the root's own target declinable.
+                //   makes the root's own target declinable;
+                // - CR 101.1 over CR 608.2b: "This ability still resolves if its
+                //   target becomes illegal" lets the ability resolve with the
+                //   root's target pruned, and the gate would read no controller.
                 let body_root = if has_up_to
+                    || matches!(disposition, IllegalTargetsDisposition::StillResolves)
                     || unless_pay.as_ref().is_some_and(|modifier| {
                         crate::types::ability::payer_is_declared_target(&modifier.payer)
                     }) {
