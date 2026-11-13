@@ -839,15 +839,21 @@ fn every_waiting_for_arm_declares_its_acting_authority() {
     // 146 -> 147 is adjudicated: Turtle Team-Up added `HeroEventChoice`. It HAS
     // an acting player — the prompted hero answers with `SelectCards` — and is
     // classified `ActingAuthority::One(player)` alongside `DiscardChoice`.
-    // 147 -> 148 is adjudicated: the staged replacement-choice scheduler (CR
+    // 147 -> 148 is adjudicated: CR 103.1's game-one starting-player choice
+    // added `ChooseStartingPlayer`. It names one acting `player` — the player
+    // chosen to decide who takes the first turn — and is classified by
+    // `WaitingFor::acting_authority` as `ActingAuthority::One(player)`. Not
+    // actorless: the prompt cannot advance without that player's
+    // `GameAction::ChooseStartingPlayer`.
+    // 148 -> 149 is adjudicated: the staged replacement-choice scheduler (CR
     // 101.4c + CR 616.1) added `ReplacementDecisionOrder`. It HAS an acting
     // player — the chooser holding two or more decisions picks which to make
     // first with `SelectCards` — and is classified `ActingAuthority::One(player)`
     // alongside `ReplacementChoice`. Not actorless: the staged population cannot
     // advance without that player's selection.
-    if declared.len() != 148 {
+    if declared.len() != 149 {
         failures.push(format!(
-            "PIN declared.len()={} != 148.\n\
+            "PIN declared.len()={} != 149.\n\
              \n\
              Adding a `WaitingFor` variant IS the counted event this gate exists to make loud. \
              Repair it by ADJUDICATING, not by bumping the number:\n\

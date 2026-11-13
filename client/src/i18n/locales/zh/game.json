@@ -1660,6 +1660,11 @@
       "title": "通联古咒？",
       "unknownCard": "牌 #{{id}}"
     },
+    "startingPlayer": {
+      "opponentChoosing": "{{name}} 正在选择先手玩家…",
+      "playerPlaysFirst": "{{name}} 先手",
+      "title": "选择先手玩家"
+    },
     "toasts": {
       "gamePausedPlayerDisconnected": "游戏已暂停 —— {{name}}已断开连接",
       "hostReconnecting": "房主已断开连接 —— 正在重连（第 {{attempt}} 次尝试）…",

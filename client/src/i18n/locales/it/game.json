@@ -1186,6 +1186,11 @@
       "drawFirst": "Pesca per primo",
       "drawFirstDescription": "Effettua la pesca extra nel tuo primo turno"
     },
+    "startingPlayer": {
+      "title": "Scegli chi gioca per primo",
+      "playerPlaysFirst": "{{name}} gioca per primo",
+      "opponentChoosing": "{{name}} sta scegliendo chi gioca per primo…"
+    },
     "mulligan": {
       "opponentDeciding": "L'avversario sta decidendo la sua mano iniziale…",
       "londonTitle": "Mulligan di Londra ({{count}} effettuati)",

@@ -1186,6 +1186,11 @@
       "drawFirst": "Robar primero",
       "drawFirstDescription": "Toma el robo extra en tu primer turno"
     },
+    "startingPlayer": {
+      "title": "Elige quién juega primero",
+      "playerPlaysFirst": "{{name}} juega primero",
+      "opponentChoosing": "{{name}} está eligiendo quién juega primero…"
+    },
     "mulligan": {
       "opponentDeciding": "El oponente está decidiendo su mano inicial…",
       "londonTitle": "Mulligan de Londres ({{count}} tomados)",

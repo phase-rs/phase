@@ -1186,6 +1186,11 @@
       "drawFirst": "Dobieraj pierwszy",
       "drawFirstDescription": "Wykonaj dodatkowe dobranie w swojej pierwszej turze"
     },
+    "startingPlayer": {
+      "title": "Wybierz, kto zaczyna",
+      "playerPlaysFirst": "{{name}} zaczyna",
+      "opponentChoosing": "{{name}} wybiera, kto zaczyna…"
+    },
     "mulligan": {
       "opponentDeciding": "Przeciwnik wybiera swoją rękę startową…",
       "londonTitle": "Mulligan londyński ({{count}} wziętych)",

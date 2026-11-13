@@ -1219,6 +1219,11 @@
       "drawFirst": "後攻",
       "drawFirstDescription": "最初のターンに追加のドローを得る"
     },
+    "startingPlayer": {
+      "title": "先攻を選択",
+      "playerPlaysFirst": "{{name}}が先攻",
+      "opponentChoosing": "{{name}}が先攻を選択しています…"
+    },
     "mulligan": {
       "opponentDeciding": "対戦相手が初手を検討中…",
       "londonTitle": "ロンドン・マリガン（{{count}}回目）",
