@@ -41,41 +41,23 @@ use super::zones;
 use crate::database::CardDatabase;
 use crate::game::token_presets::TokenPtProvenance;
 
-/// CR 704.3 + CR 603.2c + CR 603.3b: the sandbox's state-based-action check and
-/// the trigger scan that follows it. A player who leaves in that check has the
-/// departure's triggers collected and its occurrences claimed (CR 603.10a), so
-/// the scan takes only what is unclaimed, and the departure's triggers join the
-/// same batch: one APNAP ordering for everything the check triggered.
+/// CR 704.3 + CR 603.2c: the sandbox's state-based-action check and the
+/// trigger scan that follows it. A player who leaves in that check has the
+/// departure's triggers collected and its occurrences claimed
+/// (CR 603.10a), so the scan takes only what is unclaimed, and the queued
+/// departure triggers are then placed.
 fn run_state_based_actions_and_triggers(state: &mut GameState, events: &mut Vec<GameEvent>) {
-    let departure = check_state_based_actions_taking_departure_triggers(state, events);
+    super::sba::check_state_based_actions(state, events);
     let consumed = state.consumed_before_priority_trigger_events.clone();
     let unclaimed =
         super::triggers::filter_already_collected_trigger_events_from(state, events, 0, &consumed);
-    super::triggers::process_triggers_with_waiting(state, &unclaimed, departure);
-}
-
-/// CR 704.3 + CR 603.10a: run the state-based-action check and take the
-/// triggers a player's departure in it queued (the tail of `deferred_triggers`).
-fn check_state_based_actions_taking_departure_triggers(
-    state: &mut GameState,
-    events: &mut Vec<GameEvent>,
-) -> Vec<super::triggers::PendingTriggerContext> {
-    let queued = super::sba::check_state_based_actions_with_waiting_triggers(state, events, &[]);
-    let first = state.deferred_triggers.len().saturating_sub(queued);
-    state.deferred_triggers.split_off(first)
-}
-
-/// CR 704.3 + CR 603.3 + CR 117.5: the state-based-action check of a sandbox
-/// action that has already processed its own triggers. A player who leaves in
-/// that check has the departure's triggers placed before the action returns.
-fn check_state_based_actions_placing_departure_triggers(
-    state: &mut GameState,
-    events: &mut Vec<GameEvent>,
-) {
-    let departure = check_state_based_actions_taking_departure_triggers(state, events);
-    if !departure.is_empty() {
-        super::triggers::process_triggers_with_waiting(state, &[], departure);
-    }
+    super::triggers::process_triggers(state, &unclaimed);
+    // CR 603.3 + CR 117.5: what a departure queued goes on the stack with them.
+    super::elimination::drain_or_clear_deferred_triggers_after_elimination(
+        state,
+        super::elimination::DepartureTriggers::ScannedByCaller,
+        events,
+    );
 }
 
 pub fn apply_debug_action(
@@ -171,8 +153,7 @@ pub fn apply_debug_action(
                     super::triggers::process_triggers(state, events); // CR 603: dies/LTB triggers
                     let delayed = super::triggers::check_delayed_triggers(state, events);
                     events.extend(delayed);
-                    check_state_based_actions_placing_departure_triggers(state, events);
-                    // CR 704
+                    super::sba::check_state_based_actions(state, events); // CR 704
                 }
                 super::sacrifice::SacrificeOutcome::NeedsReplacementChoice(player) => {
                     state.waiting_for =
@@ -204,7 +185,7 @@ pub fn apply_debug_action(
             ) {
                 let draw_events: Vec<_> = events[event_start..].to_vec();
                 super::triggers::process_triggers(state, &draw_events);
-                check_state_based_actions_placing_departure_triggers(state, events);
+                super::sba::check_state_based_actions(state, events);
             }
         }
 
@@ -772,8 +753,7 @@ pub fn apply_debug_action(
                     // `MoveToZone { simulate: false }`.
                     if run_etb {
                         super::triggers::process_triggers(state, events); // CR 603: Process triggers
-                        check_state_based_actions_placing_departure_triggers(state, events);
-                        // CR 704: Check SBAs
+                        super::sba::check_state_based_actions(state, events); // CR 704: Check SBAs
                     }
                 }
                 super::replacement::ReplacementResult::Prevented => {}
@@ -819,7 +799,7 @@ pub fn apply_debug_action(
             super::effects::token_copy::resolve(state, &ability, events)
                 .map_err(|err| EngineError::InvalidAction(format!("{err:?}")))?;
             super::triggers::process_triggers(state, events);
-            check_state_based_actions_placing_departure_triggers(state, events);
+            super::sba::check_state_based_actions(state, events);
         }
     }
 
@@ -1158,7 +1138,7 @@ fn enter_battlefield_with_etb(
     // token ceases to exist (CR 704.5d).
     if crate::game::zone_pipeline::zone_move_is_primitive_noop(state, object, Zone::Battlefield) {
         super::triggers::process_triggers(state, events); // CR 603: Process triggers
-        check_state_based_actions_placing_departure_triggers(state, events); // CR 704: Check SBAs
+        super::sba::check_state_based_actions(state, events); // CR 704: Check SBAs
         return;
     }
 
@@ -1211,8 +1191,7 @@ fn enter_battlefield_with_etb(
                 }
             }
             super::triggers::process_triggers(state, events); // CR 603: Process triggers
-            check_state_based_actions_placing_departure_triggers(state, events);
-            // CR 704: Check SBAs
+            super::sba::check_state_based_actions(state, events); // CR 704: Check SBAs
         }
         ReplacementResult::Prevented => {}
         ReplacementResult::NeedsChoice(player) => {
@@ -1351,7 +1330,7 @@ fn route_debug_token_to_battlefield(
                         &mut events,
                     ) {
                         super::triggers::process_triggers(state, &events);
-                        check_state_based_actions_placing_departure_triggers(state, &mut events);
+                        super::sba::check_state_based_actions(state, &mut events);
                     }
                 }
                 ReplacementResult::Prevented => {

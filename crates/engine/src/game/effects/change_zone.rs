@@ -2878,12 +2878,7 @@ pub fn resolve_all(
         // Qualified slots are indexed in the original declaration, before
         // illegal or stale entries are removed.
         match &target_filter {
-            // CR 608.2b-c: a parent whose referent is missing selects nothing;
-            // an inherited player target does not turn it into that player's
-            // whole population (the `_` arm below yields the empty set).
-            TargetFilter::ParentTarget
-                if player_scope.is_some() && ability.parent_target_missing_reason.is_none() =>
-            {
+            TargetFilter::ParentTarget if player_scope.is_some() => {
                 if ability.targets.iter().any(|target| match target {
                     TargetRef::Object(_) => true,
                     TargetRef::Player(player) => Some(*player) != player_scope,
@@ -13401,49 +13396,6 @@ mod tests {
             assert_eq!(state.chain_tracked_set_id, None);
             assert_eq!(state.objects[&source].zone, Zone::Battlefield);
         }
-    }
-
-    /// CR 608.2b-c: a missing parent referent with an inherited player target
-    /// moves nothing, while the same live player-scoped instruction still moves
-    /// that player's declared population. SYNTHETIC binding: no printed card
-    /// produces a missing reason together with an inherited player target.
-    #[test]
-    fn selected_owner_shuffle_with_a_missing_parent_and_an_inherited_player_moves_nothing() {
-        let mut state = GameState::new_two_player(42);
-        let source = create_object(
-            &mut state,
-            CardId(9600),
-            PlayerId(0),
-            "Source".to_string(),
-            Zone::Battlefield,
-        );
-        let bystander = create_object(
-            &mut state,
-            CardId(9601),
-            PlayerId(1),
-            "Bystander".to_string(),
-            Zone::Battlefield,
-        );
-        let mut ability = selected_owner_shuffle_for_test(source);
-        ability.targets = vec![TargetRef::Player(PlayerId(1))];
-        ability.parent_target_missing_reason =
-            Some(crate::types::ability::ParentTargetMissingReason::Dig);
-        resolve_all(&mut state, &ability, &mut Vec::new()).unwrap();
-        assert_eq!(
-            state.objects[&bystander].zone,
-            Zone::Battlefield,
-            "a missing parent selects nothing"
-        );
-        assert_eq!(state.objects[&source].zone, Zone::Battlefield);
-
-        ability.parent_target_missing_reason = None;
-        resolve_all(&mut state, &ability, &mut Vec::new()).unwrap();
-        assert_eq!(
-            state.objects[&bystander].zone,
-            Zone::Library,
-            "the live player-scoped instruction moves that player's population"
-        );
-        assert_eq!(state.objects[&source].zone, Zone::Battlefield);
     }
 
     /// CR 400.7 + CR 608.2b-c: a declaration stamped illegal at resolution never

@@ -823,7 +823,7 @@ const GRAFTED_WARGEAR_ORACLE: &str = "Equipped creature gets +3/+2.\n\
 ///
 /// REVERT-FAILING: reading the departure's `Unattached` event against the
 /// post-revert board gives the Wargear's trigger to P0.
-fn assert_stolen_equipment_unattach_retired(loss: Option<Loss>) {
+fn assert_stolen_equipment_unattach_retired(loss: Loss) {
     let mut scenario = GameScenario::new_n_player(3, 42);
     scenario.at_phase(Phase::PreCombatMain);
     for player in [P0, P1, P2] {
@@ -834,7 +834,6 @@ fn assert_stolen_equipment_unattach_retired(loss: Option<Loss>) {
         .with_subtypes(vec!["Equipment"])
         .id();
     let bear = scenario.add_creature(P2, "P2 Bear", 2, 2).id();
-    let other_bear = scenario.add_creature(P2, "P2 Other Bear", 2, 2).id();
     let seizing = scenario
         .add_spell_to_hand_from_oracle(P2, "Word of Seizing", true, WORD_OF_SEIZING_ORACLE)
         .with_mana_cost(engine::types::mana::ManaCost::zero())
@@ -871,31 +870,6 @@ fn assert_stolen_equipment_unattach_retired(loss: Option<Loss>) {
     );
     assert!(runner.state().stack.is_empty());
 
-    let Some(loss) = loss else {
-        // Positive control: with P2 still in the game, moving the Wargear to
-        // another creature unattaches it from the bear, and the printed
-        // "becomes unattached" ability triggers for P2, its controller.
-        runner
-            .activate(wargear, equip)
-            .target_object(other_bear)
-            .resolve();
-        assert_eq!(
-            runner.state().objects[&wargear].attached_to,
-            Some(engine::game::game_object::AttachTarget::Object(other_bear))
-        );
-        drive_trigger_prompts(&mut runner);
-        if !runner.state().stack.is_empty() {
-            runner.advance_until_stack_empty();
-        }
-        assert_eq!(
-            zone(&runner, bear),
-            Zone::Graveyard,
-            "CR 603.10c: the Wargear's unattach ability triggered for P2 and resolved: the bear \
-             it left was sacrificed"
-        );
-        assert_eq!(zone(&runner, other_bear), Zone::Battlefield);
-        return;
-    };
     lose_the_game(&mut runner, &[P2], loss);
     assert_eq!(zone(&runner, bear), Zone::Exile);
     assert_eq!(
@@ -920,21 +894,12 @@ fn assert_stolen_equipment_unattach_retired(loss: Option<Loss>) {
 
 #[test]
 fn concession_after_stealing_equipment_retires_its_unattach_trigger() {
-    assert_stolen_equipment_unattach_retired(Some(Loss::Concede));
-}
-
-/// The positive control of the two rows around it: the same board and the same
-/// printed ability, with P2 staying in the game. Without the Wargear's
-/// "becomes unattached" ability this row fails, so the zero counts of the
-/// departure rows are the retirement of a trigger that exists.
-#[test]
-fn stolen_equipment_unattach_trigger_fires_for_a_controller_who_stays() {
-    assert_stolen_equipment_unattach_retired(None);
+    assert_stolen_equipment_unattach_retired(Loss::Concede);
 }
 
 #[test]
 fn zero_life_after_stealing_equipment_retires_its_unattach_trigger() {
-    assert_stolen_equipment_unattach_retired(Some(Loss::ZeroLife));
+    assert_stolen_equipment_unattach_retired(Loss::ZeroLife);
 }
 
 /// How the losing players leave the game in a stolen-observer test.
@@ -1183,22 +1148,13 @@ fn combat_damage_loss_after_stealing_an_observer_retires_the_stolen_observers_tr
     );
 }
 
-/// CR 603.3 + CR 117.5: the departure's triggers are placed before priority
-/// when a loss leaves no resolution to resume. P1 is at 1 life, owns a Grizzly
-/// Bears, and casts Ad Nauseam; the revealed card costs P1 2 life and Ad Nauseam
-/// asks whether to repeat.
-///
-/// The rules apply that loss the next time a player would receive priority
-/// (CR 704.3, CR 117.2e), after the repeat choice. This engine applies it at
-/// the prompt instead: its player-loss safety net (#962, on main), an engine
-/// policy and not CR 704.5a's timing. The row does not require either timing:
-/// if the repeat prompt is still open it is declined, and the assertions are
-/// made once P1 has left, at the first priority after that. The rules-valid
-/// boundary has its own row below.
-///
-/// What is asserted is the settlement: P0's Super Shredder saw the Bears leave
-/// the game, its ability is on the stack before any player has priority, and
-/// nothing is left waiting.
+/// CR 704.5a + CR 603.3 + CR 117.5: a loss applied at a prompt that leaves no
+/// resolution to resume. P1 is at 1 life, owns a Grizzly Bears, and casts Ad
+/// Nauseam; the revealed card costs P1 2 life and Ad Nauseam asks whether to
+/// repeat. P1 has lost, so the loss is applied at that prompt, and the spell
+/// leaves with its controller. The ability the departure triggered, P0's Super
+/// Shredder seeing the Bears leave the game, is on the stack before any player
+/// has priority, and nothing is left waiting.
 #[test]
 fn losing_at_a_prompt_with_nothing_to_resume_puts_the_departure_triggers_on_the_stack() {
     let db = shared_card_db().expect("integration card fixture must load");
@@ -1228,17 +1184,9 @@ fn losing_at_a_prompt_with_nothing_to_resume_puts_the_departure_triggers_on_the_
             .act(GameAction::PassPriority)
             .expect("priority passes while Ad Nauseam resolves");
     }
-    if matches!(
-        runner.state().waiting_for,
-        WaitingFor::RepeatDecision { .. }
-    ) {
-        runner
-            .act(GameAction::DecideOptionalEffect { accept: false })
-            .expect("P1 stops repeating");
-    }
     assert!(
         runner.state().players[1].is_eliminated,
-        "P1 at -1 life has left the game by the first priority after Ad Nauseam: {:?}",
+        "CR 704.5a: P1 lost at Ad Nauseam's repeat prompt: {:?}",
         runner.state().waiting_for
     );
     assert_eq!(zone(&runner, bears), Zone::Exile);
@@ -1288,130 +1236,6 @@ fn debug_state_based_actions_collect_a_departure_once_and_retire_the_stolen_obse
         "CR 603.10a + CR 800.4d: the stolen Demon's trigger was P2's"
     );
     assert!(runner.state().deferred_triggers.is_empty());
-}
-
-/// CR 704.3 + CR 704.5a + CR 603.3 + CR 117.5: the rules-valid boundary. P1 is at
-/// 0 life when a player would receive priority, so the state-based actions make
-/// P1 lose there. P0's Super Shredder saw P1's Grizzly Bears leave the game:
-/// its ability is on the stack before any player has priority, and nothing is
-/// left waiting.
-#[test]
-fn losing_at_a_priority_boundary_puts_the_departure_triggers_on_the_stack() {
-    let db = shared_card_db().expect("integration card fixture must load");
-    let mut scenario = GameScenario::new_n_player(3, 42);
-    scenario.at_phase(Phase::PreCombatMain);
-    let shredder = scenario.add_real_card(P0, "Super Shredder", Zone::Battlefield, db);
-    let bears = scenario.add_real_card(P1, "Grizzly Bears", Zone::Battlefield, db);
-    let mut runner = scenario.build();
-    lose_the_game(&mut runner, &[P1], Loss::ZeroLife);
-    assert!(runner.state().players[1].is_eliminated);
-    assert_eq!(zone(&runner, bears), Zone::Exile);
-    assert!(
-        runner.state().deferred_triggers.is_empty(),
-        "the departure's triggers are not left waiting"
-    );
-    assert!(matches!(
-        runner.state().waiting_for,
-        WaitingFor::Priority { .. }
-    ));
-    assert_eq!(
-        triggers_from(&runner, shredder),
-        1,
-        "CR 603.6c: Super Shredder saw the Bears leave the game, once, and its ability is on \
-         the stack"
-    );
-}
-
-/// CR 603.3b + CR 704.3: the sandbox's state-based-action check orders everything
-/// it triggered in one pass. P2 is at 0 life and owns a Grizzly Bears; P0
-/// controls Super Shredder and a Circuit Mender with lethal damage marked. The
-/// check makes P2 lose and destroys the Mender: Shredder's ability for the Bears
-/// (queued by the departure), Shredder's ability for the Mender and the Mender's
-/// own leaves-the-battlefield ability are all P0's, and P0 orders the three
-/// together.
-#[test]
-fn debug_state_based_actions_order_departure_and_other_triggers_in_one_pass() {
-    let db = shared_card_db().expect("integration card fixture must load");
-    let mut scenario = GameScenario::new_n_player(3, 42);
-    scenario.at_phase(Phase::PreCombatMain);
-    scenario.add_real_card(P0, "Super Shredder", Zone::Battlefield, db);
-    let mender = scenario.add_real_card(P0, "Circuit Mender", Zone::Battlefield, db);
-    let bears = scenario.add_real_card(P2, "Grizzly Bears", Zone::Battlefield, db);
-    scenario.with_library_top(P0, &["Forest", "Forest"]);
-    let mut runner = scenario.build();
-    runner.state_mut().debug_mode = true;
-    runner.state_mut().players[2].life = 0;
-    let toughness = runner.state().objects[&mender]
-        .toughness
-        .expect("Circuit Mender has toughness");
-    runner
-        .state_mut()
-        .objects
-        .get_mut(&mender)
-        .expect("Circuit Mender exists")
-        .damage_marked = toughness as u32;
-    runner
-        .act(GameAction::Debug(
-            engine::types::actions::DebugAction::RunStateBasedActions,
-        ))
-        .expect("the debug state-based-action check runs");
-    assert!(runner.state().players[2].is_eliminated);
-    assert_eq!(zone(&runner, bears), Zone::Exile);
-    assert_eq!(zone(&runner, mender), Zone::Graveyard);
-    match &runner.state().waiting_for {
-        WaitingFor::OrderTriggers {
-            player: P0,
-            triggers,
-            ..
-        } => assert_eq!(
-            triggers.len(),
-            3,
-            "one ordering pass holds the departure's trigger and the two others: {triggers:?}"
-        ),
-        other => panic!("P0 orders all three triggers together: {other:?}"),
-    }
-    assert!(runner.state().stack.is_empty());
-}
-
-/// CR 704.5b + CR 603.3 + CR 117.5: a sandbox draw from an empty library makes
-/// P2 lose in the action's own state-based-action check. P0's Super Shredder
-/// saw P2's Grizzly Bears leave the game: its ability is on the stack when the
-/// action returns, and nothing is left waiting.
-#[test]
-fn debug_draw_from_an_empty_library_places_the_departure_triggers() {
-    let db = shared_card_db().expect("integration card fixture must load");
-    let mut scenario = GameScenario::new_n_player(3, 42);
-    scenario.at_phase(Phase::PreCombatMain);
-    let shredder = scenario.add_real_card(P0, "Super Shredder", Zone::Battlefield, db);
-    let bears = scenario.add_real_card(P2, "Grizzly Bears", Zone::Battlefield, db);
-    let mut runner = scenario.build();
-    runner.state_mut().debug_mode = true;
-    assert!(
-        runner.state().players[2].library.is_empty(),
-        "reach guard: P2's library is empty"
-    );
-    runner
-        .act(GameAction::Debug(
-            engine::types::actions::DebugAction::DrawCards {
-                player_id: P2,
-                count: 1,
-            },
-        ))
-        .expect("the debug draw runs");
-    assert!(
-        runner.state().players[2].is_eliminated,
-        "CR 704.5b: P2 drew from an empty library"
-    );
-    assert_eq!(zone(&runner, bears), Zone::Exile);
-    assert!(
-        runner.state().deferred_triggers.is_empty(),
-        "the departure's triggers are not left waiting"
-    );
-    assert_eq!(
-        triggers_from(&runner, shredder),
-        1,
-        "Super Shredder's ability for the Bears is on the stack"
-    );
 }
 
 /// CR 704.3 + CR 603.2c + CR 603.10a: one state-based-action event, one "one or

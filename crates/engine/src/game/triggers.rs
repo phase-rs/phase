@@ -7863,25 +7863,6 @@ pub fn process_triggers(state: &mut GameState, events: &[GameEvent]) {
     process_collected_triggers_with_delayed_phase_events(state, pending, &[], &mut events_out);
 }
 
-/// CR 603.3b: [`process_triggers`] with abilities that have already triggered
-/// and wait to be put on the stack (`waiting`): they join the batch `events`
-/// trigger, so everything is ordered in one APNAP pass.
-pub(crate) fn process_triggers_with_waiting(
-    state: &mut GameState,
-    events: &[GameEvent],
-    waiting: Vec<PendingTriggerContext>,
-) {
-    if super::stack::resolving_spell_owes_final_part(state) {
-        collect_triggers_into_deferred(state, events);
-        state.deferred_triggers.extend(waiting);
-        return;
-    }
-    let mut pending = collect_pending_triggers(state, events);
-    pending.extend(waiting);
-    let mut events_out = Vec::new();
-    process_collected_triggers_with_delayed_phase_events(state, pending, &[], &mut events_out);
-}
-
 /// CR 700.13 + CR 601.2c + CR 603.3b: Target-lock events (`BecomesTarget`,
 /// `CrimeCommitted`, etc.) emitted while putting a triggered ability on the
 /// stack are collected into `deferred_triggers` — they must not recurse through
