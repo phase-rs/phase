@@ -1936,12 +1936,17 @@ fn resume_parked_counter_cost_root_at_action_boundary(
 ///   replacement authority, so the chooser is offered exactly the effects that
 ///   apply now (CR 616.1). The same authority re-proposes on an answer; here it
 ///   runs before the chooser is asked.
-/// - Its replacement choice left with a departed chooser (a substitute draw by
-///   another player, interrupted on that player's own choice): the choice and
-///   the substitute are gone (CR 800.4a), and the payer, who chose to pay and
-///   is still in the game, performs what is still owed. No player receives
-///   priority before the payment ends (CR 117.2e); when the resolution it
-///   belongs to ends, the active player does (CR 117.3b).
+/// - Its replacement choice was a departed player's own draw (a substitute
+///   draw by another player, interrupted on that player's choice). That draw
+///   can no longer happen (CR 800.4a + CR 614.17c); the same authority settles
+///   it with no card drawn and resumes the draw sequences above it (CR
+///   121.6b), so the payer's own remaining draws and then the instructions
+///   still owed are performed.
+/// - Its replacement choice was abandoned with a departed chooser (any other
+///   parked event of theirs): the payer, who chose to pay and is still in the
+///   game, performs what is still owed. No player receives priority before the
+///   payment ends (CR 117.2e); when the resolution it belongs to ends, the
+///   active player does (CR 117.3b).
 ///
 /// A payment that parks again has its events collected as any pause inside a
 /// payment of draws does (CR 603.2c); one that ended is left to the caller's
@@ -1964,17 +1969,21 @@ fn reconcile_parked_unless_payment_after_departure(
     {
         return Ok(false);
     }
+    let stale_prompt = engine_payment_choices::draw_payment_is_parked(state)
+        && state
+            .pending_replacement
+            .as_ref()
+            .is_some_and(|pending| replacement::parked_prompt_is_stale(state, pending));
     match &result.waiting_for {
-        WaitingFor::ReplacementChoice { .. }
-            if engine_payment_choices::draw_payment_is_parked(state)
-                && state
-                    .pending_replacement
-                    .as_ref()
-                    .is_some_and(|pending| replacement::parked_prompt_is_stale(state, pending)) =>
-        {
+        // The prompt is still open for a surviving chooser, or its chooser left
+        // and the departure handed priority on while keeping the record
+        // (`engine_payment_choices::departed_draw_settles_with_parked_payment`).
+        WaitingFor::ReplacementChoice { .. } | WaitingFor::Priority { .. } if stale_prompt => {
             sync_waiting_for(state, &result.waiting_for);
-            // No answer is read: the replacement authority re-proposes a stale
-            // prompt before it applies any index (`continue_replacement`).
+            // No answer is read: the replacement authority settles a draw that
+            // can't happen with no replacement, and re-proposes any other stale
+            // prompt, before it applies an index (`handle_replacement_choice`,
+            // `continue_replacement`).
             result.waiting_for =
                 engine_replacement::handle_replacement_choice(state, 0, &mut result.events)?;
             state.waiting_for = result.waiting_for.clone();

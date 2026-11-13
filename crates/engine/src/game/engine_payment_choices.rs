@@ -2296,6 +2296,27 @@ pub(crate) fn retire_parked_unless_payment_of_departing_players(
     }
 }
 
+/// CR 800.4a + CR 121.6b: whether the replacement choice parked under a
+/// surviving draw unless payment is a draw by a player now leaving: a
+/// substitute draw (Notion Thief) interrupted on the leaver's own choice.
+/// The departure keeps that record instead of abandoning every active draw
+/// sequence with it (`elimination::do_eliminate`); the concession's action
+/// boundary settles it as a draw that can't happen, which lets the surviving
+/// sequences above it continue.
+pub(crate) fn departed_draw_settles_with_parked_payment(
+    state: &GameState,
+    leaving: &std::collections::HashSet<PlayerId>,
+) -> bool {
+    draw_payment_is_parked(state)
+        && state.pending_replacement.as_ref().is_some_and(|pending| {
+            matches!(
+                pending.proposed,
+                crate::types::proposed_event::ProposedEvent::Draw { player_id, .. }
+                    if leaving.contains(&player_id)
+            )
+        })
+}
+
 /// CR 117.2e + CR 800.4a: whether a parked unless payment has lost the prompt
 /// it waited on: no replacement choice is parked for it. Under a Priority
 /// result that is a payment a departure interrupted (the choice left with its

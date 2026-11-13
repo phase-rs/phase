@@ -2373,6 +2373,64 @@ fn checked_restore_refuses_a_checkpoint_that_is_a_viewer_projection() {
     );
 }
 
+/// CR 615.5 + CR 614.6: a recovery checkpoint has arenas of its own, so a
+/// handle inside it names the checkpoint's arena, not the enclosing game's.
+/// NOT a state the game produces: a shield installed only in the valid Dredge
+/// checkpoint (already used, so it is not a candidate), whose continuation is
+/// entry 0 of the checkpoint's arena while the enclosing game's arena is
+/// empty. The save restores; the same handle naming no entry of the
+/// checkpoint's arena is refused where the checkpoint is decoded.
+#[test]
+fn checked_restore_reads_a_checkpoints_handles_against_its_own_arenas() {
+    let runner = recovered_dredge_checkpoint();
+    let forge = |handle_offset: u64| {
+        let mut state = runner.state().clone();
+        assert!(
+            state.replacement_continuations.is_empty(),
+            "reach guard: the enclosing game's arena is empty"
+        );
+        let source = state
+            .payment_transaction
+            .as_ref()
+            .expect("reach guard: the payment is staged")
+            .root
+            .source_id;
+        let nested = &mut state
+            .payment_transaction
+            .as_mut()
+            .and_then(|transaction| transaction.recovered.as_mut())
+            .expect("the departure parked a recovery checkpoint")
+            .state;
+        let installed = nested.install_replacement_continuation(ResolvedAbility::new(
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 1 },
+                player: TargetFilter::Controller,
+            },
+            vec![],
+            source,
+            P0,
+        ));
+        let mut used = ReplacementDefinition::new(ReplacementEvent::Draw);
+        used.is_consumed = true;
+        used.runtime_execute = Some(engine::types::identifiers::ReplacementContinuationId(
+            installed.0 + handle_offset,
+        ));
+        nested.pending_damage_replacements.push(used);
+        state
+    };
+    checked_round_trip(&forge(0))
+        .expect("a handle into the checkpoint's own arena is not read against the outer arena");
+    let saved = serde_json::to_string(&PersistedGameState::Raw(Box::new(forge(7))))
+        .expect("the forged state serializes");
+    let refused = serde_json::from_str::<PersistedGameState>(&saved).map(|_| "decoded");
+    assert!(
+        refused
+            .as_ref()
+            .is_err_and(|error| error.to_string().contains("recovery checkpoint")),
+        "a handle that names no entry of the checkpoint's arena is refused: {refused:?}"
+    );
+}
+
 /// CR 702.24a + CR 118.12: a recovery checkpoint is a second executable state,
 /// so a parked unless payment inside it is held to the outer state's rule. NOT
 /// a state the game produces: a staged payment's checkpoint never parks an

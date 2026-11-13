@@ -15608,12 +15608,24 @@ struct SerializedStateHandles {
 }
 
 /// Collects every [`SerializedStateHandles`] handle in one walk of `value`.
+///
+/// A recovery checkpoint's state (`payment_transaction.recovered.state`) is a
+/// second executable game with arenas of its own: its handles name its arenas
+/// and are validated where it is decoded (`persisted_checkpoint_state`), so the
+/// walk of the enclosing state stops at that boundary.
 fn collect_serialized_state_handles(value: &serde_json::Value) -> SerializedStateHandles {
-    fn walk(value: &serde_json::Value, handles: &mut SerializedStateHandles) {
+    fn walk(
+        value: &serde_json::Value,
+        nested_state: Option<&serde_json::Value>,
+        handles: &mut SerializedStateHandles,
+    ) {
+        if nested_state.is_some_and(|nested| std::ptr::eq(nested, value)) {
+            return;
+        }
         match value {
             serde_json::Value::Array(values) => {
                 for value in values {
-                    walk(value, handles);
+                    walk(value, nested_state, handles);
                 }
             }
             serde_json::Value::Object(object) => {
@@ -15629,14 +15641,18 @@ fn collect_serialized_state_handles(value: &serde_json::Value) -> SerializedStat
                     handles.replacement_continuations.insert(handle);
                 }
                 for value in object.values() {
-                    walk(value, handles);
+                    walk(value, nested_state, handles);
                 }
             }
             _ => {}
         }
     }
+    let nested_state = value
+        .get("payment_transaction")
+        .and_then(|transaction| transaction.get("recovered"))
+        .and_then(|checkpoint| checkpoint.get("state"));
     let mut handles = SerializedStateHandles::default();
-    walk(value, &mut handles);
+    walk(value, nested_state, &mut handles);
     handles
 }
 

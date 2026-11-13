@@ -1633,7 +1633,23 @@ fn do_eliminate(
                 .expect("eliminated search batch must own the active frame");
         }
     }
-    if state.pending_replacement.is_some() && leaving_is_latched_chooser {
+    // CR 800.4a + CR 121.6b + CR 614.17c: under a parked draw unless payment
+    // that outlives this departure, the choice the leaver was asked is their
+    // own draw inside the payer's draw sequence (a substitute: Notion Thief's
+    // "you draw a card"). It is kept for the concession's action boundary,
+    // which settles it through the replacement authority as a draw that can no
+    // longer happen (`engine::reconcile_parked_unless_payment_after_departure`):
+    // the sequences above it resume, so the payer's own remaining draws
+    // (Thought Reflection's second card) are not abandoned with the leaver's.
+    let settles_with_parked_payment = leaving_is_latched_chooser
+        && super::engine_payment_choices::departed_draw_settles_with_parked_payment(
+            state,
+            leaving_set,
+        );
+    if state.pending_replacement.is_some()
+        && leaving_is_latched_chooser
+        && !settles_with_parked_payment
+    {
         state.pending_replacement = None;
         // CR 800.4a: a paused frameless single-card discard belongs to the
         // abandoned choice of the leaving player; left behind it would go stale.
