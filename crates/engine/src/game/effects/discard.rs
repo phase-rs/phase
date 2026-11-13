@@ -81,7 +81,7 @@ pub(crate) fn complete_discard_to_graveyard(
         enter_with_choices: None,
         discard_frame,
         performed_by: None,
-        ownership_actor: None,
+        ownership_actor: crate::types::proposed_event::EntryOwnershipActor::NoPlayer,
         applied,
     };
     match replacement::replace_event(state, proposed, events) {

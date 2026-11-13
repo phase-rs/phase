@@ -19790,7 +19790,7 @@ fn commit_land_play(
         // CR 116.2a: the player performs the land play, which a format's
         // entry-ownership axis reads as the land's new owner.
         *performed_by = Some(player);
-        *ownership_actor = Some(player);
+        *ownership_actor = crate::types::proposed_event::EntryOwnershipActor::Player(player);
     }
 
     // CR 306.5b + CR 310.4b + CR 614.1c: Seed the intrinsic "enters with N

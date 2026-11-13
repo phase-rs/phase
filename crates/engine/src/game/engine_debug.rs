@@ -1144,7 +1144,7 @@ fn enter_battlefield_with_etb(
         enter_with_choices: None,
         discard_frame: None,
         performed_by: None,
-        ownership_actor: None,
+        ownership_actor: crate::types::proposed_event::EntryOwnershipActor::NoPlayer,
         applied: HashSet::new(),
     };
     // CR 306.5b + CR 310.4b + CR 614.1c: seed the intrinsic enters-with

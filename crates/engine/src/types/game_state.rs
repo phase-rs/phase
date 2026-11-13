@@ -6977,8 +6977,11 @@ pub struct PendingBatchZoneMoveRequest {
     pub performed_by: Option<PlayerId>,
     /// The parked move's ownership input under `EntryOwnership::ActorOwns`,
     /// kept apart from `performed_by` (`zone_pipeline::MoveActors`).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub ownership_actor: Option<PlayerId>,
+    #[serde(
+        default,
+        skip_serializing_if = "crate::types::proposed_event::EntryOwnershipActor::is_unrecorded"
+    )]
+    pub ownership_actor: crate::types::proposed_event::EntryOwnershipActor,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub library_placement: Option<LibraryPosition>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

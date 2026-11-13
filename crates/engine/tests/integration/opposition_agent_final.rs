@@ -541,3 +541,85 @@ fn scoped_search_records_the_searching_opponent_as_exiler() {
     outcome.assert_zone(&[island], Zone::Exile);
     assert_eq!(outcome.state().objects[&island].exiled_by, Some(P1));
 }
+
+/// CR 614.6 ("A modified event occurs instead") + CR 608.2c: in a Dandân
+/// game, whose library is one pile both seats read, the opponent searching
+/// under Opposition Agent exiles the card they find; when a replacement
+/// redirects that exile to the hand, the card goes to its owner's hand and
+/// stays theirs. The searcher (P1) is recorded as the exile's performer, never
+/// as the entry-ownership input, so the redirect cannot hand P1 a P0-owned
+/// card. Synthetic: the mandatory exile-to-hand redirect; no printed card
+/// redirects an exile to a hand (Rest in Peace and Dauthi Voidwalker redirect
+/// into exile).
+///
+/// Revert sensitivity: reading the performer as the ownership input sends the
+/// card to P1's hand, owned by P1.
+#[test]
+fn redirected_found_card_exile_keeps_its_owner_in_a_shared_library() {
+    use engine::types::ability::{ReplacementDefinition, ReplacementMode};
+    use engine::types::replacements::ReplacementEvent;
+
+    let mut scenario = GameScenario::new_with_format(FormatConfig::dandan(), 2, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.add_creature_from_oracle(P0, "Opposition Agent", 3, 2, OPPOSITION_AGENT);
+    scenario
+        .add_creature(P0, "Synthetic Exile Redirect", 1, 1)
+        .with_replacement_definition(
+            ReplacementDefinition::new(ReplacementEvent::Moved)
+                .mode(ReplacementMode::Mandatory)
+                .execute(AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::ChangeZone {
+                        actor: engine::types::ability::LibraryInstructionActor::Controller,
+                        library_shuffle: Default::default(),
+                        origin: None,
+                        destination: Zone::Hand,
+                        target: TargetFilter::SelfRef,
+                        owner_library: false,
+                        enter_transformed: false,
+                        enters_under: None,
+                        enter_tapped: engine::types::zones::EtbTapState::Unspecified,
+                        enters_attacking: false,
+                        up_to: false,
+                        enter_with_counters: vec![],
+                        conditional_enter_with_counters: vec![],
+                        face_down_profile: None,
+                        enters_modified_if: None,
+                    },
+                ))
+                .destination_zone(Zone::Exile),
+        );
+    let tutor = scenario
+        .add_spell_to_hand_from_oracle(P1, "Test Tutor", false, TEST_TUTOR)
+        .with_mana_cost(ManaCost::zero())
+        .id();
+    let found = scenario
+        .add_spell_to_library_top(P0, "Found Card", true)
+        .id();
+    scenario.add_card_to_library_top(P0, "Library Filler");
+    let mut runner = scenario.build();
+    runner.state_mut().active_player = P1;
+    runner.state_mut().priority_player = P1;
+    runner.state_mut().waiting_for = WaitingFor::Priority { player: P1 };
+
+    resolve_to_search(&mut runner, tutor);
+    // Reach-guard: Opposition Agent controls the opponent's search.
+    assert_eq!(
+        engine::game::turn_control::authorized_submitter_for_player(runner.state(), P1),
+        P0
+    );
+    runner
+        .act(GameAction::SelectCards { cards: vec![found] })
+        .expect("the Agent's controller submits the search choice");
+
+    // Reach-guard: the exile was requested and redirected.
+    assert_eq!(runner.state().objects[&found].zone, Zone::Hand);
+    assert_eq!(runner.state().objects[&found].owner, P0);
+    let holder = runner
+        .state()
+        .players
+        .iter()
+        .find(|player| player.hand.contains(&found))
+        .map(|player| player.id);
+    assert_eq!(holder, Some(P0));
+}

@@ -63,11 +63,10 @@ pub struct BoundSearchFoundDisposition {
 impl BoundSearchFoundDisposition {
     /// CR 608.2c + CR 406.6: the player recorded as having exiled the found
     /// card, given the event's searcher. Only a move that requests exile
-    /// records a performer, and an exile never rebinds entry ownership, so the
-    /// delivery supplies no ownership input on any destination, as before. (A
-    /// later replacement that redirected the requested exile to a hand would
-    /// let the delivery's legacy fallback read the searcher; no printed card
-    /// does that.)
+    /// records a performer. The delivery states that no player's action
+    /// decides ownership (`EntryOwnershipActor::NoPlayer`), so a replacement
+    /// that redirects the requested exile elsewhere (CR 614.6) cannot make the
+    /// searcher the card's receiver or owner.
     pub fn performer(&self, searcher: PlayerId) -> Option<PlayerId> {
         use super::ability::LibraryInstructionActor;
         match &self.actor {
@@ -453,6 +452,49 @@ pub enum PlaneswalkCause {
     RulesProcess,
 }
 
+/// The `EntryOwnership::ActorOwns` input of a zone move
+/// (`zone_pipeline::entry_receiver`), recorded apart from the move's performer.
+///
+/// Every current writer records `NoPlayer` or `Player`, so a replacement that
+/// redirects a move (CR 614.6: "A modified event occurs instead") keeps the
+/// input the move was requested with. `Unrecorded` is what a save from before
+/// the field existed decodes to: those writers recorded one player, in
+/// `performed_by`, for both roles, and delivery keeps reading it for them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum EntryOwnershipActor {
+    /// The field is absent: a save from a writer that had no separate input.
+    #[default]
+    Unrecorded,
+    /// No player's action decides ownership; the card keeps its owner.
+    NoPlayer,
+    /// This player's action decides ownership.
+    Player(PlayerId),
+}
+
+impl EntryOwnershipActor {
+    /// Serde skip-helper: `Unrecorded` is the absent field.
+    pub fn is_unrecorded(&self) -> bool {
+        matches!(self, Self::Unrecorded)
+    }
+
+    /// The ownership input, given the event's recorded performer for a save
+    /// that predates the separate field.
+    pub fn resolve(self, legacy_performer: Option<PlayerId>) -> Option<PlayerId> {
+        match self {
+            Self::Player(player) => Some(player),
+            Self::NoPlayer => None,
+            Self::Unrecorded => legacy_performer,
+        }
+    }
+}
+
+impl From<Option<PlayerId>> for EntryOwnershipActor {
+    /// A current writer's input: a named player or, explicitly, nobody.
+    fn from(actor: Option<PlayerId>) -> Self {
+        actor.map_or(Self::NoPlayer, Self::Player)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ProposedEvent {
     ZoneChange {
@@ -548,11 +590,9 @@ pub enum ProposedEvent {
         /// `EntryOwnership::ActorOwns` (`zone_pipeline::entry_receiver`), kept
         /// apart from `performed_by`: an instruction's subject performs the move
         /// while the instruction's controller (the zone prompt's chooser on the
-        /// interactive route) stays the ownership input. Absent
-        /// on events saved before the split, whose writers used `performed_by`
-        /// for both roles.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        ownership_actor: Option<PlayerId>,
+        /// interactive route) stays the ownership input.
+        #[serde(default, skip_serializing_if = "EntryOwnershipActor::is_unrecorded")]
+        ownership_actor: EntryOwnershipActor,
         #[serde(serialize_with = "crate::types::deterministic_serde::hash_set")]
         applied: HashSet<AppliedReplacementKey>,
     },
@@ -981,7 +1021,7 @@ impl ProposedEvent {
             enter_with_choices: None,
             discard_frame: None,
             performed_by: None,
-            ownership_actor: None,
+            ownership_actor: crate::types::proposed_event::EntryOwnershipActor::NoPlayer,
             applied: HashSet::new(),
         }
     }
