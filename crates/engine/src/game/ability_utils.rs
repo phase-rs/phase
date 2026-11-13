@@ -9291,7 +9291,10 @@ fn assign_targets_recursive(
     // authority produces (`WaitingFor::RetargetChoice::slot_pools`, Invariant
     // SC). Per-node ownership remains the PRECONDITION — an address
     // `(node, slot)` is only meaningful because this block makes each node
-    // hold exactly its own claimed entries.
+    // hold exactly its own claimed entries. Both production routes are pinned
+    // on a two-mode Shifting Grift, whose artifact mode is a SUB node:
+    // `exchange_control_of_a_spell` V12 (the stolen spell, Perplexing Chimera)
+    // and V13 (a CR 707.10c copy, Twincast).
     if paired_subject_filters(&ability.effect).is_some() {
         let claimed = paired_subject_slot_filters(&ability.effect).count();
         // CR 115.6: same authority as collect_target_slots_inner's paired arm.

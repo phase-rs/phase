@@ -52,6 +52,10 @@ const PERPLEXING_CHIMERA_TEXT: &str = "Whenever an opponent casts a spell, you m
     control of this creature and that spell. If you do, you may choose new targets for the \
     spell. (If the spell becomes a permanent, you control that permanent.)";
 
+/// Verbatim from `client/public/card-data.json`.
+const TWINCAST_TEXT: &str =
+    "Copy target instant or sorcery spell. You may choose new targets for the copy.";
+
 const SUDDEN_SUBSTITUTION_TEXT: &str = "Split second (As long as this spell is on the stack, \
     players can't cast spells or activate abilities that aren't mana abilities.)\nExchange \
     control of target noncreature spell and target creature. Then the spell's controller may \
@@ -3018,6 +3022,232 @@ fn chimera_retarget_of_a_two_mode_grift_offers_every_modes_targets() {
     assert_eq!(commit.state().objects[&a1].controller, P0);
     assert_eq!(commit.state().objects[&c1].controller, P1);
     assert_eq!(commit.state().objects[&c2].controller, P0);
+}
+
+/// V13 — the COPY route of V12's seam (CR 707.10c + CR 115.7d + CR 700.2f):
+/// a copied modal spell's later-mode targets are offered AND written at the
+/// node that owns them, not through the root.
+///
+/// P0 casts a two-mode Shifting Grift (creatures + artifacts), then copies it
+/// with Twincast. The copy's "you may choose new targets" walk must expose
+/// FOUR positions — the creature pair at the root, the artifact pair at the
+/// sub — and a submission that moves only the artifact pair must land on the
+/// sub node.
+///
+/// This is the "copied" half of issue #8355's concrete report (the V12 row
+/// above pins the "stolen" half through Perplexing Chimera), and it is the
+/// printed Shifting Grift ruling under the Spree copy interaction: "If a
+/// spell with spree is copied, the effect that creates the copy may allow
+/// you to choose new targets".
+///
+/// REVERT-FAILING (two directions):
+/// 1. With a retarget pool built from the root's `ability.targets` (the shape
+///    issue #8355 reports), the first copy prompt exposes 2 positions and the
+///    `target_slots.len() == 4` guard below fails.
+/// 2. With a root-only write, the artifact picks never reach the sub node:
+///    the copy re-exchanges (a1, a2) and (a3, a4) never move.
+#[test]
+fn twincast_retarget_of_a_two_mode_grift_writes_the_later_modes_sub_node() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_mana_pool(P0, generic_mana_pool());
+    let c1 = scenario.add_creature(P0, "Creature C1", 2, 2).id();
+    let c2 = scenario.add_creature(P1, "Creature C2", 2, 2).id();
+    let c3 = scenario.add_creature(P0, "Creature C3", 2, 2).id();
+    let c4 = scenario.add_creature(P1, "Creature C4", 2, 2).id();
+    let a1 = scenario
+        .add_artifact_from_oracle(P0, "Artifact A1", "")
+        .id();
+    let a2 = scenario
+        .add_artifact_from_oracle(P1, "Artifact A2", "")
+        .id();
+    let a3 = scenario
+        .add_artifact_from_oracle(P0, "Artifact A3", "")
+        .id();
+    let a4 = scenario
+        .add_artifact_from_oracle(P1, "Artifact A4", "")
+        .id();
+    let grift = scenario
+        .add_spell_to_hand_from_oracle(P0, "Shifting Grift", false, SHIFTING_GRIFT_TEXT)
+        .with_mana_cost(ManaCost::zero())
+        .id();
+    let twincast = scenario
+        .add_spell_to_hand_from_oracle(P0, "Twincast", true, TWINCAST_TEXT)
+        .with_mana_cost(ManaCost::zero())
+        .id();
+
+    let mut runner = scenario.build();
+    runner
+        .cast(grift)
+        .modes(&[0, 1])
+        .target_objects(&[c1, c2, a1, a2])
+        .commit();
+    runner.cast(twincast).target_objects(&[grift]).commit();
+
+    // CR 707.10c: drain to the copy's retarget walk, accepting the "you may
+    // choose new targets" gate on the way.
+    let mut first_prompt = None;
+    for _ in 0..60 {
+        match runner.state().waiting_for.clone() {
+            WaitingFor::CopyRetarget {
+                copy_id,
+                target_slots,
+                current_slot,
+                ..
+            } => {
+                first_prompt = Some((copy_id, target_slots, current_slot));
+                break;
+            }
+            WaitingFor::OptionalEffectChoice { .. } => {
+                runner
+                    .act(GameAction::DecideOptionalEffect { accept: true })
+                    .expect("accepting the copy's new-targets offer must succeed");
+            }
+            WaitingFor::Priority { .. } => {
+                assert!(
+                    !runner.state().stack.is_empty(),
+                    "the stack emptied before the copy walk opened"
+                );
+                runner
+                    .act(GameAction::PassPriority)
+                    .expect("PassPriority should succeed while draining to the copy walk");
+            }
+            other => panic!("unexpected state while draining to the copy walk: {other:?}"),
+        }
+    }
+    let (copy, target_slots, current_slot) =
+        first_prompt.expect("REACH GUARD: the copy's retarget walk must open");
+    assert_eq!(current_slot, 0);
+    assert_ne!(copy, grift, "the walk is the Twincast copy");
+
+    // Assertion 1: EVERY mode is addressed. The issue's defect exposed only
+    // the root pair, so any regression to a root-only pool fails here.
+    assert_eq!(
+        target_slots.len(),
+        4,
+        "a copied two-mode chain must expose all four positions, got {target_slots:?}"
+    );
+    let path_at = |i: usize| {
+        target_slots[i]
+            .address
+            .as_ref()
+            .map(|address| address.path.clone())
+            .expect("a retarget position carries its address")
+    };
+    assert!(path_at(0).is_empty() && path_at(1).is_empty());
+    assert_eq!(path_at(2), vec![ChainStep::SubAbility]);
+    assert_eq!(path_at(3), vec![ChainStep::SubAbility]);
+    let slot_at = |i: usize| {
+        target_slots[i]
+            .address
+            .as_ref()
+            .map(|address| address.slot)
+            .expect("a retarget position carries its address")
+    };
+    assert_eq!(
+        (slot_at(0), slot_at(1), slot_at(2), slot_at(3)),
+        (0, 1, 0, 1)
+    );
+    assert_eq!(target_slots[2].current, Some(TargetRef::Object(a1)));
+    assert_eq!(target_slots[3].current, Some(TargetRef::Object(a2)));
+
+    // Assertion 2: the later mode's pool is genuinely offered (not merely
+    // addressed) — A3 is a legal artifact alternative for that position.
+    assert!(
+        target_slots[2]
+            .legal_alternatives
+            .contains(&TargetRef::Object(a3)),
+        "the artifact-mode position must offer A3, got {:?}",
+        target_slots[2].legal_alternatives
+    );
+
+    // Assertion 3: submit a full reassignment — each mode moves to its own
+    // distinct pair.
+    for target in [c3, c4, a3, a4] {
+        runner
+            .act(GameAction::ChooseTarget {
+                target: Some(TargetRef::Object(target)),
+            })
+            .expect("choosing the copy's target for this position must be accepted");
+    }
+
+    // Assertion 4 (the write): the copy's ROOT holds the creature pair and
+    // its SUB holds the artifact pair — per-node ownership, not a root write.
+    let copy_ability = runner
+        .state()
+        .stack
+        .iter()
+        .find(|entry| entry.id == copy)
+        .and_then(|entry| entry.ability())
+        .expect("the copy is still on the stack");
+    assert_eq!(
+        copy_ability.targets,
+        vec![TargetRef::Object(c3), TargetRef::Object(c4)],
+        "the copy's root must hold the retargeted creature pair"
+    );
+    let artifact_mode = copy_ability
+        .sub_ability
+        .as_deref()
+        .expect("the artifact mode is chained below the root");
+    assert_eq!(
+        artifact_mode.targets,
+        vec![TargetRef::Object(a3), TargetRef::Object(a4)],
+        "the copy's SUB node must hold the retargeted artifact pair"
+    );
+
+    // The original keeps its own targets on its own nodes — CR 115.7d is an
+    // operation on the copy, not on the original.
+    let original = runner
+        .state()
+        .stack
+        .iter()
+        .find(|entry| entry.id == grift)
+        .and_then(|entry| entry.ability())
+        .expect("the original is still on the stack");
+    assert_eq!(
+        original.targets,
+        vec![TargetRef::Object(c1), TargetRef::Object(c2)]
+    );
+    assert_eq!(
+        original.sub_ability.as_deref().unwrap().targets,
+        vec![TargetRef::Object(a1), TargetRef::Object(a2)]
+    );
+
+    // Resolve the copy, then the original.
+    for _ in 0..80 {
+        match runner.state().waiting_for.clone() {
+            WaitingFor::Priority { .. } => {
+                if runner.state().stack.is_empty() {
+                    break;
+                }
+                runner
+                    .act(GameAction::PassPriority)
+                    .expect("PassPriority should succeed while resolving the chain");
+            }
+            WaitingFor::OptionalEffectChoice { .. } => {
+                runner
+                    .act(GameAction::DecideOptionalEffect { accept: true })
+                    .expect("accepting an optional effect must succeed");
+            }
+            other => panic!("unexpected prompt while resolving the chain: {other:?}"),
+        }
+    }
+    assert!(
+        runner.state().stack.is_empty(),
+        "REACH GUARD: both exchanges must resolve"
+    );
+
+    // Assertion 5: all four pairs exchanged exactly once — the copy hit its
+    // retargeted pairs, the original hit its own.
+    let state = runner.state();
+    assert_eq!(state.objects[&c1].controller, P1);
+    assert_eq!(state.objects[&c2].controller, P0);
+    assert_eq!(state.objects[&c3].controller, P1);
+    assert_eq!(state.objects[&c4].controller, P0);
+    assert_eq!(state.objects[&a1].controller, P1);
+    assert_eq!(state.objects[&a2].controller, P0);
+    assert_eq!(state.objects[&a3].controller, P1);
+    assert_eq!(state.objects[&a4].controller, P0);
 }
 
 /// V15 — the newly reachable sub-chain descent (§5.2/§5.3) surfaces NO
