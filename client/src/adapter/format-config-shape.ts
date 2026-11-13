@@ -152,6 +152,15 @@ export function isCustomFormatRulesShape(value: unknown): value is CustomFormatR
   // still be the right shape.
   const roi = structural.range_of_influence;
   if (roi !== null && roi !== undefined && !isRangeOfInfluenceConfig(roi)) return false;
+  // Absent is valid: a definition persisted before this field existed carries
+  // no `poison_counter_threshold` key, and the engine's serde default reads
+  // that as ten.
+  if (
+    structural.poison_counter_threshold !== undefined
+    && !isInteger(structural.poison_counter_threshold)
+  ) {
+    return false;
+  }
 
   const legality = value.legality;
   if (!isRecord(legality)) return false;
@@ -174,9 +183,10 @@ export function isCustomFormatRulesShape(value: unknown): value is CustomFormatR
  * Structural check for a `FormatConfig` blob, exhaustive against the engine
  * struct's real current field list (`crates/engine/src/types/format.rs`).
  *
- * The three easy-to-miss ones are checked explicitly because they are
+ * The easy-to-miss ones are checked explicitly because they are
  * serde-optional and therefore invisible in most payloads:
- * `range_of_influence`, `archenemy_player`, `supplies_fixed_deck`.
+ * `range_of_influence`, `archenemy_player`, `supplies_fixed_deck`,
+ * `poison_counter_threshold`.
  */
 export function isFormatConfigShape(value: unknown): value is FormatConfig {
   if (!isRecord(value)) return false;
@@ -203,10 +213,15 @@ export function isFormatConfigShape(value: unknown): value is FormatConfig {
     return false;
   }
 
-  // Serde-optional trio. Absent is legal; present must be well-formed.
+  // Serde-optional fields. Absent is legal; present must be well-formed.
   const roi = value.range_of_influence;
   if (roi !== null && roi !== undefined && !isRangeOfInfluenceConfig(roi)) return false;
   if (!isOptionalInteger(value.archenemy_player)) return false;
+  // The narrowed type claims a required `number | null`, but a blob written
+  // before the field existed has no key: it reads `undefined`, and
+  // `undefined != null` is false, so the setup editors' gates stay closed.
+  // The engine migrates the absent field to the format's CR value on ingress.
+  if (!isOptionalInteger(value.poison_counter_threshold)) return false;
   if (
     value.supplies_fixed_deck !== undefined
     && typeof value.supplies_fixed_deck !== "boolean"

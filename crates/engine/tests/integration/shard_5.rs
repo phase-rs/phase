@@ -182,6 +182,7 @@ mod stack_object_keyword_grants;
 mod stack_session_batch_authority;
 mod stargaze_dynamic_keep;
 mod starting_intensity_keyword;
+mod starting_player_choice;
 mod state_trigger_source_anaphor_recheck_and_self_suppression;
 mod statecraft_damage_prevention;
 mod static_provider_layer_reference;

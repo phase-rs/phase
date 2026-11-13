@@ -896,24 +896,12 @@ pub struct DraftPlayerView {
     /// withdraw it exactly when it becomes usable. It is read from the same
     /// retained latch either way.
     ///
-    /// **ADVISORY, NOT ENFORCED -- and the boundary is measured, not assumed.**
-    /// Game one's starting player comes from `engine::game::engine::start_game`'s
-    /// CR 103.1 contest, reached through
-    /// `server_core::session::GameSession::start_game`.
-    /// `start_game_with_starting_player` DOES exist and is public -- but it
-    /// takes a DECIDED starting player, not a chooser, and there is no pre-game
-    /// venue in which to ask the question: `GameState::next_game_chooser` is set
-    /// BY that function, and `GameAction::ChoosePlayDraw` must clear TWO gates,
-    /// not one: it is admissible only against
-    /// `WaitingFor::BetweenGamesChoosePlayDraw`, which `match_flow::start_next_game`
-    /// sets BETWEEN games, and `match_flow::handle_choose_play_draw`
-    /// independently refuses it whenever `state.match_phase !=
-    /// MatchPhase::BetweenGames`. Binding this seat to game one's starting
-    /// player therefore needs a NEW game-one play/draw election -- a new
-    /// `WaitingFor`, a widened action guard, a widened `MatchPhase`
-    /// admissibility rule, a protocol bump and a UI -- which is a match-flow
-    /// feature, not part of a draft kind. Until then the players apply it as
-    /// they do at a physical table, and the UI says so in words.
+    /// **ADVISORY, NOT ENFORCED.** Game one's CR 103.1 chooser is the d20
+    /// contest winner, who answers `WaitingFor::ChooseStartingPlayer`
+    /// (`engine::game::engine::start_game`, reached through
+    /// `server_core::session::GameSession::start_game`). Binding this seat as
+    /// that chooser is not done, so the field stays advisory and the players
+    /// apply it as they do at a physical table, and the UI says so in words.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub play_first_chooser: Option<u8>,
 }
