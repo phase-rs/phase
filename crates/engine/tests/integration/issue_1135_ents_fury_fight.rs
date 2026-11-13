@@ -48,6 +48,21 @@ fn ents_fury_fights_boosted_creature_against_opponent_creature() {
         .commit()
         .resolve();
 
+    let damage_events: Vec<_> = outcome
+        .events()
+        .iter()
+        .filter_map(|event| match event {
+            GameEvent::DamageDealt {
+                source_id,
+                target,
+                amount,
+                is_combat,
+                ..
+            } => Some((*source_id, target.clone(), *amount, *is_combat)),
+            _ => None,
+        })
+        .collect();
+
     assert!(
         outcome.events().iter().any(|event| matches!(
             event,
@@ -59,7 +74,7 @@ fn ents_fury_fights_boosted_creature_against_opponent_creature() {
                 ..
             } if *source_id == bear && *target == wolf
         )),
-        "the boosted bear deals 7 noncombat fight damage to the wolf"
+        "the boosted bear deals 7 noncombat fight damage to the wolf; observed damage events: {damage_events:?}"
     );
     assert_eq!(outcome.zone_of(wolf), Zone::Graveyard);
     assert!(
@@ -73,7 +88,7 @@ fn ents_fury_fights_boosted_creature_against_opponent_creature() {
                 ..
             } if *source_id == wolf && *target == bear
         )),
-        "the wolf deals 2 noncombat fight damage back to the bear"
+        "the wolf deals 2 noncombat fight damage back to the bear; observed damage events: {damage_events:?}"
     );
     assert_eq!(
         outcome.state().objects[&bear].damage_marked,

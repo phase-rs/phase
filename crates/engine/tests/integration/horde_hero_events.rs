@@ -378,8 +378,12 @@ fn in_pile(state: &GameState, seat: PlayerId, id: ObjectId, pile: Zone) -> bool 
 /// Enter the Horde's precombat main (firing `begin_wave`) and set an exact
 /// wave budget, so each test reveals exactly what it rigged.
 fn begin_wave_with_budget(runner: &mut GameRunner, budget: u32) -> Vec<GameEvent> {
+    let events = runner.advance_to_phase_collecting_events(Phase::PreCombatMain);
+    // Entering PreCombatMain runs production `begin_wave`, which seeds the
+    // configured wave. Override that seed only after phase-entry effects have
+    // completed, so this test drives the exact budget it requested.
     runner.state_mut().horde_wave_remaining = budget;
-    runner.advance_to_phase_collecting_events(Phase::PreCombatMain)
+    events
 }
 
 /// Drive the wave to completion (bounded): pass priority through, answering
