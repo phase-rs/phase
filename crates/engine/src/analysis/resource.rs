@@ -5458,19 +5458,19 @@ pub(crate) fn loop_states_cover_modulo_fodder_growth(
         .is_empty()
 }
 
-/// CR 400.7: for each stack entry, bottom first, whether each pin its ability chain holds
-/// still names the live object. A pin on an object that left and returned, or that is gone,
-/// names a new object or none (CR 400.7), so a delayed trigger "won't affect it" (CR 603.7c)
-/// and a target is illegal (CR 608.2b). The pins are the ones loop normalization ranks, read
-/// through the same visitor,
+/// CR 400.7: for each stack entry, bottom first, the entry's id and whether each pin its
+/// ability chain holds still names the live object. A pin on an object that left and
+/// returned, or that is gone, names a new object or none (CR 400.7), so a delayed trigger
+/// "won't affect it" (CR 603.7c) and a target is illegal (CR 608.2b). The pins are the ones
+/// loop normalization ranks, read through the same visitor,
 /// [`ResolvedAbility::for_each_loop_pin_mut`](crate::types::ability::ResolvedAbility::for_each_loop_pin_mut),
 /// which writes nothing here.
-fn stack_pin_liveness(state: &mut GameState) -> Vec<Vec<bool>> {
+fn stack_pin_liveness(state: &mut GameState) -> Vec<(ObjectId, Vec<bool>)> {
     let GameState { stack, objects, .. } = state;
     stack
         .iter_mut()
         .map(|entry| {
-            let source_id = entry.source_id;
+            let (id, source_id) = (entry.id, entry.source_id);
             let mut live = Vec::new();
             if let Some(ability) = entry.ability_mut() {
                 ability.for_each_loop_pin_mut(source_id, &mut |object_id, incarnation| {
@@ -5481,7 +5481,7 @@ fn stack_pin_liveness(state: &mut GameState) -> Vec<Vec<bool>> {
                     );
                 });
             }
-            live
+            (id, live)
         })
         .collect()
 }
@@ -5491,29 +5491,68 @@ fn stack_pin_liveness(state: &mut GameState) -> Vec<Vec<bool>> {
 /// other comparators keep the stack, where the ranked pin itself separates a live carrier
 /// from a stale one (the stack-growth cover's buried arm sets aside only the entries below
 /// the replay floor, which the period does not resolve). A frame pair whose stacks hold no
-/// superseded pin is not judged here, as before; a superseded pin held in both frames (a Clue
-/// that sacrificed itself to pay for its own ability, or a trigger whose source left, say) is
-/// the same position and is not refused.
+/// superseded pin is not judged here, as before.
 ///
-/// Stacks of the same depth are compared entry by entry from the bottom. For a growth cover's
-/// frames, whose stacks differ in depth, the prior stack's liveness patterns must embed in the
-/// current stack's, bottom up, with the extra entries growth of a pattern the prior stack
-/// already holds (the embedding `stack_covers` requires of the entries themselves); a pair that
-/// does not embed is refused.
+/// The pins are aligned by their carrier, never by position or by pattern alone:
+///
+/// - a stack entry both frames hold (the same entry id, CR 405.5: it stayed on the stack) must
+///   have the same liveness, pin for pin, in both. A superseded pin it holds in both frames (a
+///   Clue that sacrificed itself to pay for its own ability, a trigger whose source left) is
+///   the same position; a pin live in one frame and superseded in the other is not;
+/// - the entries only one frame holds (resolved, or put on the stack since) are different
+///   stack objects, so none of them is a carrier whose pin changed. Among them the prior
+///   frame's liveness patterns must embed in the current frame's, bottom up, with every extra
+///   entry a pattern the prior frame already holds (the embedding `stack_covers` requires of
+///   the entries themselves); equal counts therefore compare entry by entry. A pair that does
+///   not embed is refused; refusing can only miss a cover.
 fn stack_pins_superseded_apart(prior: &mut GameState, current: &mut GameState) -> bool {
     let (prior, current) = (stack_pin_liveness(prior), stack_pin_liveness(current));
-    let superseded = |frame: &[Vec<bool>]| frame.iter().flatten().any(|live| !live);
-    if !(superseded(&prior) || superseded(&current)) {
+    let superseded = |live: &[bool]| live.iter().any(|live| !live);
+    if !prior
+        .iter()
+        .chain(current.iter())
+        .any(|(_, live)| superseded(live))
+    {
         return false;
     }
-    if prior.len() == current.len() {
-        return prior != current;
+    // Occurrence-keyed, so two entries that share an id within a frame still pair one to one.
+    let keyed = |frame: Vec<(ObjectId, Vec<bool>)>| {
+        let mut seen: HashMap<ObjectId, usize> = HashMap::new();
+        frame
+            .into_iter()
+            .map(|(id, live)| {
+                let occurrence = seen.entry(id).or_default();
+                *occurrence += 1;
+                ((id, *occurrence), live)
+            })
+            .collect::<Vec<_>>()
+    };
+    let (prior, current) = (keyed(prior), keyed(current));
+    let current_by_key: HashMap<_, _> = current.iter().map(|(key, live)| (*key, live)).collect();
+    let prior_keys: HashSet<_> = prior.iter().map(|(key, _)| *key).collect();
+    if prior
+        .iter()
+        .any(|(key, live)| current_by_key.get(key).is_some_and(|other| *other != live))
+    {
+        return true;
     }
-    let mut remaining = current.iter();
-    let embeds = prior
+    let prior_unshared: Vec<&Vec<bool>> = prior
+        .iter()
+        .filter(|(key, _)| !current_by_key.contains_key(key))
+        .map(|(_, live)| live)
+        .collect();
+    let current_unshared: Vec<&Vec<bool>> = current
+        .iter()
+        .filter(|(key, _)| !prior_keys.contains(key))
+        .map(|(_, live)| live)
+        .collect();
+    let mut remaining = current_unshared.iter();
+    let embeds = prior_unshared
         .iter()
         .all(|pattern| remaining.any(|candidate| candidate == pattern));
-    let grown_from_present = current.iter().all(|pattern| prior.contains(pattern));
+    let grown_from_present = current_unshared
+        .iter()
+        .all(|pattern| prior.iter().any(|(_, live)| live == *pattern));
     !(embeds && grown_from_present)
 }
 
@@ -10926,68 +10965,112 @@ mod tests {
         );
     }
 
-    /// CR 400.7: the stack-pin veto of the two stack-dropping covers over frames of different
-    /// depth, which a growth cover's frames are. A trigger whose source left holds a superseded
-    /// source stamp by design: the same entry once in the prior stack and twice in the current
-    /// one is the same position and is not refused, while the entry live in the prior stack and
-    /// superseded in the current one still is.
+    /// A stack of `FiredDestroy` entries over one recipient live at incarnation 8: each
+    /// `(id, pin)` is an entry with that stack id whose target pin names incarnation `pin`
+    /// (8 is live, 5 is superseded). Synthetic.
+    fn pinned_stack(entries: &[(u64, u64)]) -> GameState {
+        let mut frame = pinned_frame(PinCarrier::FiredDestroy, 8, 8);
+        frame.stack.clear();
+        for &(id, pin) in entries {
+            let mut entry = pinned_frame(PinCarrier::FiredDestroy, 8, pin).stack[0].clone();
+            entry.id = ObjectId(id);
+            frame.stack.push_back(entry);
+        }
+        frame
+    }
+
+    /// CR 400.7 + CR 405.5: the stack-pin veto aligns pins by their carrier. Entries A (id 1)
+    /// and B (id 2) stay on the stack across the pair; C (id 3) is put on it in between.
     #[test]
-    fn loop_stack_pin_veto_tolerates_a_grown_stack_of_the_same_entry() {
-        let framed = |live: u64, pin: u64, entries: usize| {
-            let mut frame = pinned_frame(PinCarrier::FiredDestroy, live, pin);
-            let entry = frame.stack[0].clone();
-            for _ in 1..entries {
-                frame.stack.push_back(entry.clone());
-            }
-            frame
+    fn loop_stack_pin_veto_aligns_pins_by_their_carrier() {
+        let apart = |prior: &[(u64, u64)], current: &[(u64, u64)]| {
+            stack_pins_superseded_apart(&mut pinned_stack(prior), &mut pinned_stack(current))
         };
-        let (mut stale_one, mut stale_two) = (framed(8, 5, 1), framed(8, 5, 2));
+        // The review's case: A live, B stale; then A stale, C live, B stale. The liveness
+        // patterns of the prior stack embed in the current one at C and B, yet A changed.
         assert!(
-            !stack_pins_superseded_apart(&mut stale_one, &mut stale_two),
-            "the same superseded entry, grown by one copy"
+            apart(&[(1, 8), (2, 5)], &[(1, 5), (3, 8), (2, 5)]),
+            "A's pin went from live to superseded behind a grown live entry"
         );
-        let (mut live_one, mut stale_two) = (framed(8, 8, 1), framed(8, 5, 2));
         assert!(
-            stack_pins_superseded_apart(&mut live_one, &mut stale_two),
-            "live in the prior stack, superseded in the grown one"
+            apart(&[(1, 5), (2, 8)], &[(1, 8), (3, 5), (2, 8)]),
+            "the same, the other way round"
         );
-        let (mut stale_one, mut stale_one_again) = (framed(8, 5, 1), framed(8, 5, 1));
+        // Positive control: actual growth with unchanged carriers.
         assert!(
-            !stack_pins_superseded_apart(&mut stale_one, &mut stale_one_again),
-            "reach guard: equal depth, the same superseded entry"
+            !apart(&[(1, 8), (2, 5)], &[(1, 8), (3, 8), (2, 5)]),
+            "A and B unchanged, C live: growth"
+        );
+        assert!(
+            !apart(&[(1, 8), (2, 5)], &[(1, 8), (3, 5), (4, 5), (2, 5)]),
+            "A and B unchanged, grown by two entries of one superseded pattern"
+        );
+        assert!(
+            !apart(&[(1, 5)], &[(1, 5)]),
+            "the same superseded entry in both frames"
+        );
+        // Entries with no carrier in common are different stack objects: their patterns
+        // must embed in order, with growth of a pattern already present.
+        assert!(
+            !apart(&[(1, 5)], &[(2, 5), (3, 5)]),
+            "re-fired entries of one superseded pattern, grown by one"
+        );
+        assert!(
+            apart(&[(1, 8), (2, 5)], &[(3, 5), (4, 8)]),
+            "no carrier in common, the patterns in the other order"
+        );
+        assert!(
+            apart(&[(1, 5)], &[(2, 5), (3, 8)]),
+            "grown by a pattern the prior stack does not hold"
+        );
+        assert!(
+            apart(&[(1, 8)], &[(2, 5)]),
+            "live in one frame, superseded in the other, no carrier in common"
         );
     }
 
-    /// CR 400.7: the veto aligns frames of different depth by embedding, so a flip of one
-    /// entry's pins is refused even when another entry of the same pattern keeps the set of
-    /// patterns equal. Prior stack `[A live, B superseded]`, current `[A superseded, B live,
-    /// B' live]`: A acted before and would now do nothing.
+    /// The same alignment through the boundary of both covers that set the stack aside. A
+    /// steady inert-token engine grown by one token (the object-growth cover) and the fodder
+    /// cover's refusal list, each over the review's stacks and over the growth control.
     #[test]
-    fn loop_stack_pin_veto_refuses_a_flip_hidden_by_a_grown_stack() {
-        let entry = |live: u64, pin: u64| {
-            pinned_frame(PinCarrier::FiredDestroy, live, pin).stack[0].clone()
-        };
-        let stack_of = |entries: [(u64, u64); 3], len: usize| {
-            let mut frame = pinned_frame(PinCarrier::FiredDestroy, 8, 8);
-            frame.stack.clear();
-            for (live, pin) in entries.into_iter().take(len) {
-                frame.stack.push_back(entry(live, pin));
+    fn loop_growth_covers_refuse_a_carrier_whose_pin_changed_behind_a_grown_entry() {
+        let framed = |entries: &[(u64, u64)]| {
+            let donor = pinned_stack(entries);
+            let (mut prior, mut current) = og_cover_base();
+            for frame in [&mut prior, &mut current] {
+                for id in [ObjectId(20), ObjectId(21)] {
+                    frame.objects.insert(id, donor.objects[&id].clone());
+                    frame.battlefield.push_back(id);
+                }
+                frame.stack = donor.stack.clone();
+                frame.waiting_for = donor.waiting_for.clone();
             }
-            frame
+            (prior, current)
         };
-        // The liveness of an entry is read against the one recipient the frame holds (live
-        // incarnation 8): a pin of 8 is live, a pin of 5 is superseded.
-        let mut prior = stack_of([(8, 8), (8, 5), (8, 5)], 2);
-        let mut flipped = stack_of([(8, 5), (8, 8), (8, 8)], 3);
+        let fodder = pinned_stack(&[]).objects[&ObjectId(20)].clone();
+        let fodder_refuses = |prior: &GameState, current: &GameState| {
+            fodder_growth_cover_refusals(prior, current, &fodder, PlayerId(0))
+                .0
+                .contains(&FodderCoverRefusal::SupersededStackPin)
+        };
+        let (prior, _) = framed(&[(1, 8), (2, 5)]);
+        let (_, changed) = framed(&[(1, 5), (3, 8), (2, 5)]);
+        let (_, grown) = framed(&[(1, 8), (3, 8), (2, 5)]);
         assert!(
-            stack_pins_superseded_apart(&mut prior, &mut flipped),
-            "a live entry superseded and a superseded one live, hidden by a grown copy"
+            loop_states_cover_modulo_object_growth(&prior, &grown),
+            "reach guard and positive control: growth with unchanged carriers covers"
         );
-        let mut prior = stack_of([(8, 8), (8, 5), (8, 5)], 2);
-        let mut grown = stack_of([(8, 8), (8, 5), (8, 5)], 3);
         assert!(
-            !stack_pins_superseded_apart(&mut prior, &mut grown),
-            "reach guard: the same entries grown by a copy of a present pattern"
+            !loop_states_cover_modulo_object_growth(&prior, &changed),
+            "object-growth cover: A's pin changed behind the grown entry"
+        );
+        assert!(
+            !fodder_refuses(&prior, &grown),
+            "fodder cover: growth with unchanged carriers is not refused on this ground"
+        );
+        assert!(
+            fodder_refuses(&prior, &changed),
+            "fodder cover: A's pin changed behind the grown entry"
         );
     }
 
