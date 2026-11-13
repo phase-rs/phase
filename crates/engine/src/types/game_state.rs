@@ -3676,6 +3676,23 @@ pub struct LatchedSuppressTrigger {
     #[serde(default)]
     pub trigger_source_filter: Option<TargetFilter>,
     pub events: Vec<crate::types::statics::SuppressedTriggerEvent>,
+    /// CR 603.10a + CR 800.4a: set when the suppressing source's owner left the
+    /// game while the action was paused. The static applied to the occurrences
+    /// the action had completed by then, and only to those: later occurrences
+    /// happen without it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completed_occurrences_only: Option<Vec<CollectedZoneChange>>,
+}
+
+impl LatchedSuppressTrigger {
+    /// Whether this latched static still speaks for `event`.
+    pub fn applies_to(&self, event: &GameEvent) -> bool {
+        self.completed_occurrences_only
+            .as_ref()
+            .is_none_or(|completed| {
+                CollectedZoneChange::of(event).is_some_and(|key| completed.contains(&key))
+            })
+    }
 }
 
 /// Complete ownership for one logical zone-change action.
@@ -4235,7 +4252,16 @@ impl LogicalZoneChangeGroup {
     /// controller is that player's ability for the departures this owner
     /// already performed, even when its source leaves with its owner; only a
     /// latch the leaver controlled is retired with them.
-    pub fn retire_contexts_owned_by(&mut self, player: PlayerId) {
+    ///
+    /// CR 603.10a: an immediately-before suppressor whose owner leaves keeps
+    /// speaking for the occurrences this action had already completed (its own
+    /// and `held_by_child`, those a linked component child still holds for it),
+    /// and for nothing later; with none completed it is dropped.
+    pub fn retire_contexts_owned_by(
+        &mut self,
+        player: PlayerId,
+        held_by_child: &[CollectedZoneChange],
+    ) {
         let retained_latch = |latch: &LatchedBatchedTrigger| {
             !latch
                 .observations
@@ -4246,8 +4272,25 @@ impl LogicalZoneChangeGroup {
             .retain(retained_latch);
         self.immediately_after_batched_triggers
             .retain(retained_latch);
+        let completed: Vec<CollectedZoneChange> = self
+            .all_origin_occurrences
+            .iter()
+            .filter_map(|occurrence| CollectedZoneChange::of(&occurrence.event))
+            .chain(held_by_child.iter().copied())
+            .collect();
         self.immediately_before_suppress_triggers
-            .retain(|suppress| suppress.source_context.lki.owner != player);
+            .retain_mut(|suppress| {
+                if suppress.source_context.lki.owner != player {
+                    return true;
+                }
+                if completed.is_empty() {
+                    return false;
+                }
+                suppress
+                    .completed_occurrences_only
+                    .get_or_insert_with(|| completed.clone());
+                true
+            });
         self.immediately_after_suppress_triggers
             .retain(|suppress| suppress.source_context.lki.owner != player);
     }

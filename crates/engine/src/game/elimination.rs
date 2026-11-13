@@ -2057,15 +2057,31 @@ pub fn apply_resolved_player_leave(
 /// left before any remaining member resumes; otherwise a pre-pause latch could
 /// fire from an object that no longer exists in the game.
 fn retire_pending_zone_change_contexts_owned_by(state: &mut GameState, player: PlayerId) {
+    // CR 730.3: a linked component child holds occurrences its announcing owner
+    // has completed but not yet been handed.
+    let held_by_child: Vec<crate::types::game_state::CollectedZoneChange> = state
+        .active_batch_delivery()
+        .filter(|child| child.component_delivery_parent.is_some())
+        .map(|child| {
+            child
+                .logical_zone_change_group
+                .all_origin_occurrences
+                .iter()
+                .filter_map(|occurrence| {
+                    crate::types::game_state::CollectedZoneChange::of(&occurrence.event)
+                })
+                .collect()
+        })
+        .unwrap_or_default();
     state
         .resolution_stack
         .visit_active_zone_change_owners_mut(|owner| match owner {
             ZoneChangeOwnerMut::Batch(pending) => pending
                 .logical_zone_change_group
-                .retire_contexts_owned_by(player),
+                .retire_contexts_owned_by(player, &held_by_child),
             ZoneChangeOwnerMut::ChangeZone(pending) => pending
                 .logical_zone_change_group
-                .retire_contexts_owned_by(player),
+                .retire_contexts_owned_by(player, &held_by_child),
         });
 }
 
@@ -2838,6 +2854,7 @@ mod tests {
                 source_filter: crate::types::ability::TargetFilter::Any,
                 trigger_source_filter: None,
                 events: vec![crate::types::statics::SuppressedTriggerEvent::Dies],
+                completed_occurrences_only: None,
             },
         );
         state.push_batch_delivery(crate::types::game_state::PendingBatchDeliveries {

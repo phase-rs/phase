@@ -2558,6 +2558,7 @@ fn latch_logical_zone_change_group_immediately_before(
                 source_filter: source_filter.clone(),
                 trigger_source_filter: trigger_source_filter.clone(),
                 events: events.clone(),
+                completed_occurrences_only: None,
             })
         })
         .collect();
@@ -2713,6 +2714,7 @@ pub(crate) fn latch_logical_zone_change_group_immediately_after(
                 source_filter: source_filter.clone(),
                 trigger_source_filter: trigger_source_filter.clone(),
                 events: events.clone(),
+                completed_occurrences_only: None,
             })
         })
         .collect();
@@ -3316,7 +3318,7 @@ fn collect_matching_triggers_inner(
                     .immediately_after_latches()
                     .expect("settlement requires its immediately-after latch"),
             };
-            let suppressors = latched_suppress_trigger_statics(suppressors);
+            let suppressors = latched_suppress_trigger_statics(suppressors, event);
             if event_is_suppressed_by_static_triggers_cached(
                 state,
                 event,
@@ -3954,11 +3956,16 @@ fn active_suppress_trigger_statics(state: &GameState) -> Vec<ActiveSuppressTrigg
 /// Rehydrate the carrier-owned suppressor projection without consulting a
 /// current object by ID. Settlement must evaluate the static that existed at
 /// the trigger's observation time, not a later same-ID incarnation.
+///
+/// CR 603.10a: a suppressor whose owner left mid-action speaks only for the
+/// occurrences completed before that ([`LatchedSuppressTrigger::applies_to`]).
 fn latched_suppress_trigger_statics(
     suppressors: &[LatchedSuppressTrigger],
+    event: &GameEvent,
 ) -> Vec<ActiveSuppressTriggerStatic> {
     suppressors
         .iter()
+        .filter(|suppressor| suppressor.applies_to(event))
         .map(|suppressor| ActiveSuppressTriggerStatic {
             source_context: suppressor.source_context.clone(),
             source_filter: suppressor.source_filter.clone(),
@@ -5160,7 +5167,7 @@ fn collect_latched_batched_zone_triggers(
                     .immediately_after_latches()
                     .expect("settlement checked its immediately-after latch"),
             };
-            let suppressors = latched_suppress_trigger_statics(suppressors);
+            let suppressors = latched_suppress_trigger_statics(suppressors, event);
             if event_is_suppressed_by_static_triggers_cached(
                 state,
                 event,
