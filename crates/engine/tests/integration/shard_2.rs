@@ -361,6 +361,7 @@ mod cut_a_deal_draw_this_way_count;
 mod damage_done_once_by_controller_player_recipients;
 mod damage_prevention_formula;
 mod damage_redirect_target_constraints;
+mod damage_replacement_declared_slot_restore;
 mod dandan_analysis_ai_support_reads;
 mod dandan_declare_round;
 mod dandan_free_reveal;

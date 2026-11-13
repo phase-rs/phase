@@ -9061,26 +9061,66 @@ pub(crate) fn declared_slot_announcement_filter(
             return declared.get(index).map(|filter| (*filter).clone());
         }
     }
+    // CR 614.9 + CR 115.1a/c/d: a damage redirection declares its announced slots
+    // through `damage_replacement_target_roles`, NOT through a generic `target`
+    // field. `Effect::CreateDamageReplacement` has none, so
+    // `extract_target_filter_from_effect` answers `None` below and every slot of
+    // this effect would reach the restore guard with NO filter — leaving the
+    // recorded characteristics unchecked. A save could then keep the recipient's
+    // id, zone and pin while restating its characteristics as anything at all,
+    // pass restore, and publish that contradictory target into the cast history.
+    //
+    // The role order IS the live declaration order, so `index` names the role that
+    // declared this position: `collect_target_slots_inner`'s redirection arm walks
+    // this same iterator (`DeclaredSource`, `OriginalRecipient`,
+    // `RedirectRecipient`) and pushes one slot per role, `collect_target_slot_specs`
+    // mirrors it, and `assign_selected_slots_recursive` consumes the announced
+    // targets in that same order. A source role and a recipient role therefore keep
+    // their OWN filters instead of collapsing onto one, and `Any` on a recipient
+    // role still resolves through its CR 115.4 damage domain below (a declared
+    // source is not a damage recipient and keeps its CR 609.7a domain).
+    //
+    // Same length guard as the Fight and Attach arms: a DECLINED optional slot
+    // compacts `targets`, leaving the vector unable to say which declared role
+    // survived, so that shape falls through to the single-filter reading below
+    // (which answers `None` for this effect) rather than guessing a role.
+    if let Some(roles) = damage_replacement_target_roles(&node.effect) {
+        if roles.len() == node.targets.len() {
+            let filter = roles.get(index)?.filter();
+            if effect_slot_denotes_damage_any_target(
+                &node.effect,
+                AbilityTargetSlot::Declared { index, filter },
+            ) {
+                return Some(damage_any_target_announcement_filter(filter));
+            }
+            return Some(filter.clone());
+        }
+    }
     let filter = extract_target_filter_from_effect(&node.effect)?;
     if effect_slot_denotes_damage_any_target(
         &node.effect,
         AbilityTargetSlot::Declared { index, filter },
     ) {
-        // CR 115.4: the damage domain, expressed as the filter a snapshot must satisfy.
-        // Both halves come from the LIVE domain's own builders, so a recorded
-        // announcement can never satisfy a domain the cast path would have refused.
-        // The object half is the load-bearing one here: its battlefield requirement
-        // is the zone live selection imposes by enumeration, and a recorded fact
-        // states the zone its announcement was made in — the only surviving
-        // authority once the target has moved and its pin gone stale (CR 400.7).
-        return Some(TargetFilter::Or {
-            filters: vec![
-                TargetFilter::Player,
-                damage_any_target_object_filter(damage_any_target_slot_properties(filter)),
-            ],
-        });
+        return Some(damage_any_target_announcement_filter(filter));
     }
     Some(filter.clone())
+}
+
+/// CR 115.4: the damage domain, expressed as the filter a recorded snapshot must
+/// satisfy. Both halves come from the LIVE domain's own builders
+/// (`TargetFilter::Player` and [`damage_any_target_object_filter`]), so a recorded
+/// announcement can never satisfy a domain the cast path would have refused.
+/// The object half is the load-bearing one: its battlefield requirement is the
+/// zone live selection imposes by enumeration, and a recorded fact states the
+/// zone its announcement was made in — the only surviving authority once the
+/// target has moved and its pin gone stale (CR 400.7).
+fn damage_any_target_announcement_filter(filter: &TargetFilter) -> TargetFilter {
+    TargetFilter::Or {
+        filters: vec![
+            TargetFilter::Player,
+            damage_any_target_object_filter(damage_any_target_slot_properties(filter)),
+        ],
+    }
 }
 
 /// CR 115.4: the declaring slot's own predicates for a damage "any target"
@@ -16548,6 +16588,138 @@ mod tests {
             }),
             "CR 115.4: the recorded damage domain is a creature, player, planeswalker or \
              battle, and the permanents among those exist only on the BATTLEFIELD"
+        );
+    }
+
+    /// CR 614.9 + CR 115.1a/c/d + CR 609.7a: a damage redirection's announced
+    /// slots are recovered from `damage_replacement_target_roles` in DECLARED
+    /// order — `DeclaredSource`, then `OriginalRecipient`, then
+    /// `RedirectRecipient` — BEFORE the generic single-filter extraction, which
+    /// answers `None` for `Effect::CreateDamageReplacement` because the effect has
+    /// no generic `target` field. That order is the live declaration order:
+    /// `collect_target_slots_inner`'s redirection arm pushes one slot per role in
+    /// iterator order. Revert-probe: reverting this arm to the generic extraction
+    /// leaves every one of these slots with `None`, so no recorded snapshot is
+    /// ever checked against the filter its slot announced.
+    #[test]
+    fn damage_replacement_slot_announcement_filters_follow_the_declared_order() {
+        use crate::types::ability::{DamageRedirectTarget, RedirectionLifetime};
+
+        let creature = TargetFilter::Typed(TypedFilter::creature());
+        // CR 115.4: the damage "any target" domain, built by the same authority
+        // the live enumeration uses.
+        let damage_domain = TargetFilter::Or {
+            filters: vec![
+                TargetFilter::Player,
+                TargetFilter::Typed(TypedFilter {
+                    type_filters: vec![TypeFilter::AnyOf(vec![
+                        TypeFilter::Creature,
+                        TypeFilter::Planeswalker,
+                        TypeFilter::Battle,
+                    ])],
+                    controller: None,
+                    properties: vec![FilterProp::InZone {
+                        zone: Zone::Battlefield,
+                    }],
+                }),
+            ],
+        };
+        let redirection = |source_filter, recipient_object_filter, redirect_object_filter| {
+            Effect::CreateDamageReplacement {
+                source_filter,
+                combat_scope: None,
+                target_filter: None,
+                modification: None,
+                redirect_to: Some(DamageRedirectTarget::ChosenTarget),
+                redirect_amount: Some(PreventionAmount::Next(1)),
+                redirect_object_filter,
+                recipient_object_filter,
+                redirect_lifetime: RedirectionLifetime::OneOpportunity,
+            }
+        };
+        let source = ObjectId(1);
+        let recipient = ObjectId(2);
+        let redirect = ObjectId(3);
+
+        // "The next 1 damage that would be dealt to target creature this turn is
+        // dealt to any target instead" (Jade Monolith): TWO slots whose filters
+        // DIFFER, so the position alone decides which requirement applies.
+        let two_role = ResolvedAbility::new(
+            redirection(None, Some(creature.clone()), Some(TargetFilter::Any)),
+            vec![TargetRef::Object(recipient), TargetRef::Object(redirect)],
+            source,
+            PlayerId(0),
+        );
+        assert_eq!(
+            declared_slot_announcement_filter(&two_role, 0),
+            Some(creature.clone()),
+            "slot 0 is the ORIGINAL RECIPIENT: its own 'target creature' requirement, not the \
+             redirect recipient's 'any target'"
+        );
+        assert_eq!(
+            declared_slot_announcement_filter(&two_role, 1),
+            Some(damage_domain.clone()),
+            "slot 1 is the REDIRECT RECIPIENT: 'any target' names the CR 115.4 domain"
+        );
+
+        // A DECLARED SOURCE leads a three-slot declaration and keeps its own CR
+        // 609.7a domain: `Any` there names any source, never the damage "any
+        // target" domain, so it must not be narrowed.
+        let three_role = ResolvedAbility::new(
+            redirection(
+                Some(TargetFilter::And {
+                    filters: vec![
+                        TargetFilter::ParentTargetSlot { index: 0 },
+                        TargetFilter::Any,
+                    ],
+                }),
+                Some(TargetFilter::Any),
+                Some(creature.clone()),
+            ),
+            vec![
+                TargetRef::Object(source),
+                TargetRef::Object(recipient),
+                TargetRef::Object(redirect),
+            ],
+            source,
+            PlayerId(0),
+        );
+        assert_eq!(
+            declared_slot_announcement_filter(&three_role, 0),
+            Some(TargetFilter::Any),
+            "slot 0 is the DECLARED SOURCE: 'any source' is not a damage recipient and keeps \
+             its own domain"
+        );
+        assert_eq!(
+            declared_slot_announcement_filter(&three_role, 1),
+            Some(damage_domain.clone()),
+            "slot 1 is the ORIGINAL RECIPIENT: its 'any target' names the damage domain"
+        );
+        assert_eq!(
+            declared_slot_announcement_filter(&three_role, 2),
+            Some(creature),
+            "slot 2 is the REDIRECT RECIPIENT: its own typed requirement"
+        );
+
+        // A DECLINED optional slot compacts `targets`, leaving the vector unable
+        // to say which role survived. The recovery claims nothing rather than
+        // guessing a role — the generic extraction answers `None` for this
+        // effect, so the slot stays unchecked instead of checked against the
+        // wrong requirement.
+        let compacted = ResolvedAbility::new(
+            redirection(
+                None,
+                Some(TargetFilter::Typed(TypedFilter::creature())),
+                Some(TargetFilter::Any),
+            ),
+            vec![TargetRef::Object(recipient)],
+            source,
+            PlayerId(0),
+        );
+        assert_eq!(
+            declared_slot_announcement_filter(&compacted, 0),
+            None,
+            "a compacted declaration is not positionally attributable"
         );
     }
 
