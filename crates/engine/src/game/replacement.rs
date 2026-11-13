@@ -1176,7 +1176,8 @@ pub(crate) fn pending_candidates_are_current(
 /// The prompt knows its stored candidates and, when it asks about the one
 /// optional candidate its chooser picked from an ordering, the candidates
 /// passed over (`PendingReplacement::ordering_peers`), which are offered again
-/// after that candidate's own choice.
+/// after that candidate's own choice. Only an optional prompt carries them, so
+/// a record cannot hide an effect from an ordering by listing it there.
 ///
 /// Read only for a prompt parked at the choice itself, where the stored
 /// candidates are what [`pipeline_loop`] discovered for the stored event. A
@@ -1196,7 +1197,10 @@ fn leaves_out_an_applicable_replacement(state: &GameState, pending: &PendingRepl
     let applicable = find_applicable_replacements(state, &pending.proposed, replacement_registry());
     choosable_replacement_candidates(state, &pending.proposed, applicable)
         .iter()
-        .any(|rid| !pending.candidates.contains(rid) && !pending.ordering_peers.contains(rid))
+        .any(|rid| {
+            !pending.candidates.contains(rid)
+                && !(pending.is_optional && pending.ordering_peers.contains(rid))
+        })
 }
 
 /// CR 616.1 + CR 614.17c + CR 800.4a: whether a parked replacement prompt no

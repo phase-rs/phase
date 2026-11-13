@@ -2363,9 +2363,10 @@ pub(crate) fn awaits_payment_continuation(state: &GameState) -> bool {
 /// A mana ability is activated with priority or when a rule or effect asks for
 /// a mana payment; the payer of a draw cost has neither while the ability
 /// resolves (CR 117.1d). The one mana-window authority of an unless payment:
-/// the tap preflight, each mana handler and the legal-action lists
-/// (`ai_support::mana_action_player`) read it. Every other unless cost keeps
-/// the window it had.
+/// the tap preflight, the tap and activation handlers and the legal-action
+/// lists (`ai_support::mana_action_player`) read it. Every other unless cost
+/// keeps the window it had. Taking back an earlier tap (`UntapLandForMana`)
+/// activates nothing and is admitted at every unless payment, as before.
 pub(crate) fn unless_prompt_asks_for_no_mana(state: &GameState) -> bool {
     matches!(
         &state.waiting_for,
@@ -2802,7 +2803,6 @@ pub(super) fn handle_unless_payment_untap_land_for_mana(
     object_id: ObjectId,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
-    refuse_mana_at_draw_only_payment(state)?;
     let WaitingFor::UnlessPayment {
         player,
         cost,

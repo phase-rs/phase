@@ -32,6 +32,7 @@ use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
+use engine::types::proposed_event::ReplacementId;
 use engine::types::resolved_commands::{
     ResolvedLedgerEdit, ResolvedLedgerEditCommand, ResolvedRulesCommand,
 };
@@ -3045,10 +3046,11 @@ fn a_payer_departing_at_the_last_instructions_prompt_retires_the_payment() {
 /// P0's two upkeep draws into a draw by P1, which parks on P1's own Obstinate
 /// Familiar. P1 concedes: the interrupted substitute leaves with P1, and P0,
 /// who chose to pay and is still in the game, performs the instruction still
-/// owed before any player receives priority.
+/// owed before any player receives priority, and Psychosis Crawler sees that
+/// draw once.
 #[test]
 fn a_departing_substitute_chooser_leaves_the_surviving_payer_to_finish_the_payment() {
-    let (mut runner, vortex, ()) = three_player_vortex_board(1, |scenario| {
+    let (mut runner, vortex, crawler) = three_player_vortex_board(1, |scenario| {
         scenario.with_library_top(P1, &STAGED_LIBRARY[..6]);
         scenario.add_creature_from_oracle(P1, "Notion Thief", 3, 1, NOTION_THIEF_ORACLE);
         scenario.add_creature_from_oracle(
@@ -3058,6 +3060,12 @@ fn a_departing_substitute_chooser_leaves_the_surviving_payer_to_finish_the_payme
             1,
             OBSTINATE_FAMILIAR_ORACLE,
         );
+        let crawler = scenario
+            .add_creature(P0, "Psychosis Crawler", 1, 1)
+            .from_oracle_text(PSYCHOSIS_CRAWLER_ORACLE)
+            .id();
+        keep_psychosis_crawler_alive(scenario);
+        crawler
     });
     advance_through_upkeep(&mut runner);
     assert_draw_cost_prompt(&runner, 2, 1);
@@ -3101,6 +3109,11 @@ fn a_departing_substitute_chooser_leaves_the_surviving_payer_to_finish_the_payme
         upkeep_resolutions(&departure, vortex),
         1,
         "the upkeep is paid inside the same resolution"
+    );
+    assert_eq!(
+        queued_triggers_from(&runner, crawler),
+        1,
+        "CR 603.2c: the resumed draw's trigger is collected exactly once"
     );
     let state = runner.state();
     assert!(
@@ -3464,15 +3477,24 @@ fn a_departing_payer_leaves_another_players_substitute_draw_to_its_chooser() {
         .expect("the game goes on");
 }
 
-/// CR 616.1: an answer to an ordering prompt that leaves out an effect which
-/// now applies is not applied; the event is re-proposed first, also after a
-/// checked save and restore. Humility is removed by a sandbox action, which
-/// re-settles nothing (the public-action form is the concession above), so the
-/// two-Reflection prompt is still parked when P0 answers it: the answer
-/// re-proposes the draw, all three effects are offered, and Hullbreacher can
-/// be chosen first.
-#[test]
-fn an_answer_to_an_ordering_prompt_missing_an_applicable_replacement_reproposes_it() {
+/// The candidates of the parked replacement choice.
+fn offered_candidates(runner: &GameRunner) -> Vec<ReplacementId> {
+    runner
+        .state()
+        .pending_replacement
+        .as_ref()
+        .expect("a replacement choice is parked")
+        .candidates
+        .clone()
+}
+
+/// Three players: P0's one-draw Psychic Vortex upkeep is paid and parks on the
+/// order of P0's two Thought Reflections while P2's Humility mutes P1's
+/// Hullbreacher. A sandbox action then removes Humility, which re-settles
+/// nothing (the public-action form is a concession), so the two-Reflection
+/// prompt is still parked while Hullbreacher applies again. Returns the
+/// runner, Psychic Vortex, Hullbreacher and P0's zones before the payment.
+fn reflections_prompt_after_humility_is_removed() -> (GameRunner, ObjectId, ObjectId, ZoneSizes) {
     let (mut runner, vortex, (hullbreacher, humility)) = three_player_vortex_board(0, |scenario| {
         for _ in 0..2 {
             scenario.add_enchantment_from_oracle(
@@ -3502,20 +3524,24 @@ fn an_answer_to_an_ordering_prompt_missing_an_applicable_replacement_reproposes_
             object_id: humility,
         }))
         .expect("the sandbox removes Humility");
-    let offered = |runner: &GameRunner| {
-        runner
-            .state()
-            .pending_replacement
-            .as_ref()
-            .expect("a replacement choice is parked")
-            .candidates
-            .clone()
-    };
     assert_eq!(
-        offered(&runner).len(),
+        offered_candidates(&runner).len(),
         2,
         "reach guard: the sandbox action leaves the two-Reflection prompt parked"
     );
+    (runner, vortex, hullbreacher, before)
+}
+
+/// CR 616.1: an answer to an ordering prompt that leaves out an effect which
+/// now applies is not applied; the event is re-proposed first, also after a
+/// checked save and restore. P0 answers the two-Reflection prompt left parked
+/// by `reflections_prompt_after_humility_is_removed`: the answer re-proposes
+/// the draw, all three effects are offered, and Hullbreacher can be chosen
+/// first.
+#[test]
+fn an_answer_to_an_ordering_prompt_missing_an_applicable_replacement_reproposes_it() {
+    let (mut runner, vortex, hullbreacher, before) = reflections_prompt_after_humility_is_removed();
+    let offered = offered_candidates;
 
     let saved = serde_json::to_string(&PersistedGameState::Raw(Box::new(runner.state().clone())))
         .expect("the parked payment serializes");
@@ -3546,4 +3572,90 @@ fn an_answer_to_an_ordering_prompt_missing_an_applicable_replacement_reproposes_
     assert_eq!(treasures_of(&runner, P1), 1, "exactly one Treasure");
     assert_eq!(ZoneSizes::of(&runner, P0), before, "no card is drawn");
     assert!(upkeep_ability_resolved(&result.events, vortex));
+}
+
+/// CR 616.1: the candidates an optional prompt passed over
+/// (`PendingReplacement::ordering_peers`) are read only on that optional
+/// prompt. NOT a record the game produces: the same parked ordering prompt
+/// with Hullbreacher forged into its passed-over list. The record cannot hide
+/// Hullbreacher from the ordering: the answer still re-proposes the draw and
+/// offers all three effects.
+#[test]
+fn a_forged_passed_over_list_cannot_hide_a_replacement_from_an_ordering_prompt() {
+    let (mut runner, _, hullbreacher, before) = reflections_prompt_after_humility_is_removed();
+    runner
+        .state_mut()
+        .pending_replacement
+        .as_mut()
+        .expect("reach guard: the ordering prompt is parked")
+        .ordering_peers = (0..4)
+        .map(|index| ReplacementId {
+            source: hullbreacher,
+            index,
+        })
+        .collect();
+    runner
+        .act(GameAction::ChooseReplacement { index: 0 })
+        .expect("an answer to a prompt that changed is not refused");
+    assert_replacement_choice(&runner, "the draw is re-proposed, not replaced");
+    assert_eq!(ZoneSizes::of(&runner, P0), before, "no Reflection applied");
+    let candidates = offered_candidates(&runner);
+    assert_eq!(candidates.len(), 3, "every effect that applies is offered");
+    assert!(
+        candidates.iter().any(|rid| rid.source == hullbreacher),
+        "Hullbreacher is offered"
+    );
+}
+
+/// Mystic Remora, verbatim Oracle text.
+const MYSTIC_REMORA_ORACLE: &str = "Cumulative upkeep {1} (At the beginning of your upkeep, put \
+an age counter on this permanent, then sacrifice it unless you pay its upkeep cost for each age \
+counter on it.)\nWhenever an opponent casts a noncreature spell, you may draw a card unless that \
+player pays {4}.";
+
+/// CR 605.3a: the control for the draw-only refusal. Mystic Remora's upkeep
+/// asks for a mana payment, so its prompt keeps the mana window: the Island is
+/// offered and tapped at the prompt, and the mana it adds pays the upkeep.
+#[test]
+fn a_mana_upkeep_keeps_its_mana_window() {
+    let (mut runner, remora, island) = upkeep_board(
+        "Mystic Remora",
+        MYSTIC_REMORA_ORACLE,
+        0,
+        &STAGED_LIBRARY,
+        |scenario| scenario.add_basic_land(P0, ManaColor::Blue),
+    );
+    advance_through_upkeep(&mut runner);
+    assert!(
+        matches!(
+            &runner.state().waiting_for,
+            WaitingFor::UnlessPayment {
+                player: P0,
+                cost: AbilityCost::Mana { .. },
+                ..
+            }
+        ),
+        "reach guard: Mystic Remora's upkeep asks for mana: {:?}",
+        runner.state().waiting_for
+    );
+    let (flat, _, by_object) = engine::ai_support::legal_actions_full(runner.state());
+    assert!(
+        flat.iter()
+            .chain(by_object.values().flatten())
+            .any(|action| matches!(action, GameAction::TapLandForMana { .. })),
+        "the Island's mana ability is offered at a mana payment"
+    );
+    let selection =
+        engine::game::mana_sources::activatable_mana_source_selections(runner.state(), P0)
+            .into_iter()
+            .find(|selection| selection.source.object_id == island)
+            .expect("reach guard: the Island's mana ability is activatable");
+    runner
+        .act(GameAction::TapLandForMana { selection })
+        .expect("CR 605.3a: a mana ability may be activated when an effect asks for mana");
+    assert!(runner.state().objects[&island].tapped);
+    runner
+        .act(GameAction::PayUnlessCost { pay: true })
+        .expect("the tapped mana pays the upkeep");
+    assert_eq!(zone_of(&runner, remora), Zone::Battlefield);
 }

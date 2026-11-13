@@ -16793,7 +16793,8 @@ impl GameState {
             };
             if !crate::game::replacement::pending_candidates_are_current(&probe, pending) {
                 return Err(
-                    "recovery checkpoint replacement candidate no longer applies".to_string(),
+                    "recovery checkpoint replacement choice is not the one the game offers"
+                        .to_string(),
                 );
             }
             let chooser = crate::game::replacement::pending_replacement_chooser(&probe, pending);
@@ -30026,7 +30027,8 @@ pub struct PendingReplacement {
     /// made, so they are part of the choice this prompt belongs to: the prompt
     /// is stale only when an effect outside `candidates` and these applies
     /// (`replacement::pending_candidates_are_current`). Empty for every prompt
-    /// parked at the choice among candidates itself.
+    /// parked at the choice among candidates itself, and read only on an
+    /// optional prompt.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub ordering_peers: Vec<ReplacementId>,
     /// CR 616.1: SearchFound choices snapshot the selected source

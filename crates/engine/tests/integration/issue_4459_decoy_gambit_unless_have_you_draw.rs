@@ -110,7 +110,14 @@ fn cast_decoy_gambit_to_unless_prompt(
 /// P0 holds Decoy Gambit with mana to cast it, P1 controls the creature, and
 /// `setup` adds whatever the row needs before the board is built.
 fn decoy_board(setup: impl FnOnce(&mut GameScenario)) -> (GameRunner, ObjectId, ObjectId) {
-    let mut scenario = GameScenario::new();
+    decoy_board_on(GameScenario::new(), setup)
+}
+
+/// `decoy_board` on the given scenario (two players, or more).
+fn decoy_board_on(
+    mut scenario: GameScenario,
+    setup: impl FnOnce(&mut GameScenario),
+) -> (GameRunner, ObjectId, ObjectId) {
     scenario.at_phase(Phase::PreCombatMain);
     scenario.add_card_to_library_top(P0, "Library Top");
 
@@ -339,6 +346,86 @@ fn decoy_gambit_payment_paused_by_dredge_settles_paid() {
 
 /// SHAPE: the fixture's unless cost is the verbatim card's, so the runtime rows
 /// above exercise the cost the real card produces.
+/// CR 800.4a + CR 118.12: the payer is not the spell's controller here, and
+/// leaves while the caster's draw is parked on the caster's own Dredge choice.
+/// The payment belongs to Decoy Gambit's resolution, whose controller is still
+/// in the game, so it stays parked: the caster answers, the payment settles as
+/// paid, and the spell finishes resolving. A positive witness: the rule that
+/// retires a payment keys on the ability's controller, and this row passes
+/// with that rule reverted.
+#[test]
+fn decoy_gambit_payer_leaving_at_the_casters_dredge_choice_lets_the_spell_finish() {
+    let mut imp = None;
+    let (mut runner, gambit, creature) =
+        decoy_board_on(GameScenario::new_n_player(3, 42), |scenario| {
+            scenario.with_library_top(
+                P0,
+                &[
+                    "Library 1",
+                    "Library 2",
+                    "Library 3",
+                    "Library 4",
+                    "Library 5",
+                ],
+            );
+            imp = Some(
+                scenario
+                    .add_creature_to_graveyard(P0, "Stinkweed Imp", 1, 2)
+                    .from_oracle_text(STINKWEED_IMP_ORACLE)
+                    .id(),
+            );
+        });
+    let imp = imp.expect("Stinkweed Imp was staged");
+    cast_decoy_gambit_to_unless_prompt(&mut runner, gambit, creature);
+    runner
+        .act(GameAction::PayUnlessCost { pay: true })
+        .expect("paying is legal");
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::ReplacementChoice { player: P0, .. }
+        ),
+        "reach guard: Dredge pauses the caster's draw, got {:?}",
+        runner.state().waiting_for
+    );
+
+    engine::game::engine::apply(
+        runner.state_mut(),
+        P1,
+        GameAction::Concede { player_id: P1 },
+    )
+    .expect("a player can concede at any time");
+    assert!(runner.state().players[P1.0 as usize].is_eliminated);
+    assert!(
+        runner.state().pending_cost_move_resume.is_some(),
+        "the surviving controller's payment stays parked"
+    );
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::ReplacementChoice { player: P0, .. }
+        ),
+        "the caster's choice is still open: {:?}",
+        runner.state().waiting_for
+    );
+
+    runner
+        .act(GameAction::ChooseReplacement { index: 0 })
+        .expect("applying Dredge is legal");
+    assert_eq!(runner.state().objects[&imp].zone, Zone::Hand);
+    assert!(runner.state().pending_cost_move_resume.is_none());
+    assert_eq!(runner.state().objects[&gambit].zone, Zone::Graveyard);
+    assert!(runner.state().stack.is_empty(), "Decoy Gambit finished");
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { player: P0 }
+        ),
+        "the caster has priority again: {:?}",
+        runner.state().waiting_for
+    );
+}
+
 #[test]
 fn decoy_gambit_fixture_carries_the_real_unless_cost() {
     let types = ["Instant".to_string()];

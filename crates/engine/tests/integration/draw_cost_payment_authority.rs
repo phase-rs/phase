@@ -356,6 +356,9 @@ fn a_fresh_composite_draw_cost_is_refused_as_a_whole() {
 
 /// A three-player board for a staged draw cost: P0's draws are Dredge prompts (Stinkweed Imp), Maralen
 /// is under P1, and Humility, owned and controlled by P2, mutes her. Returns the runner and P0's source.
+/// Synthetic: the staged costs paid on it have draw legs, which no printed resolution-time composite
+/// cost has (the five printed ones are all `[Mana, PayLife]`); the nearest printed draw cost is
+/// Psychic Vortex's "Cumulative upkeep—Draw a card." (see `concession_board_with_hand`).
 fn concession_board() -> (GameRunner, engine::types::identifiers::ObjectId) {
     let mut scenario = GameScenario::new_n_player(3, 42);
     scenario.at_phase(Phase::PreCombatMain);
@@ -2187,6 +2190,7 @@ fn gain_hand_size() -> Effect {
 /// Humility; P3 has nothing. P0 is at `i32::MAX` life with `stack` on the
 /// stack and P0 and P1 auto-passing. P0 declines leg 1's Dredge and P3
 /// concedes, so leg 2's Dredge prompt is parked on a recovery checkpoint.
+/// Synthetic, as `concession_board`: no printed staged cost has a draw leg.
 fn second_concession_board(rider: Option<Effect>, stack: Vec<StackEntry>) -> GameRunner {
     let mut scenario = GameScenario::new_n_player(4, 42);
     scenario.at_phase(Phase::PreCombatMain);
@@ -2312,7 +2316,7 @@ fn a_second_concession_whose_rider_is_unrepresentable_retires_the_payment() {
 
 /// CR 616.1 + CR 702.52a: a saved Dredge choice whose stored
 /// candidate no longer applies is refused by the candidate check, like an
-/// empty candidate list; the valid save restores and its prompt is answered.
+/// empty candidate list; the valid save restores.
 #[test]
 fn checked_restore_refuses_a_stale_replacement_candidate() {
     let runner = recovered_dredge_checkpoint();
@@ -2334,7 +2338,7 @@ fn checked_restore_refuses_a_stale_replacement_candidate() {
         matches!(
             &refusal,
             Err(PersistedRestoreError::InvalidPaymentTransaction(reason))
-                if reason.contains("replacement candidate no longer applies")
+                if reason.contains("replacement choice is not the one the game offers")
         ),
         "a candidate whose definition is gone is not admitted: {refusal:?}"
     );
@@ -2590,6 +2594,8 @@ fn a_departure_that_removes_a_parked_candidate_keeps_a_restorable_checkpoint() {
 /// recovery checkpoint; P0 then declines Dredge, and leg 2 opens its own
 /// prompt on that checkpoint. P0 has a second creature and a second
 /// graveyard card, so tapping a creature or a graveyard exile asks which.
+/// Synthetic, as `concession_board`: no printed staged cost has a draw, tap
+/// or exile leg.
 fn recovered_second_leg_checkpoint(second: AbilityCost) -> GameRunner {
     let mut scenario = GameScenario::new_n_player(3, 42);
     scenario.at_phase(Phase::PreCombatMain);
@@ -2748,7 +2754,10 @@ fn checked_restore_refuses_a_used_floating_shield_candidate() {
         .candidates = vec![candidate];
     let refusal = checked_round_trip(&state);
     assert!(
-        refused_with(refusal.clone(), "replacement candidate no longer applies"),
+        refused_with(
+            refusal.clone(),
+            "replacement choice is not the one the game offers"
+        ),
         "{refusal:?}"
     );
 }
@@ -3030,9 +3039,9 @@ fn a_concession_that_removes_a_listed_creature_drops_the_checkpoint() {
 
 /// CR 800.4a + CR 118.3: the same departure when the lent creature was the only
 /// one listed. Re-materialized on the departed board, the cost can no longer be
-/// paid in full, and it fails whole, as the next answer's replay would find it
-/// on main: nothing of the payment is committed, no prompt remains, and the
-/// save restores.
+/// paid in full, and it fails whole, as a replay of the transcript on that
+/// board finds it: nothing of the payment is committed, no prompt remains, and
+/// the save restores.
 #[test]
 fn a_concession_that_removes_the_only_listed_creature_fails_the_payment_whole() {
     let (mut runner, _, _) = lent_creature_tap_prompt(false, false);
