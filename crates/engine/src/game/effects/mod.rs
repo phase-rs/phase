@@ -18009,6 +18009,10 @@ fn ability_refs_post_replacement_event_target(ability: &ResolvedAbility) -> bool
     effect_parent_ref_slots(&ability.effect)
         .iter()
         .any(|filter| filter_refs_post_replacement_event_target(filter))
+        // CR 608.2c: a zone move performed by the replaced event's player
+        // ("that player exiles … instead") needs that player too.
+        || zone_move_actor_filter(&ability.effect)
+            .is_some_and(filter_refs_post_replacement_event_target)
         || ability
             .child_links()
             .any(|(_, child)| ability_refs_post_replacement_event_target(child))
@@ -27027,11 +27031,17 @@ fn ability_definition_chain_refs_parent_target(definition: &AbilityDefinition) -
 /// even when the moved population does not, so a detached continuation (a
 /// delayed trigger) snapshots the parent targets for it.
 fn zone_move_actor_refs_parent_target(effect: &Effect) -> bool {
+    zone_move_actor_filter(effect).is_some_and(crate::types::ability::filter_refs_parent_target)
+}
+
+/// CR 608.2c: the player filter of a zone move's named performer, the slot
+/// dependency readers inspect beside the moved population.
+pub(crate) fn zone_move_actor_filter(effect: &Effect) -> Option<&TargetFilter> {
     match effect {
-        Effect::ChangeZone { actor, .. } | Effect::ChangeZoneAll { actor, .. } => actor
-            .player_filter()
-            .is_some_and(crate::types::ability::filter_refs_parent_target),
-        _ => false,
+        Effect::ChangeZone { actor, .. } | Effect::ChangeZoneAll { actor, .. } => {
+            actor.player_filter()
+        }
+        _ => None,
     }
 }
 
@@ -52486,6 +52496,48 @@ mod tests {
             }
         )));
         assert!(!ability_refs_parent_target(&mass(
+            LibraryInstructionActor::Controller
+        )));
+    }
+
+    /// CR 614.6 + CR 608.2c: a stashed continuation whose only reference to
+    /// the replaced event's player is its move's performer still needs that
+    /// player captured. Synthetic: printed Shared Fate also names the drawer in
+    /// its moved-object slot.
+    /// Revert-probe: drop the actor read from
+    /// `ability_refs_post_replacement_event_target` ⇒ the first row reads `false`.
+    #[test]
+    fn zone_move_actor_event_player_is_a_post_replacement_dependency() {
+        let exile = |actor| {
+            ResolvedAbility::new(
+                Effect::ChangeZone {
+                    actor,
+                    origin: None,
+                    destination: Zone::Exile,
+                    target: TargetFilter::SelfRef,
+                    owner_library: false,
+                    enter_transformed: false,
+                    enters_under: None,
+                    enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                    enters_attacking: false,
+                    up_to: false,
+                    enter_with_counters: vec![],
+                    conditional_enter_with_counters: vec![],
+                    face_down_profile: None,
+                    enters_modified_if: None,
+                    library_shuffle: Default::default(),
+                },
+                vec![],
+                ObjectId(900),
+                PlayerId(0),
+            )
+        };
+        assert!(ability_refs_post_replacement_event_target(&exile(
+            LibraryInstructionActor::Player {
+                player: TargetFilter::PostReplacementDamageTarget,
+            }
+        )));
+        assert!(!ability_refs_post_replacement_event_target(&exile(
             LibraryInstructionActor::Controller
         )));
     }
