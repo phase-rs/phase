@@ -46803,6 +46803,17 @@ pub mod tests {
 
     /// "Remove a charge counter from each other artifact with `threshold` or
     /// more charge counters on it" (a mass removal, `EffectScope::All`).
+    ///
+    /// Synthetic witness: no printed card combines a mass counter removal with a
+    /// population threshold that reads the SOURCE's own counters, so the
+    /// source-relative threshold tests below cannot be built from a real card.
+    /// The closest printed analogues each cover one half of the shape:
+    /// Heartmender ("At the beginning of your upkeep, remove a -1/-1 counter from
+    /// each creature you control.") is the mass removal, and Corrosion ("destroy
+    /// each artifact with mana value less than or equal to the number of rust
+    /// counters on it") is a quantity-qualified population. These tests keep both
+    /// halves so the profile's threshold read is exercised on the exact shape a
+    /// future printing would take.
     fn other_artifact_charge_removal(threshold: QuantityExpr) -> ResolvedAbility {
         other_artifact_charge_removal_matching(FilterProp::Counters {
             counters: crate::types::counter::CounterMatch::OfType(charge_counter()),
@@ -46888,7 +46899,7 @@ pub mod tests {
     fn same_event_mass_counter_removal_with_source_relative_threshold_prompts() {
         let (state, group) =
             mass_charge_removal_group(|| other_artifact_charge_removal(source_charge_count()));
-        // Premise: the two orders really diverge, exactly as the card text reads.
+        // Premise: the two orders really diverge (A=2, B=1 as set up above).
         assert_eq!(resolve_in_order(state.clone(), &group, [0, 1]), (1, 1));
         assert_eq!(resolve_in_order(state.clone(), &group, [1, 0]), (1, 0));
         let mut state = state;
