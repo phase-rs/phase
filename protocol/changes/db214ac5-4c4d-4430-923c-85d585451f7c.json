@@ -3,5 +3,5 @@
     "full",
     "wire"
   ],
-  "reason": "Make proposed zone-change library placement authoritative across replacement resume, and link a merged permanent's parked component-delivery batch to the batch or ChangeZone owner that announced its departure"
+  "reason": "Make proposed zone-change library placement authoritative across replacement resume, link a merged permanent's parked component-delivery batch to the batch or ChangeZone owner that announced its departure, and latch on that owner who controlled each permanent before its event so a retained departure collected after a player leaves reads its observers' controllers as they were"
 }
