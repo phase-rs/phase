@@ -717,10 +717,11 @@ pub(crate) fn available_mana_after_spell(ctx: &PolicyContext<'_>) -> u32 {
         // sources count only if they have a mana ability and — for creatures —
         // aren't summoning-sick (CR 302.6).
         let is_pure_land = obj.card_types.core_types.contains(&CoreType::Land) && !is_creature;
+        // CR 701.10f: a pool doubling is a mana ability but adds no mana by itself.
         let is_usable_dork = obj
             .abilities
             .iter()
-            .any(engine::game::mana_abilities::is_mana_ability)
+            .any(engine::game::mana_abilities::is_mana_source_ability)
             && !(is_creature && engine::game::combat::has_summoning_sickness(obj));
         if is_pure_land || is_usable_dork {
             sources += 1;

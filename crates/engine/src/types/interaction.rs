@@ -543,6 +543,7 @@ pub enum InteractionActionCode {
     TurnFaceUp,
     SubmitSideboard,
     ChoosePlayDraw,
+    ChooseStartingPlayer,
     ChooseOption,
     SubmitVoteCandidate,
     SubmitSpellbookDraft,

@@ -1,5 +1,6 @@
 /**
- * GameSetupPage — the edited starting life must reach the started game.
+ * GameSetupPage — the edited config (starting life, commander damage) must
+ * reach the started game.
  *
  * The game URL carries the format NAME only, so `GamePage` re-derives the
  * config from `FORMAT_DEFAULTS` unless the setup page hands the edited
@@ -76,9 +77,9 @@ function GameRouteProbe() {
   );
 }
 
-function renderSetup() {
+function renderSetup(path = "/game-setup") {
   return render(
-    <MemoryRouter initialEntries={["/game-setup"]}>
+    <MemoryRouter initialEntries={[path]}>
       <Routes>
         <Route path="/game-setup" element={<GameSetupPage />} />
         <Route path="/game/:id" element={<GameRouteProbe />} />
@@ -129,5 +130,112 @@ describe("GameSetupPage — starting life", () => {
     expect(meta.formatConfig.starting_life).toBe(
       FORMAT_DEFAULTS.Commander.starting_life,
     );
+  });
+});
+
+describe("GameSetupPage — commander damage", () => {
+  it("hands an edited commander damage threshold to the game it starts", async () => {
+    const user = userEvent.setup();
+    renderSetup();
+
+    const damageInput = await screen.findByLabelText("Commander Damage");
+    await user.clear(damageInput);
+    await user.type(damageInput, "30");
+
+    await user.click(screen.getByRole("button", { name: /Start Match/i }));
+
+    const navState = JSON.parse(screen.getByTestId("nav-state").textContent!);
+    expect(navState.formatConfig.commander_damage_threshold).toBe(30);
+
+    const meta = JSON.parse(localStorage.getItem(ACTIVE_GAME_KEY)!);
+    expect(meta.formatConfig.commander_damage_threshold).toBe(30);
+  });
+
+  it("keeps the last valid commander damage threshold when the field is left empty", async () => {
+    const user = userEvent.setup();
+    renderSetup();
+
+    expect(await screen.findByLabelText("Starting Life")).toBeInTheDocument();
+    const damageInput = screen.getByLabelText("Commander Damage");
+    await user.clear(damageInput);
+
+    await user.click(screen.getByRole("button", { name: /Start Match/i }));
+
+    const meta = JSON.parse(localStorage.getItem(ACTIVE_GAME_KEY)!);
+    expect(meta.formatConfig.commander_damage_threshold).toBe(
+      FORMAT_DEFAULTS.Commander.commander_damage_threshold,
+    );
+  });
+
+  it("offers no commander damage editor in a format without commander damage", async () => {
+    renderSetup("/game-setup?format=Standard");
+
+    expect(await screen.findByLabelText("Starting Life")).toBeInTheDocument();
+    expect(screen.queryByLabelText("Commander Damage")).not.toBeInTheDocument();
+  });
+});
+
+describe("GameSetupPage — poison counters", () => {
+  it("hands an edited poison-counter threshold to the game it starts", async () => {
+    const user = userEvent.setup();
+    renderSetup();
+
+    const poisonInput = await screen.findByLabelText("Poison Counters");
+    await user.clear(poisonInput);
+    await user.type(poisonInput, "15");
+
+    await user.click(screen.getByRole("button", { name: /Start Match/i }));
+
+    const navState = JSON.parse(screen.getByTestId("nav-state").textContent!);
+    expect(navState.formatConfig.poison_counter_threshold).toBe(15);
+
+    const meta = JSON.parse(localStorage.getItem(ACTIVE_GAME_KEY)!);
+    expect(meta.formatConfig.poison_counter_threshold).toBe(15);
+  });
+
+  it("keeps the last valid poison-counter threshold when the field is left empty", async () => {
+    const user = userEvent.setup();
+    renderSetup();
+
+    expect(await screen.findByLabelText("Starting Life")).toBeInTheDocument();
+    const poisonInput = screen.getByLabelText("Poison Counters");
+    await user.clear(poisonInput);
+
+    await user.click(screen.getByRole("button", { name: /Start Match/i }));
+
+    const meta = JSON.parse(localStorage.getItem(ACTIVE_GAME_KEY)!);
+    expect(meta.formatConfig.poison_counter_threshold).toBe(10);
+  });
+
+  // The engine field is a `u8`: 255 is the largest threshold it can hold.
+  it("hands a poison-counter threshold of 255 to the game it starts", async () => {
+    const user = userEvent.setup();
+    renderSetup();
+
+    const poisonInput = await screen.findByLabelText("Poison Counters");
+    await user.clear(poisonInput);
+    await user.type(poisonInput, "255");
+
+    await user.click(screen.getByRole("button", { name: /Start Match/i }));
+
+    const meta = JSON.parse(localStorage.getItem(ACTIVE_GAME_KEY)!);
+    expect(meta.formatConfig.poison_counter_threshold).toBe(255);
+  });
+
+  it("does not commit a poison-counter threshold past the engine's u8 range", async () => {
+    const user = userEvent.setup();
+    renderSetup();
+
+    const poisonInput = await screen.findByLabelText("Poison Counters");
+    await user.clear(poisonInput);
+    await user.type(poisonInput, "256");
+
+    await user.click(screen.getByRole("button", { name: /Start Match/i }));
+
+    // Reach guard: 25 is the in-range reading committed by the keystroke
+    // before the final "6", so the edit reached the config and only 256 was
+    // refused (an untouched field would still read the default 10).
+    const meta = JSON.parse(localStorage.getItem(ACTIVE_GAME_KEY)!);
+    expect(meta.formatConfig.poison_counter_threshold).toBe(25);
   });
 });

@@ -87,6 +87,7 @@
     "sandboxTools": "沙盒工具",
     "sandboxToolsTitle": "沙盒工具 — 设置任意盘面状态（`）",
     "openSandboxTools": "打开沙盒工具",
+    "clickMode": "点击模式",
     "clickModeButton": "点击模式按钮",
     "shown": "显示",
     "hidden": "隐藏",
@@ -256,6 +257,10 @@
         "title": "高级调试面板",
         "body": "打开高级调试面板。大多数牌手应先用恢复工具。"
       },
+      "toggleClickMode": {
+        "title": "切换点击模式",
+        "body": "在可使用沙盒工具的对局中开启或关闭点击模式。开启时，点击一张牌会打开其调试菜单（区域、力量/防御力、指示物、关键词），而不是使用它。"
+      },
       "reportOrExportState": {
         "title": "报告或导出状态",
         "body": "如果卡牌行为异常，请导出当前游戏状态，以便精确复现盘面。"
@@ -298,16 +303,13 @@
     "skip": "点击跳过",
     "continue": "点击继续",
     "you": "你",
-    "youPlayFirst": "你先行",
-    "playerPlaysFirst": "{{name}} 先行",
+    "youWonRoll": "你赢得了掷骰",
+    "playerWonRoll": "{{name}} 赢得了掷骰",
     "heads": "正面",
     "tails": "反面",
     "coinFlip": "掷硬币",
     "wonCoinFlip": "{{name}} 掷赢了",
     "lostCoinFlip": "{{name}} 掷输了",
-    "turnOrder": "回合顺序",
-    "turnOrderItem": "第 {{turn}} 回合：{{name}}",
-    "youTakeTurn": "你在第 {{turn}} 回合行动",
     "ignoredDie": "已忽略"
   },
   "chrome": {

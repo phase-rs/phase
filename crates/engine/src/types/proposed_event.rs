@@ -451,6 +451,14 @@ pub enum ProposedEvent {
         /// Each entry is (counter_type, count). Set by ETB-counter replacements.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         enter_with_counters: Vec<(CounterType, u32)>,
+        /// CR 614.1c + CR 611.2a: "and with …" entry grants folded from the
+        /// applied replacements' execute chains, in application (CR 616.1)
+        /// order. They ride the event — like counters — so every applicable
+        /// same-entry rider survives, and delivery installs them on the new
+        /// object after CR 400.7's reset, exactly as the post-entry drain
+        /// would have for a single rider.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        enter_with_grants: Vec<EnterWithGrant>,
         /// Override the controller on ETB. Used by Earthbending return ("under your control")
         /// and other "enters the battlefield under [player]'s control" effects.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -901,6 +909,19 @@ impl EntryChoices {
     }
 }
 
+/// CR 614.1c + CR 611.2a: one "and with …" entry grant riding a battlefield
+/// entry (`ZoneChange::enter_with_grants`). The grant is a single stripped
+/// chain link — a `GenericEffect` carrying only `static_abilities` with
+/// `Duration::UntilHostLeavesPlay` for `SelfRef`, no `sub_ability` or
+/// `else_ability` — plus the granting replacement's controller (CR 109.5),
+/// so delivery installs exactly what the post-entry drain would have, for
+/// every applicable same-entry replacement instead of just the first.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EnterWithGrant {
+    pub grant: crate::types::ability::AbilityDefinition,
+    pub controller: PlayerId,
+}
+
 impl ProposedEvent {
     /// Construct a `ZoneChange` with default `enter_tapped: Unspecified` and empty `applied` set.
     pub fn zone_change(object_id: ObjectId, from: Zone, to: Zone, cause: Option<ObjectId>) -> Self {
@@ -913,6 +934,7 @@ impl ProposedEvent {
             enter_tapped: EtbTapState::Unspecified,
             enters_attacking: false,
             enter_with_counters: Vec::new(),
+            enter_with_grants: Vec::new(),
             controller_override: None,
             enter_transformed: false,
             face_down_profile: None,
