@@ -20,6 +20,7 @@ const FORMAT: FormatConfig = {
   singleton: false,
   command_zone: false,
   commander_damage_threshold: null,
+  poison_counter_threshold: 10,
   range_of_influence: null,
   team_based: false,
   sideboard_policy: { type: "Forbidden" },
