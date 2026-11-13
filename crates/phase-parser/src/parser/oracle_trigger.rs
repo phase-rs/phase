@@ -2222,22 +2222,40 @@ pub(crate) fn parse_trigger_line_with_index_ir(
                 }
                 let (stripped_text, disposition) =
                     extract_illegal_targets_disposition(&effect_for_parse);
+                // CR 118.12: a hoisted unless-payment with a targeted payer is
+                // stamped back on the root and announced before the body's
+                // own target, so the body is no proven single-role root.
+                let body_root = if unless_pay.as_ref().is_some_and(|modifier| {
+                    crate::types::ability::payer_is_declared_target(&modifier.payer)
+                }) {
+                    ResolvedChainRoot::Unproven
+                } else {
+                    ResolvedChainRoot::Proven
+                };
                 let (chain_text, ir) = match disposition {
                     IllegalTargetsDisposition::DoesNotResolve => {
-                        let ir = parse_trigger_body_chain_ir(&stripped_text, &mut effect_ctx);
+                        let ir =
+                            parse_trigger_body_chain_ir(&stripped_text, &mut effect_ctx, body_root);
                         (stripped_text, ir)
                     }
                     IllegalTargetsDisposition::StillResolves => {
                         // Parse the stripped chain on a clone: it is committed only if kept.
                         let mut stripped_ctx = effect_ctx.clone();
-                        let ir = parse_trigger_body_chain_ir(&stripped_text, &mut stripped_ctx);
+                        let ir = parse_trigger_body_chain_ir(
+                            &stripped_text,
+                            &mut stripped_ctx,
+                            body_root,
+                        );
                         if chain_creates_reflexive_ability(&lower_effect_chain_ir(&ir)) {
                             // CR 603.12 + CR 608.2b: a reflexive node is a separate ability
                             // with its own targets; the root stamp would not govern it. Fail
                             // closed: re-parse the unstripped body so the sentence stays a
                             // strict failure and the disposition stays the default.
-                            let ir =
-                                parse_trigger_body_chain_ir(&effect_for_parse, &mut effect_ctx);
+                            let ir = parse_trigger_body_chain_ir(
+                                &effect_for_parse,
+                                &mut effect_ctx,
+                                body_root,
+                            );
                             (effect_for_parse.to_string(), ir)
                         } else {
                             effect_ctx = stripped_ctx;
@@ -2474,8 +2492,17 @@ pub(crate) fn reflexive_event_trigger(
 /// that ability's root node, handing the chain parse the resolved-root proof
 /// ([`ResolvedChainRoot`]). The proof is cleared afterwards even when the parse
 /// never reached a chain body, because `ctx` outlives this one parse.
-fn parse_trigger_body_chain_ir(text: &str, ctx: &mut ParseContext) -> EffectChainIr {
-    ctx.resolved_chain_root = ResolvedChainRoot::Proven;
+///
+/// `root` is `Unproven` when the trigger hoisted an unless-payment whose payer
+/// is a declared target (CR 118.12): lowering stamps that payer back on the
+/// root, where it is announced before the body's own target, so the body's
+/// single-role proof would not hold.
+fn parse_trigger_body_chain_ir(
+    text: &str,
+    ctx: &mut ParseContext,
+    root: ResolvedChainRoot,
+) -> EffectChainIr {
+    ctx.resolved_chain_root = root;
     let ir = parse_effect_chain_ir_ability_root(text, AbilityKind::Spell, ctx);
     ctx.resolved_chain_root = ResolvedChainRoot::Unproven;
     ir

@@ -12859,6 +12859,42 @@ mod tests {
         }
     }
 
+    /// CR 118.12 + CR 608.2c: a trigger-level unless-payment with a targeted
+    /// payer is hoisted before the body is parsed and stamped back on the
+    /// root, where the payer is announced before the body's own target; a
+    /// bound gate would read the payer. The body is therefore no proven root
+    /// and the suffix is not bound. Synthetic text: Athreos, God of Passage's
+    /// printed "unless target opponent pays 3 life" on a Skulking
+    /// Killer-style instruction. The reach guard parses the same trigger
+    /// without the payment and asserts it binds.
+    #[test]
+    fn target_controller_suffix_with_a_hoisted_targeted_payer_is_not_bound() {
+        let body = "When this creature enters, destroy target artifact if its controller \
+                    controls no creatures";
+        let execute = |text: &str| {
+            let parsed = parse_oracle_text(text, "Synthetic", &[], &["Creature".to_owned()], &[]);
+            let [trigger] = parsed.triggers.as_slice() else {
+                panic!("{text}: expected one trigger: {parsed:?}");
+            };
+            (
+                trigger.unless_pay.clone(),
+                trigger.execute.as_deref().cloned().expect("trigger body"),
+            )
+        };
+        let (payer, plain) = execute(&format!("{body}."));
+        assert!(payer.is_none());
+        assert!(plain.condition.is_some(), "reach guard: it binds unpaid");
+
+        let (payer, gated) = execute(&format!("{body} unless target opponent pays 3 life."));
+        assert!(
+            payer.is_some_and(|modifier| payer_is_declared_target(&modifier.payer)),
+            "reach guard: the trigger hoisted a targeted payer"
+        );
+        for def in std::iter::once(&gated).chain(sub_chain(&gated)) {
+            assert_eq!(def.condition, None, "{:?}", def.effect);
+        }
+    }
+
     /// CR 608.2c: the assembled-chain check is total. If the first clause no
     /// longer carries the gate it was asked to vouch for (a later composition
     /// re-homed it, here under an `And`), the check cannot prove the gate is
