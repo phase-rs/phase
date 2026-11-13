@@ -3595,6 +3595,121 @@ fn a_departing_substitute_chooser_leaves_the_payers_own_draw_sequence_running() 
         .expect("the game goes on");
 }
 
+/// CR 121.2 + CR 121.6b + CR 800.4a: the Thought Reflection board of
+/// `a_departing_substitute_chooser_leaves_the_payers_own_draw_sequence_running`
+/// with Abundance in place of Obstinate Familiar, so the leaver's open
+/// question is a later choice of their substitute, not their draw. P1 accepts
+/// Abundance for the draw Notion Thief gave them and concedes at its
+/// land-or-nonland choice. Only P1's part of the draw is abandoned: P0's
+/// second draw of the two-card sequence is still drawn, and only then is the
+/// upkeep complete. The departed board passes a checked save and restore.
+#[test]
+fn a_departing_substitute_chooser_at_a_later_choice_leaves_the_payers_sequence_running() {
+    let (mut runner, vortex, reflection) = three_player_vortex_board(0, |scenario| {
+        scenario.with_library_top(P1, &STAGED_LIBRARY[..6]);
+        scenario.add_creature_from_oracle(P1, "Notion Thief", 3, 1, NOTION_THIEF_ORACLE);
+        scenario.add_enchantment_from_oracle(P1, "Abundance", ABUNDANCE_ORACLE);
+        scenario
+            .add_enchantment_from_oracle(P0, "Thought Reflection", THOUGHT_REFLECTION_ORACLE)
+            .id()
+    });
+    advance_through_upkeep(&mut runner);
+    assert_draw_cost_prompt(&runner, 1, 1);
+    let before = ZoneSizes::of(&runner, P0);
+    runner
+        .act(GameAction::PayUnlessCost { pay: true })
+        .expect("choosing the draw cost is legal");
+    assert_replacement_choice(&runner, "P0 orders Thought Reflection and Notion Thief");
+    let index = offered_candidates(&runner)
+        .iter()
+        .position(|rid| rid.source == reflection)
+        .expect("Thought Reflection is offered");
+    runner
+        .act(GameAction::ChooseReplacement { index })
+        .expect("choosing Thought Reflection first is legal");
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::ReplacementChoice { player: P1, .. }
+        ),
+        "reach guard: the first of P0's two draws became P1's, offered Abundance: {:?}",
+        runner.state().waiting_for
+    );
+    engine::game::engine::apply(
+        runner.state_mut(),
+        P1,
+        GameAction::ChooseReplacement {
+            index: APPLY_REPLACEMENT,
+        },
+    )
+    .expect("P1 accepts Abundance");
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::NamedChoice { player: P1, .. }
+        ),
+        "reach guard: Abundance asks P1 for land or nonland: {:?}",
+        runner.state().waiting_for
+    );
+    assert_eq!(
+        parked_unpaid_suffix(&runner),
+        None,
+        "reach guard: the only instruction is the one in flight"
+    );
+    assert_eq!(
+        ZoneSizes::of(&runner, P0),
+        before,
+        "reach guard: P0 drew nothing yet"
+    );
+
+    let departure = concede_with_events(&mut runner, P1);
+    let drawn_by_p0 = event_index(
+        &departure,
+        |event| matches!(event, GameEvent::CardDrawn { player_id, .. } if *player_id == P0),
+    )
+    .expect("P0's second draw of the sequence is performed");
+    let resolved = event_index(&departure, |event| {
+        matches!(
+            event,
+            GameEvent::EffectResolved {
+                kind: EffectKind::Sacrifice,
+                source_id,
+                ..
+            } if *source_id == vortex
+        )
+    })
+    .expect("the upkeep is paid");
+    assert!(
+        drawn_by_p0 < resolved,
+        "the remaining draw comes before the upkeep completes"
+    );
+    assert_eq!(
+        departure
+            .iter()
+            .filter(|event| matches!(event, GameEvent::CardDrawn { .. }))
+            .count(),
+        1,
+        "exactly one card is drawn, by P0"
+    );
+    assert_eq!(ZoneSizes::of(&runner, P0).hand, before.hand + 1);
+    assert_eq!(upkeep_resolutions(&departure, vortex), 1);
+    let state = runner.state();
+    assert!(state.pending_cost_move_resume.is_none(), "nothing is owed");
+    assert!(
+        matches!(state.waiting_for, WaitingFor::Priority { player: P0 }),
+        "priority only once the payment is over: {:?}",
+        state.waiting_for
+    );
+    let saved = serde_json::to_string(&PersistedGameState::Raw(Box::new(state.clone())))
+        .expect("the departed board serializes");
+    let mut restored = serde_json::from_str::<PersistedGameState>(&saved)
+        .expect("the save decodes")
+        .into_game_state()
+        .expect("nothing of the abandoned substitute is left behind");
+    engine::game::engine::apply(&mut restored, P0, GameAction::PassPriority)
+        .expect("the game goes on");
+}
+
 /// CR 800.4a + CR 614.17c: the departed chooser's parked draw is settled as a
 /// draw that can't happen even when every effect offered for it belongs to a
 /// player still in the game. P1's Notion Thief turns the first of P0's two

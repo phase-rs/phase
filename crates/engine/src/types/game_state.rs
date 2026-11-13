@@ -17291,6 +17291,17 @@ impl PersistedGameState {
         // one (it is lowered to the activator at creation), so this only sanitizes
         // corrupt/forged snapshots and closes the fail-open path in both consumers.
         state.drop_unresolved_source_controller_restrictions();
+        // The recovery checkpoint becomes the game when its payment settles,
+        // so it is sanitized the same way.
+        if let Some(checkpoint) = state
+            .payment_transaction
+            .as_deref_mut()
+            .and_then(|transaction| transaction.recovered.as_deref_mut())
+        {
+            checkpoint
+                .state
+                .drop_unresolved_source_controller_restrictions();
+        }
         // Issue #5466: `rng` is `#[serde(skip)]`, so a decode leaves the LIVE ChaCha20 stream at
         // word 0 while the serialized high-water `rng_word_pos` keeps its saved offset. A
         // `capture_rng_word_pos` on that state — the production library shuffle performs one, see
@@ -29548,6 +29559,17 @@ impl PostReplacementDrainStack {
         self.drains.clear();
     }
 
+    /// CR 800.4a: abandon the continuations whose controller is leaving the
+    /// game, keeping the others in order
+    /// (`GameState::abandon_active_replacement_tails_of`).
+    pub(crate) fn abandon_drains_of(&mut self, leaving: &HashSet<PlayerId>) {
+        self.drains.retain(|drain| {
+            !drain
+                .controller
+                .is_some_and(|controller| leaving.contains(&controller))
+        });
+    }
+
     /// This frame's identity, or `None` if it has never been dispatched.
     ///
     /// "Unstamped" is carried by the type, not by a reserved value: a legacy
@@ -29945,6 +29967,14 @@ impl DrawSequenceStack {
     /// it, or a stale resume would drive the wrong instruction.
     pub fn abandon_all(&mut self) {
         self.frames.clear();
+    }
+
+    /// CR 800.4a + CR 121.6b: abandon the in-flight instructions of players
+    /// leaving the game, keeping every other player's instruction and its
+    /// order, so a surviving sequence still resumes. The allocator does not
+    /// rewind, as in [`Self::abandon_all`].
+    pub(crate) fn abandon_sequences_of(&mut self, leaving: &HashSet<PlayerId>) {
+        self.frames.retain(|frame| !leaving.contains(&frame.player));
     }
 
     /// CR 104.4b: loop-equality projection — compares game *position*, not history.
@@ -32466,6 +32496,68 @@ impl GameState {
             {
                 drains.abandon_all();
             }
+        }
+    }
+
+    /// CR 800.4a + CR 121.6b: [`Self::abandon_active_replacement_tails`] for a
+    /// departure inside work that is not the leaver's own: a substitute for one
+    /// of a surviving player's draws (Notion Thief makes the draw the leaver's,
+    /// who was then asked something by Abundance). Only the leaver's part goes:
+    /// their draw instructions, the continuations they control, and the
+    /// continuation their open choice deferred beneath those. A surviving
+    /// player's instruction in the same draw authority (the second card of
+    /// Thought Reflection's "draw two cards instead") stays in place and
+    /// resumes.
+    ///
+    /// It reads the same two shapes the blunt form does, the active
+    /// post-replacement frame and its one direct child, and never searches
+    /// deeper.
+    pub fn abandon_active_replacement_tails_of(&mut self, leaving: &HashSet<PlayerId>) {
+        let child = match self.resolution_stack.take_active_post_replacement_child() {
+            Some(super::resolution::ResolutionFrame::MultiDraw(frame)) => Some(frame),
+            Some(_) => None,
+            None if self.active_multi_draw_frame().is_some() => self
+                .resolution_stack
+                .take_active_multi_draw()
+                .expect("an active multi-draw frame must be consumable"),
+            None => {
+                if self.active_connive_reentry().is_some() {
+                    let _ = self.take_active_connive_reentry();
+                }
+                None
+            }
+        };
+        let surviving_draws = child.and_then(|mut frame| {
+            self.resolution_stack
+                .observe_draw_sequence_frame_id(frame.draw_sequences.next_frame_id());
+            frame.draw_sequences.abandon_sequences_of(leaving);
+            (!frame.draw_sequences.is_empty()).then_some(frame)
+        });
+        let surviving_drains = if matches!(
+            self.resolution_stack.last(),
+            Some(super::resolution::ResolutionFrame::PostReplacement(_))
+        ) {
+            self.resolution_stack
+                .take_active_post_replacement()
+                .expect("the active post-replacement frame must be consumable")
+                .and_then(|mut drains| {
+                    drains.abandon_drains_of(leaving);
+                    (!drains.is_empty()).then_some(drains)
+                })
+        } else {
+            None
+        };
+        if self
+            .active_ability_continuation()
+            .is_some_and(|pending| leaving.contains(&pending.chain.controller))
+        {
+            let _ = self.clear_active_ability_continuation();
+        }
+        if let Some(drains) = surviving_drains {
+            self.resolution_stack.push_post_replacement(drains);
+        }
+        if let Some(frame) = surviving_draws {
+            self.resolution_stack.push_multi_draw(frame);
         }
     }
 

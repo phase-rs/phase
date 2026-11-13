@@ -2344,6 +2344,85 @@ fn checked_restore_refuses_a_stale_replacement_candidate() {
     );
 }
 
+/// CR 109.5 + CR 611.2a: a restriction still carrying the raw
+/// `SourceController` placeholder is dropped from a recovery checkpoint at
+/// restore, as it is from the saved game around it, in both save forms. NOT a
+/// state the game produces: the placeholder is forged into the valid Dredge
+/// checkpoint. After restore the checkpoint no longer holds it, the payment is
+/// answered to the end, and the settled game holds none either.
+#[test]
+fn checked_restore_drops_an_unbindable_restriction_inside_a_checkpoint() {
+    use engine::types::ability::{
+        GameRestriction, ProhibitedActivity, RestrictionExpiry, RestrictionPlayerScope,
+    };
+    let placeholder = |restriction: &GameRestriction| {
+        matches!(
+            restriction,
+            GameRestriction::ProhibitActivity {
+                affected_players: RestrictionPlayerScope::SourceController,
+                ..
+            }
+        )
+    };
+    let runner = recovered_dredge_checkpoint();
+    let mut state = runner.state().clone();
+    let source = state
+        .payment_transaction
+        .as_ref()
+        .expect("reach guard: the payment is staged")
+        .root
+        .source_id;
+    state
+        .payment_transaction
+        .as_mut()
+        .and_then(|transaction| transaction.recovered.as_mut())
+        .expect("the departure parked a recovery checkpoint")
+        .state
+        .restrictions
+        .push(GameRestriction::ProhibitActivity {
+            source,
+            affected_players: RestrictionPlayerScope::SourceController,
+            expiry: RestrictionExpiry::EndOfTurn,
+            activity: ProhibitedActivity::CastSpells { spell_filter: None },
+        });
+    let raw = serde_json::to_string(&PersistedGameState::Raw(Box::new(state.clone())))
+        .expect("the raw save serializes");
+    let trusted = serde_json::to_string(&PersistedGameState::capture(state))
+        .expect("the trusted save serializes");
+    for (form, saved) in [("raw", raw), ("trusted", trusted)] {
+        let mut restored = serde_json::from_str::<PersistedGameState>(&saved)
+            .unwrap_or_else(|error| panic!("the {form} save decodes: {error}"))
+            .into_game_state()
+            .unwrap_or_else(|error| panic!("the {form} save restores: {error:?}"));
+        let nested = &restored
+            .payment_transaction
+            .as_ref()
+            .and_then(|transaction| transaction.recovered.as_ref())
+            .unwrap_or_else(|| panic!("the {form} save keeps its checkpoint"))
+            .state;
+        assert!(
+            !nested.restrictions.iter().any(placeholder),
+            "{form}: the checkpoint no longer holds the placeholder"
+        );
+        while is_dredge_prompt_for_p0(&restored) {
+            apply(
+                &mut restored,
+                P0,
+                GameAction::ChooseReplacement { index: 1 },
+            )
+            .unwrap_or_else(|error| panic!("{form}: declining Dredge: {error:?}"));
+        }
+        assert!(
+            restored.payment_transaction.is_none(),
+            "{form}: the payment settled"
+        );
+        assert!(
+            !restored.restrictions.iter().any(placeholder),
+            "{form}: the settled game holds no placeholder"
+        );
+    }
+}
+
 /// A recovery checkpoint's state is read through the persistence ingress, as
 /// the saved game that carries it is. NOT a state the game produces: the valid
 /// Dredge checkpoint with its nested state marked as one player's view. A

@@ -1942,11 +1942,14 @@ fn resume_parked_counter_cost_root_at_action_boundary(
 ///   it with no card drawn and resumes the draw sequences above it (CR
 ///   121.6b), so the payer's own remaining draws and then the instructions
 ///   still owed are performed.
-/// - Its replacement choice was abandoned with a departed chooser (any other
-///   parked event of theirs): the payer, who chose to pay and is still in the
-///   game, performs what is still owed. No player receives priority before the
-///   payment ends (CR 117.2e); when the resolution it belongs to ends, the
-///   active player does (CR 117.3b).
+/// - Its open question was abandoned with a departed chooser (any other
+///   parked event of theirs, or a later choice of an interactive substitute:
+///   Abundance's land-or-nonland). The departure removed only the leaver's
+///   part of the substitute (`replacement::abandon_departed_substitute_continuation`),
+///   so a surviving draw sequence is finished first (CR 121.6b), and then the
+///   payer, who chose to pay and is still in the game, performs what is still
+///   owed. No player receives priority before the payment ends (CR 117.2e);
+///   when the resolution it belongs to ends, the active player does (CR 117.3b).
 ///
 /// A payment that parks again has its events collected as any pause inside a
 /// payment of draws does (CR 603.2c); one that ended is left to the caller's
@@ -1993,7 +1996,13 @@ fn reconcile_parked_unless_payment_after_departure(
         {
             sync_waiting_for(state, &result.waiting_for);
             engine_payment_choices::set_active_priority(state);
-            resume_pending_continuation_if_priority(state, &mut result.events)?;
+            // CR 121.6b + CR 614.11a: a surviving draw sequence the departed
+            // substitute sat inside is finished before the payment's owner
+            // resumes; a draw of it that parks keeps the owner parked.
+            if engine_replacement::resume_active_draw_sequences(state, &mut result.events).is_none()
+            {
+                resume_pending_continuation_if_priority(state, &mut result.events)?;
+            }
             result.waiting_for = state.waiting_for.clone();
         }
         _ => return Ok(false),

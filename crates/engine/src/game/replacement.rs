@@ -1094,6 +1094,19 @@ pub(crate) fn abandon_post_replacement_continuation(state: &mut GameState) {
     // captured before the abandonment must never alias a frame allocated after it.
 }
 
+/// CR 800.4a + CR 121.6b: [`abandon_post_replacement_continuation`] for a
+/// departure inside a substitute for a surviving player's draw: the leaver's
+/// replacement tails and the choice-scoped seeds go, and the surviving
+/// player's draw sequences stay (`GameState::abandon_active_replacement_tails_of`).
+pub(crate) fn abandon_departed_substitute_continuation(
+    state: &mut GameState,
+    leaving: &std::collections::HashSet<PlayerId>,
+) {
+    state.abandon_active_replacement_tails_of(leaving);
+    state.post_replacement_token_choice_applied = None;
+    state.post_replacement_token_substitution_count = None;
+}
+
 pub type ReplacementMatcher = fn(&ProposedEvent, ObjectId, &GameState) -> bool;
 pub type ReplacementApplier =
     fn(ProposedEvent, ReplacementId, &mut GameState, &mut Vec<GameEvent>) -> ApplyResult;
