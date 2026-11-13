@@ -204,6 +204,14 @@
         "label": "ラベル",
         "fallback": "選択"
       }
+    },
+    "attacking": {
+      "you": "あなたを攻撃中",
+      "player": "{{player}}を攻撃中",
+      "yourPlaneswalker": "あなたのプレインズウォーカー{{name}}を攻撃中",
+      "planeswalker": "{{player}}のプレインズウォーカー{{name}}を攻撃中",
+      "battle": "バトル{{name}}を攻撃中",
+      "nothing": "攻撃中（プレイヤー、プレインズウォーカー、バトルのいずれも攻撃していない）"
     }
   },
   "actionButton": {
@@ -346,7 +354,6 @@
     "pickNone": "なし",
     "underAttack_one": "{{count}}体のクリーチャーから攻撃されています",
     "underAttack_other": "{{count}}体のクリーチャーから攻撃されています",
-    "target": "対象",
     "sacrifice": "生け贄",
     "token": "トークン",
     "tokenTooltip": "実在カードのトークンコピー",
@@ -469,7 +476,12 @@
     "assignRemaining_other": "あと{{count}}体を割り当て",
     "confirmDistribute_one": "攻撃クリーチャー{{count}}体を宣言",
     "confirmDistribute_other": "攻撃クリーチャー{{count}}体を宣言",
-    "noCommonTarget": "共通の対象がありません — 分配に切り替えて各攻撃クリーチャーの対象を指定してください。"
+    "noCommonTarget": "共通の対象がありません — 分配に切り替えて各攻撃クリーチャーの対象を指定してください。",
+    "totalsHeading": "攻撃の合計",
+    "targetTotal_few": "攻撃クリーチャー{{count}}体 · {{damage}}点",
+    "targetTotal_many": "攻撃クリーチャー{{count}}体 · {{damage}}点",
+    "targetTotal_one": "攻撃クリーチャー{{count}}体 · {{damage}}点",
+    "targetTotal_other": "攻撃クリーチャー{{count}}体 · {{damage}}点"
   },
   "fullControl": {
     "label": "コントロール",
@@ -594,7 +606,9 @@
     "dungeonTooltip": "{{name}}を踏破中",
     "poisonAriaLabel_one": "毒カウンター{{count}}個",
     "poisonAriaLabel_other": "毒カウンター{{count}}個",
-    "poisonTooltip": "毒カウンター: {{count}}\n毒カウンターが10個以上あるプレイヤーはゲームに敗北します。",
+    "poisonTooltip": "毒カウンター: {{count}}",
+    "poisonLossPlayer": "毒カウンターが{{threshold}}個以上あるプレイヤーはゲームに敗北します。",
+    "poisonLossTeam": "毒カウンターが{{threshold}}個以上あるチームはゲームに敗北します。",
     "energyAriaLabel_one": "エネルギー・カウンター{{count}}個",
     "energyAriaLabel_other": "エネルギー・カウンター{{count}}個",
     "energyTooltip": "エネルギー・カウンター: {{count}}\nエネルギー・カウンターはカード能力が使う、プレイヤーが持つリソースです。",
@@ -855,7 +869,12 @@
     "lethalBadge": "致死",
     "planeswalkerLoyalty": "プレインズウォーカー（忠誠度: {{loyalty}}）",
     "defendingPlayerTrample": "防御プレイヤー（トランプル）",
-    "pwControllerTrample": "PWコントローラー（PW越しのトランプル）"
+    "pwControllerTrample": "PWコントローラー（PW越しのトランプル）",
+    "assignRemainingButton": "+{{amount}}",
+    "assignRemainingTo_few": "残り{{count}}点のダメージを{{target}}に割り振る",
+    "assignRemainingTo_many": "残り{{count}}点のダメージを{{target}}に割り振る",
+    "assignRemainingTo_one": "残り{{count}}点のダメージを{{target}}に割り振る",
+    "assignRemainingTo_other": "残り{{count}}点のダメージを{{target}}に割り振る"
   },
   "cardTextReference": {
     "title": "日本語カード本文（参考）",
@@ -1200,6 +1219,11 @@
       "drawFirst": "後攻",
       "drawFirstDescription": "最初のターンに追加のドローを得る"
     },
+    "startingPlayer": {
+      "title": "先攻を選択",
+      "playerPlaysFirst": "{{name}}が先攻",
+      "opponentChoosing": "{{name}}が先攻を選択しています…"
+    },
     "mulligan": {
       "opponentDeciding": "対戦相手が初手を検討中…",
       "londonTitle": "ロンドン・マリガン（{{count}}回目）",
@@ -1222,7 +1246,10 @@
       "subtitleKeepWithBottom": "この手札で始める（{{count}}枚を一番下に置く）か、再びマリガンして新たに7枚引きます。",
       "subtitleKeepFree": "この手札で始める（フリー・マリガンのため一番下に置くカードなし）か、再びマリガンして新たに7枚引きます。",
       "subtitleOpeningFree": "この手札で始めるか、フリー・マリガンできます（一番下に置くカードなし）。",
-      "subtitleOpeningOne": "この手札で始めるか、マリガンして新たに7枚引きます（手札を確定する際に1枚を一番下に置きます）。"
+      "subtitleOpeningOne": "この手札で始めるか、マリガンして新たに7枚引きます（手札を確定する際に1枚を一番下に置きます）。",
+      "onThePlay": "あなたが先攻",
+      "onTheDraw": "あなたが後攻",
+      "takeTurn": "あなたの{{turn}}ターン目"
     },
     "companion": {
       "eyebrow": "ゲーム開始前",
@@ -1439,6 +1466,8 @@
     },
     "config": {
       "startingLife": "開始時のライフ",
+      "commanderDamage": "統率者ダメージ",
+      "poisonCounters": "毒カウンター",
       "players": "プレイヤー",
       "whoGoesFirst": "先攻プレイヤー",
       "firstPlayer": {

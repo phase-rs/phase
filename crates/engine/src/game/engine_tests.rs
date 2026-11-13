@@ -5563,29 +5563,51 @@ fn start_game_counts_the_starting_players_first_turn() {
     assert_eq!(state.players[0].turns_taken, 1);
 }
 
+/// CR 103.1: `start_game` ends at the choice; the chooser's answer starts
+/// the game.
 #[test]
-fn start_game_emits_game_started_event() {
+fn start_game_ends_at_the_choice_and_the_answer_starts_the_game() {
     let mut state = new_game(42);
     let result = start_game(&mut state);
 
-    assert!(result
+    assert!(!result
+        .events
+        .iter()
+        .any(|e| matches!(e, GameEvent::GameStarted)));
+    let WaitingFor::ChooseStartingPlayer {
+        player: chooser, ..
+    } = state.waiting_for
+    else {
+        panic!("the start rests at the CR 103.1 choice");
+    };
+
+    let answer = apply(
+        &mut state,
+        chooser,
+        GameAction::ChooseStartingPlayer { player: chooser },
+    )
+    .expect("the chooser elects to play first");
+    assert!(answer
         .events
         .iter()
         .any(|e| matches!(e, GameEvent::GameStarted)));
 }
 
-// CR 103.1: Regression — `start_game` must randomize the starting player for
-// all match types, not just Bo3. Previously gated on `match_type == Bo3`, which
+// CR 103.1: Regression — `start_game` must randomize the chooser for all
+// match types, not just Bo3. Previously gated on `match_type == Bo3`, which
 // caused every Bo1 (default) game to begin with PlayerId(0).
 #[test]
-fn start_game_randomizes_starting_player_for_default_match_type() {
+fn start_game_randomizes_the_chooser_for_default_match_type() {
     let mut saw_p0 = false;
     let mut saw_p1 = false;
 
     for seed in 0..64u64 {
         let mut state = new_game(seed);
         let _ = start_game(&mut state);
-        match state.current_starting_player {
+        let WaitingFor::ChooseStartingPlayer { player, .. } = state.waiting_for else {
+            panic!("the start rests at the CR 103.1 choice");
+        };
+        match player {
             PlayerId(0) => saw_p0 = true,
             PlayerId(1) => saw_p1 = true,
             _ => unreachable!("two-player game can only produce PlayerId(0) or PlayerId(1)"),

@@ -30,7 +30,7 @@ import {
 import { LifeTotal } from "../controls/LifeTotal.tsx";
 import { ManaPoolSummary } from "./ManaPoolSummary.tsx";
 import { ScoreBadge } from "../draft/ScoreBadge.tsx";
-import { CityBlessingBadge, CounterBadge, DungeonBadge, EnduringStoryBadge, HordeRulesBadge, InitiativeBadge, MonarchBadge, StatusBadge, UnboundedBadge } from "./HudBadges.tsx";
+import { CityBlessingBadge, CounterBadge, DungeonBadge, EnduringStoryBadge, HordeRulesBadge, InitiativeBadge, MonarchBadge, PoisonCounterBadge, StatusBadge, UnboundedBadge } from "./HudBadges.tsx";
 import { AurasHoverPreview } from "./AurasHoverPreview.tsx";
 import { AvatarHoverPreview } from "./AvatarHoverPreview.tsx";
 import { BattlefieldPeekPopover } from "./BattlefieldPeekPopover.tsx";
@@ -316,7 +316,7 @@ export function OpponentHud({
                 />
               ) : null}
               {opponentDesignations.energy > 0 ? <CounterBadge kind="energy" value={opponentDesignations.energy} /> : null}
-              {opponentPoisonCounters > 0 ? <CounterBadge kind="poison" value={opponentPoisonCounters} /> : null}
+              {opponentPoisonCounters > 0 ? <PoisonCounterBadge playerId={opponentId} value={opponentPoisonCounters} /> : null}
               {opponentRadCounters > 0 ? <CounterBadge kind="rad" value={opponentRadCounters} /> : null}
               {opponentExperienceCounters > 0 ? <CounterBadge kind="experience" value={opponentExperienceCounters} /> : null}
               {opponentSpeed > 0 ? <CounterBadge kind="speed" value={opponentSpeed} /> : null}
@@ -781,7 +781,7 @@ function OpponentTab({
         />
       ) : null}
       {designations.energy > 0 ? <CounterBadge kind="energy" value={designations.energy} /> : null}
-      {poisonCounters > 0 ? <CounterBadge kind="poison" value={poisonCounters} /> : null}
+      {poisonCounters > 0 ? <PoisonCounterBadge playerId={playerId} value={poisonCounters} /> : null}
       {radCounters > 0 ? <CounterBadge kind="rad" value={radCounters} /> : null}
       {experienceCounters > 0 ? <CounterBadge kind="experience" value={experienceCounters} /> : null}
       {speed > 0 ? <CounterBadge kind="speed" value={speed} /> : null}
