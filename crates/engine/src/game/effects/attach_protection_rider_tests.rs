@@ -219,6 +219,15 @@ fn grant_static_to(
     persist_last_static(state, granter);
 }
 
+/// CR 702.16: whether `object` has protection from white after layers, read
+/// through the protection-quality authority that targeting and attachment
+/// legality share. The object-scoped `has_keyword` compares keyword kinds
+/// only, so it cannot tell protection from white from any other protection.
+fn has_protection_from_white(state: &GameState, object: ObjectId) -> bool {
+    crate::game::keywords::protection_qualities(&state.objects[&object])
+        .any(|quality| *quality == ProtectionTarget::Color(ManaColor::White))
+}
+
 fn white_riders(
     state: &GameState,
     host_id: ObjectId,
@@ -276,10 +285,12 @@ fn cr_702_16p_snapshot_survives_later_ability_removal() {
     );
 
     cast(&mut runner, P0, humility, None, None);
-    assert!(runner.state().objects[&host]
-        .keywords
-        .iter()
-        .all(|k| !matches!(k, Keyword::Protection(_))));
+    assert!(
+        crate::game::keywords::protection_qualities(&runner.state().objects[&host])
+            .next()
+            .is_none(),
+        "Humility leaves the Bears no protection ability"
+    );
     assert!(
         runner.state().objects[&host]
             .protection_provenance
@@ -297,11 +308,7 @@ fn cr_702_16p_snapshot_survives_later_ability_removal() {
     cast(&mut runner, P0, demystify, Some(humility), None);
     assert_eq!(runner.state().objects[&humility].zone, Zone::Graveyard);
     assert!(
-        runner.state().objects[&host]
-            .keywords
-            .contains(&Keyword::Protection(ProtectionTarget::Color(
-                ManaColor::White
-            ))),
+        has_protection_from_white(runner.state(), host),
         "reach guard: protection from white returns once Humility is gone"
     );
     attached(&runner, pacifism, host);
@@ -875,7 +882,6 @@ fn later_copy_drops_the_retained_protections_provenance() {
     let mut runner = s.build();
     let state = runner.state_mut();
     let bears_values = crate::game::printed_cards::intrinsic_copiable_values(&state.objects[&host]);
-    let white = Keyword::Protection(ProtectionTarget::Color(ManaColor::White));
     state
         .add_transient_continuous_effect(
             knight,
@@ -894,7 +900,7 @@ fn later_copy_drops_the_retained_protections_provenance() {
         .expect("the retaining copy must register");
     evaluate_protection_layers(state);
     assert!(
-        state.objects[&host].keywords.contains(&white),
+        has_protection_from_white(state, host),
         "reach guard: the first copy retains Black Knight's protection from white"
     );
     assert_eq!(
@@ -918,13 +924,13 @@ fn later_copy_drops_the_retained_protections_provenance() {
         .expect("the later copy must register");
     evaluate_protection_layers(state);
     assert!(
-        !state.objects[&host].keywords.contains(&white),
+        !has_protection_from_white(state, host),
         "reach guard: the later copy replaced the retained protection"
     );
 
     cast(&mut runner, P0, ward, Some(host), None);
     assert!(
-        runner.state().objects[&host].keywords.contains(&white),
+        has_protection_from_white(runner.state(), host),
         "reach guard: White Ward grants protection from white"
     );
     attached(&runner, ward, host);
