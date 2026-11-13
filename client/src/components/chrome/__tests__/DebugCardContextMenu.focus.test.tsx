@@ -298,10 +298,10 @@ describe("DebugCardContextMenu focus ownership", () => {
       name: "Set",
     });
     const removeCounter = within(menu).getByRole("menuitem", {
-      name: "P1P1: −1",
+      name: "+1/+1: −1",
     });
     const addCounter = within(menu).getByRole("menuitem", {
-      name: "P1P1: +1",
+      name: "+1/+1: +1",
     });
     setPowerToughness.focus();
     fireEvent.keyDown(setPowerToughness, { key: "ArrowDown" });
@@ -309,10 +309,16 @@ describe("DebugCardContextMenu focus ownership", () => {
     fireEvent.keyDown(removeCounter, { key: "ArrowDown" });
     expect(addCounter).toHaveFocus();
 
+    const addMinusCounter = within(menu).getByRole("menuitem", {
+      name: "-1/-1: +1",
+    });
+    fireEvent.keyDown(addCounter, { key: "ArrowDown" });
+    expect(addMinusCounter).toHaveFocus();
+
     const keywordTrigger = within(menu).getByRole("menuitem", {
       name: /^Keywords/,
     });
-    fireEvent.keyDown(addCounter, { key: "ArrowDown" });
+    fireEvent.keyDown(addMinusCounter, { key: "ArrowDown" });
     expect(keywordTrigger).toHaveFocus();
 
     fireEvent.keyDown(keywordTrigger, { key: "ArrowRight" });

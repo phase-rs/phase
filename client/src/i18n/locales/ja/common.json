@@ -87,6 +87,7 @@
     "sandboxTools": "サンドボックスツール",
     "sandboxToolsTitle": "サンドボックスツール — 任意の盤面状態を設定（`）",
     "openSandboxTools": "サンドボックスツールを開く",
+    "clickMode": "クリックモード",
     "clickModeButton": "クリックモードボタン",
     "shown": "表示",
     "hidden": "非表示",
@@ -256,6 +257,10 @@
         "title": "高度なデバッグパネル",
         "body": "高度なデバッグパネルを開きます。ほとんどのプレイヤーは最初に復旧ツールを使ってください。"
       },
+      "toggleClickMode": {
+        "title": "クリックモードの切り替え",
+        "body": "サンドボックスツールが使えるゲームで、クリックモードのオン/オフを切り替えます。オンの間は、カードをクリックするとプレイする代わりにデバッグメニュー（領域、P/T、カウンター、キーワード）が開きます。"
+      },
       "reportOrExportState": {
         "title": "状態を報告またはエクスポート",
         "body": "カードが正しく動かない場合、現在のゲーム状態をエクスポートすると正確な盤面を再現できます。"
@@ -299,16 +304,13 @@
     "ignoredDie": "無視",
     "continue": "タップして続行",
     "you": "あなた",
-    "youPlayFirst": "あなたが先攻",
-    "playerPlaysFirst": "{{name}}が先攻",
+    "youWonRoll": "あなたがダイスロールに勝利",
+    "playerWonRoll": "{{name}}がダイスロールに勝利",
     "heads": "表",
     "tails": "裏",
     "coinFlip": "コインフリップ",
     "wonCoinFlip": "{{name}}がコインフリップに勝利",
-    "lostCoinFlip": "{{name}}がコインフリップに敗北",
-    "turnOrder": "ターン順",
-    "turnOrderItem": "{{turn}}ターン目: {{name}}",
-    "youTakeTurn": "あなたの{{turn}}ターン目"
+    "lostCoinFlip": "{{name}}がコインフリップに敗北"
   },
   "chrome": {
     "back": "戻る",

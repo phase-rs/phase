@@ -2098,6 +2098,7 @@ impl GameRunner {
             WaitingFor::TriggerTargetSelection { .. } => "TriggerTargetSelection",
             WaitingFor::BetweenGamesSideboard { .. } => "BetweenGamesSideboard",
             WaitingFor::BetweenGamesChoosePlayDraw { .. } => "BetweenGamesChoosePlayDraw",
+            WaitingFor::ChooseStartingPlayer { .. } => "ChooseStartingPlayer",
             WaitingFor::NamedChoice { .. } => "NamedChoice",
             WaitingFor::OpponentGuess { .. } => "OpponentGuess",
             WaitingFor::SpellbookDraft { .. } => "SpellbookDraft",

@@ -17,9 +17,20 @@ reviews:
   high_level_summary: true
   poem: false
   review_status: true
+  # Walkthrough: keep the summary, changed files and linked-issue assessment.
+  sequence_diagrams: false
+  related_issues: false
+  related_prs: false
+  suggested_labels: false
+  suggested_reviewers: false
+  estimate_code_review_effort: false
+  in_progress_fortune: false
   auto_review:
     enabled: true
     drafts: false
+    # One automatic review per PR, then pause; later heads' `CodeRabbit` check
+    # reads "Review paused". `@coderabbitai review` runs one more on request.
+    auto_pause_after_reviewed_commits: 1
   # Generated / vendored / binary artifacts — reviewing these is pure noise.
   # Ported from .gemini/config.yaml ignore_patterns for parity.
   path_filters:

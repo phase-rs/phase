@@ -567,9 +567,11 @@
     "tournamentEliminationDesc": "Os jogadores são eliminados após uma derrota em partida até restar um vencedor.",
     "podPolicy": "Política do Pod",
     "policyCompetitive": "Competitivo",
-    "policyCompetitiveDesc": "Escolhas cronometradas, escolhas automáticas no tempo limite e avanço automático de rodada.",
+    "policyCompetitiveDesc": "Escolhas cronometradas, escolhas automáticas no tempo limite e avanço automático de rodada. Decks enviados são definitivos; você só pode usar o sideboard entre os jogos de uma partida.",
+    "policyCompetitiveNoRoundsDesc": "Escolhas cronometradas e escolhas automáticas no tempo limite.",
     "policyCasual": "Casual",
-    "policyCasualDesc": "Escolhas sem cronômetro, avanço manual de rodada e controles do anfitrião para resolver problemas.",
+    "policyCasualDesc": "Escolhas sem cronômetro, avanço manual de rodada, controles do anfitrião para resolver problemas e alterações de deck entre rodadas.",
+    "policyCasualNoRoundsDesc": "Escolhas sem cronômetro e controles do anfitrião para resolver problemas.",
     "podSize": "Tamanho do Pod",
     "podSizeDesc": "{{count}} assentos no total. Assentos vazios podem ser preenchidos com bots a partir do lobby antes de o draft começar.",
     "playerCount": "{{count}} jogadores",
@@ -615,11 +617,21 @@
     "roundComplete": "Rodada Concluída",
     "waitingNextRound": "Aguardando o anfitrião iniciar a próxima rodada...",
     "nextRoundShortly": "A próxima rodada começará em breve...",
+    "editDeck": "Editar Deck",
+    "backToStandings": "Voltar à Classificação",
+    "editDeckHint": "Pod casual: você pode alterar seu deck antes do início da próxima rodada.",
     "pauseReason": {
       "PlayerDisconnected": "Draft paused — a player disconnected.",
       "PausedByHost": "Draft paused by host.",
       "DisconnectGraceExpired": "A player did not return in time."
     }
+  },
+  "deckSubmitConfirm": {
+    "title": "Enviar este deck?",
+    "confirm": "Confirmar Envio",
+    "competitive": "Este é um pod competitivo: o deck enviado é definitivo para todas as rodadas. Você ainda pode usar o sideboard entre os jogos de uma partida Bo3.",
+    "casual": "Você ainda pode alterar seu deck entre as rodadas.",
+    "final": "O deck enviado é definitivo."
   },
   "betweenGames": {
     "game": "Jogo {{number}}",
