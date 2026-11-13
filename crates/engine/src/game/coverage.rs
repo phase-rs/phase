@@ -16,7 +16,9 @@ use crate::parser::oracle::{
 use crate::parser::oracle_casting::parse_casting_restriction_line;
 use crate::parser::oracle_effect::gap_diagnosis::diagnose_clause_gap;
 use crate::parser::oracle_effect::imperative::try_parse_em_dash_die_result_line;
-use crate::parser::oracle_ir::diagnostic::{ClauseGap, ClauseGapKind, OracleDiagnostic};
+use crate::parser::oracle_ir::diagnostic::{
+    ClauseGap, ClauseGapKind, OracleDiagnostic, OracleItemId, OracleSourceSpan,
+};
 use crate::parser::oracle_util::normalize_card_name_refs;
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AbilityUseTally,
@@ -6629,6 +6631,194 @@ pub fn parse_warning_pattern(
             warning.category_name().to_string(),
             format!("{slot:?}: {effect_name}"),
         ),
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub struct WarningDrilldown {
+    pub category: Option<String>,
+    pub pattern: Option<String>,
+    pub detector: Option<String>,
+    pub matched_cards: usize,
+    pub supported_cards: usize,
+    pub single_gap_cards: usize,
+    pub cards: Vec<WarningDrilldownCard>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct WarningDrilldownCard {
+    pub name: String,
+    pub key: String,
+    pub supported: Option<bool>,
+    pub gap_count: Option<usize>,
+    pub printings: Vec<String>,
+    pub oracle_text: Option<String>,
+    pub warnings: Vec<WarningDrilldownWarning>,
+    pub parsed_labels: Vec<String>,
+    pub gap_details: Vec<GapDetail>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parse_details: Option<Vec<ParsedItem>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub card: Option<CardFace>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct WarningDrilldownWarning {
+    pub category: String,
+    pub pattern: String,
+    pub line_index: usize,
+    pub text: String,
+    /// Unit provenance, present only on stamped swallow-audit findings. The span is the
+    /// card-absolute byte range of the audit unit's OWN lines — line-granular today, so
+    /// two clauses on one line share it (see `OracleDiagnostic::SwallowedClause`).
+    /// `items` is the unit's pooled evidence set, legitimately empty for a card that
+    /// lowered to no items.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unit_span: Option<OracleSourceSpan>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub evidence_items: Vec<OracleItemId>,
+}
+
+/// Faces with a parse warning matching every given filter, each joined to its own coverage row
+/// by face key, ranked supported-first, then by gap count, name and key, and cut to `limit`.
+pub fn build_warning_drilldown(
+    db: &CardDatabase,
+    summary: &CoverageSummary,
+    category: Option<&str>,
+    pattern: Option<&str>,
+    detector: Option<&str>,
+    limit: usize,
+    full: bool,
+) -> WarningDrilldown {
+    let coverage_by_key: HashMap<&str, &CardCoverageResult> = summary
+        .cards
+        .iter()
+        .filter_map(|card| Some((card.card_face_key.as_deref()?, card)))
+        .collect();
+    let mut cards = Vec::new();
+
+    for (key, face) in db.face_iter() {
+        let oracle_text = face.oracle_text.as_deref();
+        let warnings: Vec<_> = face
+            .parse_warnings
+            .iter()
+            .filter_map(|warning| {
+                let (warning_category, warning_pattern) =
+                    parse_warning_pattern(warning, oracle_text);
+                if category.is_some_and(|expected| expected != warning_category) {
+                    return None;
+                }
+                if pattern.is_some_and(|expected| expected != warning_pattern) {
+                    return None;
+                }
+                if detector.is_some_and(|expected| !warning_detector_is(warning, expected)) {
+                    return None;
+                }
+                Some(WarningDrilldownWarning {
+                    category: warning_category,
+                    pattern: warning_pattern,
+                    line_index: warning.line_index(),
+                    text: warning_text(warning),
+                    unit_span: warning.unit_span().cloned(),
+                    evidence_items: warning.evidence_items().to_vec(),
+                })
+            })
+            .collect();
+
+        if warnings.is_empty() {
+            continue;
+        }
+
+        let coverage = coverage_by_key.get(key).copied();
+        cards.push(WarningDrilldownCard {
+            name: face.name.clone(),
+            key: key.to_string(),
+            supported: coverage.map(|card| card.supported),
+            gap_count: coverage.map(|card| card.gap_count),
+            printings: coverage
+                .map(|card| card.printings.clone())
+                .unwrap_or_default(),
+            oracle_text: face.oracle_text.clone(),
+            warnings,
+            parsed_labels: coverage
+                .map(|card| parsed_labels(&card.parse_details))
+                .unwrap_or_default(),
+            gap_details: coverage
+                .map(|card| card.gap_details.clone())
+                .unwrap_or_default(),
+            parse_details: if full {
+                coverage.map(|card| card.parse_details.clone())
+            } else {
+                None
+            },
+            card: full.then(|| face.clone()),
+        });
+    }
+
+    cards.sort_by(|left, right| {
+        let left_supported = left.supported.unwrap_or(false);
+        let right_supported = right.supported.unwrap_or(false);
+        right_supported
+            .cmp(&left_supported)
+            .then_with(|| {
+                left.gap_count
+                    .unwrap_or(usize::MAX)
+                    .cmp(&right.gap_count.unwrap_or(usize::MAX))
+            })
+            .then_with(|| left.name.cmp(&right.name))
+            .then_with(|| left.key.cmp(&right.key))
+    });
+
+    let matched_cards = cards.len();
+    let supported_cards = cards
+        .iter()
+        .filter(|card| card.supported == Some(true))
+        .count();
+    let single_gap_cards = cards
+        .iter()
+        .filter(|card| card.gap_count == Some(1))
+        .count();
+    cards.truncate(limit);
+
+    WarningDrilldown {
+        category: category.map(str::to_string),
+        pattern: pattern.map(str::to_string),
+        detector: detector.map(str::to_string),
+        matched_cards,
+        supported_cards,
+        single_gap_cards,
+        cards,
+    }
+}
+
+fn warning_detector_is(warning: &OracleDiagnostic, expected: &str) -> bool {
+    matches!(
+        warning,
+        OracleDiagnostic::SwallowedClause { detector, .. } if detector == expected
+    )
+}
+
+fn warning_text(warning: &OracleDiagnostic) -> String {
+    match warning {
+        OracleDiagnostic::TargetFallback { text, .. }
+        | OracleDiagnostic::IgnoredRemainder { text, .. } => text.clone(),
+        OracleDiagnostic::SwallowedClause { description, .. } => description.clone(),
+        OracleDiagnostic::CascadeLoss {
+            slot, effect_name, ..
+        } => format!("{slot:?}: {effect_name}"),
+    }
+}
+
+fn parsed_labels(items: &[ParsedItem]) -> Vec<String> {
+    let mut labels = Vec::new();
+    collect_parsed_labels(items, &mut labels);
+    labels
+}
+
+fn collect_parsed_labels(items: &[ParsedItem], labels: &mut Vec<String>) {
+    for item in items {
+        labels.push(format!("{:?}:{}", item.category, item.label));
+        collect_parsed_labels(&item.children, labels);
     }
 }
 
