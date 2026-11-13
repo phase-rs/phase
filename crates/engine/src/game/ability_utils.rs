@@ -1,12 +1,12 @@
 use crate::game::game_object::ObjectIncarnationRefExt;
 use crate::types::ability::{
-    attach_attachment_claims_announcement_slot, attach_host_filter_needs_target_slot,
-    become_copy_recipient_slot_filter, damage_replacement_source_slot_filter,
-    damage_replacement_target_roles, effect_bound_filter_matches,
-    effect_needs_parent_target_combat_relation_slot, effect_needs_target_creature_quantity_slot,
-    effect_references_target_player, effect_stack_target_declaration_matching,
-    effect_target_filter_references_chosen_player, effect_target_slot_filter,
-    extract_target_filter_from_effect, fight_declared_slot_filters,
+    attach_attachment_claims_announcement_slot, attach_declared_slot_filters,
+    attach_host_filter_needs_target_slot, become_copy_recipient_slot_filter,
+    damage_replacement_source_slot_filter, damage_replacement_target_roles,
+    effect_bound_filter_matches, effect_needs_parent_target_combat_relation_slot,
+    effect_needs_target_creature_quantity_slot, effect_references_target_player,
+    effect_stack_target_declaration_matching, effect_target_filter_references_chosen_player,
+    effect_target_slot_filter, extract_target_filter_from_effect, fight_declared_slot_filters,
     fight_subject_needs_target_slot, filter_references_target_opponent, is_any_target_filter,
     mass_all_target_filter, move_counter_stack_target_filters,
     one_sided_fight_source_supplies_quantity_creature, paired_subject_filters,
@@ -2997,6 +2997,13 @@ pub fn declared_targets_in_chain(ability: &ResolvedAbility) -> Vec<TargetRef> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct DeclaredTargetEntry {
     pub(crate) target: TargetRef,
+    /// CR 601.2c + CR 115.4: the filter the DECLARING node used for this slot, recovered by
+    /// re-walking the effect tree in lockstep with the slot builder. `TargetSelectionSlot` is
+    /// attribution-free by design, so this cannot be recovered from the persisted slot; the
+    /// node the walk visits still carries its effect, and every position one node declares
+    /// shares that node's filter ("two target creatures"). `None` where the node declares no
+    /// stack-time filter — callers must skip that position rather than invent one.
+    pub(crate) filter: Option<crate::types::ability::TargetFilter>,
     /// The announced pin of THIS occurrence, read positionally from the
     /// declaring node (`ResolvedAbility::target_pin_at`). Two declared
     /// positions holding the same object carry their own pins. `None` for a
@@ -3022,12 +3029,79 @@ pub(crate) fn declared_target_entries_in_chain(
                         .map(|&position| DeclaredTargetEntry {
                             target: node.targets[position].clone(),
                             pin: node.target_pin_at(position),
+                            filter: declared_slot_announcement_filter(node, position),
                         }),
                 );
             }
         },
     );
     entries
+}
+
+/// CR 601.2c + CR 115.1: the declared-slot VIEW a RECORD comparison may read —
+/// indexed in the STATIC declared-slot space — or `None` when that space cannot
+/// be recovered from the save.
+///
+/// The two numberings are not the same space:
+///
+/// * `AttachmentReferent::DeclaredTarget { slot }` is authored in the STATIC
+///   space. The announcement walk maps `selected_slots` — one position per
+///   surfaced slot, a declined optional slot included as a `None` hole — onto the
+///   view one-for-one, and the spec enumeration writes `view[slot]` with the
+///   filter's own slot number.
+/// * [`declared_target_entries_in_chain`] returns the COMPACTED space: one entry
+///   per target actually pushed. `ResolvedAbility::push_chosen_target` numbers by
+///   `targets.len()` and a declining `optional_targeting` node pushes nothing, so
+///   a declined slot leaves NO hole here.
+///
+/// Indexing one space with the other is not a harmless off-by-one: the referent
+/// resolves to the wrong object, and a record comparison states that as a
+/// DEFINITE contradiction (`Some(false)`), which the restore guard refuses an
+/// honest save on.
+///
+/// The static index of a compacted entry is genuinely not recoverable from the
+/// persisted chain. `selected_slots` is consumed at CR 601.2c and only the pushed
+/// targets survive, so "the optional slot was filled" and "it was declined while
+/// the next one was filled" produce the same saved shape for two different
+/// announcements; guessing would re-introduce exactly the misalignment above.
+/// A view is therefore supplied only when the spaces are PROVABLY the same:
+///
+/// * the chain is numbered by [`DeclaredNumbering::Recorded`], the numbering that
+///   counts chosen occurrences rather than every target a node happens to hold
+///   (CR 115.10a), and
+/// * the announcement's own slot list ([`build_target_slots`]) has exactly as
+///   many positions as there are entries.
+///
+/// Equal counts means nothing was declined — PREMISE: each declared slot
+/// contributes at most one target, so a `multi_target` slot can keep the counts
+/// equal while shifting the mapping, which can only suppress a comparison and
+/// never invent one — and no index shifted, so the k-th entry filled the k-th
+/// static slot. Otherwise NO view is supplied and every referent
+/// answers UNKNOWN — the governing answer for an axis the record cannot state,
+/// and never a refusal of an honest save.
+pub(crate) fn record_check_declared_slot_view(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    entries: &[DeclaredTargetEntry],
+) -> Option<Vec<Option<targeting::DeclaredSlotBinding>>> {
+    if !matches!(DeclaredNumbering::of(ability), DeclaredNumbering::Recorded) {
+        return None;
+    }
+    let slots = build_target_slots(state, ability).ok()?;
+    if slots.len() != entries.len() {
+        return None;
+    }
+    Some(
+        entries
+            .iter()
+            .map(|entry| {
+                Some(targeting::DeclaredSlotBinding::Announced {
+                    target: entry.target.clone(),
+                    pin: entry.pin,
+                })
+            })
+            .collect(),
+    )
 }
 
 /// CR 608.2c: ParentTarget's lexical chain excludes unselected coin outcomes.
@@ -6116,8 +6190,9 @@ fn filter_prop_contains_quantity_scope(prop: &FilterProp, scope: ObjectScope) ->
         // Every remaining prop enumerated explicitly (no `_ =>`): none carries a
         // `QuantityExpr` threshold. Props that box a nested `TargetFilter`
         // (`CanEnchant`, `DifferentNameFrom`, `DistinctFrom`, `SharesQuality`,
-        // `Targets`, `TargetsOnly`, `ControllerMatches`) are handled by the
-        // OUTER `filter_contains` traversal, which independently visits every
+        // `Targets`, `TargetsOnly`, `ManaSpentFromSource`, `AttachedTo::Host`,
+        // `ControllerMatches`) are handled by the OUTER `filter_contains`
+        // traversal, which independently visits every
         // nested `TargetFilter` and re-invokes the leaf closure there — this
         // classifier only answers for props attached directly to the `Typed`
         // node it is called on.
@@ -6212,6 +6287,8 @@ fn filter_prop_contains_quantity_scope(prop: &FilterProp, scope: ObjectScope) ->
         | FilterProp::HasXInManaCost
         | FilterProp::HasXInActivationCost
         | FilterProp::WasKicked
+        // CR 106.3 + CR 601.2h: no `ObjectScope` reference; no prior target bound.
+        | FilterProp::ManaSpentFromSource { .. }
         | FilterProp::HasManaAbility
         | FilterProp::HasNoAbilities
         | FilterProp::Named { .. }
@@ -6380,6 +6457,8 @@ fn filter_prop_binds_prior_target(prop: &FilterProp) -> bool {
         | FilterProp::HasXInManaCost
         | FilterProp::HasXInActivationCost
         | FilterProp::WasKicked
+        // CR 106.3 + CR 601.2h: no `ObjectScope` reference; no prior target bound.
+        | FilterProp::ManaSpentFromSource { .. }
         | FilterProp::HasManaAbility
         | FilterProp::HasNoAbilities
         | FilterProp::Named { .. }
@@ -8961,6 +9040,228 @@ fn effect_slot_denotes_damage_any_target(effect: &Effect, slot: AbilityTargetSlo
     }
 }
 
+/// CR 115.4: the filter that DECLARED slot `index` of `node` actually imposes, for a
+/// consumer that must judge a recorded announcement rather than re-derive legal targets.
+///
+/// "Any target" is not unrestricted: on a damage effect it means "a creature, player,
+/// planeswalker or battle", and three of those four exist only on the battlefield. That
+/// narrowing lives in [`effect_slot_denotes_damage_any_target`]. A caller that evaluated
+/// the bare `Any` predicate would admit an enchantment-only snapshot the spell could never
+/// have announced.
+/// The domain's two halves are built by the same functions the LIVE enumeration uses
+/// (`TargetFilter::Player` and [`damage_any_target_object_filter`]), so the recorded
+/// requirement and the legal-target search cannot drift apart; in particular the object
+/// half's `InZone { Battlefield }` states the zone live selection imposes by searching
+/// `state.battlefield`, which is the only zone evidence left once the target has moved
+/// and its announcement pin gone stale (CR 400.7).
+/// A `Fight` is the other multi-slot shape whose slots do NOT share a filter (CR 601.2c:
+/// an appropriate object for each target the spell requires), and it is read from
+/// [`fight_declared_slot_filters`] — the cast path's own order authority — rather than
+/// from the single-filter extraction. `Attach` is the third, read from
+/// [`attach_declared_slot_filters`] for the same reason.
+/// Returns `None` where the node declares no stack-time filter.
+pub(crate) fn declared_slot_announcement_filter(
+    node: &ResolvedAbility,
+    index: usize,
+) -> Option<TargetFilter> {
+    if node.target_choice_timing != TargetChoiceTiming::Stack {
+        return None;
+    }
+    // CR 115.3 + CR 601.2c: a PAIRED-SUBJECT instruction declares TWO slots, and
+    // neither is the effect's generic `target`. "Exchange control of two target
+    // creatures" (Switcheroo) is `Effect::ExchangeControl`, whose operands live in
+    // `target_a`/`target_b`: `paired_subject_filters` is the shape authority and
+    // `paired_subject_slot_filters` is the slot authority (it drops a
+    // context-ref operand — Gilded Drake's "this creature" — which resolves
+    // without reserving an instance of the word "target"), and it is the SAME
+    // iterator `collect_target_slots_inner`'s paired arm and
+    // `assign_selected_slots_recursive`'s paired arm consume, so `index` names the
+    // operand that declared this position.
+    //
+    // Without this arm the recovery below reads `Effect::target_filter()`, which
+    // answers `None` for `ExchangeControl`, so BOTH declared slots reached the
+    // restore guard with NO filter and neither creature check ran: a save that
+    // kept a fact's id, zone and announcement pin while restating its captured
+    // types as a Land passed restore for either slot.
+    //
+    // Same length guard as the Fight and Attach arms: a DECLINED optional slot
+    // compacts `targets`, so a vector shorter than the declared operand list
+    // cannot say which role survived; that shape falls through to the
+    // single-filter reading below rather than guessing a role.
+    if paired_subject_filters(&node.effect).is_some() {
+        let declared: Vec<&TargetFilter> = paired_subject_slot_filters(&node.effect).collect();
+        if declared.len() == node.targets.len() {
+            return declared.get(index).map(|filter| (*filter).clone());
+        }
+    }
+    // CR 701.14a + CR 601.2c: a two-fighter Fight declares TWO slots with two
+    // DIFFERENT filters — "target creature you control fights target creature you
+    // don't control" (Bushwhack) names the subject (the creature that fights) first
+    // and the target (the creature fought) second — so recovering one filter for the
+    // whole effect judges the friendly slot against "you don't control" and refuses
+    // an announcement the spell really made. `fight_declared_slot_filters` is the
+    // cast path's own authority for which filters occupy which slots:
+    // `collect_target_slots_inner`'s Fight arm pushes its filters in this exact
+    // order, and `occurrence_binds_prior` already indexes the same iterator by
+    // declared position. A one-slot fight ("~ fights …", enchanted/equipped
+    // creature) yields its single `target` at position 0, unchanged.
+    //
+    // Positional attribution holds only while the node still holds every declared
+    // slot. A DECLINED optional slot leaves no entry (`assign_selected_slots_recursive`
+    // compacts `targets`), so a compacted vector no longer says which declared slot
+    // survived; that shape falls through to the single-filter reading below, which is
+    // exactly what this function answered before this arm existed — reproduced rather
+    // than guessed, because the alternative silence would drop the slot's check
+    // altogether.
+    if let Effect::Fight { subject, target } = &node.effect {
+        let declared: Vec<&TargetFilter> = fight_declared_slot_filters(subject, target).collect();
+        if declared.len() == node.targets.len() {
+            return declared.get(index).map(|filter| (*filter).clone());
+        }
+    }
+    // CR 115.1a/c/d/e + CR 601.2c + CR 608.2d: an `Attach` instruction declares its
+    // two operands with two DIFFERENT filters — "Attach target Equipment to target
+    // creature" (Magnetic Theft) names the ATTACHMENT first and the HOST second —
+    // so recovering one filter for the whole node judges the Equipment slot against
+    // the host's "target creature" and refuses an untouched save carrying ordinary
+    // noncreature Equipment. `extract_target_filter_from_effect` reads that single
+    // filter off `Effect::target_filter()`, whose Attach arm surfaces `target` (the
+    // host) only.
+    // `attach_declared_slot_filters` is the cast path's own order authority:
+    // `collect_target_slots_inner`'s Attach arm calls
+    // `collect_attach_attachment_target_slots` and then pushes the host, and both
+    // conjuncts of that arm's gates — `attach_attachment_claims_announcement_slot`
+    // (CR 608.2d: a DESCRIBED operand is chosen while resolving and claims no slot)
+    // and `attach_host_filter_needs_target_slot` — are exactly the ones the iterator
+    // re-applies, so the positions it yields are the positions announced.
+    //
+    // Same length guard as the Fight arm, for two shapes that leave the node unable
+    // to say which filter declared a position: a DECLINED optional slot compacts
+    // `targets`, and a "attach any number of target Equipment" announcement pushes
+    // one slot per chosen Equipment (a count this filter-only recovery cannot
+    // recompute without legal-target state) while the iterator yields the operand
+    // once. Both fall through to the single-filter reading below — exactly what this
+    // function answered before this arm existed — rather than guessing a role.
+    if let Effect::Attach {
+        attachment,
+        target,
+        selection,
+    } = &node.effect
+    {
+        let declared: Vec<&TargetFilter> =
+            attach_declared_slot_filters(attachment, target, selection).collect();
+        if declared.len() == node.targets.len() {
+            return declared.get(index).map(|filter| (*filter).clone());
+        }
+    }
+    // CR 614.9 + CR 115.1a/c/d: a damage redirection declares its announced slots
+    // through `damage_replacement_target_roles`, NOT through a generic `target`
+    // field. `Effect::CreateDamageReplacement` has none, so
+    // `extract_target_filter_from_effect` answers `None` below and every slot of
+    // this effect would reach the restore guard with NO filter — leaving the
+    // recorded characteristics unchecked. A save could then keep the recipient's
+    // id, zone and pin while restating its characteristics as anything at all,
+    // pass restore, and publish that contradictory target into the cast history.
+    //
+    // The role order IS the live declaration order, so `index` names the role that
+    // declared this position: `collect_target_slots_inner`'s redirection arm walks
+    // this same iterator (`DeclaredSource`, `OriginalRecipient`,
+    // `RedirectRecipient`) and pushes one slot per role, `collect_target_slot_specs`
+    // mirrors it, and `assign_selected_slots_recursive` consumes the announced
+    // targets in that same order. A source role and a recipient role therefore keep
+    // their OWN filters instead of collapsing onto one, and `Any` on a recipient
+    // role still resolves through its CR 115.4 damage domain below (a declared
+    // source is not a damage recipient and keeps its CR 609.7a domain).
+    //
+    // Same length guard as the Fight and Attach arms: a DECLINED optional slot
+    // compacts `targets`, leaving the vector unable to say which declared role
+    // survived, so that shape falls through to the single-filter reading below
+    // (which answers `None` for this effect) rather than guessing a role.
+    if let Some(roles) = damage_replacement_target_roles(&node.effect) {
+        if roles.len() == node.targets.len() {
+            let filter = roles.get(index)?.filter();
+            if effect_slot_denotes_damage_any_target(
+                &node.effect,
+                AbilityTargetSlot::Declared { index, filter },
+            ) {
+                return Some(damage_any_target_announcement_filter(filter));
+            }
+            return Some(filter.clone());
+        }
+    }
+    let filter = extract_target_filter_from_effect(&node.effect)?;
+    if effect_slot_denotes_damage_any_target(
+        &node.effect,
+        AbilityTargetSlot::Declared { index, filter },
+    ) {
+        return Some(damage_any_target_announcement_filter(filter));
+    }
+    Some(filter.clone())
+}
+
+/// CR 115.4: the damage domain, expressed as the filter a recorded snapshot must
+/// satisfy. Both halves come from the LIVE domain's own builders
+/// (`TargetFilter::Player` and [`damage_any_target_object_filter`]), so a recorded
+/// announcement can never satisfy a domain the cast path would have refused.
+/// The object half is the load-bearing one: its battlefield requirement is the
+/// zone live selection imposes by enumeration, and a recorded fact states the
+/// zone its announcement was made in — the only surviving authority once the
+/// target has moved and its pin gone stale (CR 400.7).
+fn damage_any_target_announcement_filter(filter: &TargetFilter) -> TargetFilter {
+    TargetFilter::Or {
+        filters: vec![
+            TargetFilter::Player,
+            damage_any_target_object_filter(damage_any_target_slot_properties(filter)),
+        ],
+    }
+}
+
+/// CR 115.4: the declaring slot's own predicates for a damage "any target"
+/// slot, which both readers conjoin with [`damage_any_target_object_filter`].
+/// The only shape `is_any_target_filter` admits with any is the bare "any other
+/// target" (`FilterProp::Another`); every other spelling of the domain carries
+/// none.
+fn damage_any_target_slot_properties(filter: &TargetFilter) -> &[FilterProp] {
+    match filter {
+        TargetFilter::Typed(tf) => tf.properties.as_slice(),
+        _ => &[],
+    }
+}
+
+/// CR 115.4: the OBJECT half of the damage "any target" domain — a creature,
+/// planeswalker or battle ON THE BATTLEFIELD. The domain's other half is
+/// `TargetFilter::Player`.
+///
+/// This is the single authority both the live enumeration
+/// ([`damage_any_target_legal_targets`]) and the recorded-announcement
+/// requirement ([`declared_slot_announcement_filter`]) build.
+///
+/// CR 109.2 + CR 115.4: the battlefield requirement is load-bearing, not
+/// decorative. The live path imposes it by searching `state.battlefield`; the
+/// recorded path has no board to search, so the requirement must be IN the
+/// filter or a fact stating a creature CARD in a graveyard — or in exile, or in a
+/// library — would satisfy a domain the cast path never offered. A bare type
+/// description means a permanent (CR 109.2), and a permanent's home is the
+/// battlefield.
+///
+/// `slot_properties` are the declaring slot's own predicates, conjoined with
+/// the domain by both readers so the two cannot drift.
+fn damage_any_target_object_filter(slot_properties: &[FilterProp]) -> TargetFilter {
+    TargetFilter::Typed(TypedFilter {
+        type_filters: vec![TypeFilter::AnyOf(vec![
+            TypeFilter::Creature,
+            TypeFilter::Planeswalker,
+            TypeFilter::Battle,
+        ])],
+        controller: None,
+        properties: std::iter::once(FilterProp::InZone {
+            zone: Zone::Battlefield,
+        })
+        .chain(slot_properties.iter().cloned())
+        .collect(),
+    })
+}
+
 fn damage_any_target_legal_targets(
     state: &GameState,
     ability: &ResolvedAbility,
@@ -8973,19 +9274,10 @@ fn damage_any_target_legal_targets(
     // CR 115.4: "any target" is a creature, player, planeswalker or battle
     let player_targets =
         targeting::find_legal_targets_for_ability(state, &TargetFilter::Player, ability);
-    let mut permanent_filter = TypedFilter::default().with_type(TypeFilter::AnyOf(vec![
-        TypeFilter::Creature,
-        TypeFilter::Planeswalker,
-        TypeFilter::Battle,
-    ]));
-    if let TargetFilter::Typed(tf) = slot.filter() {
-        permanent_filter.properties = tf.properties.clone();
-    }
-    let permanent_targets = targeting::find_legal_targets_for_ability(
-        state,
-        &TargetFilter::Typed(permanent_filter),
-        ability,
-    );
+    let permanent_filter =
+        damage_any_target_object_filter(damage_any_target_slot_properties(slot.filter()));
+    let permanent_targets =
+        targeting::find_legal_targets_for_ability(state, &permanent_filter, ability);
 
     Some(
         player_targets
@@ -16113,15 +16405,427 @@ mod tests {
         assert!(runner.state().resolution_stack.is_empty());
     }
 
+    /// CR 601.2c + CR 701.14a: the DECLARED SLOT ORDER of a two-fighter `Fight`,
+    /// established on the printed card rather than assumed from Oracle word order.
+    ///
+    /// Bushwhack's fight mode is "Target creature you control fights target creature
+    /// you don't control." The declaration order `collect_target_slots_inner`'s
+    /// `Fight` arm pushes — and the order `fight_declared_slot_filters` yields — is
+    /// SUBJECT first ("the creature that fights", `Effect::Fight::subject`), TARGET
+    /// second ("the creature fought", `Effect::Fight::target`). The legal-target
+    /// sets are the witness: the controller's creature can fill only slot 0 and the
+    /// opponent's only slot 1, so a per-slot filter recovery that swaps the two
+    /// filters is observable rather than notional.
+    #[test]
+    fn bushwhack_fight_mode_declares_the_subject_slot_before_the_target_slot() {
+        const BUSHWHACK: &str = "Choose one —\n\
+            • Search your library for a basic land card, reveal it, put it into your hand, then shuffle.\n\
+            • Target creature you control fights target creature you don't control.";
+        let parsed = crate::parser::parse_oracle_text(
+            BUSHWHACK,
+            "Bushwhack",
+            &[],
+            &["Sorcery".to_string()],
+            &[],
+        );
+        assert!(
+            parsed
+                .modal
+                .as_ref()
+                .is_some_and(|modal| modal.mode_count == 2),
+            "reach-guard: Bushwhack is a two-mode \"Choose one\" spell, got {:?}",
+            parsed.modal
+        );
+        let fight_mode = parsed
+            .abilities
+            .get(1)
+            .expect("reach-guard: the second mode is the fight clause");
+        let Effect::Fight { subject, target } = &*fight_mode.effect else {
+            panic!(
+                "reach-guard: Bushwhack's second mode must parse as a Fight, got {:#?}",
+                fight_mode.effect
+            );
+        };
+        assert_eq!(
+            *subject,
+            TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
+            "the fighting creature is the you-control creature"
+        );
+        assert_eq!(
+            *target,
+            TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::Opponent)),
+            "the creature fought is the creature you don't control"
+        );
+
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let own = scenario.add_creature(P0, "Own fighter", 2, 2).id();
+        let theirs = scenario.add_creature(P1, "Opposing fighter", 1, 3).id();
+        let runner = scenario.build();
+
+        // The spell itself is on the stack; nothing in this declaration reads it.
+        let ability = build_resolved_from_def(fight_mode, ObjectId(9999), PlayerId(0));
+        let slots = build_target_slots(runner.state(), &ability)
+            .expect("Bushwhack's fight mode must build its announced slots");
+        assert_eq!(
+            slots.len(),
+            2,
+            "CR 601.2c: both fighters are declared targets, got {slots:?}"
+        );
+        assert_eq!(
+            slots[0].legal_targets,
+            vec![TargetRef::Object(own)],
+            "slot 0 is the SUBJECT: only the creature you control may fill it"
+        );
+        assert_eq!(
+            slots[1].legal_targets,
+            vec![TargetRef::Object(theirs)],
+            "slot 1 is the TARGET: only the creature you don't control may fill it"
+        );
+    }
+
+    /// CR 601.2c + CR 701.14a: the per-slot announcement recovery
+    /// ([`declared_slot_announcement_filter`]) hands each `Fight` slot its OWN
+    /// filter, and reproduces the single-filter reading only where a declared slot is
+    /// no longer positionally attributable.
+    #[test]
+    fn fight_slot_announcement_filters_follow_the_declared_order() {
+        let you_control =
+            TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You));
+        let you_dont_control =
+            TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::Opponent));
+        let source = ObjectId(1);
+        let own = ObjectId(2);
+        let theirs = ObjectId(3);
+
+        let two_slot = ResolvedAbility::new(
+            Effect::Fight {
+                subject: you_control.clone(),
+                target: you_dont_control.clone(),
+            },
+            vec![TargetRef::Object(own), TargetRef::Object(theirs)],
+            source,
+            PlayerId(0),
+        );
+        assert_eq!(
+            declared_slot_announcement_filter(&two_slot, 0),
+            Some(you_control.clone()),
+            "slot 0 is the SUBJECT: the creature that fights"
+        );
+        assert_eq!(
+            declared_slot_announcement_filter(&two_slot, 1),
+            Some(you_dont_control.clone()),
+            "slot 1 is the TARGET: the creature fought"
+        );
+
+        // "~ fights target creature you don't control": the context-ref fighter
+        // declares nothing, so the fought creature is the only slot.
+        let one_slot = ResolvedAbility::new(
+            Effect::Fight {
+                subject: TargetFilter::SelfRef,
+                target: you_dont_control.clone(),
+            },
+            vec![TargetRef::Object(theirs)],
+            source,
+            PlayerId(0),
+        );
+        assert_eq!(
+            declared_slot_announcement_filter(&one_slot, 0),
+            Some(you_dont_control.clone()),
+            "a one-slot fight keeps its single `target` at position 0"
+        );
+
+        // A DECLINED optional slot leaves no entry, so which declared slot survived is
+        // no longer recoverable from the position. The recovery reproduces the
+        // pre-existing single-filter answer instead of guessing a role.
+        let compacted = ResolvedAbility::new(
+            Effect::Fight {
+                subject: you_control,
+                target: you_dont_control.clone(),
+            },
+            vec![TargetRef::Object(theirs)],
+            source,
+            PlayerId(0),
+        );
+        assert_eq!(
+            declared_slot_announcement_filter(&compacted, 0),
+            Some(you_dont_control),
+            "a compacted declaration keeps the single-filter reading"
+        );
+    }
+
+    /// CR 115.1a/c/d/e + CR 601.2c + CR 608.2d: the per-slot announcement recovery
+    /// ([`declared_slot_announcement_filter`]) hands each `Attach` slot its OWN filter —
+    /// the attachment at position 0, the host at position 1 — and claims no attachment
+    /// slot at all for a DESCRIBED operand.
+    #[test]
+    fn attach_slot_announcement_filters_follow_the_declared_order() {
+        let equipment = TargetFilter::Typed(
+            TypedFilter::default().with_type(TypeFilter::Subtype("Equipment".to_string())),
+        );
+        let creature = TargetFilter::Typed(TypedFilter::creature());
+        let source = ObjectId(1);
+        let equipment_id = ObjectId(2);
+        let creature_id = ObjectId(3);
+
+        // "Attach target Equipment to target creature" (Magnetic Theft): the
+        // attachment is announced first, the host second.
+        let two_slot = ResolvedAbility::new(
+            Effect::Attach {
+                attachment: equipment.clone(),
+                target: creature.clone(),
+                selection: AttachSelection::Targeted,
+            },
+            vec![
+                TargetRef::Object(equipment_id),
+                TargetRef::Object(creature_id),
+            ],
+            source,
+            PlayerId(0),
+        );
+        assert_eq!(
+            declared_slot_announcement_filter(&two_slot, 0),
+            Some(equipment.clone()),
+            "slot 0 is the ATTACHMENT: the filter is the Equipment, never the host's"
+        );
+        assert_eq!(
+            declared_slot_announcement_filter(&two_slot, 1),
+            Some(creature.clone()),
+            "slot 1 is the HOST: the creature the Equipment is attached to"
+        );
+
+        // CR 608.2d: a DESCRIBED attachment ("attach any number of Equipment you
+        // control to target creature") claims no announcement slot, so the host is the
+        // only slot and position 0 recovers it.
+        let described = ResolvedAbility::new(
+            Effect::Attach {
+                attachment: equipment,
+                target: creature.clone(),
+                selection: AttachSelection::AtResolution {
+                    count: AttachCardinality::AnyNumber,
+                },
+            },
+            vec![TargetRef::Object(creature_id)],
+            source,
+            PlayerId(0),
+        );
+        assert_eq!(
+            declared_slot_announcement_filter(&described, 0),
+            Some(creature.clone()),
+            "a described attachment declares nothing, so the host lands at position 0"
+        );
+
+        // An anaphoric host ("attach this Equipment to it") resolves without a slot:
+        // the printed-target attachment is the whole declaration.
+        let anaphoric_host = ResolvedAbility::new(
+            Effect::Attach {
+                attachment: TargetFilter::Typed(
+                    TypedFilter::default().with_type(TypeFilter::Subtype("Equipment".to_string())),
+                ),
+                target: TargetFilter::ParentTarget,
+                selection: AttachSelection::Targeted,
+            },
+            vec![TargetRef::Object(equipment_id)],
+            source,
+            PlayerId(0),
+        );
+        assert_eq!(
+            declared_slot_announcement_filter(&anaphoric_host, 0),
+            Some(TargetFilter::Typed(
+                TypedFilter::default().with_type(TypeFilter::Subtype("Equipment".to_string()))
+            )),
+            "a context-ref host declares nothing, so the attachment lands at position 0"
+        );
+    }
+
+    /// CR 115.4 + CR 109.2: a damage "any target" slot's RECORDED requirement is
+    /// the live damage domain — the player axis plus the object axis — and the
+    /// object axis names the BATTLEFIELD. A type set alone would admit a creature
+    /// CARD in a graveyard, which live selection never offers because it searches
+    /// `state.battlefield`. The two halves are built by the same functions the
+    /// live enumeration uses, so they cannot drift.
+    ///
+    /// Revert-probe: dropping the `InZone { Battlefield }` prop restores the
+    /// pre-fix filter, whose type set alone satisfies the equality below only if
+    /// this test stops pinning the zone — which is exactly what it is here to do.
+    #[test]
+    fn damage_slot_announcement_filter_names_the_battlefield_domain() {
+        let bolt = ResolvedAbility::new(
+            Effect::DealDamage {
+                target: TargetFilter::Any,
+                amount: QuantityExpr::Fixed { value: 3 },
+                damage_source: None,
+                excess: None,
+            },
+            vec![TargetRef::Object(ObjectId(2))],
+            ObjectId(1),
+            PlayerId(0),
+        );
+        assert_eq!(
+            declared_slot_announcement_filter(&bolt, 0),
+            Some(TargetFilter::Or {
+                filters: vec![
+                    TargetFilter::Player,
+                    TargetFilter::Typed(TypedFilter {
+                        type_filters: vec![TypeFilter::AnyOf(vec![
+                            TypeFilter::Creature,
+                            TypeFilter::Planeswalker,
+                            TypeFilter::Battle,
+                        ])],
+                        controller: None,
+                        properties: vec![FilterProp::InZone {
+                            zone: Zone::Battlefield,
+                        }],
+                    }),
+                ],
+            }),
+            "CR 115.4: the recorded damage domain is a creature, player, planeswalker or \
+             battle, and the permanents among those exist only on the BATTLEFIELD"
+        );
+    }
+
+    /// CR 614.9 + CR 115.1a/c/d + CR 609.7a: a damage redirection's announced
+    /// slots are recovered from `damage_replacement_target_roles` in DECLARED
+    /// order — `DeclaredSource`, then `OriginalRecipient`, then
+    /// `RedirectRecipient` — BEFORE the generic single-filter extraction, which
+    /// answers `None` for `Effect::CreateDamageReplacement` because the effect has
+    /// no generic `target` field. That order is the live declaration order:
+    /// `collect_target_slots_inner`'s redirection arm pushes one slot per role in
+    /// iterator order. Revert-probe: reverting this arm to the generic extraction
+    /// leaves every one of these slots with `None`, so no recorded snapshot is
+    /// ever checked against the filter its slot announced.
+    #[test]
+    fn damage_replacement_slot_announcement_filters_follow_the_declared_order() {
+        use crate::types::ability::{DamageRedirectTarget, RedirectionLifetime};
+
+        let creature = TargetFilter::Typed(TypedFilter::creature());
+        // CR 115.4: the damage "any target" domain, built by the same authority
+        // the live enumeration uses.
+        let damage_domain = TargetFilter::Or {
+            filters: vec![
+                TargetFilter::Player,
+                TargetFilter::Typed(TypedFilter {
+                    type_filters: vec![TypeFilter::AnyOf(vec![
+                        TypeFilter::Creature,
+                        TypeFilter::Planeswalker,
+                        TypeFilter::Battle,
+                    ])],
+                    controller: None,
+                    properties: vec![FilterProp::InZone {
+                        zone: Zone::Battlefield,
+                    }],
+                }),
+            ],
+        };
+        let redirection = |source_filter, recipient_object_filter, redirect_object_filter| {
+            Effect::CreateDamageReplacement {
+                source_filter,
+                combat_scope: None,
+                target_filter: None,
+                modification: None,
+                redirect_to: Some(DamageRedirectTarget::ChosenTarget),
+                redirect_amount: Some(PreventionAmount::Next(1)),
+                redirect_object_filter,
+                recipient_object_filter,
+                redirect_lifetime: RedirectionLifetime::OneOpportunity,
+            }
+        };
+        let source = ObjectId(1);
+        let recipient = ObjectId(2);
+        let redirect = ObjectId(3);
+
+        // "The next 1 damage that would be dealt to target creature this turn is
+        // dealt to any target instead" (Jade Monolith): TWO slots whose filters
+        // DIFFER, so the position alone decides which requirement applies.
+        let two_role = ResolvedAbility::new(
+            redirection(None, Some(creature.clone()), Some(TargetFilter::Any)),
+            vec![TargetRef::Object(recipient), TargetRef::Object(redirect)],
+            source,
+            PlayerId(0),
+        );
+        assert_eq!(
+            declared_slot_announcement_filter(&two_role, 0),
+            Some(creature.clone()),
+            "slot 0 is the ORIGINAL RECIPIENT: its own 'target creature' requirement, not the \
+             redirect recipient's 'any target'"
+        );
+        assert_eq!(
+            declared_slot_announcement_filter(&two_role, 1),
+            Some(damage_domain.clone()),
+            "slot 1 is the REDIRECT RECIPIENT: 'any target' names the CR 115.4 domain"
+        );
+
+        // A DECLARED SOURCE leads a three-slot declaration and keeps its own CR
+        // 609.7a domain: `Any` there names any source, never the damage "any
+        // target" domain, so it must not be narrowed.
+        let three_role = ResolvedAbility::new(
+            redirection(
+                Some(TargetFilter::And {
+                    filters: vec![
+                        TargetFilter::ParentTargetSlot { index: 0 },
+                        TargetFilter::Any,
+                    ],
+                }),
+                Some(TargetFilter::Any),
+                Some(creature.clone()),
+            ),
+            vec![
+                TargetRef::Object(source),
+                TargetRef::Object(recipient),
+                TargetRef::Object(redirect),
+            ],
+            source,
+            PlayerId(0),
+        );
+        assert_eq!(
+            declared_slot_announcement_filter(&three_role, 0),
+            Some(TargetFilter::Any),
+            "slot 0 is the DECLARED SOURCE: 'any source' is not a damage recipient and keeps \
+             its own domain"
+        );
+        assert_eq!(
+            declared_slot_announcement_filter(&three_role, 1),
+            Some(damage_domain.clone()),
+            "slot 1 is the ORIGINAL RECIPIENT: its 'any target' names the damage domain"
+        );
+        assert_eq!(
+            declared_slot_announcement_filter(&three_role, 2),
+            Some(creature),
+            "slot 2 is the REDIRECT RECIPIENT: its own typed requirement"
+        );
+
+        // A DECLINED optional slot compacts `targets`, leaving the vector unable
+        // to say which role survived. The recovery claims nothing rather than
+        // guessing a role — the generic extraction answers `None` for this
+        // effect, so the slot stays unchecked instead of checked against the
+        // wrong requirement.
+        let compacted = ResolvedAbility::new(
+            redirection(
+                None,
+                Some(TargetFilter::Typed(TypedFilter::creature())),
+                Some(TargetFilter::Any),
+            ),
+            vec![TargetRef::Object(recipient)],
+            source,
+            PlayerId(0),
+        );
+        assert_eq!(
+            declared_slot_announcement_filter(&compacted, 0),
+            None,
+            "a compacted declaration is not positionally attributable"
+        );
+    }
+
     use crate::types::ability::{
-        AbilityCost, AbilityKind, AggregateFunction, BounceSelection, CardTypeSetSource,
-        CastManaObjectScope, CastManaSpentMetric, Comparator, ContinuousModification,
-        ControllerRef, CountScope, CounterTransferMode, DamageChannel, DamageKindFilter, Duration,
-        Effect, FilterProp, GameRestriction, LibraryPosition, ModalChoice,
-        ModalSelectionConstraint, MultiTargetSpec, ObjectProperty, ObjectScope, ProhibitedActivity,
-        PtStat, PtValue, PtValueScope, QuantityExpr, QuantityRef, RestrictionExpiry,
-        RestrictionPlayerScope, SearchSelectionConstraint, SharedQuality, SharedQualityRelation,
-        StaticDefinition, TargetFilter, TargetRef, TypeFilter, TypedFilter, UnlessPayModifier,
+        AbilityCost, AbilityKind, AggregateFunction, AttachSelection, BounceSelection,
+        CardTypeSetSource, CastManaObjectScope, CastManaSpentMetric, Comparator,
+        ContinuousModification, ControllerRef, CountScope, CounterTransferMode, DamageChannel,
+        DamageKindFilter, Duration, Effect, FilterProp, GameRestriction, LibraryPosition,
+        ModalChoice, ModalSelectionConstraint, MultiTargetSpec, ObjectProperty, ObjectScope,
+        ProhibitedActivity, PtStat, PtValue, PtValueScope, QuantityExpr, QuantityRef,
+        RestrictionExpiry, RestrictionPlayerScope, SearchSelectionConstraint, SharedQuality,
+        SharedQualityRelation, StaticDefinition, TargetFilter, TargetRef, TypeFilter, TypedFilter,
+        UnlessPayModifier,
     };
     use crate::types::card_type::CoreType;
     use crate::types::game_state::{
@@ -30298,6 +31002,192 @@ mod tests {
         assert_eq!(
             declared_group_player_slot(&root, group),
             Some(Some((1, PlayerId(1))))
+        );
+    }
+
+    /// CR 601.2c + CR 115.1: the restore guard's declared-slot view must be indexed
+    /// in the STATIC declared-slot space, because `DeclaredTarget { slot }` is
+    /// authored there (the announcement walk maps `selected_slots` position for
+    /// position, declined slots included as `None` holes).
+    /// [`declared_target_entries_in_chain`] is the COMPACTED space — a declining
+    /// optional slot pushes no target and leaves no hole — so a declined slot BEFORE
+    /// the referent resolves it against the wrong object. A record comparison states
+    /// that as a DEFINITE contradiction, which the restore guard refuses an honest
+    /// save on. This pins the builder's answer AND that consequence on one honest
+    /// announcement.
+    #[test]
+    fn record_check_view_is_withheld_when_a_declined_slot_shifts_the_numbering() {
+        use crate::game::effects::attach::attach_to;
+        use crate::game::filter::{
+            matches_target_filter_on_recorded_announcement, AnnouncedTargetRecord, FilterContext,
+        };
+        use crate::game::game_object::AttachTarget;
+        use crate::game::targeting::DeclaredSlotBinding;
+        use crate::types::ability::{
+            AttachmentReferent, EffectScope, FilterProp, TapStateChange, TypeFilter, TypedFilter,
+        };
+        use crate::types::game_state::ActivationTargetFact;
+
+        let mut scenario = GameScenario::new();
+        let creature = scenario.add_creature(P1, "Host", 2, 7).id();
+        let gear = scenario
+            .add_artifact_from_oracle(P1, "Gear", "Equipped creature gets +1/+0.")
+            .with_subtypes(vec!["Equipment"])
+            .id();
+        let trinket = scenario.add_artifact_from_oracle(P1, "Trinket", "").id();
+        let mut state = scenario.state;
+        attach_to(&mut state, gear, creature);
+
+        // The probe chain of three static declared slots: an optional first slot, a
+        // required creature slot, and a slot whose filter reads declared slot 1.
+        let equipment_filter = TargetFilter::Typed(
+            TypedFilter::new(TypeFilter::Artifact)
+                .subtype("Equipment".to_string())
+                .properties(vec![FilterProp::AttachedTo {
+                    to: AttachmentReferent::DeclaredTarget { slot: 1 },
+                }]),
+        );
+        let node = |filter: TargetFilter| {
+            ResolvedAbility::new(
+                Effect::SetTapState {
+                    target: filter,
+                    scope: EffectScope::Single,
+                    state: TapStateChange::Tap,
+                },
+                vec![],
+                ObjectId(999),
+                PlayerId(0),
+            )
+        };
+        let optional_chain = || {
+            let mut root = node(TargetFilter::Typed(TypedFilter::new(TypeFilter::Artifact)));
+            root.optional_targeting = true;
+            root.sub_ability(
+                node(TargetFilter::Typed(TypedFilter::creature()))
+                    .sub_ability(node(equipment_filter.clone())),
+            )
+        };
+
+        let mut chain = optional_chain();
+        // CR 601.2c: the honest announcement — the optional first slot DECLINED, the
+        // creature and its Equipment announced in declaration order.
+        assign_selected_slots_in_chain(
+            &state,
+            &mut chain,
+            &[
+                None,
+                Some(TargetRef::Object(creature)),
+                Some(TargetRef::Object(gear)),
+            ],
+        )
+        .expect("the honest announcement assigns");
+        let entries = declared_target_entries_in_chain(&chain);
+        assert_eq!(
+            entries.len(),
+            2,
+            "reach: the declined slot contributed no entry"
+        );
+        assert_eq!(
+            build_target_slots(&state, &chain)
+                .expect("the chain's slots rebuild")
+                .len(),
+            3,
+            "reach: the declined optional slot is still a declared slot"
+        );
+        assert!(
+            record_check_declared_slot_view(&state, &chain, &entries).is_none(),
+            "the compacted entries cannot address the static space, so no view is supplied"
+        );
+
+        // Control: with the optional slot FILLED the two numberings coincide and the
+        // view names each announced object at its own static position.
+        let mut filled = optional_chain();
+        assign_selected_slots_in_chain(
+            &state,
+            &mut filled,
+            &[
+                Some(TargetRef::Object(trinket)),
+                Some(TargetRef::Object(creature)),
+                Some(TargetRef::Object(gear)),
+            ],
+        )
+        .expect("the full announcement assigns");
+        let filled_entries = declared_target_entries_in_chain(&filled);
+        let view = record_check_declared_slot_view(&state, &filled, &filled_entries)
+            .expect("a 1:1 chain supplies its view");
+        assert_eq!(view.len(), 3, "the view spans the static space");
+        for (slot, expected) in [(0, trinket), (1, creature), (2, gear)] {
+            assert!(
+                matches!(
+                    &view[slot],
+                    Some(DeclaredSlotBinding::Announced {
+                        target: TargetRef::Object(id),
+                        ..
+                    }) if *id == expected
+                ),
+                "static slot {slot} names {expected:?}: {view:?}"
+            );
+        }
+
+        // CR 601.2c + CR 301.5a: the honest record of the Equipment fact. Its host is
+        // the creature the declaration named for slot 1.
+        let facts = crate::game::casting::capture_target_facts(&state, &[TargetRef::Object(gear)]);
+        let ActivationTargetFact::Object {
+            lki,
+            zone,
+            token,
+            attached_to,
+            ..
+        } = &facts[0]
+        else {
+            panic!("reach: the announced Equipment produced an object fact");
+        };
+        assert_eq!(
+            *attached_to,
+            Some(AttachTarget::Object(creature)),
+            "reach guard: the capture states the host the caster saw"
+        );
+        let ask = |view: Option<&[Option<DeclaredSlotBinding>]>| {
+            let context = match view {
+                Some(view) => FilterContext::neutral().with_declared_slot_view(view),
+                None => FilterContext::neutral(),
+            };
+            matches_target_filter_on_recorded_announcement(
+                &state,
+                gear,
+                AnnouncedTargetRecord {
+                    lki,
+                    zone: zone.zone(),
+                    token: token.bit(),
+                    attached_to: *attached_to,
+                },
+                &equipment_filter,
+                &context,
+            )
+        };
+        // The pre-fix view: the COMPACTED entry list. Static slot 1 therefore reads
+        // the entry that filled static slot 2 — the Equipment itself — so the honest
+        // host reads as a contradiction the guard refuses on.
+        let compacted: Vec<Option<DeclaredSlotBinding>> = entries
+            .iter()
+            .map(|entry| {
+                Some(DeclaredSlotBinding::Announced {
+                    target: entry.target.clone(),
+                    pin: entry.pin,
+                })
+            })
+            .collect();
+        assert_eq!(
+            ask(Some(&compacted)),
+            Some(false),
+            "the mis-indexed view reports an honest announcement as a contradiction"
+        );
+        // What the guard supplies for this chain: no view, so the axis is UNKNOWN and
+        // the save is admitted.
+        assert_eq!(
+            ask(record_check_declared_slot_view(&state, &chain, &entries).as_deref()),
+            None,
+            "no view answers UNKNOWN, never a refusal"
         );
     }
 

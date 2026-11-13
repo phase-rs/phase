@@ -37,7 +37,8 @@ use crate::types::identifiers::{CardId, ObjectId, ObjectIncarnationRef, TrackedS
 use crate::types::keywords::{FlashbackCost, Keyword, KeywordKind};
 use crate::types::mana::{
     ActivationManaColorConstraint, ManaColor, ManaCost, ManaCostShard, ManaSourceOutput,
-    ManaSourceSelection, ManaSpellGrant, ManaType, PaymentContext, SpecialAction, SpellMeta,
+    ManaSourceSelection, ManaSpellGrant, ManaType, ManaUnit, PaymentContext, SpecialAction,
+    SpellMeta,
 };
 use crate::types::player::PlayerId;
 use crate::types::resolved_commands::ManaPaymentRecipient;
@@ -13429,7 +13430,7 @@ pub(super) fn apply_battlefield_cost_modifiers_with_selected_targets(
 /// `DuringYourTurn` binds to the source permanent's controller (Paladin Class),
 /// while `SpellsCastThisTurn` / first-spell quantity gates bind to the spell
 /// caster (Heartwood Storyteller Avatar's opponent-first tax).
-fn evaluate_cost_mod_static_condition(
+pub(crate) fn evaluate_cost_mod_static_condition(
     state: &GameState,
     condition: &crate::types::ability::StaticCondition,
     caster: PlayerId,
@@ -19968,6 +19969,7 @@ fn continue_with_prepared(
                     prepared.cast_timing_permission,
                     prepared.origin_zone,
                     prepared.payment_mode,
+                    casting_costs::CostLockInput::default(),
                     events,
                 );
             } else {
@@ -20051,6 +20053,7 @@ fn continue_with_prepared(
                 prepared.cast_timing_permission,
                 prepared.origin_zone,
                 prepared.payment_mode,
+                casting_costs::CostLockInput::default(),
                 events,
             );
         } else {
@@ -20443,6 +20446,7 @@ fn continue_with_prepared(
                 prepared.cast_timing_permission,
                 prepared.origin_zone,
                 prepared.payment_mode,
+                casting_costs::CostLockInput::default(),
                 events,
             );
         }
@@ -20465,6 +20469,8 @@ fn continue_with_prepared(
     }
 
     // 6. Check additional cost, then pay mana cost
+    // CR 601.2c: this cast declared no targets (it reached here without target
+    // slots), so there is nothing to latch.
     check_additional_cost_or_pay(
         state,
         player,
@@ -20478,6 +20484,7 @@ fn continue_with_prepared(
         prepared.cast_timing_permission,
         prepared.origin_zone,
         prepared.payment_mode,
+        casting_costs::CostLockInput::default(),
         events,
     )
 }
@@ -20597,6 +20604,8 @@ fn continue_with_no_ability(
             events,
         );
     }
+    // CR 601.2c: a permanent spell with no spell ability declares no targets, so
+    // there is nothing to latch.
     check_additional_cost_or_pay(
         state,
         player,
@@ -20610,6 +20619,7 @@ fn continue_with_no_ability(
         prepared.cast_timing_permission,
         prepared.origin_zone,
         prepared.payment_mode,
+        casting_costs::CostLockInput::default(),
         events,
     )
 }
@@ -24519,6 +24529,54 @@ fn pay_life_components(
     Ok(None)
 }
 
+/// CR 702.132a + CR 118.3a: the units a committed Assist helper spent on the cast
+/// being finalized, from the ONE typed contribution claim the spend boundary captured.
+///
+/// Both payment finalizers record this cast's payment, and the helper's units are
+/// part of it: CR 702.132a has the helper pay "before you begin to pay the total
+/// cost", so their units precede the caster's in the recorded payment, and CR 118.3a
+/// makes paying mana "removing the indicated mana from a player's mana pool" — so
+/// the units the helper removed ARE mana spent to cast this spell. Recording only
+/// the caster's would drop the pips a source-qualified predicate reads (Rain of
+/// Riches' "mana from a Treasure was spent to cast has cascade").
+///
+/// The claim states its own cast, helper and amount, so this reader can refuse one
+/// that does not describe the payment it asserts instead of splicing whatever
+/// happens to be there:
+///
+/// * a claim captured for a different cast is not this cast's payment;
+/// * a claim whose unit count disagrees with the generic amount it says was paid is
+///   not the payment it claims to be (CR 118.3a: one unit per point of generic mana).
+///
+/// Restore binds the claim to the journal before a finalizer ever runs
+/// (`GameState::bind_or_reject_assist_contribution_provenance`), so this is the
+/// consumer-side half of the same rule: a paid contribution that lost its units must
+/// surface as a refusal, never as a silent zero.
+fn assist_contributed_units_for(
+    state: &GameState,
+    source_id: ObjectId,
+) -> Result<Vec<ManaUnit>, EngineError> {
+    let Some(contribution) = state.active_assist_contribution.as_deref() else {
+        return Ok(Vec::new());
+    };
+    if contribution.source_id != source_id {
+        return Err(EngineError::ActionNotAllowed(format!(
+            "an Assist contribution captured for {:?} cannot be recorded on {source_id:?}",
+            contribution.source_id
+        )));
+    }
+    if !contribution.is_backed_by_its_units() {
+        return Err(EngineError::ActionNotAllowed(format!(
+            "the Assist contribution to {source_id:?} records {:?} as having paid {} generic \
+             mana but carries {} spent units",
+            contribution.helper,
+            contribution.generic,
+            contribution.units.len()
+        )));
+    }
+    Ok(contribution.units.clone())
+}
+
 /// CR 107.4f + CR 601.2f-h + CR 605.3b + CR 616.1: A submitted Phyrexian
 /// payment can be interrupted by a costed auto-tapped mana source. Preserve
 /// the finalization root rather than deriving a generic priority resume.
@@ -24564,11 +24622,16 @@ pub(super) fn pay_mana_cost_with_choices_and_resume(
     // CR 702.51a + CR 702.126a + CR 701.67a: Convoke, improvise and waterbend
     // taps are consumed by the payment algorithm but are not mana spent to cast
     // the spell.
-    let mana_spent_units = spent_units
+    let mut mana_spent_units = spent_units
         .iter()
         .filter(|unit| !unit.is_convoke_payment())
         .cloned()
         .collect::<Vec<_>>();
+    // CR 702.132a + CR 118.3a: a committed Assist helper's units are mana spent to cast
+    // THIS spell. CR 702.132a has the helper pay "before you begin to pay the total
+    // cost", so their units come FIRST in payment order, and recording only the
+    // caster's would drop the pips a source-qualified predicate reads.
+    mana_spent_units.splice(0..0, assist_contributed_units_for(state, source_id)?);
 
     // CR 106.6: Apply mana spell grants to the spell being cast.
     apply_mana_spell_grants(state, source_id, &mana_spent_units);
@@ -24584,20 +24647,7 @@ pub(super) fn pay_mana_cost_with_choices_and_resume(
     }
 
     if !mana_spent_units.is_empty() {
-        let source_snapshots: Vec<_> = mana_spent_units
-            .iter()
-            .filter_map(|unit| {
-                state
-                    .objects
-                    .get(&unit.source_id)
-                    .map(|source| source.snapshot_for_mana_spent())
-                    .or_else(|| state.lki_cache.get(&unit.source_id).cloned())
-                    .map(|lki| crate::types::game_state::ManaSpentSourceSnapshot {
-                        source_id: unit.source_id,
-                        lki,
-                    })
-            })
-            .collect();
+        let source_snapshots = mana_spent_source_snapshots(state, &mana_spent_units);
         if let Some(obj) = state.objects.get_mut(&source_id) {
             obj.mana_spent_to_cast = true;
             obj.mana_spent_to_cast_amount = mana_spent_units.len() as u32;
@@ -24706,11 +24756,14 @@ pub(super) fn pay_mana_cost_from_pool_with_choices(
         .collect::<HashSet<_>>();
     cleanup_unused_convoke_payments(state, player, source_id, &spent_convoke_sources);
 
-    let mana_spent_units = spent_units
+    let mut mana_spent_units = spent_units
         .iter()
         .filter(|unit| !unit.is_convoke_payment())
         .cloned()
         .collect::<Vec<_>>();
+    // CR 702.132a + CR 118.3a: the committed Assist helper's units are mana spent to
+    // cast this spell, beside the caster's (see the sibling finalizer).
+    mana_spent_units.splice(0..0, assist_contributed_units_for(state, source_id)?);
 
     apply_mana_spell_grants(state, source_id, &mana_spent_units);
 
@@ -24722,20 +24775,7 @@ pub(super) fn pay_mana_cost_from_pool_with_choices(
     }
 
     if !mana_spent_units.is_empty() {
-        let source_snapshots: Vec<_> = mana_spent_units
-            .iter()
-            .filter_map(|unit| {
-                state
-                    .objects
-                    .get(&unit.source_id)
-                    .map(|source| source.snapshot_for_mana_spent())
-                    .or_else(|| state.lki_cache.get(&unit.source_id).cloned())
-                    .map(|lki| crate::types::game_state::ManaSpentSourceSnapshot {
-                        source_id: unit.source_id,
-                        lki,
-                    })
-            })
-            .collect();
+        let source_snapshots = mana_spent_source_snapshots(state, &mana_spent_units);
         if let Some(obj) = state.objects.get_mut(&source_id) {
             obj.mana_spent_to_cast = true;
             obj.mana_spent_to_cast_amount = mana_spent_units.len() as u32;
@@ -24804,6 +24844,190 @@ fn cleanup_unused_convoke_payments(
     }
 
     release_unspent_tap_markers(state, player, &unused_sources);
+}
+
+/// CR 106.3 + CR 601.2h + CR 400.7: the provenance recorded for every unit a
+/// completed payment spent, in unit order.
+///
+/// The single capture authority for both payment paths (`pay_mana_cost…` with
+/// and without pre-chosen Phyrexian payments): each unit records the source that
+/// PRODUCED its mana, resolved by the epoch production pinned on the unit.
+pub(crate) fn mana_spent_source_snapshots(
+    state: &GameState,
+    units: &[crate::types::mana::ManaUnit],
+) -> Vec<crate::types::game_state::ManaSpentSourceSnapshot> {
+    ProducerFactReader::new(state).snapshots(units)
+}
+
+/// CR 118.3a + CR 400.7: ONE position's producer-fact read — the retained ledger's index,
+/// built once for the position and reused by every unit any of its readers visits.
+///
+/// The retained producer ledger answers for ONE unit at a time, and every caller asks it for
+/// MANY units in a row, so the ledger is indexed once per BATCH rather than searched once per
+/// unit (which is quadratic in the number of units a batch can drain). That batching is not
+/// only per call: a caller that reads several pools of ONE state — `analysis`'s loop
+/// comparison walks every payer's pool through
+/// `crate::analysis::resource::floating_producer_facts_match` — has ONE position, so it must
+/// build ONE index, not one per pool. That is why the reader is a value the caller binds to a
+/// position and lends to each of its reads, rather than a free function each read re-enters.
+///
+/// CR 118.3a + CR 400.7: the index is LAZY. It is the LAST resort of each unit's read, and
+/// most reads never fall back — mana tapped and spent out of a live source is answered by
+/// that source's own live object — while under Upwelling ("Players don't lose unspent mana
+/// as steps and phases end.") the ledger can hold a row for every unit the pool still floats,
+/// carried for as long as the mana lasts. Indexing up front would charge every read for facts
+/// a live or exit-cache answer already settled; the lazy index keeps the batch linear when
+/// the fallback IS reached and free when it is not. A reader whose units are all answered by
+/// their live object therefore never builds one at all, however many pools it serves.
+pub(crate) struct ProducerFactReader<'a> {
+    state: &'a GameState,
+    pooled_index: super::mana_payment::LazyPooledProducerLedgerIndex<'a>,
+}
+
+impl<'a> ProducerFactReader<'a> {
+    /// Bind one reader to `state`, holding (not yet indexing) its retained producer rows.
+    pub(crate) fn new(state: &'a GameState) -> Self {
+        Self {
+            state,
+            pooled_index: super::mana_payment::LazyPooledProducerLedgerIndex::new(
+                &state.pooled_mana_producer_snapshots,
+            ),
+        }
+    }
+
+    /// The position-preserving batch: one entry per input unit, `None` for a unit whose
+    /// producer cannot be named, in unit order.
+    pub(crate) fn snapshots_by_unit(
+        &self,
+        units: &[crate::types::mana::ManaUnit],
+    ) -> Vec<Option<crate::types::game_state::ManaSpentSourceSnapshot>> {
+        units
+            .iter()
+            .map(|unit| mana_spent_source_snapshot(self.state, &self.pooled_index, unit))
+            .collect()
+    }
+
+    /// The payment's batch: the same answers, with the unnamable units dropped.
+    pub(crate) fn snapshots(
+        &self,
+        units: &[crate::types::mana::ManaUnit],
+    ) -> Vec<crate::types::game_state::ManaSpentSourceSnapshot> {
+        self.snapshots_by_unit(units)
+            .into_iter()
+            .flatten()
+            .collect()
+    }
+}
+
+/// CR 106.3 + CR 113.7 + CR 400.7: one spent unit's producing source.
+///
+/// CR 106.3 makes the mana's source the source of the ability that produced it,
+/// and CR 113.7 makes that the object which generated the ability — so the
+/// answer is the incarnation the unit pinned at production, not whatever now
+/// occupies its storage id. A mana ability whose own cost sacrificed its source
+/// (a Treasure ability granted to the permanent, Lion's Eye Diamond) is the case
+/// that separates the two: CR 400.7 makes the sacrificed card's successor a
+/// different object, so a live re-read would record the graveyard card.
+///
+/// Resolution is exact and fails closed: the live object answers only while it
+/// still IS the pinned incarnation, otherwise the epoch's exit last-known
+/// information (`exit_lki_for_incarnation`) does, then the producer fact a
+/// floating unit carries across a step/phase boundary
+/// (`mana_payment::pooled_mana_producer_row`, read through the batch index
+/// the caller holds — built lazily by this very call, so the two answers above
+/// cost no indexing at all), and only then is the fact unprovable. A unit that
+/// predates the pin (legacy payload, synthetic pool fixture) keeps the historical
+/// live-then-`lki_cache` read, so no answer that was already reachable changes.
+fn mana_spent_source_snapshot(
+    state: &GameState,
+    pooled_index: &super::mana_payment::LazyPooledProducerLedgerIndex<'_>,
+    unit: &crate::types::mana::ManaUnit,
+) -> Option<crate::types::game_state::ManaSpentSourceSnapshot> {
+    use crate::game::game_object::ObjectIncarnationRefExt as _;
+    use crate::types::game_state::CapturedTokenBit;
+
+    // CR 111.1 + CR 106.3: the bit the producer held when it made the mana,
+    // captured beside the snapshot from the SAME source — the live row, the
+    // pinned epoch's departure capture, or the storage-id-keyed pair. A producer
+    // fact that names none of them leaves `Unknown`, which the leaf refuses.
+    let (lki, source_token) = match unit.source_incarnation_ref() {
+        Some(pinned) => match state.objects.get(&pinned.object_id).filter(|source| {
+            crate::types::identifiers::ObjectIncarnationRef::from_object(source) == pinned
+        }) {
+            Some(source) => (
+                source.snapshot_for_mana_spent(),
+                CapturedTokenBit::Known(source.is_token),
+            ),
+            None => {
+                let exit_lki = super::filter::exit_lki_for_incarnation(
+                    state,
+                    pinned.object_id,
+                    pinned.incarnation,
+                );
+                // CR 608.2h: the capture the SAME departure recorded for that
+                // epoch, while it is still live.
+                let exit_bit = exit_lki.and_then(|_| {
+                    state
+                        .departure_token_by_incarnation
+                        .get(&pinned.object_id)
+                        .and_then(|history| history.get(&pinned.incarnation))
+                        .copied()
+                });
+                match exit_lki {
+                    // CR 608.2h: the exit cache answered, so the retained ledger is
+                    // not read at all — touching it would build the index this
+                    // caller avoided.
+                    Some(exit_lki) => (
+                        exit_lki.clone(),
+                        exit_bit.map_or(CapturedTokenBit::Unknown, CapturedTokenBit::Known),
+                    ),
+                    // CR 111.1 + CR 106.3 + CR 400.7: past the step boundary the exit
+                    // cache and the departure captures are both gone, and the retained
+                    // ledger row states the bit IT was written with — the
+                    // classification a retention effect (Upwelling, CR 106.4) carries
+                    // across the boundary with the unit. ONE row read yields both
+                    // halves.
+                    None => {
+                        let row = super::mana_payment::pooled_mana_producer_row(pooled_index, unit);
+                        let lki = row.map(|row| row.lki.clone())?;
+                        let source_token = row
+                            .map(|row| row.source_token)
+                            .unwrap_or(CapturedTokenBit::Unknown);
+                        (lki, source_token)
+                    }
+                }
+            }
+        },
+        None => {
+            let live = state
+                .objects
+                .get(&unit.source_id)
+                .map(crate::game::game_object::GameObject::snapshot_for_mana_spent);
+            let source_token = match live {
+                Some(_) => CapturedTokenBit::Known(
+                    state
+                        .objects
+                        .get(&unit.source_id)
+                        .is_some_and(|source| source.is_token),
+                ),
+                // CR 608.2h: the storage-id-keyed pair was written by the same
+                // departure as the cached snapshot this branch reads.
+                None => state
+                    .departure_token_cache
+                    .get(&unit.source_id)
+                    .map_or(CapturedTokenBit::Unknown, |is_token| {
+                        CapturedTokenBit::Known(*is_token)
+                    }),
+            };
+            let lki = live.or_else(|| state.lki_cache.get(&unit.source_id).cloned())?;
+            (lki, source_token)
+        }
+    };
+    Some(crate::types::game_state::ManaSpentSourceSnapshot {
+        source_id: unit.source_id,
+        lki,
+        source_token,
+    })
 }
 
 /// CR 702.51a + CR 702.126a + CR 701.67a: each of these taps a permanent
@@ -31937,6 +32161,126 @@ pub(crate) fn record_activation_announcement(
     }
 }
 
+/// CR 115.1 + CR 601.2c + CR 400.7: snapshot one committed target list into the
+/// repo's typed "one committed target, as it was when committed" vocabulary. A
+/// player fact needs no snapshot; an object fact carries the target's public
+/// characteristics as they were at commitment — including the attachment relation
+/// that may be the whole reason it was legal ([`capture_announced_target_lki`]) —
+/// together with the zone it occupied then (CR 109.2 needs the zone to read a bare
+/// type description as a battlefield permanent) and the object it was attached to
+/// then (the OUTGOING half of the relation, which a declared-slot attachment
+/// requirement is read against). An id absent from `state.objects`
+/// (a target that has ceased — only reachable for a token) is dropped: a fact that
+/// cannot be snapshotted is not invented. CR 115.9b's "a departed target is
+/// ignored" rule belongs to the live reader in
+/// `filter::stack_entry_targets_satisfy`, not to this capture.
+pub(crate) fn capture_target_facts(
+    state: &GameState,
+    targets: &[TargetRef],
+) -> Vec<ActivationTargetFact> {
+    targets
+        .iter()
+        .filter_map(|target| match target {
+            TargetRef::Player(player) => Some(ActivationTargetFact::Player(*player)),
+            TargetRef::Object(id) => {
+                state
+                    .objects
+                    .get(id)
+                    .map(|obj| ActivationTargetFact::Object {
+                        id: *id,
+                        lki: Box::new(capture_announced_target_lki(state, obj)),
+                        // CR 601.2c: the zone the announced target was legal in.
+                        zone: crate::types::game_state::AnnouncedTargetZone::Known(obj.zone),
+                        // CR 111.1 + CR 115.9: the token bit the target held at
+                        // this announcement, captured HERE because no later epoch
+                        // can date it — CR 730.2c + CR 730.2d let a merge flip the
+                        // bit on the same object with no zone change to record,
+                        // and the zone-change journal is turn-scoped.
+                        token: crate::types::game_state::CapturedTokenBit::Known(obj.is_token),
+                        // CR 601.2c + CR 301.5a + CR 701.3a: the OUTGOING
+                        // attachment relation. `LKISnapshot::attachments` records
+                        // only what is attached TO this object, which leaves a
+                        // slot that requires the target to be attached ("target
+                        // Equipment attached to that creature") with no record of
+                        // the very relation that admitted it. Captured from the
+                        // live object here, at the one moment the announcement is
+                        // still in hand.
+                        attached_to: obj.attached_to,
+                    })
+            }
+        })
+        .collect()
+}
+
+/// CR 303.4 + CR 301.5 + CR 608.2h: the announcement-time snapshot of an object
+/// the caster just chose as a target, COMPLETE with the attachment relation it
+/// carried then.
+///
+/// [`GameObject::snapshot_public_characteristics`] cannot state attachments: a
+/// `LKISnapshot` classifies an attached object as Aura/Equipment by looking it up
+/// in `GameState`, and that method holds only `&self`. The announcement is one of
+/// the two moments a snapshot is the only surviving authority for the relation —
+/// the other is the battlefield exit (`apply_zone_exit_cleanup`), which supplies
+/// the same capture — so this caller, which does have the board, supplies it here
+/// rather than leaving the field empty. An empty set is otherwise indistinguishable
+/// from "nothing was attached", which is the OPPOSITE answer.
+///
+/// CR 115.1 + CR 601.2c: a target the caster could choose ("Destroy target
+/// enchanted permanent" — Venomous Vines) may owe its legality entirely to this
+/// relation, and `LKISnapshot` is the whole record of that choice once the
+/// target's live band is gone. CR 608.2h: a look-back question about the announced
+/// object ("was it enchanted") reads what the announcement saw. CR 303.4b
+/// defines "enchanted" as having an Aura attached, CR 301.5a defines "equipped"
+/// the same way for Equipment; [`crate::game::zones::capture_attachment_snapshot`]
+/// is the one authority that classifies both, exactly as it does for a departure.
+fn capture_announced_target_lki(
+    state: &GameState,
+    obj: &crate::game::game_object::GameObject,
+) -> crate::types::game_state::LKISnapshot {
+    let mut lki = obj.snapshot_public_characteristics();
+    lki.attachments = crate::game::zones::capture_attachment_snapshot(state, obj);
+    lki
+}
+
+/// CR 115.1 + CR 601.2c + CR 400.7: latch the spell's just-declared targets onto
+/// its own `PendingCast`, at the shared target-declaration→payment boundary —
+/// the last moment before CR 601.2h moves anything. The latch is the cast's
+/// answer for the CR 601.2i history write; every later reader prefers it over a
+/// fresh raw-id capture, because a cost that moves a target (the ordinary
+/// return-to-hand additional cost, Bone Splinters' sacrifice) makes the same
+/// storage id a different object whose printed baseline CR 400.7 restores on the
+/// zone change. First capture wins: a spell declares its targets once, and a
+/// continuation that re-enters the boundary must not restate them from the
+/// moved object.
+///
+/// Deliberate scope of the frozen facts (CR 601.2c): this is the
+/// announcement-time reading, so a cost that mutates a target *in place* rather
+/// than moving it — tapping it for convoke or an "as an additional cost, tap"
+/// clause, putting counters on it, pumping it — is now recorded as it was when
+/// announced, where an earlier capture point taken after such a cost recorded the
+/// mutated value. That is the reading the cost-axis predicates are defined over
+/// (CR 601.2f evaluates them before the total cost is paid); the in-place
+/// alternative would make the record depend on how the caster chose to pay.
+///
+/// CR 601.2c: the ORDER of this list is load-bearing. Each fact is the target of
+/// one declared slot, in `declared_targets_in_chain`'s numbering order, and
+/// `GameState::reject_contradictory_announced_target_facts` reads the latch back
+/// against that same walk to give each fact its own slot's requirement and pin.
+/// CR 601.2c lets one object fill two slots, so the list is not a set: a repeated
+/// target must keep one entry per occurrence, in declaration order.
+pub(crate) fn latch_committed_target_facts(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    pending: &mut PendingCast,
+) {
+    if pending.committed_target_facts.is_none() {
+        pending.committed_target_facts = Some(capture_target_facts(
+            state,
+            &declared_targets_in_chain(ability),
+        ));
+    }
+}
+
 /// [`capture_activation_record`] from an ability definition and its committed
 /// targets.
 pub(crate) fn capture_activation_record_from(
@@ -31951,26 +32295,16 @@ pub(crate) fn capture_activation_record_from(
     let source = state.objects.get(&source_id)?;
     let source_lki = source.snapshot_public_characteristics();
     let source_zone = source.zone;
-    let targets = targets
-        .iter()
-        .filter_map(|target| match target {
-            TargetRef::Player(player) => Some(ActivationTargetFact::Player(*player)),
-            TargetRef::Object(id) => {
-                state
-                    .objects
-                    .get(id)
-                    .map(|obj| ActivationTargetFact::Object {
-                        id: *id,
-                        lki: Box::new(obj.snapshot_public_characteristics()),
-                    })
-            }
-        })
-        .collect();
+    // CR 111.1 + CR 602.2: the source's own bit, captured with the snapshot a
+    // source-scoped modifier reads. See `CapturedTokenBit`.
+    let source_token = crate::types::game_state::CapturedTokenBit::Known(source.is_token);
+    let targets = capture_target_facts(state, targets);
     Some(AbilityActivationRecord {
         activator: player,
         source: source_id,
         source_lki,
         source_zone,
+        source_token,
         ability_tag: def.and_then(|def| def.ability_tag),
         // CR 606.1: classified once, from the announcement-bound definition.
         is_loyalty_ability: def.map(ActivatedAbilityKind::of_definition)
@@ -33287,7 +33621,12 @@ fn filter_prop_reads_chosen_target(prop: &FilterProp, read: TargetRead) -> bool 
         | FilterProp::DifferentNameFrom { filter }
         | FilterProp::DistinctFrom { reference: filter }
         | FilterProp::TargetsOnly { filter }
-        | FilterProp::Targets { filter } => target_filter_reads_chosen_target(filter, read),
+        | FilterProp::Targets { filter }
+        // CR 106.3 + CR 601.2h: the paid mana source phrase is itself a
+        // `TargetFilter`, so a chosen-target read inside it must route.
+        | FilterProp::ManaSpentFromSource {
+            source_filter: filter,
+        } => target_filter_reads_chosen_target(filter, read),
         // CR 701.3a: the filter-matched host axis nests its own `TargetFilter`, so
         // whether it reads a chosen target is exactly whether that filter does.
         FilterProp::AttachedTo {
@@ -34976,7 +35315,13 @@ struct AppliedAbilityCostModifier {
 #[derive(Clone, Copy)]
 enum ActivationSourceFacts<'a> {
     Live,
-    Recorded { lki: &'a LKISnapshot, zone: Zone },
+    Recorded {
+        lki: &'a LKISnapshot,
+        zone: Zone,
+        /// CR 111.1 + CR 602.2: the bit the source held when the ability was
+        /// announced, captured with the snapshot beside it.
+        token: crate::types::game_state::CapturedTokenBit,
+    },
 }
 
 impl ActivationSourceFacts<'_> {
@@ -35070,11 +35415,17 @@ fn reduce_ability_cost_non_target_gates_admit(
         ActivationSourceFacts::Live => {
             super::filter::matches_target_filter(state, view.source, affected, filter_ctx)
         }
-        ActivationSourceFacts::Recorded { lki, .. } => {
-            super::filter::matches_target_filter_on_lki_snapshot(
+        // CR 602.2 + CR 111.1: the recorded source answers the token leaves from
+        // the bit captured at its announcement — a source-scoped modifier
+        // ("abilities of nontoken creatures you control") must not read the
+        // present, and a snapshot cannot carry the bit (CR 707.2).
+        ActivationSourceFacts::Recorded { lki, token, .. } => {
+            super::filter::matches_target_filter_on_stated_lki(
                 state,
                 view.source,
                 lki,
+                None,
+                token.bit(),
                 affected,
                 filter_ctx,
             )
@@ -35083,7 +35434,9 @@ fn reduce_ability_cost_non_target_gates_admit(
 }
 
 /// CR 601.2c + CR 115.1: whether any committed target of a recorded activation
-/// matched `filter` as it was when the ability was activated.
+/// matched `filter` as it was when the ability was activated. Delegates to
+/// `filter::declared_target_facts_match`, the single fold for this question
+/// (shared with the spell-cast record's `FilterProp::Targets` arm).
 fn recorded_targets_match_filter(
     state: &GameState,
     record: &AbilityActivationRecord,
@@ -35095,18 +35448,7 @@ fn recorded_targets_match_filter(
         static_source_id,
         static_controller,
     );
-    record.targets.iter().any(|fact| match fact {
-        ActivationTargetFact::Object { id, lki } => {
-            super::filter::matches_target_filter_on_lki_snapshot(state, *id, lki, filter, &ctx)
-        }
-        ActivationTargetFact::Player(player) => target_ref_matches_cost_filter(
-            state,
-            static_source_id,
-            static_controller,
-            &TargetRef::Player(*player),
-            filter,
-        ),
-    })
+    super::filter::declared_target_facts_match(state, &record.targets, filter, &ctx)
 }
 
 /// CR 611.3a + CR 602.2: "the first activated ability … you activate each
@@ -35170,6 +35512,7 @@ fn first_qualifying_activation_this_turn<'s>(
                 source_facts: ActivationSourceFacts::Recorded {
                     lki: &record.source_lki,
                     zone: record.source_zone,
+                    token: record.source_token,
                 },
                 active_keyword: record
                     .ability_tag
@@ -35329,6 +35672,192 @@ pub(crate) fn cost_observable_activation_journal(
         }
     }
     journal
+}
+
+/// CR 104.4b + CR 732.2a + CR 601.2f: the part of the per-turn CAST journal a
+/// cost can observe, for a loop-equivalence projection.
+///
+/// CR 601.2f prices a spell against the turn's cast history ("The first spell you
+/// cast during each of your turns that targets a creature costs {W}{B} less to
+/// cast" — Head of the Class), and CR 732.2a's "predictable results" forbid the
+/// comparator to equate two positions the next price reads differently. The same
+/// journal answers a per-turn first-use GRANT ("The first spell you cast each turn
+/// that mana from a Treasure was spent to cast has cascade." — Rain of Riches), where
+/// the difference the next cast reads is an ability rather than a price. The rest of
+/// the journal is pumped history — it grows on every cycle of an ordinary cast loop
+/// and clearing it is what lets such a loop compare equal — so the projection cannot
+/// keep the whole journal either.
+///
+/// The line is the same one the activation journal's projection draws: a
+/// "the Nth … each turn" gate reads exactly one fact — WHICH row it would count
+/// against, or that it counts none. So the projection keeps, for every such gate a
+/// first-use definition carries — a cost modifier that PRICES the cast, or a
+/// `CastWithKeyword` grant that gives it an ability
+/// ([`is_first_use_cast_gate_mode`]) — the gate's first `N` qualifying rows for every
+/// living player as its hypothetical controller (CR 109.5: control can later pass to
+/// anyone), and drops every other row.
+///
+/// Keeping the first `N` is what makes an exact-ordinal gate (`count == N - 1`)
+/// comparable at all: a period that SPENDS the one-time discount moves a row into
+/// the kept prefix and compares UNEQUAL, while later periods keep the same prefix —
+/// the gate answers "no" on both — and still compare equal. Keeping fewer would
+/// equate the position that has spent it with one that has not.
+///
+/// A gate shape this recognizer does not parse keeps no row here; the price veto
+/// ([`crate::analysis::resource::cost_modifier_reads_changed_projected_resource`])
+/// is the exhaustive half — it classifies every `StaticCondition` variant through
+/// `ability_scan` — so a shape missed here is still vetoed there.
+pub(crate) fn cost_observable_cast_journal(
+    state: &GameState,
+) -> HashMap<PlayerId, im::Vector<crate::types::game_state::SpellCastRecord>> {
+    if state.spells_cast_this_turn_by_player.is_empty() {
+        return HashMap::new();
+    }
+    // One gate per (filter, ordinal), each anchored to the static that carries it:
+    // the filter is evaluated with that static's controller and source in scope.
+    let mut gates: Vec<(ObjectId, TargetFilter, u32)> = Vec::new();
+    let mut collect = |condition: Option<&StaticCondition>, source_id: ObjectId| {
+        let Some(condition) = condition else {
+            return;
+        };
+        for (filter, ordinal) in cost_gate_cast_filters(condition) {
+            gates.push((source_id, filter, ordinal));
+        }
+    };
+    for (id, obj) in state.objects.iter() {
+        let definitions = obj
+            .static_definitions
+            .iter_all()
+            .chain(obj.base_static_definitions.iter())
+            .chain(
+                obj.back_face
+                    .iter()
+                    .flat_map(|face| face.static_definitions.iter_all()),
+            )
+            .filter(|def| is_first_use_cast_gate_mode(&def.mode));
+        for def in definitions {
+            collect(def.condition.as_ref(), *id);
+        }
+    }
+    let mut kept: HashSet<(PlayerId, usize)> = HashSet::new();
+    for (source_id, filter, ordinal) in &gates {
+        for player in state.players.iter().filter(|p| !p.is_eliminated) {
+            let Some(rows) = state.spells_cast_this_turn_by_player.get(&player.id) else {
+                continue;
+            };
+            let ctx =
+                super::filter::FilterContext::from_source_with_controller(*source_id, player.id);
+            let mut counted = 0u32;
+            for (index, record) in rows.iter().enumerate() {
+                if counted >= *ordinal {
+                    break;
+                }
+                if super::filter::spell_record_matches_filter(
+                    record, filter, player.id, state, &ctx,
+                ) {
+                    kept.insert((player.id, index));
+                    counted += 1;
+                }
+            }
+        }
+    }
+    let mut journal: HashMap<PlayerId, im::Vector<crate::types::game_state::SpellCastRecord>> =
+        HashMap::new();
+    for (player, rows) in state.spells_cast_this_turn_by_player.iter() {
+        let observable: im::Vector<_> = rows
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| kept.contains(&(*player, *index)))
+            .map(|(_, record)| record.clone())
+            .collect();
+        if !observable.is_empty() {
+            journal.insert(*player, observable);
+        }
+    }
+    journal
+}
+
+/// CR 601.2f + CR 604.1: whether `mode` is a mode whose printed CONDITION gates a
+/// per-turn FIRST USE of the turn's cast journal — the family whose condition may be
+/// asked against `GameState::spells_cast_this_turn_by_player`.
+///
+/// Two shapes read the journal this way, and they differ only in what the first use
+/// BUYS: a cost modifier PRICES the cast (`ModifyCost` / `ReduceAbilityCost` — Head of the
+/// Class), and a keyword grant gives it an ABILITY (`CastWithKeyword` — Rain of Riches,
+/// "The first spell you cast each turn that mana from a Treasure was spent to cast has
+/// cascade."). CR 732.2a asks about "the current game state and the predictable results of
+/// the sequence of choices", and a first use that GRANTS is as much a predictably
+/// different result as one that discounts. Leaving the grant out projected a
+/// spent-and-unspent pair to the same journal, so the recurrence was certified as though
+/// the next cast's cascade could not differ.
+///
+/// A mode whose definition carries no `condition` contributes no gate (`collect` returns
+/// early), and over-keeping a row can only make two positions compare UNEQUAL — never
+/// equal — so widening this set is the fail-closed direction.
+fn is_first_use_cast_gate_mode(mode: &StaticMode) -> bool {
+    matches!(
+        mode,
+        StaticMode::ModifyCost { .. }
+            | StaticMode::ReduceAbilityCost { .. }
+            | StaticMode::CastWithKeyword { .. }
+    )
+}
+
+/// CR 601.2f + CR 117.1: every "the Nth spell … each turn" cast gate `condition`
+/// carries, as `(filter, N)` — the population the gate counts and the ordinal it
+/// compares against.
+///
+/// The parser lowers "the first spell you cast each turn that targets a creature"
+/// to `And[DuringYourTurn, QuantityComparison { SpellsCastThisTurn(you, filter),
+/// ==, ordinal - 1 }]`, so the ordinal is the right-hand constant plus one. A shape
+/// this recognizer does not produce keeps every matching row (the conservative
+/// direction), and a gate whose shape it cannot parse at all is still priced by the
+/// exhaustive veto.
+fn cost_gate_cast_filters(condition: &StaticCondition) -> Vec<(TargetFilter, u32)> {
+    let mut gates = Vec::new();
+    collect_cost_gate_cast_filters(condition, &mut gates);
+    gates
+}
+
+fn collect_cost_gate_cast_filters(
+    condition: &StaticCondition,
+    gates: &mut Vec<(TargetFilter, u32)>,
+) {
+    match condition {
+        StaticCondition::And { conditions } | StaticCondition::Or { conditions } => {
+            for condition in conditions {
+                collect_cost_gate_cast_filters(condition, gates);
+            }
+        }
+        StaticCondition::QuantityComparison {
+            lhs,
+            comparator,
+            rhs,
+        } => {
+            let QuantityExpr::Ref {
+                qty:
+                    QuantityRef::SpellsCastThisTurn {
+                        filter: Some(filter),
+                        ..
+                    },
+            } = lhs
+            else {
+                return;
+            };
+            let ordinal = match (comparator, rhs) {
+                (crate::types::ability::Comparator::EQ, QuantityExpr::Fixed { value })
+                    if *value >= 0 =>
+                {
+                    u32::try_from(*value).unwrap_or(u32::MAX).saturating_add(1)
+                }
+                // A gate this recognizer cannot bound is kept whole: over-keeping
+                // can only make two positions compare unequal, never equal.
+                _ => u32::MAX,
+            };
+            gates.push((filter.clone(), ordinal));
+        }
+        _ => {}
+    }
 }
 
 /// CR 611.3a: a "first activated ability … each turn" cost modifier, the one
@@ -36351,6 +36880,15 @@ fn is_blocked_by_per_turn_cast_limit_for(
             // If a spell filter is set, first check if the spell being cast matches.
             // E.g., Deafening Silence only limits noncreature spells — creature spells
             // are unaffected regardless of how many noncreature spells were cast.
+            // CR 101.2 + CR 106.3: the prohibiting static's own source object is the
+            // only source in scope for a record read here. The live projection is
+            // PRE-payment by construction (CR 601.2f precedes CR 601.2h), so a
+            // `ManaSpentFromSource` in a `PerTurnCastLimit` filter answers false
+            // honestly; no printed card does this.
+            let filter_ctx = super::filter::FilterContext::from_source_with_controller(
+                bf_obj.id,
+                bf_obj.controller,
+            );
             if let Some(filter) = spell_filter {
                 // CR 202.3d + CR 702.102b: project the spell being cast through the
                 // shared cast-record authority so a fused split spell's mana value /
@@ -36368,7 +36906,8 @@ fn is_blocked_by_per_turn_cast_limit_for(
                     &current_record,
                     filter,
                     bf_obj.controller,
-                    &state.all_creature_types,
+                    state,
+                    &filter_ctx,
                 ) {
                     continue;
                 }
@@ -36389,7 +36928,8 @@ fn is_blocked_by_per_turn_cast_limit_for(
                                 r,
                                 filter,
                                 bf_obj.controller,
-                                &state.all_creature_types,
+                                state,
+                                &filter_ctx,
                             )
                         })
                         .count(),

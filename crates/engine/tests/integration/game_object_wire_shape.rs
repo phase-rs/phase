@@ -140,7 +140,13 @@ fn gunzip(bytes: &[u8]) -> String {
         .read_to_string(&mut json)
         .expect("fixture .json.gz inflates to UTF-8 JSON");
     // Committed pre-onset capture; onset-independent test (see record_captured_onsets).
-    engine::types::game_state::record_captured_onsets_json(&json)
+    let json = engine::types::game_state::record_captured_onsets_json(&json);
+    // Committed PRE-PIN captures hold floating mana written before
+    // `ManaUnit::source_incarnation`, which production refuses unless the save proves the
+    // producing epoch. The documented test-only migration stamps the epochs these
+    // captures prove (see `record_captured_floating_mana_provenance`); it never runs in a
+    // product build.
+    engine::types::legacy_capture_fixture::record_captured_floating_mana_provenance_json(&json)
 }
 
 fn seat_zero_projection() -> GameState {

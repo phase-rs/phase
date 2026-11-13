@@ -16,15 +16,16 @@ use crate::types::game_state::{
     CastPaymentMode, CostResume, GameState, ManaAbilityCostCursor, ManaAbilityCostParent,
     ManaAbilityCostParentLifecycle, ManaAbilityCostResolutionMode, ManaAbilityResume,
     ManaAmountComposition, ManaChoice, ManaChoiceContext, ManaChoicePrompt, ManaColorChoiceResume,
-    ManaTriggerFixedPointResume, PausedCounterCostRemoval, PayCostKind, PayableResource,
-    PendingCostMoveResume, PendingCounterRemoval, PendingManaAbility, ProductionOverride,
-    WaitingFor,
+    ManaTriggerFixedPointResume, ParkedActivationNodeEvidence, PausedCounterCostRemoval,
+    PayCostKind, PayableResource, PendingCostMoveResume, PendingCounterRemoval, PendingManaAbility,
+    ProductionOverride, WaitingFor,
 };
 use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
 use crate::types::mana::{ManaColor, ManaCost, ManaPipId, ManaPool, ManaType, PaymentContext};
 #[cfg(test)]
 use crate::types::phase::Phase;
 use crate::types::player::PlayerId;
+use crate::types::resolved_commands::{ManaActivationOccurrence, RulesExecutionNodeRef};
 use crate::types::statics::StaticModeKind;
 use crate::types::zones::Zone;
 use std::collections::HashSet;
@@ -533,12 +534,17 @@ pub(super) fn resolve_mana_ability_excluding(
         .objects
         .get(&source_id)
         .map(|source| source.incarnation);
-    let rules_execution_node = Some(state.begin_activated_mana_journal_node(source_id));
+    let rules_execution_node = state.begin_activated_mana_journal_node(source_id);
+    // CR 605.3b: the occurrence this activation IS, recorded beside the node it
+    // was announced under — the pair restore compares, so this activation can never
+    // be confused with another activation of the same object.
+    let activated_mana_occurrence = ManaActivationOccurrence::of_node(rules_execution_node);
     let pending = PendingManaAbility {
         player,
         source_id,
         ability_index,
-        rules_execution_node,
+        rules_execution_node: Some(rules_execution_node),
+        activated_mana_occurrence,
         ability_snapshot: Some(ability_def.clone()),
         announced_source_incarnation,
         color_override,
@@ -608,6 +614,15 @@ pub(super) fn resolve_mana_ability_excluding(
 /// resolve cost-paid-object refs (Food Chain / Burnt Offering class).
 /// `cost_removed_counters` is this activation's own payment's removed-counter
 /// count (`PendingManaAbility::cost_removed_counters`).
+///
+/// `settlement_node` is the node this activation settles under — the producer node
+/// its own pending names. Recording the settlement HERE, in the one production
+/// chokepoint, is what makes it a fact about the activation rather than a guess
+/// from its output: an activation the game state allows no mana (CR 605.2) still
+/// ran the production that this function owns, so it settles exactly like one that
+/// made pips (CR 605.3b). A caller with no node to settle (a direct
+/// prompt/production call on a live state, whose pending predates both node
+/// records) passes `None`.
 #[allow(clippy::too_many_arguments)]
 fn produce_mana_from_ability(
     state: &mut GameState,
@@ -620,6 +635,7 @@ fn produce_mana_from_ability(
     cost_paid_object: Option<CostPaidObjectSnapshot>,
     announced_source_incarnation: Option<u64>,
     cost_removed_counters: Option<u32>,
+    settlement_node: Option<RulesExecutionNodeRef>,
 ) {
     with_bound_mana_activation(
         state,
@@ -640,6 +656,11 @@ fn produce_mana_from_ability(
                 color_override,
                 resolved_for_quantity,
             );
+            // CR 605.3b: the ability has resolved — after the production, and
+            // whether or not it made any mana.
+            if let Some(node) = settlement_node {
+                state.settle_mana_activation(node);
+            }
         },
     );
 }
@@ -803,9 +824,17 @@ fn produce_mana_from_bound_ability(
             produced_for_ability_events.push((recipient, produced_mana.clone()));
         }
         for &mana_type in &produced_mana {
+            // CR 106.3 + CR 113.7 + CR 400.7: the mana's source is the object
+            // that generated this ability (CR 113.7) — the epoch captured at the
+            // activation's announcement, before a self-sacrifice / self-exile
+            // cost moved it (CR 601.2h). Reading `state.objects[source_id]` here
+            // would name the moved object.
+            let source_incarnation =
+                mana_payment::producing_incarnation_for_ability(state, resolved_for_quantity);
             mana_payment::produce_mana_with_attributes_from_source_quality(
                 state,
                 source_id,
+                source_incarnation,
                 mana_type,
                 recipient,
                 tapped,
@@ -1104,14 +1133,18 @@ pub fn activate_mana_ability_with_payment_mode(
     // before the inline sub-chain resolves; the source-subject condition gate
     // must read this epoch's exit last-known information instead.
     let announced_source_incarnation = Some(source.incarnation);
-    let rules_execution_node = Some(state.begin_activated_mana_journal_node(source_id));
+    let rules_execution_node = state.begin_activated_mana_journal_node(source_id);
+    // CR 605.3b: the occurrence witness beside the node — see
+    // `resolve_parked_activation_producer`.
+    let activated_mana_occurrence = ManaActivationOccurrence::of_node(rules_execution_node);
     advance_mana_ability_activation(
         state,
         PendingManaAbility {
             player,
             source_id,
             ability_index: Some(ability_index),
-            rules_execution_node,
+            rules_execution_node: Some(rules_execution_node),
+            activated_mana_occurrence,
             ability_snapshot: Some(ability_def.clone()),
             announced_source_incarnation,
             color_override,
@@ -1447,6 +1480,122 @@ pub(crate) fn mana_choice_prompt(
     }
 }
 
+/// CR 106.3 + CR 113.7 + CR 400.7 + CR 605.3b: the ONE producer identity a
+/// parked mana activation resumes under.
+///
+/// A mana ability resolves inline, but its cost is paid after it is announced
+/// (CR 602.2b routes the cost through CR 601.2h), so a self-sacrificing or
+/// self-exiling cost moves the source before the activation finishes. By the time
+/// a colour choice or a paused cost leg resumes, `source_id` names the moved
+/// object (CR 400.7), while CR 106.3 + CR 113.7 make the mana's producer the
+/// object that GENERATED the ability.
+///
+/// Two records can carry that epoch, and which of them a save holds depends on
+/// when the save was written — the activation's execution node
+/// (`PendingManaAbility::rules_execution_node`, whose mana node names the source
+/// as an [`ObjectIncarnationRef`], or the occurrence ordinal
+/// (`PendingManaAbility::activated_mana_occurrence`) that node was minted under)
+/// and the announcement epoch (`PendingManaAbility::announced_source_incarnation`).
+/// They are statements about ONE activation, so resolving them independently is
+/// exactly how the two writers could disagree: a node-only save produced from the
+/// moved object while the journal recorded the original one, and an
+/// announcement-only save stamped the pip with the announcement while the re-opened
+/// node named the moved object. Either way the save the activation then wrote was
+/// one its own next load refuses with
+/// `PersistedRestoreError::ContradictoryFloatingManaProvenance`.
+///
+/// This function is the single authority on the resume side. It answers the epoch
+/// AND the node that must be used with it, ONCE, so both writers consume one value:
+/// the pip's recorded producer (what [`produce_mana_from_ability`] stamps on the
+/// unit) and the journal's production record (the node the activation runs under).
+/// The validation itself is not its own: it is
+/// [`PendingManaAbility::activation_producer_evidence`], the same rule the restore
+/// chokepoint applies, so a boundary cannot admit what the other refuses.
+///
+/// Resolution:
+/// * the producer evidence rule
+///   ([`PendingManaAbility::activation_producer_evidence`], the ONE rule restore
+///   applies to every parked activation a save holds) answers this activation's
+///   own activated-mana node → that epoch is exact and the node itself is reused.
+///   The node may be named by either record the save carries: the reference, or
+///   the occurrence ordinal that reference was minted under;
+/// * nothing retained proves nothing, and the announcement epoch is exact by
+///   construction (captured before any cost);
+/// * a contradiction — a retained node of a different kind or object, a node of
+///   this object and epoch belonging to a DIFFERENT occurrence (an earlier
+///   activation of it, already settled per CR 605.3b), a node that has already
+///   SETTLED — the question is about the node, so it is asked whether the save
+///   states an occurrence beside it or none at all — two records naming two
+///   incarnations, or no producer record at all behind an activation snapshot — is
+///   refused here exactly as restore refuses it, never read as absence;
+/// * neither record present: the rule refuses a snapshot-carrying pending, and the
+///   only shape left is a pending that carries no announcement snapshot at all —
+///   not built by the activation entry (a direct prompt/production call on a live
+///   state, not a resume of a saved one) — so it resolves from the live object and
+///   BOTH writers then use that one value.
+///
+/// Whichever answer it reaches, the caller binds `producer.node` AND the
+/// occurrence that node was minted under
+/// (`ManaActivationOccurrence::of_node`) back onto the pending, so the pair a
+/// later restore compares is the pair this resume actually used.
+struct ParkedActivationProducer {
+    /// The producing epoch every fact written for this activation is stamped with.
+    source: ObjectIncarnationRef,
+    /// The execution node the activation's facts are attributed to.
+    node: RulesExecutionNodeRef,
+}
+
+fn resolve_parked_activation_producer(
+    state: &mut GameState,
+    pending: &PendingManaAbility,
+) -> Result<ParkedActivationProducer, EngineError> {
+    // CR 113.7 + CR 602.2a + CR 605.3b + CR 400.7: the resume boundary applies the
+    // same rule restore runs over every parked activation, so the two can never
+    // disagree about which settlement this activation is. Reading absence where the
+    // rule reports a contradiction is what let a resume price this activation from
+    // somebody else's node — and the reverse, admitting at restore what only resume
+    // refused, let an activation bind production to a node its own next load
+    // rejects.
+    let recorded = pending
+        .activation_producer_evidence(&state.resolved_rules_journal)
+        .map_err(|conflict| {
+            EngineError::InvalidAction(format!(
+                "Parked mana activation for {:?} records producer evidence it cannot own: \
+                 {conflict}",
+                pending.source_id
+            ))
+        })?;
+    // CR 605.3b: the rule answers the epoch AND the node this activation settles
+    // under, and both are consumed here — the epoch by production, the node by the
+    // journal — so the two cannot describe different activations.
+    let (recorded_source, usable_node) = match recorded {
+        ParkedActivationNodeEvidence::Owned { source, node } => (Some(source), Some(node)),
+        ParkedActivationNodeEvidence::None => (None, None),
+    };
+
+    let source = match (recorded_source, pending.announced_source_incarnation) {
+        (Some(recorded), _) => recorded,
+        (None, Some(announced)) => ObjectIncarnationRef::of(pending.source_id, announced),
+        // CR 400.7: the rule refuses every snapshot-carrying pending that names no
+        // producer, so what reaches here was not built by the activation entry — it
+        // is a direct prompt/production call on a live state, not a resume of a
+        // saved one — and the live object IS the announcement there.
+        (None, None) => mana_payment::live_source_incarnation(state, pending.source_id)
+            .map(|incarnation| ObjectIncarnationRef::of(pending.source_id, incarnation))
+            .ok_or_else(|| {
+                EngineError::InvalidAction("Mana ability source no longer exists".to_string())
+            })?,
+    };
+
+    // CR 605.3b: reuse the activation's own node when the journal still retains
+    // it; otherwise open one that names the resolved epoch, never the live object.
+    let node = match usable_node {
+        Some(node) => node,
+        None => state.begin_activated_mana_journal_node_for_source(source),
+    };
+    Ok(ParkedActivationProducer { source, node })
+}
+
 /// CR 605.3b: Complete the mana color/combination choice. Cost was already
 /// paid before the prompt (either in `activate_mana_ability` or
 /// `handle_tap_creatures_for_mana_ability`), so this only produces mana.
@@ -1495,14 +1644,14 @@ pub fn handle_choose_mana_color(
     // activation event used before the prompt.
     let ability_def = mana_ability_definition(state, pending)?;
 
-    let node = pending
-        .rules_execution_node
-        .unwrap_or_else(|| state.begin_activated_mana_journal_node(pending.source_id));
+    // CR 106.3 + CR 113.7 + CR 400.7: resolve the activation's surviving producer
+    // evidence ONCE, here, and run the journal and production under that one value.
+    let producer = resolve_parked_activation_producer(state, pending)?;
     // CR 605.4a: the choice action's own live-collection start. The already-paid
     // cost range was collected by the frame that returned this prompt; this
     // action owns only what production/completion emits from here.
     let choice_action_start = events.len();
-    state.with_rules_execution_node(node, |state| {
+    state.with_rules_execution_node(producer.node, |state| {
         produce_mana_from_ability(
             state,
             pending.source_id,
@@ -1512,8 +1661,11 @@ pub fn handle_choose_mana_color(
             Some(override_value),
             pending.chosen_x,
             pending.cost_paid_object.clone(),
-            pending.announced_source_incarnation,
+            Some(producer.source.incarnation),
             pending.cost_removed_counters,
+            // CR 605.3b: the settlement this choice completes is the node the
+            // producer evidence resolved — the same value production runs under.
+            Some(producer.node),
         );
         complete_mana_ability_activation(
             state,
@@ -3837,6 +3989,9 @@ fn finish_mana_ability_cost_payment(
         pending.cost_paid_object,
         pending.announced_source_incarnation,
         pending.cost_removed_counters,
+        // CR 605.3b: the node this activation was announced under, as the resume
+        // boundary resolved and re-bound it onto the pending.
+        pending.rules_execution_node,
     );
     if !resolves_automatically {
         complete_mana_ability_activation(
@@ -4459,15 +4614,37 @@ pub(crate) fn finish_mana_root_after_deferred_life_payment(
 
 fn continue_mana_ability_cost_payment(
     state: &mut GameState,
-    pending: PendingManaAbility,
+    mut pending: PendingManaAbility,
     cursor: ManaAbilityCostCursor,
     events: &mut Vec<GameEvent>,
     cost_event_start: usize,
 ) -> Result<WaitingFor, EngineError> {
-    let node = pending
-        .rules_execution_node
-        .unwrap_or_else(|| state.begin_activated_mana_journal_node(pending.source_id));
-    state.with_rules_execution_node(node, |state| {
+    // CR 106.3 + CR 113.7 + CR 400.7: the other half of the shared resume
+    // boundary. Resolve the activation's surviving producer evidence ONCE, bind it
+    // onto the pending so every later stage of this activation — the colour prompt,
+    // production, the activation's own sub-chain — reads the same value, and run
+    // the whole cost walk under the node that names it.
+    let producer = resolve_parked_activation_producer(state, &pending)?;
+    // CR 605.3b + CR 113.7: bind BOTH halves of that one identity, not just the
+    // epoch. The pending is the value every later pause serializes —
+    // `pause_mana_ability_cost_payment` stores it as `pending_cost_move_resume`,
+    // and `finish_mana_ability_cost_payment` stores it inside the
+    // `ChooseManaColor` prompt — so a pending that carries the epoch alone makes
+    // the NEXT resume find no node, open a second `ActivatedMana` settlement node
+    // for this one activation, and attribute the pip to that second node while
+    // the first settles nothing. Writing the resolved node back here is what
+    // gives the activation exactly one settlement node however many times it
+    // parks: every later resume reads the node it already carries and reuses it.
+    pending.announced_source_incarnation = Some(producer.source.incarnation);
+    pending.rules_execution_node = Some(producer.node);
+    // CR 605.3b: and the OCCURRENCE besides them. The node reference alone cannot
+    // say which activation it belongs to once it is written into a save (the
+    // object's other activations keep nodes of their own at the same source and
+    // epoch), so the ordinal the node was minted under travels with it. Re-binding
+    // it here — from the node this resume resolved, the only node this activation
+    // may settle under — is what keeps the pair agreeing through every park.
+    pending.activated_mana_occurrence = ManaActivationOccurrence::of_node(producer.node);
+    state.with_rules_execution_node(producer.node, |state| {
         continue_mana_ability_cost_payment_in_node(state, pending, cursor, events, cost_event_start)
     })
 }
@@ -6799,6 +6976,7 @@ mod tests {
                 restrictions: Vec::new(),
                 grants: vec![],
                 expiry: None,
+                source_incarnation: None,
             });
         }
     }
@@ -12711,6 +12889,7 @@ mod tests {
             source_id: source,
             ability_index: Some(0),
             rules_execution_node: None,
+            activated_mana_occurrence: None,
             ability_snapshot: None,
             announced_source_incarnation: None,
             color_override: None,
@@ -12819,6 +12998,7 @@ mod tests {
             announced_source_incarnation: None,
             ability_index: Some(0),
             rules_execution_node: None,
+            activated_mana_occurrence: None,
             color_override: None,
             resume: ManaAbilityResume::Priority,
             cost_move_resume: None,
@@ -13032,6 +13212,7 @@ mod tests {
                 source_id: source,
                 ability_index: Some(0),
                 rules_execution_node: None,
+                activated_mana_occurrence: None,
                 ability_snapshot: None,
                 announced_source_incarnation: None,
                 color_override: None,
@@ -13269,6 +13450,7 @@ mod tests {
             source_id: ruins,
             ability_index: Some(0),
             rules_execution_node: None,
+            activated_mana_occurrence: None,
             ability_snapshot: None,
             announced_source_incarnation: None,
             color_override: None,
@@ -13379,6 +13561,7 @@ mod tests {
             source_id: ruins,
             ability_index: Some(0),
             rules_execution_node: None,
+            activated_mana_occurrence: None,
             ability_snapshot: None,
             announced_source_incarnation: None,
             color_override: None,
@@ -14521,6 +14704,7 @@ mod tests {
             source_id: ruins,
             ability_index: Some(0),
             rules_execution_node: None,
+            activated_mana_occurrence: None,
             ability_snapshot: None,
             announced_source_incarnation: None,
             color_override: None,
@@ -15452,6 +15636,7 @@ mod tests {
             announced_source_incarnation: None,
             ability_index: Some(0),
             rules_execution_node: None,
+            activated_mana_occurrence: None,
             color_override: None,
             resume: ManaAbilityResume::Priority,
             cost_move_resume: None,
@@ -15901,6 +16086,7 @@ mod tests {
             source_id: brushland,
             ability_index: Some(0),
             rules_execution_node: None,
+            activated_mana_occurrence: None,
             ability_snapshot: None,
             announced_source_incarnation: None,
             color_override: None,
@@ -16470,6 +16656,7 @@ mod tests {
             source_id: source,
             ability_index: None,
             rules_execution_node: None,
+            activated_mana_occurrence: None,
             ability_snapshot: None,
             announced_source_incarnation: None,
             color_override: None,
@@ -16547,6 +16734,7 @@ mod tests {
             source_id: altar,
             ability_index: Some(0),
             rules_execution_node: None,
+            activated_mana_occurrence: None,
             ability_snapshot: None,
             announced_source_incarnation: None,
             color_override: Some(ProductionOverride::SingleColor(ManaType::Black)),
@@ -16682,6 +16870,7 @@ mod tests {
             source_id: chain,
             ability_index: Some(0),
             rules_execution_node: None,
+            activated_mana_occurrence: None,
             ability_snapshot: None,
             announced_source_incarnation: None,
             color_override: Some(ProductionOverride::SingleColor(ManaType::Green)),
@@ -16752,6 +16941,7 @@ mod tests {
             source_id: chain,
             ability_index: Some(0),
             rules_execution_node: None,
+            activated_mana_occurrence: None,
             ability_snapshot: None,
             announced_source_incarnation: None,
             color_override: Some(ProductionOverride::SingleColor(ManaType::Red)),
@@ -16914,6 +17104,7 @@ mod tests {
             source_id: chain,
             ability_index: Some(0),
             rules_execution_node: None,
+            activated_mana_occurrence: None,
             ability_snapshot: None,
             announced_source_incarnation: None,
             color_override: Some(ProductionOverride::SingleColor(ManaType::Green)),

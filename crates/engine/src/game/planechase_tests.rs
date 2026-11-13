@@ -33,7 +33,7 @@ use std::str::FromStr;
 /// Build a `CardFace` for a plane/phenomenon carrying the given triggers and
 /// statics, then run `synthesize_planechase` (the production stamping step) so
 /// the trigger/static zones reflect the real card-build path.
-fn synthesized_planar_face(
+pub(super) fn synthesized_planar_face(
     core: CoreType,
     triggers: Vec<TriggerDefinition>,
     statics: Vec<StaticDefinition>,
@@ -88,7 +88,7 @@ fn draw_ability() -> AbilityDefinition {
 /// trigger/static definitions and setting its controller. Returns its id. The
 /// object is NOT placed in any zone vector — the caller decides command zone vs
 /// planar deck.
-fn create_planar_object(
+pub(super) fn create_planar_object(
     state: &mut GameState,
     name: &str,
     face: &CardFace,
@@ -117,7 +117,7 @@ fn create_planar_object(
 
 /// Place a Planechase game: `active` face up in the command zone, `deck` (front
 /// = top) in the planar deck, controller set. Returns (active_id, deck_ids).
-fn setup_planechase(
+pub(super) fn setup_planechase(
     state: &mut GameState,
     controller: PlayerId,
     active: (&str, &CardFace),

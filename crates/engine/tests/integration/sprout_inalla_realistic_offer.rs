@@ -35,7 +35,13 @@ fn gunzip(gz: &[u8]) -> String {
         .read_to_string(&mut json)
         .expect("fixture .json.gz must inflate to UTF-8 JSON");
     // Committed pre-onset capture; onset-independent test (see record_captured_onsets).
-    engine::types::game_state::record_captured_onsets_json(&json)
+    let json = engine::types::game_state::record_captured_onsets_json(&json);
+    // Committed PRE-PIN capture: the floating mana this dump holds was written before
+    // `ManaUnit::source_incarnation`, and production refuses a pool whose producing
+    // epoch it cannot prove. The documented test-only migration stamps the epochs this
+    // capture proves (see `record_captured_floating_mana_provenance`); it never runs in
+    // a product build.
+    engine::types::legacy_capture_fixture::record_captured_floating_mana_provenance_json(&json)
 }
 
 /// Load the realistic 4p dump's `["gameState"]` through the REAL production restore chokepoint

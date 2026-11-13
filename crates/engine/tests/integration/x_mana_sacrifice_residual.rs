@@ -687,7 +687,11 @@ fn fiend_fixture(captain_controller: PlayerId, replacements: bool) -> (GameRunne
     });
     scenario.with_mana_pool(
         P0,
-        vec![ManaUnit::new(ManaType::Green, ObjectId(9000), false, vec![]); 6],
+        // Filler mana for the {X}: it names no producing object (`ObjectId(0)` is the
+        // pool's "no source" sentinel), because no real ability made it and the
+        // checked restore refuses a unit naming a storage id that answers for no
+        // object.
+        vec![ManaUnit::new(ManaType::Green, ObjectId(0), false, vec![]); 6],
     );
     let mut runner = scenario.build();
     // The library builder supplies types/cost; set the printed creature P/T too.

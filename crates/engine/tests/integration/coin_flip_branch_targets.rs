@@ -4678,10 +4678,12 @@ fn viewer_projection_redacts_hidden_coin_child_context_but_keeps_public_sibling_
         ManaSpentSourceSnapshot {
             source_id: hidden,
             lki: runner.state().objects[&hidden].snapshot_for_mana_spent(),
+            source_token: engine::types::game_state::CapturedTokenBit::Unknown,
         },
         ManaSpentSourceSnapshot {
             source_id: own,
             lki: runner.state().objects[&own].snapshot_for_mana_spent(),
+            source_token: engine::types::game_state::CapturedTokenBit::Unknown,
         },
     ];
     // Hostile metadata fixture on an actually announced stack ability. These

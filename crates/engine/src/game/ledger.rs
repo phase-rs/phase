@@ -673,6 +673,12 @@ mod tests {
             Zone::Hand,
             crate::types::game_state::CastingVariant::Normal,
             false,
+            // A hand-built case object carries no announced ability, so it declares no
+            // target.
+            &[],
+            crate::game::restrictions::CastPaymentFacts::Recorded(
+                &object.mana_spent_source_snapshots,
+            ),
         );
 
         let first = record_spell_cast(&mut state, PlayerId(0), record.clone())
@@ -741,6 +747,12 @@ mod tests {
             Zone::Hand,
             crate::types::game_state::CastingVariant::Normal,
             false,
+            // A hand-built case object carries no announced ability, so it declares no
+            // target.
+            &[],
+            crate::game::restrictions::CastPaymentFacts::Recorded(
+                &object.mana_spent_source_snapshots,
+            ),
         );
 
         record_spell_cast(&mut state, PlayerId(1), record.clone())

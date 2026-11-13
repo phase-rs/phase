@@ -510,6 +510,7 @@ fn add_pool_mana(state: &mut GameState, player: PlayerId, colors: &[crate::types
             restrictions: Vec::new(),
             grants: vec![],
             expiry: None,
+            source_incarnation: None,
         });
     }
 }

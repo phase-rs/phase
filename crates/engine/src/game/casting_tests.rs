@@ -465,6 +465,7 @@ fn add_mana(state: &mut GameState, player: PlayerId, color: ManaType, count: usi
             restrictions: Vec::new(),
             grants: vec![],
             expiry: None,
+            source_incarnation: None,
         });
     }
 }
@@ -1301,6 +1302,7 @@ fn add_restricted_mana(
         restrictions,
         grants: vec![],
         expiry: None,
+        source_incarnation: None,
     });
 }
 
@@ -2283,6 +2285,7 @@ fn play_from_exile_any_color_preserves_snow_source_requirement() {
         restrictions: Vec::new(),
         grants: vec![],
         expiry: None,
+        source_incarnation: None,
     });
     let allowed_card = allowed.objects[&allowed_spell].card_id;
     apply_as_current(
@@ -4925,6 +4928,9 @@ fn record_one_spell_cast_this_turn(state: &mut GameState, player: PlayerId) {
             was_kicked: false,
             spell_object_id: None,
             prepared_copy_source: None,
+            mana_spent_source_snapshots: Some(Vec::new()),
+            // A hand-built case record carries no announced cast, so it declares no target.
+            targets: Some(Vec::new()),
         }]),
     );
 }
@@ -5404,6 +5410,7 @@ fn conditional_mana_keyword_grant_applies_to_matching_spell() {
             duration: Box::new(crate::types::ability::Duration::UntilEndOfTurn),
         }],
         expiry: None,
+        source_incarnation: None,
     };
 
     apply_mana_spell_grants(&mut state, dragon_id, std::slice::from_ref(&unit));
@@ -5453,6 +5460,7 @@ fn mana_keyword_grants_apply_both_temporary_and_permanent_durations() {
             duration: Box::new(crate::types::ability::Duration::UntilEndOfTurn),
         }],
         expiry: None,
+        source_incarnation: None,
     };
     let permanent_unit = ManaUnit {
         color: ManaType::Colorless,
@@ -5467,6 +5475,7 @@ fn mana_keyword_grants_apply_both_temporary_and_permanent_durations() {
             duration: Box::new(crate::types::ability::Duration::Permanent),
         }],
         expiry: None,
+        source_incarnation: None,
     };
 
     apply_mana_spell_grants(&mut state, dragon_id, &[eot_unit, permanent_unit]);
@@ -5567,6 +5576,7 @@ fn mana_spend_trigger_fires_only_on_matching_spell() {
             ability: Box::new(trigger_ability),
         }],
         expiry: None,
+        source_incarnation: None,
     };
 
     let before = state.stack.len();
@@ -5704,6 +5714,7 @@ fn mana_spend_trigger_shares_creature_type_with_commander() {
             ability: Box::new(trigger_ability),
         }],
         expiry: None,
+        source_incarnation: None,
     };
 
     let base = state.deferred_triggers.len();
@@ -5798,6 +5809,7 @@ fn mana_spend_trigger_cast_pipeline_places_trigger_after_spell_is_cast() {
                 ability: Box::new(trigger_ability),
             }],
             expiry: None,
+            source_incarnation: None,
         });
 
     let mut events = Vec::new();
@@ -10994,6 +11006,7 @@ fn self_ref_exile_cost_exiles_card_from_hand() {
         restrictions: Vec::new(),
         grants: vec![],
         expiry: None,
+        source_incarnation: None,
     });
     activate_and_assert_exiled(&mut state, curse, "Curse of the Cabal", Some(3));
 
@@ -13073,6 +13086,9 @@ fn self_cost_reduction_applies_from_graveyard() {
                 was_kicked: false,
                 spell_object_id: None,
                 prepared_copy_source: None,
+                mana_spent_source_snapshots: Some(Vec::new()),
+                // A hand-built case record carries no announced cast, so it declares no target.
+                targets: Some(Vec::new()),
             },
             crate::types::SpellCastRecord {
                 name: "Opt".to_string(),
@@ -13089,6 +13105,9 @@ fn self_cost_reduction_applies_from_graveyard() {
                 was_kicked: false,
                 spell_object_id: None,
                 prepared_copy_source: None,
+                mana_spent_source_snapshots: Some(Vec::new()),
+                // A hand-built case record carries no announced cast, so it declares no target.
+                targets: Some(Vec::new()),
             },
         ]),
     );
@@ -31084,8 +31103,15 @@ fn per_turn_limit_all_players_blocks_after_one_cast() {
 
     // Record one spell cast (clone to avoid borrow conflict)
     let obj_clone = state.objects.get(&spell_id).unwrap().clone();
-    restrictions::record_spell_cast(&mut state, PlayerId(0), &obj_clone, CastingVariant::Normal)
-        .expect("test spell-cast ledger is valid");
+    // A hand-built case object carries no announced ability, so it declares no target.
+    restrictions::record_spell_cast(
+        &mut state,
+        PlayerId(0),
+        &obj_clone,
+        CastingVariant::Normal,
+        &[],
+    )
+    .expect("test spell-cast ledger is valid");
 
     // Now should be blocked
     let obj = state.objects.get(&spell_id).unwrap();
@@ -31105,10 +31131,24 @@ fn per_turn_limit_controller_scope_blocks_only_controller() {
     let spell_id = make_spell_obj(&mut state, PlayerId(0), false);
 
     let obj_clone = state.objects.get(&spell_id).unwrap().clone();
-    restrictions::record_spell_cast(&mut state, PlayerId(0), &obj_clone, CastingVariant::Normal)
-        .expect("test spell-cast ledger is valid");
-    restrictions::record_spell_cast(&mut state, PlayerId(1), &obj_clone, CastingVariant::Normal)
-        .expect("test spell-cast ledger is valid");
+    // A hand-built case object carries no announced ability, so it declares no target.
+    restrictions::record_spell_cast(
+        &mut state,
+        PlayerId(0),
+        &obj_clone,
+        CastingVariant::Normal,
+        &[],
+    )
+    .expect("test spell-cast ledger is valid");
+    // A hand-built case object carries no announced ability, so it declares no target.
+    restrictions::record_spell_cast(
+        &mut state,
+        PlayerId(1),
+        &obj_clone,
+        CastingVariant::Normal,
+        &[],
+    )
+    .expect("test spell-cast ledger is valid");
 
     let obj = state.objects.get(&spell_id).unwrap();
     // Controller (P0) should be blocked
@@ -31130,10 +31170,24 @@ fn per_turn_limit_opponents_scope_blocks_only_opponents() {
     let spell_id = make_spell_obj(&mut state, PlayerId(0), false);
 
     let obj_clone = state.objects.get(&spell_id).unwrap().clone();
-    restrictions::record_spell_cast(&mut state, PlayerId(0), &obj_clone, CastingVariant::Normal)
-        .expect("test spell-cast ledger is valid");
-    restrictions::record_spell_cast(&mut state, PlayerId(1), &obj_clone, CastingVariant::Normal)
-        .expect("test spell-cast ledger is valid");
+    // A hand-built case object carries no announced ability, so it declares no target.
+    restrictions::record_spell_cast(
+        &mut state,
+        PlayerId(0),
+        &obj_clone,
+        CastingVariant::Normal,
+        &[],
+    )
+    .expect("test spell-cast ledger is valid");
+    // A hand-built case object carries no announced ability, so it declares no target.
+    restrictions::record_spell_cast(
+        &mut state,
+        PlayerId(1),
+        &obj_clone,
+        CastingVariant::Normal,
+        &[],
+    )
+    .expect("test spell-cast ledger is valid");
 
     let obj = state.objects.get(&spell_id).unwrap();
     // Controller (P0) should NOT be blocked by their own "opponents" restriction
@@ -31160,8 +31214,15 @@ fn per_turn_limit_noncreature_filter_allows_creature_spells() {
     // Cast a noncreature spell first
     let nc_id = make_spell_obj(&mut state, PlayerId(0), false);
     let nc_clone = state.objects.get(&nc_id).unwrap().clone();
-    restrictions::record_spell_cast(&mut state, PlayerId(0), &nc_clone, CastingVariant::Normal)
-        .expect("test spell-cast ledger is valid");
+    // A hand-built case object carries no announced ability, so it declares no target.
+    restrictions::record_spell_cast(
+        &mut state,
+        PlayerId(0),
+        &nc_clone,
+        CastingVariant::Normal,
+        &[],
+    )
+    .expect("test spell-cast ledger is valid");
 
     // Trying to cast another noncreature → blocked
     let nc_obj = state.objects.get(&nc_id).unwrap();
@@ -31195,14 +31256,28 @@ fn per_turn_limit_max_two_allows_second_cast() {
 
     // First cast OK
     let obj_clone = state.objects.get(&spell_id).unwrap().clone();
-    restrictions::record_spell_cast(&mut state, PlayerId(0), &obj_clone, CastingVariant::Normal)
-        .expect("test spell-cast ledger is valid");
+    // A hand-built case object carries no announced ability, so it declares no target.
+    restrictions::record_spell_cast(
+        &mut state,
+        PlayerId(0),
+        &obj_clone,
+        CastingVariant::Normal,
+        &[],
+    )
+    .expect("test spell-cast ledger is valid");
     let obj = state.objects.get(&spell_id).unwrap();
     assert!(!is_blocked_by_per_turn_cast_limit(&state, PlayerId(0), obj));
 
     // Second cast OK
-    restrictions::record_spell_cast(&mut state, PlayerId(0), &obj_clone, CastingVariant::Normal)
-        .expect("test spell-cast ledger is valid");
+    // A hand-built case object carries no announced ability, so it declares no target.
+    restrictions::record_spell_cast(
+        &mut state,
+        PlayerId(0),
+        &obj_clone,
+        CastingVariant::Normal,
+        &[],
+    )
+    .expect("test spell-cast ledger is valid");
 
     // Third cast → blocked
     let obj = state.objects.get(&spell_id).unwrap();
@@ -31232,8 +31307,15 @@ fn per_turn_limit_multiple_sources_strictest_wins() {
 
     // Record one spell cast
     let obj_clone = state.objects.get(&spell_id).unwrap().clone();
-    restrictions::record_spell_cast(&mut state, PlayerId(0), &obj_clone, CastingVariant::Normal)
-        .expect("test spell-cast ledger is valid");
+    // A hand-built case object carries no announced ability, so it declares no target.
+    restrictions::record_spell_cast(
+        &mut state,
+        PlayerId(0),
+        &obj_clone,
+        CastingVariant::Normal,
+        &[],
+    )
+    .expect("test spell-cast ledger is valid");
 
     // Blocked: B's limit of 1 applies
     let obj = state.objects.get(&spell_id).unwrap();
@@ -31898,6 +31980,9 @@ fn first_qualified_spell_reducer_only_applies_to_first_matching_spell() {
             was_kicked: false,
             spell_object_id: None,
             prepared_copy_source: None,
+            mana_spent_source_snapshots: Some(Vec::new()),
+            // A hand-built case record carries no announced cast, so it declares no target.
+            targets: Some(Vec::new()),
         }]),
     );
 
@@ -32018,6 +32103,9 @@ fn first_x_spell_reducer_uses_x_filter_dynamic_counter_count_and_first_gate() {
             was_kicked: false,
             spell_object_id: None,
             prepared_copy_source: None,
+            mana_spent_source_snapshots: Some(Vec::new()),
+            // A hand-built case record carries no announced cast, so it declares no target.
+            targets: Some(Vec::new()),
         }]),
     );
 
@@ -32098,6 +32186,9 @@ fn opponent_first_noncreature_tax_uses_caster_history() {
             was_kicked: false,
             spell_object_id: None,
             prepared_copy_source: None,
+            mana_spent_source_snapshots: Some(Vec::new()),
+            // A hand-built case record carries no announced cast, so it declares no target.
+            targets: Some(Vec::new()),
         }]),
     );
 
@@ -53621,21 +53712,33 @@ fn clear_stack_to_priority(state: &mut GameState) {
     };
 }
 
-fn install_first_spell_cascade_grant(state: &mut GameState) {
+/// Install a first-qualified-spell keyword-grant static (`oracle_line`) on a
+/// battlefield permanent named `name`, owned by P0.
+///
+/// Parameterized by the card so the same fixture serves every member of the class
+/// whose ability really does function from the battlefield: Maelstrom Nexus and
+/// Rain of Riches (both enchantments). A PLANE card's static does not — see
+/// [`install_printed_plane_first_spell_cascade_grant`].
+fn install_first_spell_cascade_grant(
+    state: &mut GameState,
+    name: &str,
+    card_id: CardId,
+    oracle_line: &str,
+) {
     let source = create_object(
         state,
-        CardId(7_000),
+        card_id,
         PlayerId(0),
-        "Maelstrom Nexus".to_string(),
+        name.to_string(),
         Zone::Battlefield,
     );
-    let grant = parse_static_line("The first spell you cast each turn has cascade.")
-        .expect("Maelstrom Nexus static should parse");
+    let grant = parse_static_line(oracle_line)
+        .unwrap_or_else(|| panic!("{name}'s static should parse: {oracle_line}"));
     // Sanity: the parser must emit the gated form, not the legacy condition-null
     // static — otherwise this test silently stops exercising the gate.
     assert!(
         grant.condition.is_some(),
-        "first-spell grant must carry the SpellsCastThisTurn gate"
+        "{name}'s first-spell grant must carry the SpellsCastThisTurn gate"
     );
     state
         .objects
@@ -53645,10 +53748,253 @@ fn install_first_spell_cascade_grant(state: &mut GameState) {
         .push(grant);
 }
 
+/// CR 311.2 + CR 113.6b: install `name`'s first-spell keyword grant as the
+/// PRINTED PLANE it is — a `Plane` card, face up in the command zone, placed
+/// through the same Planechase setup the Planechase suite uses.
+///
+/// CR 311.2: "Plane cards remain in the command zone throughout the game … They're
+/// not permanents." A plane's static therefore has to function from the COMMAND
+/// zone (CR 113.6b), which is why `synthesize_planechase` is the production
+/// stamping step that puts `Zone::Command` on it. Mounting the same text on a
+/// battlefield object — as this fixture used to — tests a card that does not
+/// exist: it exercises a permanent whose ability works from the battlefield, not
+/// TARDIS Bay. The object is built with the real card type, the real static, and
+/// the real zone, so nothing about the fixture stands in for the card.
+fn install_printed_plane_first_spell_cascade_grant(
+    state: &mut GameState,
+    name: &str,
+    oracle_line: &str,
+) -> ObjectId {
+    let grant = parse_static_line(oracle_line)
+        .unwrap_or_else(|| panic!("{name}'s static should parse: {oracle_line}"));
+    assert!(
+        grant.condition.is_some(),
+        "{name}'s first-spell grant must carry the SpellsCastThisTurn gate"
+    );
+    // `synthesize_planechase` is the production stamping step: it is what makes a
+    // parsed plane's static function from the command zone.
+    let face = crate::game::planechase_tests::synthesized_planar_face(
+        CoreType::Plane,
+        Vec::new(),
+        vec![grant],
+    );
+    state.format_config = crate::types::format::FormatConfig::planechase();
+    let (active, deck) =
+        crate::game::planechase_tests::setup_planechase(state, PlayerId(0), (name, &face), &[]);
+    assert!(
+        deck.is_empty(),
+        "{name} is the active plane, not a deck entry"
+    );
+    assert_eq!(
+        state.objects[&active].zone,
+        Zone::Command,
+        "CR 311.2: a plane stays in the command zone"
+    );
+    assert!(
+        !state.objects[&active].card_types.core_types.is_empty()
+            && state.objects[&active]
+                .card_types
+                .core_types
+                .contains(&CoreType::Plane),
+        "{name} must be the printed Plane card type, not a stand-in"
+    );
+    // The parser+pipeline sanity check the battlefield helper makes: the ability
+    // must be stamped to function from the command zone it actually sits in.
+    assert!(
+        state.objects[&active]
+            .static_definitions
+            .iter_all()
+            .all(|definition| definition.active_zones.contains(&Zone::Command)),
+        "CR 113.6b: {name}'s static must function from the command zone"
+    );
+    active
+}
+
+/// A battlefield artifact with the `Treasure` subtype — the source Phase 1's
+/// `FilterProp::ManaSpentFromSource { Subtype("Treasure") }` selects. No mana
+/// ability is wired: the fixtures below add the pool units directly and stamp
+/// this object's id as their source, which is exactly what `pay_mana_cost`
+/// attributes a payment by (each unit's `source_id`, resolved through
+/// `state.objects` at CR 601.2h).
+fn treasure_permanent(state: &mut GameState, card_id: CardId) -> ObjectId {
+    let id = create_object(
+        state,
+        card_id,
+        PlayerId(0),
+        "Treasure".to_string(),
+        Zone::Battlefield,
+    );
+    let obj = state.objects.get_mut(&id).unwrap();
+    obj.card_types.core_types.push(CoreType::Artifact);
+    obj.card_types.subtypes.push("Treasure".to_string());
+    id
+}
+
+/// A battlefield non-Treasure mana source — the control side of the provenance
+/// question. Only its identity matters: the pool units name it as their source.
+fn plain_mana_source(state: &mut GameState, card_id: CardId) -> ObjectId {
+    let id = create_object(
+        state,
+        card_id,
+        PlayerId(0),
+        "Mana Land".to_string(),
+        Zone::Battlefield,
+    );
+    state
+        .objects
+        .get_mut(&id)
+        .unwrap()
+        .card_types
+        .core_types
+        .push(CoreType::Land);
+    id
+}
+
+/// `add_mana`'s source-stamping twin: the same pool units, but each names
+/// `source_id` as the permanent that produced it. A unit whose `source_id` is
+/// `ObjectId(0)` (what `add_mana` produces) stamps no
+/// `ManaSpentSourceSnapshot`, so a payment-provenance fixture must use this.
+fn add_mana_from_source(
+    state: &mut GameState,
+    player: PlayerId,
+    color: ManaType,
+    count: usize,
+    source_id: ObjectId,
+) {
+    let player_data = state.players.iter_mut().find(|p| p.id == player).unwrap();
+    for _ in 0..count {
+        player_data.mana_pool.add(ManaUnit {
+            color,
+            source_id,
+            pip_id: crate::types::mana::ManaPipId(0),
+            supertype: None,
+            source_could_produce_two_or_more_colors: false,
+            restrictions: Vec::new(),
+            grants: vec![],
+            expiry: None,
+            source_incarnation: None,
+        });
+    }
+}
+
+/// Printed **Environmental Sciences** in hand — `{2}`, Sorcery — Lesson.
+///
+/// Verbatim Oracle text: "Search your library for a basic land card, reveal it,
+/// put it into your hand, then shuffle. You gain 2 life."
+///
+/// A `ManaCost::zero()` stand-in cannot serve these legs: a zero cost makes no
+/// payment, so nothing is stamped and the positive reach guard could never fire.
+/// The card is used for its **printed cost and mana value** only — these legs
+/// commit the cast and clear the stack without resolving, so the search and the
+/// life gain never execute (`clear_stack_to_priority` discards the entry).
+fn create_environmental_sciences(
+    state: &mut GameState,
+    card_id: CardId,
+    owner: PlayerId,
+) -> ObjectId {
+    let id = create_object(
+        state,
+        card_id,
+        owner,
+        "Environmental Sciences".to_string(),
+        Zone::Hand,
+    );
+    let obj = state.objects.get_mut(&id).unwrap();
+    obj.card_types.core_types.push(CoreType::Sorcery);
+    obj.mana_cost = ManaCost::generic(2);
+    id
+}
+
+/// Printed **Wayfarer's Bauble** in hand — `{1}`, Artifact.
+///
+/// Verbatim Oracle text: "{2}, {T}, Sacrifice this artifact: Search your library
+/// for a basic land card, put that card onto the battlefield tapped, then shuffle."
+///
+/// The low-mana-value witness for TARDIS Bay's "mana value 2 or greater"
+/// qualifier. Its only text is an activated ability of the permanent, so a cast
+/// of it resolves nothing; the leg never resolves it anyway.
+fn create_wayfarers_bauble(state: &mut GameState, card_id: CardId, owner: PlayerId) -> ObjectId {
+    let id = create_object(
+        state,
+        card_id,
+        owner,
+        "Wayfarer's Bauble".to_string(),
+        Zone::Hand,
+    );
+    let obj = state.objects.get_mut(&id).unwrap();
+    obj.card_types.core_types.push(CoreType::Artifact);
+    obj.mana_cost = ManaCost::generic(1);
+    id
+}
+
+/// Assert a cast completed past payment and report its cast-time keyword
+/// snapshot (CR 601.2i).
+///
+/// The payment assertion is the fixture's reach guard: a spell whose cast never
+/// reached CR 601.2h would show an empty `cast_spell_keywords` for a reason that
+/// has nothing to do with the grant, making the negative legs vacuous.
+fn cast_keywords_after_payment(state: &GameState, spell: ObjectId) -> Vec<Keyword> {
+    let obj = &state.objects[&spell];
+    // `mana_spent_to_cast` itself is a trigger-collection transient
+    // (`clear_post_collection_transients` resets it once the cast's triggers are
+    // collected); the LATCHED evidence of payment is the amount and the source
+    // snapshots, so those are what the reach guard reads.
+    assert!(
+        obj.mana_spent_to_cast_amount > 0,
+        "the fixture must reach the payment step (CR 601.2h) before its keyword snapshot means anything"
+    );
+    obj.cast_spell_keywords.clone()
+}
+
+/// Assert the spell's payment was attributed to exactly the `sources` set — the
+/// fixture-integrity guard for a provenance-qualified filter. An unattributed unit
+/// (one whose `source_id` names no permanent) stamps no
+/// `ManaSpentSourceSnapshot`, so the filter would have nothing to match and the
+/// leg would prove nothing.
+///
+/// The set, rather than a single id, is what makes a MIXED payment assertable:
+/// every spent unit must name one of `sources`, and every named source must fund
+/// at least one unit. A leg that claims two sources therefore fails outright when
+/// the pool degenerates to one of them, instead of quietly re-running a
+/// single-source leg with a mix-shaped assertion around it.
+fn assert_paid_from(state: &GameState, spell: ObjectId, sources: &[ObjectId]) {
+    let obj = &state.objects[&spell];
+    assert!(
+        !obj.mana_spent_source_snapshots.is_empty(),
+        "the fixture must pay with source-attributed mana"
+    );
+    assert_eq!(
+        obj.mana_spent_source_snapshots.len(),
+        obj.mana_spent_to_cast_amount as usize,
+        "every spent unit must name its source"
+    );
+    // Which distinct permanents funded the payment, order-independent: the pool
+    // does not promise which unit `pay_mana_cost` consumes first.
+    let mut paid: Vec<ObjectId> = obj
+        .mana_spent_source_snapshots
+        .iter()
+        .map(|snapshot| snapshot.source_id)
+        .collect();
+    paid.sort_unstable();
+    paid.dedup();
+    let mut expected = sources.to_vec();
+    expected.sort_unstable();
+    expected.dedup();
+    assert_eq!(
+        paid, expected,
+        "fixture integrity: the spell must be funded by exactly {expected:?}"
+    );
+}
+
 #[test]
 fn snapshot_first_qualifying_spell_captures_grant_second_does_not() {
     let mut state = setup_game_at_main_phase();
-    install_first_spell_cascade_grant(&mut state);
+    install_first_spell_cascade_grant(
+        &mut state,
+        "Maelstrom Nexus",
+        CardId(7_000),
+        "The first spell you cast each turn has cascade.",
+    );
 
     let first = create_free_sorcery(&mut state, CardId(7_001), PlayerId(0));
     cast_free_sorcery_to_stack(&mut state, first, CardId(7_001));
@@ -53679,7 +54025,12 @@ fn snapshot_first_qualifying_spell_captures_grant_second_does_not() {
 #[test]
 fn first_qualifying_spell_enqueues_cascade_second_does_not() {
     let mut state = setup_game_at_main_phase();
-    install_first_spell_cascade_grant(&mut state);
+    install_first_spell_cascade_grant(
+        &mut state,
+        "Maelstrom Nexus",
+        CardId(7_000),
+        "The first spell you cast each turn has cascade.",
+    );
 
     let count_cascade = |state: &GameState| {
         state
@@ -53715,6 +54066,234 @@ fn first_qualifying_spell_enqueues_cascade_second_does_not() {
         count_cascade(&state),
         0,
         "the second same-turn spell must NOT enqueue a Cascade trigger"
+    );
+}
+
+/// CR 106.3 + CR 601.2h + CR 604.2 + CR 611.3b: Rain of Riches — "The first spell
+/// you cast each turn that mana from a Treasure was spent to cast has cascade."
+///
+/// Three casts in one game, each paid from a real source:
+///   leg A — Environmental Sciences (`{2}`) paid by a plain land: the source does not
+///           match the qualifier, so the AFFECTED reader refuses it. (The gate is
+///           true here — no qualifying spell has been cast — so this leg can only
+///           fail on the filter.)
+///   leg B — a second Environmental Sciences paid by a Treasure: the first *qualifying*
+///           spell of the turn, so the grant applies. This is also decision 8's
+///           "a prior nonqualifying spell does not consume the grant".
+///   leg C — a third Environmental Sciences paid by a Treasure: its filter matches,
+///           so only the GATE (`SpellsCastThisTurn(qualified) == 0`) can refuse it.
+///
+/// A fourth leg pays from TWO sources at once — one Treasure unit and one land
+/// unit. It needs its own game because leg B consumes the single qualification a
+/// turn allows, so a mixed payment that expects the grant must be the turn's first
+/// cast:
+///   leg D — a mixed Treasure/land payment still qualifies. "Mana from a Treasure
+///           was spent to cast" asks whether a Treasure unit was spent, not
+///           whether every unit came from a Treasure, so the grant applies. This
+///           is the one leg that distinguishes the existential reading from an
+///           all-units-must-match misreading; a single-source leg agrees under
+///           both.
+///
+/// Reverting the parser fix makes the grant unconditional: every leg receives
+/// Cascade and legs A and C fail.
+#[test]
+fn rain_of_riches_grants_cascade_only_to_a_treasure_funded_first_spell() {
+    let mut state = setup_game_at_main_phase();
+    install_first_spell_cascade_grant(
+        &mut state,
+        "Rain of Riches",
+        CardId(7_100),
+        "The first spell you cast each turn that mana from a Treasure was spent to cast has cascade.",
+    );
+    let land = plain_mana_source(&mut state, CardId(7_101));
+    let treasure = treasure_permanent(&mut state, CardId(7_102));
+
+    let leg_a = create_environmental_sciences(&mut state, CardId(7_103), PlayerId(0));
+    let leg_b = create_environmental_sciences(&mut state, CardId(7_104), PlayerId(0));
+    let leg_c = create_environmental_sciences(&mut state, CardId(7_105), PlayerId(0));
+
+    let mut runner = crate::game::scenario::GameRunner::from_state(state);
+
+    // Leg A: funded by a land.
+    add_mana_from_source(
+        runner.state_mut(),
+        PlayerId(0),
+        ManaType::Colorless,
+        2,
+        land,
+    );
+    runner.cast(leg_a).commit();
+    let keywords = cast_keywords_after_payment(runner.state(), leg_a);
+    assert_paid_from(runner.state(), leg_a, &[land]);
+    assert!(
+        !keywords.iter().any(|k| matches!(k, Keyword::Cascade)),
+        "a first spell not funded by a Treasure must not receive the grant; got {keywords:?}"
+    );
+    clear_stack_to_priority(runner.state_mut());
+
+    // Leg B: the first Treasure-funded spell of the turn.
+    add_mana_from_source(
+        runner.state_mut(),
+        PlayerId(0),
+        ManaType::Colorless,
+        2,
+        treasure,
+    );
+    runner.cast(leg_b).commit();
+    let keywords = cast_keywords_after_payment(runner.state(), leg_b);
+    assert_paid_from(runner.state(), leg_b, &[treasure]);
+    assert!(
+        keywords.iter().any(|k| matches!(k, Keyword::Cascade)),
+        "the first Treasure-funded spell of the turn must receive Cascade; got {keywords:?}"
+    );
+    clear_stack_to_priority(runner.state_mut());
+
+    // Leg C: a second Treasure-funded spell — only the gate can refuse it.
+    add_mana_from_source(
+        runner.state_mut(),
+        PlayerId(0),
+        ManaType::Colorless,
+        2,
+        treasure,
+    );
+    runner.cast(leg_c).commit();
+    let keywords = cast_keywords_after_payment(runner.state(), leg_c);
+    assert_paid_from(runner.state(), leg_c, &[treasure]);
+    assert!(
+        !keywords.iter().any(|k| matches!(k, Keyword::Cascade)),
+        "a second Treasure-funded spell of the same turn must not receive Cascade; got {keywords:?}"
+    );
+
+    // Leg D: a MIXED payment — one unit from the Treasure, one from the land —
+    // in its own game, because the turn's one qualification is consumed by leg B
+    // and a mixed payment expecting the grant must be the turn's first cast.
+    {
+        let mut state = setup_game_at_main_phase();
+        install_first_spell_cascade_grant(
+            &mut state,
+            "Rain of Riches",
+            CardId(7_106),
+            "The first spell you cast each turn that mana from a Treasure was spent to cast has cascade.",
+        );
+        let land = plain_mana_source(&mut state, CardId(7_107));
+        let treasure = treasure_permanent(&mut state, CardId(7_108));
+        let mixed = create_environmental_sciences(&mut state, CardId(7_109), PlayerId(0));
+        let mut runner = crate::game::scenario::GameRunner::from_state(state);
+
+        add_mana_from_source(
+            runner.state_mut(),
+            PlayerId(0),
+            ManaType::Colorless,
+            1,
+            treasure,
+        );
+        add_mana_from_source(
+            runner.state_mut(),
+            PlayerId(0),
+            ManaType::Colorless,
+            1,
+            land,
+        );
+        runner.cast(mixed).commit();
+        let keywords = cast_keywords_after_payment(runner.state(), mixed);
+        // Both sources must have funded a unit, or this is not a mixed payment.
+        assert_paid_from(runner.state(), mixed, &[treasure, land]);
+        assert!(
+            keywords.iter().any(|k| matches!(k, Keyword::Cascade)),
+            "a spell paid with ONE Treasure unit and ONE land unit still qualifies — \
+             the qualifier asks whether a Treasure unit was spent, not whether every \
+             unit was; got {keywords:?}"
+        );
+    }
+}
+
+/// CR 202.3 + CR 604.2 + CR 611.3b: TARDIS Bay — "The first spell you cast during
+/// each of your turns with mana value 2 or greater has cascade."
+///
+/// Same three-leg shape as Rain of Riches, with the honest difference that the
+/// qualifier is a live characteristic (mana value) rather than a payment
+/// provenance, so the payment source is irrelevant:
+///   leg A — Wayfarer's Bauble (`{1}` artifact), mana value 1: the affected reader refuses it.
+///   leg B — mana value 2 as the turn's second spell: the first *qualifying* one,
+///           so the grant applies — a prior nonqualifying spell does not consume it.
+///   leg C — a second mana value 2 spell: its affected filter matches, so only the
+///           gate can refuse it.
+#[test]
+fn tardis_bay_grants_cascade_only_to_a_first_spell_with_mana_value_two_or_greater() {
+    let mut state = setup_game_at_main_phase();
+    // CR 311.2: TARDIS Bay is a PLANE — face up in the command zone, not a
+    // battlefield permanent. The fixture is the printed card through the existing
+    // Planechase setup, so the static is exercised from the zone it functions in.
+    let plane = install_printed_plane_first_spell_cascade_grant(
+        &mut state,
+        "TARDIS Bay",
+        "The first spell you cast during each of your turns with mana value 2 or greater has cascade.",
+    );
+    assert_eq!(
+        state.objects[&plane].zone,
+        Zone::Command,
+        "CR 311.2: the plane stays in the command zone for the whole test"
+    );
+
+    let leg_a = create_wayfarers_bauble(&mut state, CardId(7_501), PlayerId(0));
+    let leg_b = create_environmental_sciences(&mut state, CardId(7_502), PlayerId(0));
+    let leg_c = create_environmental_sciences(&mut state, CardId(7_503), PlayerId(0));
+
+    let mut runner = crate::game::scenario::GameRunner::from_state(state);
+
+    // Leg A: mana value 1.
+    add_mana(runner.state_mut(), PlayerId(0), ManaType::Colorless, 1);
+    runner.cast(leg_a).commit();
+    let keywords = cast_keywords_after_payment(runner.state(), leg_a);
+    assert_eq!(
+        runner.state().objects[&leg_a].mana_spent_to_cast_amount,
+        1,
+        "fixture integrity: leg A is a one-mana spell"
+    );
+    assert!(
+        !keywords.iter().any(|k| matches!(k, Keyword::Cascade)),
+        "a first spell with mana value 1 must not receive the grant; got {keywords:?}"
+    );
+    clear_stack_to_priority(runner.state_mut());
+
+    // Leg B: mana value 2, the turn's second spell but its first qualifying one.
+    add_mana(runner.state_mut(), PlayerId(0), ManaType::Colorless, 2);
+    runner.cast(leg_b).commit();
+    let keywords = cast_keywords_after_payment(runner.state(), leg_b);
+    assert!(
+        keywords.iter().any(|k| matches!(k, Keyword::Cascade)),
+        "the first mana-value-2-or-greater spell of the turn must receive Cascade; got {keywords:?}"
+    );
+    // CR 702.85a: cascade "functions only while the spell with cascade is on the
+    // stack" and is a TRIGGERED ability, so the grant is only real if the trigger
+    // it grants actually exists — assert it on the stack BEFORE clearing it, or the
+    // leg would pass on a keyword snapshot that never became an ability.
+    let cascade_triggers = runner
+        .state()
+        .stack
+        .iter()
+        .filter(|entry| {
+            entry.source_id == leg_b
+                && matches!(entry.kind, StackEntryKind::TriggeredAbility { .. })
+                && entry
+                    .ability()
+                    .is_some_and(|ability| matches!(ability.effect, Effect::Cascade))
+        })
+        .count();
+    assert_eq!(
+        cascade_triggers, 1,
+        "the granted cascade must be on the stack as exactly one Cascade trigger from the \
+         qualifying spell"
+    );
+    clear_stack_to_priority(runner.state_mut());
+
+    // Leg C: a second mana value 2 spell — only the gate can refuse it.
+    add_mana(runner.state_mut(), PlayerId(0), ManaType::Colorless, 2);
+    runner.cast(leg_c).commit();
+    let keywords = cast_keywords_after_payment(runner.state(), leg_c);
+    assert!(
+        !keywords.iter().any(|k| matches!(k, Keyword::Cascade)),
+        "a second mana-value-2 spell of the same turn must not receive Cascade; got {keywords:?}"
     );
 }
 
@@ -53781,6 +54360,9 @@ fn convoke_query_before_record_unaffected_by_snapshot() {
             was_kicked: false,
             spell_object_id: None,
             prepared_copy_source: None,
+            mana_spent_source_snapshots: Some(Vec::new()),
+            // A hand-built case record carries no announced cast, so it declares no target.
+            targets: Some(Vec::new()),
         }]
         .into(),
     );
@@ -59306,6 +59888,7 @@ fn path_of_ancestry_unit(source_id: ObjectId) -> ManaUnit {
             )),
         }],
         expiry: None,
+        source_incarnation: None,
     }
 }
 
@@ -62484,6 +63067,128 @@ fn activation_cost_snapshot_round_trips_every_target_settlement_value() {
     }
 }
 
+/// CR 111.1 + CR 602.2: a source-scoped cost modifier reading a RECORDED
+/// activation answers the token leaves from the bit captured with the record —
+/// `Mutagen Man, Living Ooze` ("abilities of nontoken creatures you control cost
+/// … less") and `The Dining Car` are the live cards that narrow this way, and for
+/// a source that left, the record is the only evidence there is (CR 113.7a).
+///
+/// Revert-probe: reading the live object or refusing (`captured_token: None`)
+/// makes the `NonToken` assertion fail for the departed token source and inverts
+/// both assertions for the card source.
+#[test]
+fn a_recorded_source_answers_a_token_source_filter() {
+    use crate::types::game_state::CapturedTokenBit;
+
+    let mut state = GameState::new_two_player(42);
+    let token = create_object(
+        &mut state,
+        CardId(972),
+        PlayerId(0),
+        "Soldier".to_string(),
+        Zone::Battlefield,
+    );
+    {
+        let object = state.objects.get_mut(&token).unwrap();
+        object.is_token = true;
+        object.card_types.core_types = vec![CoreType::Creature];
+    }
+    let lki = state.objects[&token].snapshot_public_characteristics();
+    // CR 111.7: the source left to pay its own cost.
+    let mut events = Vec::new();
+    zones::move_to_zone(&mut state, token, Zone::Graveyard, &mut events);
+
+    let view = ActivationView {
+        activator: PlayerId(0),
+        source: token,
+        source_facts: ActivationSourceFacts::Recorded {
+            lki: &lki,
+            zone: Zone::Battlefield,
+            token: CapturedTokenBit::Known(true),
+        },
+        active_keyword: Some("activated"),
+        is_mana: false,
+        is_loyalty: false,
+    };
+    let filter = |prop: FilterProp| {
+        TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature).properties(vec![prop]))
+    };
+    let ctx = crate::game::filter::FilterContext::neutral();
+    assert!(
+        reduce_ability_cost_non_target_gates_admit(
+            &state,
+            &view,
+            "activated",
+            ActivationExemption::None,
+            None,
+            Some(&filter(FilterProp::Token)),
+            PlayerId(0),
+            &ctx,
+        ),
+        "the departed token source still matches a `token` source filter"
+    );
+    assert!(
+        !reduce_ability_cost_non_target_gates_admit(
+            &state,
+            &view,
+            "activated",
+            ActivationExemption::None,
+            None,
+            Some(&filter(FilterProp::NonToken)),
+            PlayerId(0),
+            &ctx,
+        ),
+        "and does not match `nontoken`"
+    );
+}
+
+/// CR 111.1 + CR 400.7 + CR 602.2: an activation's journal row captures whether
+/// its SOURCE was a token, at the announcement, beside the snapshot a
+/// source-scoped cost modifier reads. `Mutagen Man, Living Ooze` and `The Dining
+/// Car` are the live cards whose `ReduceAbilityCost` static narrows on
+/// token-ness, and the recorded-source door has no other way to date the bit:
+/// the snapshot cannot carry it (CR 707.2).
+///
+/// Revert-probe: dropping the capture (the field defaulting to `Unknown`) makes
+/// both assertions fail — the modifier would then read a refusal for every
+/// source, including a plain nontoken creature.
+#[test]
+fn an_activation_record_captures_its_sources_token_bit() {
+    use crate::types::game_state::CapturedTokenBit;
+
+    let mut state = GameState::new_two_player(42);
+    let token = create_object(
+        &mut state,
+        CardId(970),
+        PlayerId(0),
+        "Soldier".to_string(),
+        Zone::Battlefield,
+    );
+    state.objects.get_mut(&token).unwrap().is_token = true;
+    let card = create_object(
+        &mut state,
+        CardId(971),
+        PlayerId(0),
+        "Grizzly Bears".to_string(),
+        Zone::Battlefield,
+    );
+
+    let token_row = capture_activation_record_from(&state, PlayerId(0), token, None, &[])
+        .expect("a live source yields a record");
+    assert_eq!(
+        token_row.source_token,
+        CapturedTokenBit::Known(true),
+        "the record states the token bit its source held at the announcement"
+    );
+    let card_row = capture_activation_record_from(&state, PlayerId(0), card, None, &[])
+        .expect("a live source yields a record");
+    assert_eq!(
+        card_row.source_token,
+        CapturedTokenBit::Known(false),
+        "and a card source states the opposite bit"
+    );
+}
+
 /// CR 602.2 + CR 601.2c: a journal row round-trips through the shared serde
 /// layer with both target shapes and both ability flags.
 #[test]
@@ -62509,6 +63214,9 @@ fn an_activation_journal_row_round_trips() {
         source,
         source_lki: state.objects[&source].snapshot_public_characteristics(),
         source_zone: crate::types::zones::Zone::Battlefield,
+        source_token: crate::types::game_state::CapturedTokenBit::Known(
+            state.objects[&source].is_token,
+        ),
         ability_tag: Some(crate::types::ability::AbilityTag::Boast),
         is_loyalty_ability: true,
         activation_cost: crate::types::events::BoundActivationCost::Unknown,
@@ -62517,6 +63225,13 @@ fn an_activation_journal_row_round_trips() {
             ActivationTargetFact::Object {
                 id: target,
                 lki: Box::new(state.objects[&target].snapshot_public_characteristics()),
+                zone: crate::types::game_state::AnnouncedTargetZone::Known(
+                    state.objects[&target].zone,
+                ),
+                token: crate::types::game_state::CapturedTokenBit::Known(
+                    state.objects[&target].is_token,
+                ),
+                attached_to: None,
             },
         ],
     };
@@ -63167,5 +63882,1039 @@ fn void_winnower_runtime_does_not_block_its_own_controller() {
     assert!(
         can_cast_object_now(&scenario.state, P0, even),
         "\"Your opponents can't cast\" never restricts the controller (CR 109.5)"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Cast-history declared-target provenance (CR 115.1 + CR 601.2c + CR 115.9).
+//
+// `SpellCastRecord::targets` carries the cast's committed declared targets, and
+// `filter::spell_record_matches_property`'s `FilterProp::Targets` arm answers them
+// through the module's single LKI authority. The record read is CR 115.9's
+// SELECTION-TIME option, latched per CR 400.7; CR 115.9b's current-state reading
+// governs the live per-spell reader alone.
+// ---------------------------------------------------------------------------
+
+/// `Typed(Creature)` — the inner filter a `FilterProp::Targets` qualifier carries
+/// (Head of the Class's "that targets a creature").
+fn a_creature_filter() -> TargetFilter {
+    TargetFilter::Typed(TypedFilter::creature())
+}
+
+/// `FilterProp::Targets { Typed(Creature) }` as a property-bearing filter: an empty
+/// type-line constraint plus the property, which is exactly the filter shape a
+/// turn-history gate carries.
+fn targets_a_creature_filter() -> TargetFilter {
+    TargetFilter::Typed(TypedFilter::default().properties(vec![FilterProp::Targets {
+        filter: Box::new(a_creature_filter()),
+    }]))
+}
+
+/// The property-free control: `Typed(Card)`. Answers `true` for every real cast, so a
+/// `false` from the property above is attributable to the property and not to a
+/// rejected filter shape.
+fn any_card_filter() -> TargetFilter {
+    TargetFilter::Typed(TypedFilter::card())
+}
+
+/// The recorded cast of `spell`, found by the stable id link.
+fn recorded_cast(state: &GameState, spell: ObjectId) -> &SpellCastRecord {
+    state
+        .spells_cast_this_turn_by_player
+        .values()
+        .flat_map(|records| records.iter())
+        .find(|record| record.spell_object_id == Some(spell))
+        .expect("reach: the committed cast is recorded in the turn history")
+}
+
+/// Pass priority until a non-priority prompt opens (the CR 707.12 copy walks).
+fn pass_to_next_prompt(runner: &mut crate::game::scenario::GameRunner) {
+    for _ in 0..32 {
+        if !matches!(runner.state().waiting_for, WaitingFor::Priority { .. }) {
+            return;
+        }
+        assert!(
+            !runner.state().stack.is_empty(),
+            "reach: the stack drained before a prompt opened"
+        );
+        runner
+            .act(crate::types::actions::GameAction::PassPriority)
+            .expect("pass priority");
+    }
+    panic!("no prompt opened");
+}
+
+/// R1 — CR 115.1 + CR 601.2c + CR 115.9: a cast that declared a MATCHING target is
+/// answered `true` by the record matcher from the latched fact set. Reverting the arm
+/// to the fail-closed group flips this assertion `true` → `false`.
+#[test]
+fn record_answers_declared_creature_target() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let bear = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
+    let growth = scenario
+        .add_spell_to_hand_from_oracle(
+            P0,
+            "Giant Growth",
+            true,
+            "Target creature gets +3/+3 until end of turn.",
+        )
+        .with_mana_cost(ManaCost::zero())
+        .id();
+    let mut runner = scenario.build();
+    runner.cast(growth).target_objects(&[bear]).commit();
+    let state = runner.state();
+
+    let record = recorded_cast(state, growth);
+    // Reach guard 1: the committed fact list is non-empty and names the bear.
+    assert_eq!(
+        record.declared_targets().len(),
+        1,
+        "the cast recorded exactly one declared target"
+    );
+    assert!(
+        matches!(
+            &record.declared_targets()[0],
+            crate::types::game_state::ActivationTargetFact::Object { id, .. } if *id == bear
+        ),
+        "the recorded fact names the declared target"
+    );
+    // Reach guard 2: the property-free control answers true on the same record.
+    let ctx = crate::game::filter::FilterContext::neutral();
+    assert!(
+        crate::game::filter::spell_record_matches_filter(
+            record,
+            &any_card_filter(),
+            P0,
+            state,
+            &ctx
+        ),
+        "reach: the record matches a property-free filter, so the matcher accepted the record"
+    );
+    assert!(
+        crate::game::filter::spell_record_matches_filter(
+            record,
+            &targets_a_creature_filter(),
+            P0,
+            state,
+            &ctx
+        ),
+        "CR 115.9 selection-time: the record answers `targets a creature` from its latched set"
+    );
+}
+
+/// R2 — a cast that declared ONLY non-matching targets answers `false`, with a
+/// non-empty reach guard so the `false` is the matcher's and not the empty-vector
+/// degenerate case. The `Player` fact axis is reached here.
+#[test]
+fn record_answers_false_for_only_non_matching_targets() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let bolt = scenario
+        .add_spell_to_hand_from_oracle(
+            P0,
+            "Lightning Bolt",
+            true,
+            "Lightning Bolt deals 3 damage to any target.",
+        )
+        .with_mana_cost(ManaCost::zero())
+        .id();
+    let mut runner = scenario.build();
+    runner.cast(bolt).target_player(P1).commit();
+    let state = runner.state();
+
+    let record = recorded_cast(state, bolt);
+    // Reach guard: exactly one fact, and it is the targeted PLAYER — so the answer
+    // below is the player branch's, not an empty list's.
+    assert_eq!(
+        record.declared_targets().len(),
+        1,
+        "exactly one declared target"
+    );
+    assert_eq!(
+        record.declared_targets()[0],
+        crate::types::game_state::ActivationTargetFact::Player(P1),
+        "the recorded fact is the targeted player"
+    );
+    let ctx = crate::game::filter::FilterContext::neutral();
+    assert!(
+        crate::game::filter::spell_record_matches_filter(
+            record,
+            &any_card_filter(),
+            P0,
+            state,
+            &ctx
+        ),
+        "reach: the record itself is found and accepted"
+    );
+    assert!(
+        !crate::game::filter::spell_record_matches_filter(
+            record,
+            &targets_a_creature_filter(),
+            P0,
+            state,
+            &ctx
+        ),
+        "a spell that targeted only a player does not target a creature"
+    );
+}
+
+/// R3 — a cast that declared NO target answers `false`, with the record found and a
+/// property-free control answering `true`.
+#[test]
+fn record_answers_false_for_a_cast_that_declared_no_target() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.add_card_to_library_top(P0, "Forest");
+    scenario.add_card_to_library_top(P0, "Forest");
+    let divination = scenario
+        .add_spell_to_hand_from_oracle(P0, "Divination", false, "Draw two cards.")
+        .with_mana_cost(ManaCost::zero())
+        .id();
+    let mut runner = scenario.build();
+    runner.cast(divination).commit();
+    let state = runner.state();
+
+    let record = recorded_cast(state, divination);
+    // Reach guard: the record is real and its list is honestly empty.
+    assert!(
+        record.declared_targets().is_empty(),
+        "a non-targeting cast declared nothing"
+    );
+    let ctx = crate::game::filter::FilterContext::neutral();
+    assert!(
+        crate::game::filter::spell_record_matches_filter(
+            record,
+            &any_card_filter(),
+            P0,
+            state,
+            &ctx
+        ),
+        "reach: the record is found and accepted, so the empty list is real"
+    );
+    assert!(
+        !crate::game::filter::spell_record_matches_filter(
+            record,
+            &targets_a_creature_filter(),
+            P0,
+            state,
+            &ctx
+        ),
+        "CR 115.9: an empty declared list never satisfies `targets [something]`"
+    );
+}
+
+/// R4 — the fold is EXISTENTIAL (CR 115.9 + CR 601.2c): one matching fact among
+/// several is sufficient, an empty list never matches, and a repeated matching target
+/// never multiplies the answer.
+#[test]
+fn declared_target_facts_fold_is_existential() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let bear = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
+    let growth = scenario
+        .add_spell_to_hand_from_oracle(
+            P0,
+            "Giant Growth",
+            true,
+            "Target creature gets +3/+3 until end of turn.",
+        )
+        .with_mana_cost(ManaCost::zero())
+        .id();
+    let mut runner = scenario.build();
+    runner.cast(growth).target_objects(&[bear]).commit();
+    let state = runner.state();
+
+    let bear_fact = recorded_cast(state, growth).declared_targets()[0].clone();
+    let non_matching_player = crate::types::game_state::ActivationTargetFact::Player(P1);
+    let filter = a_creature_filter();
+    let ctx = crate::game::filter::FilterContext::neutral();
+
+    // Leg 1: one matching object fact beside a non-matching player fact → true.
+    let mixed = vec![bear_fact.clone(), non_matching_player.clone()];
+    assert_eq!(
+        mixed.len(),
+        2,
+        "reach guard: the mixed list has two facts, exactly one of which names the creature"
+    );
+    assert!(
+        crate::game::filter::declared_target_facts_match(state, &mixed, &filter, &ctx),
+        "one matching fact among several is sufficient (existential, CR 115.9)"
+    );
+    // Leg 2: only the non-matching fact → false.
+    assert!(
+        !crate::game::filter::declared_target_facts_match(
+            state,
+            std::slice::from_ref(&non_matching_player),
+            &filter,
+            &ctx
+        ),
+        "a list of only non-matching facts does not match"
+    );
+    // Leg 3: the empty list → false (it declared nothing).
+    assert!(
+        !crate::game::filter::declared_target_facts_match(state, &[], &filter, &ctx),
+        "an empty declared list never matches"
+    );
+    // Repeated-target leg: the same object twice still answers once.
+    let repeated = vec![bear_fact.clone(), bear_fact];
+    assert_eq!(repeated.len(), 2, "reach guard: two facts, same object");
+    assert!(
+        crate::game::filter::declared_target_facts_match(state, &repeated, &filter, &ctx),
+        "a repeated declared target does not multiply the answer"
+    );
+}
+
+/// R5 — the two LIVE readers and the HISTORY reader agree on one board, and no reader
+/// consults another's storage. Re-routing either live reader to the record (or the
+/// record reader to the stack) makes one leg disagree.
+#[test]
+fn live_and_history_readers_agree_on_one_board() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let bear = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
+    let growth = scenario
+        .add_spell_to_hand_from_oracle(
+            P0,
+            "Giant Growth",
+            true,
+            "Target creature gets +3/+3 until end of turn.",
+        )
+        .with_mana_cost(ManaCost::zero())
+        .id();
+    let bolt = scenario
+        .add_spell_to_hand_from_oracle(
+            P0,
+            "Lightning Bolt",
+            true,
+            "Lightning Bolt deals 3 damage to any target.",
+        )
+        .with_mana_cost(ManaCost::zero())
+        .id();
+    let mut runner = scenario.build();
+    // One board, two spells on the stack: the creature-targeting one and the
+    // player-targeting one.
+    runner.cast(growth).target_objects(&[bear]).commit();
+    runner.cast(bolt).target_player(P1).commit();
+    let state = runner.state();
+    assert!(
+        state.stack.iter().any(|entry| entry.id == growth)
+            && state.stack.iter().any(|entry| entry.id == bolt),
+        "reach: both spells are on the stack"
+    );
+
+    let creature_filter = a_creature_filter();
+    let ctx = crate::game::filter::FilterContext::neutral();
+    let ability_of = |spell: ObjectId| {
+        state
+            .stack
+            .iter()
+            .find(|entry| entry.id == spell)
+            .and_then(|entry| entry.ability())
+            .expect("reach: the announced spell carries its ability on the stack")
+    };
+
+    for (spell, expected, label) in [
+        (growth, true, "Giant Growth on a Grizzly Bears"),
+        (bolt, false, "Lightning Bolt aimed at a player"),
+    ] {
+        // (i) the live object reader: `matches_filter_prop` → `stack_entry_targets_satisfy`
+        // (reads the stack entry's ability, CR 115.9b's current state).
+        assert_eq!(
+            crate::game::filter::matches_target_filter(
+                state,
+                spell,
+                &targets_a_creature_filter(),
+                &ctx
+            ),
+            expected,
+            "live object reader on {label}"
+        );
+        // (ii) the live cost-modifier reader: reads the same announced ability.
+        assert_eq!(
+            selected_targets_match_filter(
+                state,
+                spell,
+                P0,
+                ability_of(spell),
+                &creature_filter,
+                false
+            ),
+            expected,
+            "live declared-target reader on {label}"
+        );
+        // (iii) the history reader: reads `spells_cast_this_turn_by_player[..].targets`.
+        let record = recorded_cast(state, spell);
+        assert_eq!(
+            crate::game::filter::spell_record_matches_filter(
+                record,
+                &targets_a_creature_filter(),
+                P0,
+                state,
+                &ctx
+            ),
+            expected,
+            "history record reader on {label}"
+        );
+        // Reach guard: the history reader's own input was non-empty for the matching
+        // case, so the `true` is the fact set's and not a permissive fallback.
+        if expected {
+            assert_eq!(record.declared_targets().len(), 1);
+        }
+    }
+}
+
+/// R6 — the live-projected record path's `Targets` answer is UNCHANGED (it carries no
+/// declared-target facts, so it cannot satisfy "targets [something]"). The guard is
+/// that the same entry answers `true` for a property-free filter and `true` through
+/// the live object reader, so the `false` is the projection's and not the board's.
+#[test]
+fn live_projected_record_still_answers_targets_false() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let bear = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
+    let growth = scenario
+        .add_spell_to_hand_from_oracle(
+            P0,
+            "Giant Growth",
+            true,
+            "Target creature gets +3/+3 until end of turn.",
+        )
+        .with_mana_cost(ManaCost::zero())
+        .id();
+    let mut runner = scenario.build();
+    runner.cast(growth).target_objects(&[bear]).commit();
+    let state = runner.state();
+    let spell_obj = state.objects[&growth].clone();
+
+    assert!(
+        crate::game::filter::spell_object_matches_filter_from_state(
+            state,
+            &spell_obj,
+            Zone::Hand,
+            P0,
+            &any_card_filter(),
+            bear,
+            &state.all_creature_types,
+        ),
+        "reach: the live projection accepts the record and a property-free filter"
+    );
+    assert!(
+        !crate::game::filter::spell_object_matches_filter_from_state(
+            state,
+            &spell_obj,
+            Zone::Hand,
+            P0,
+            &targets_a_creature_filter(),
+            bear,
+            &state.all_creature_types,
+        ),
+        "decision 6: the live projection carries no declared-target facts"
+    );
+    // And the live object reader on the same spell DOES answer true (R5 leg i), so the
+    // `false` above is the projection's, not the board's.
+    assert!(
+        crate::game::filter::matches_target_filter(
+            state,
+            growth,
+            &targets_a_creature_filter(),
+            &crate::game::filter::FilterContext::neutral(),
+        ),
+        "reach: the live reader answers true on this board"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// CR 707.12 + CR 601.2c: the copy-cast write's declared-target derivation.
+// `commit_copy_cast` reads the copy's own `StackEntryKind::Spell` ability — the
+// only authority a cast copy has — and refuses a missing entry rather than
+// recording an empty list. Oracle text verbatim (Mizzix's Mastery, Frost Breath,
+// Baron Helmut Zemo).
+// ---------------------------------------------------------------------------
+
+const MIZZIXS_MASTERY: &str = "Exile target card that's an instant or sorcery from your graveyard. For each card exiled this way, copy it, and you may cast the copy without paying its mana cost. Exile Mizzix's Mastery.\nOverload {5}{R}{R}{R} (You may cast this spell for its overload cost. If you do, change \"target\" in its text to \"each.\")";
+const FROST_BREATH: &str =
+    "Tap up to two target creatures. Those creatures don't untap during their controller's next untap step.";
+const BARON_HELMUT_ZEMO: &str = "Whenever you cast a black spell from your hand, Baron Helmut Zemo connives.\nBoast \u{2014} Exile any number of black cards from your graveyard with fifteen or more black mana symbols among their mana costs: Copy those exiled cards. You may cast up to three of the copies without paying their mana costs. (Activate only if this creature attacked this turn and only once each turn.)";
+
+/// R10 (positive) — CR 707.12 + CR 601.2c: a cast copy's record carries the targets
+/// its announcement walk announced. Reverting the copy-side derivation leaves the
+/// record with no facts, flipping this assertion `true` → `false`.
+#[test]
+fn copy_cast_records_its_announced_declared_targets() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let a = scenario.add_creature(P1, "Creature A", 2, 9).id();
+    scenario.add_creature(P1, "Creature B", 2, 9).id();
+    let frost = scenario
+        .add_spell_to_graveyard(P0, "Frost Breath", true)
+        .from_oracle_text(FROST_BREATH)
+        .id();
+    let mastery = scenario
+        .add_spell_to_hand(P0, "Mizzix's Mastery", false)
+        .from_oracle_text_with_keywords(&["Overload"], MIZZIXS_MASTERY)
+        .with_mana_cost(ManaCost::zero())
+        .id();
+    let mut runner = scenario.build();
+    runner.cast(mastery).target_object(frost).commit();
+    pass_to_next_prompt(&mut runner);
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::ChooseFromZoneChoice { .. }
+        ),
+        "reach: Mizzix offers the copy, got {:?}",
+        runner.state().waiting_for
+    );
+    runner
+        .act(GameAction::SelectCards { cards: vec![frost] })
+        .expect("cast the copy");
+    let WaitingFor::CopyRetarget { copy_id, mode, .. } = runner.state().waiting_for else {
+        panic!(
+            "expected the copy's announcement, got {:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert_eq!(
+        mode,
+        Some(crate::types::game_state::CopyChoiceMode::Announce),
+        "reach: the prompt is the copy's announcement"
+    );
+    runner
+        .act(GameAction::ChooseTarget {
+            target: Some(TargetRef::Object(a)),
+        })
+        .expect("announce Creature A");
+    // CR 115.6: declining the second "up to two" slot completes the announcement,
+    // which is where `commit_copy_cast` runs.
+    runner
+        .act(GameAction::ChooseTarget { target: None })
+        .expect("decline the second optional slot");
+
+    let state = runner.state();
+    // Reach guard on the write's own input, while the copy is still on the stack: the
+    // copy's own spell entry exists and carries an ability, so the facts came from that
+    // ability rather than from the ability-less arm.
+    let entry = state
+        .stack
+        .iter()
+        .find(|entry| entry.id == copy_id)
+        .expect("reach: the announced copy is on the stack");
+    let ability = entry
+        .ability()
+        .expect("reach: an ability-bearing copy keeps its own spell ability");
+    let announced = crate::game::ability_utils::declared_targets_in_chain(ability);
+    assert_eq!(
+        announced,
+        vec![TargetRef::Object(a)],
+        "reach: the copy announced exactly the chosen creature"
+    );
+
+    let record = recorded_cast(state, copy_id);
+    assert_eq!(
+        record.declared_targets().len(),
+        1,
+        "the copy's cast recorded its one announced target"
+    );
+    assert!(
+        matches!(
+            &record.declared_targets()[0],
+            crate::types::game_state::ActivationTargetFact::Object { id, .. } if *id == a
+        ),
+        "the recorded fact names the announced creature"
+    );
+    let ctx = crate::game::filter::FilterContext::neutral();
+    assert!(
+        crate::game::filter::spell_record_matches_filter(
+            record,
+            &targets_a_creature_filter(),
+            P0,
+            state,
+            &ctx
+        ),
+        "the copy's cast-history record answers `targets a creature`"
+    );
+}
+
+/// R10 (negative) — CR 707.12: a copy of a card with no spell ability declares nothing
+/// and is still recorded, with an HONEST empty list (the record is found; the entry
+/// exists and its `ability()` is `None`). This is the branch an `.unwrap_or_default()`
+/// over the whole lookup would blur into "no entry at all".
+#[test]
+fn copy_cast_with_no_spell_ability_records_no_targets() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PostCombatMain);
+    scenario.with_library_top(P0, &["Draw A", "Draw B", "Draw C", "Draw D"]);
+    let zemo = scenario
+        .add_creature_from_oracle(P0, "Baron Helmut Zemo", 3, 3, BARON_HELMUT_ZEMO)
+        .id();
+    // PRINTED THRESHOLD FODDER. Zemo's Boast reads "Exile any number of black cards
+    // from your graveyard with fifteen or more black mana symbols among their mana
+    // costs", so the payment is a *set* of printed black cards whose costs sum to
+    // the threshold — five cards, all printed, summing to exactly fifteen:
+    //
+    //   Mass of Ghouls        {3}{B}{B}      2   (zero-ability creature)
+    //   Walking Corpse        {1}{B}         1   (zero-ability creature)
+    //   Dark Ritual           {B}            1   ("Add {B}{B}{B}.")
+    //   Doomsday Excruciator  {B}{B}{B}{B}{B}{B}  6
+    //   Pox Plague            {B}{B}{B}{B}{B}     5
+    //
+    // Mass of Ghouls is the copy whose record must be empty: it is a vanilla body,
+    // so its spell has no ability. Dark Ritual is the spell copy. "You may cast up
+    // to three of the copies" is what makes selecting two of the five legal.
+    let ghouls_cost = ManaCost::Cost {
+        shards: vec![ManaCostShard::Black, ManaCostShard::Black],
+        generic: 3,
+    };
+    let corpse_cost = ManaCost::Cost {
+        shards: vec![ManaCostShard::Black],
+        generic: 1,
+    };
+    let ritual_cost = ManaCost::Cost {
+        shards: vec![ManaCostShard::Black],
+        generic: 0,
+    };
+    let excruciator_cost = ManaCost::Cost {
+        shards: vec![ManaCostShard::Black; 6],
+        generic: 0,
+    };
+    let pox_cost = ManaCost::Cost {
+        shards: vec![ManaCostShard::Black; 5],
+        generic: 0,
+    };
+    // The ability-less copy: a printed vanilla body, so its spell has no ability.
+    let vanilla = scenario
+        .add_creature_to_graveyard(P0, "Mass of Ghouls", 5, 3)
+        .from_oracle_text("")
+        .with_mana_cost(ghouls_cost)
+        .id();
+    let corpse = scenario
+        .add_creature_to_graveyard(P0, "Walking Corpse", 2, 2)
+        .from_oracle_text("")
+        .with_mana_cost(corpse_cost)
+        .id();
+    let instant = scenario
+        .add_spell_to_graveyard(P0, "Dark Ritual", true)
+        .from_oracle_text("Add {B}{B}{B}.")
+        .with_mana_cost(ritual_cost)
+        .id();
+    let excruciator = scenario
+        .add_creature_to_graveyard(P0, "Doomsday Excruciator", 6, 6)
+        .from_oracle_text(
+            "Flying\nWhen this creature enters, if it was cast, each player exiles all but the bottom six cards of their library face down.\nAt the beginning of your upkeep, draw a card.",
+        )
+        .with_mana_cost(excruciator_cost)
+        .id();
+    let pox = scenario
+        .add_spell_to_graveyard(P0, "Pox Plague", false)
+        .from_oracle_text(
+            "Each player loses half their life, then discards half the cards in their hand, then sacrifices half the permanents they control of their choice. Round down each time.",
+        )
+        .with_mana_cost(pox_cost)
+        .id();
+    let fodder = vec![vanilla, corpse, instant, excruciator, pox];
+    let mut runner = scenario.build();
+    assert!(
+        runner.state().objects[&vanilla].abilities.is_empty(),
+        "reach: the vanilla creature has no spell ability"
+    );
+    runner.state_mut().creatures_attacked_this_turn.insert(zemo);
+    let index = runner.state().objects[&zemo]
+        .abilities
+        .iter()
+        .position(|a| matches!(a.effect.as_ref(), Effect::CastCopyOfCard { .. }))
+        .expect("reach: Zemo's Boast");
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: zemo,
+            ability_index: index,
+            payment_mode: crate::types::game_state::CastPaymentMode::Auto,
+        })
+        .expect("activate Boast");
+    runner
+        .act(GameAction::SelectCards {
+            cards: fodder.clone(),
+        })
+        .expect("pay the exile cost: five printed black cards, fifteen symbols");
+    pass_to_next_prompt(&mut runner);
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::ChooseFromZoneChoice { .. }
+        ),
+        "reach: Zemo offers the copies, got {:?}",
+        runner.state().waiting_for
+    );
+    runner
+        .act(GameAction::SelectCards {
+            cards: vec![vanilla, instant],
+        })
+        .expect("CR 707.12: two of the five copies are cast");
+
+    let state = runner.state();
+    let bear_copy = state
+        .objects
+        .values()
+        .find(|object| object.is_copy && object.name == "Mass of Ghouls")
+        .expect("reach: the vanilla card's copy was cast");
+    let copy_id = bear_copy.id;
+    // Reach guard: the copy's own entry exists and carries NO spell ability, so the
+    // empty fact list below is the ability-less arm's, not a missing-entry default.
+    let entry = state
+        .stack
+        .iter()
+        .find(|entry| entry.id == copy_id)
+        .expect("reach: the ability-less copy is on the stack");
+    assert!(
+        entry.ability().is_none(),
+        "reach: a vanilla permanent spell's copy carries no spell ability"
+    );
+    let record = recorded_cast(state, copy_id);
+    assert!(
+        record.declared_targets().is_empty(),
+        "an ability-less copy declared nothing and honestly records nothing"
+    );
+    let ctx = crate::game::filter::FilterContext::neutral();
+    assert!(
+        crate::game::filter::spell_record_matches_filter(
+            record,
+            &any_card_filter(),
+            P0,
+            state,
+            &ctx
+        ),
+        "reach: the copy IS recorded, so the empty list is real"
+    );
+    assert!(
+        !crate::game::filter::spell_record_matches_filter(
+            record,
+            &targets_a_creature_filter(),
+            P0,
+            state,
+            &ctx
+        ),
+        "an empty declared list never satisfies `targets [something]`"
+    );
+}
+
+/// R10 (hostile) — CR 707.12 + CR 601.2c: an absent stack entry is a hard refusal,
+/// never an empty default. This arm is reachable only from a direct call, which is
+/// exactly why no production test can cover it: restating the derivation as
+/// `.find(..).and_then(StackEntry::ability).map(..).unwrap_or_default()` publishes
+/// `SpellCast`, records a cast with no facts, and then fails at
+/// `validate_cast_occurrence_stack_spell_carrier` with a *different* `InvalidAction`
+/// ("cannot stamp cast occurrence on non-spell stack carrier …") — after the write,
+/// not before it, while every other test in the suite — including both delivered R10
+/// legs — still passes.
+#[test]
+fn copy_cast_without_a_stack_entry_is_refused_and_records_nothing() {
+    let mut state = setup_game_at_main_phase();
+    // Fixture: a Stack-zone spell object for the real vanilla (Grizzly Bears, 2/2, no
+    // Oracle text, so no card text is exercised) that has NO `state.stack` entry.
+    // `create_object` seeds the zone directly and `add_to_zone` no-ops for `Zone::Stack`,
+    // which is the state a copy left behind by an announcement walk that never reached
+    // `finalize_copy_walk` would present.
+    let copy_id = create_object(
+        &mut state,
+        CardId(201),
+        P0,
+        "Grizzly Bears".to_string(),
+        Zone::Stack,
+    );
+    {
+        let copy = state.objects.get_mut(&copy_id).expect("the copy exists");
+        copy.is_copy = true;
+        copy.card_types.core_types.push(CoreType::Creature);
+        copy.base_card_types = copy.card_types.clone();
+        copy.power = Some(2);
+        copy.toughness = Some(2);
+        copy.base_power = Some(2);
+        copy.base_toughness = Some(2);
+    }
+    // Reach guards for the three negative assertions below: the object is present and in
+    // the Stack zone (so the object-not-found refusal is not what fires), it is UNSTAMPED
+    // (so the idempotency early-return on `cast_occurrence.is_some()` cannot swallow the
+    // call and hand back `Ok(())`), and the stack holds no entry for it.
+    assert_eq!(state.objects[&copy_id].zone, Zone::Stack);
+    assert!(state.objects[&copy_id].cast_occurrence.is_none());
+    assert!(
+        !state.stack.iter().any(|entry| entry.id == copy_id),
+        "fixture: the copy has no stack entry to derive a declared list from"
+    );
+    let turn_records_before: usize = state
+        .spells_cast_this_turn_by_player
+        .values()
+        .map(|records| records.len())
+        .sum();
+    let game_records_before: usize = state
+        .spells_cast_this_game_by_player
+        .values()
+        .map(|records| records.len())
+        .sum();
+    let journal_records_before = spell_cast_ledger_entry_count(&state);
+
+    let mut events = Vec::new();
+    let err = casting_costs::commit_copy_cast(&mut state, copy_id, P0, &mut events)
+        .expect_err("an entry-less copy is refused, not recorded with an empty list");
+    assert!(
+        matches!(&err, EngineError::InvalidAction(_)),
+        "the refusal is an InvalidAction, got {err:?}"
+    );
+    // Pins WHICH arm fired: the object-not-found refusal is also an `InvalidAction`.
+    assert!(
+        matches!(&err, EngineError::InvalidAction(message) if message.contains("has no stack entry")),
+        "the refusal is the absent-stack-entry arm, got {err:?}"
+    );
+    // CR 601.2i: validation precedes journaling, so a refused copy cast publishes no
+    // `SpellCast` and leaves no cast record or latch behind.
+    assert!(
+        events.is_empty(),
+        "a refused copy cast publishes no event, got {events:?}"
+    );
+    assert_eq!(
+        state
+            .spells_cast_this_turn_by_player
+            .values()
+            .map(|records| records.len())
+            .sum::<usize>(),
+        turn_records_before,
+        "a refused copy cast adds no turn-history record"
+    );
+    assert_eq!(
+        state
+            .spells_cast_this_game_by_player
+            .values()
+            .map(|records| records.len())
+            .sum::<usize>(),
+        game_records_before,
+        "a refused copy cast adds no game-history record"
+    );
+    assert_eq!(
+        spell_cast_ledger_entry_count(&state),
+        journal_records_before,
+        "a refused copy cast journals no ledger edit"
+    );
+    assert!(
+        state.objects[&copy_id].cast_occurrence.is_none(),
+        "a refused copy cast stamps no occurrence on the copy"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// CR 303.4 + CR 301.5 + CR 601.2c + CR 608.2h: an announcement's target fact
+// states the ATTACHMENT relation the caster saw, because `LKISnapshot` is the
+// whole record of that choice once the target's live band is gone.
+//
+// `GameObject::snapshot_public_characteristics` cannot state it: classifying an
+// attached object as Aura/Equipment requires a `GameState` lookup and the method
+// holds only `&self`. The capture therefore completes the snapshot with
+// `zones::capture_attachment_snapshot` — the same authority the battlefield-exit
+// capture uses. An empty set would read as "nothing was attached", which is the
+// opposite of what an Aura-enchanted target's record must say: `EnchantedBy`
+// (Venomous Vines' "Destroy target enchanted permanent") would answer a definite
+// FALSE and the restore guard would refuse the honest save.
+// ---------------------------------------------------------------------------
+
+/// Venomous Vines' declared slot: `EnchantedBy` on a permanent (CR 303.4b).
+fn an_enchanted_permanent_filter() -> TargetFilter {
+    TargetFilter::Typed(
+        TypedFilter::default()
+            .with_type(TypeFilter::Permanent)
+            .properties(vec![FilterProp::EnchantedBy]),
+    )
+}
+
+/// CR 303.4b: attach `aura` to `host` through both back-edges, so the board is
+/// the shape a real Aura leaves behind.
+fn attach_aura(state: &mut GameState, aura: ObjectId, host: ObjectId) {
+    state.objects.get_mut(&aura).unwrap().attached_to =
+        Some(crate::game::game_object::AttachTarget::Object(host));
+    let host_obj = state.objects.get_mut(&host).unwrap();
+    if !host_obj.attachments.contains(&aura) {
+        host_obj.attachments.push(aura);
+    }
+}
+
+#[test]
+fn announced_target_fact_states_the_attachment_relation_the_caster_saw() {
+    use crate::types::ability::AttachmentKind;
+    use crate::types::game_state::ActivationTargetFact;
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let enchanted = scenario.add_creature(P1, "Grizzly Bears", 2, 2).id();
+    let bare = scenario.add_creature(P1, "Savannah Lions", 2, 1).id();
+    let aura = scenario
+        .add_creature(P0, "Pacifism", 0, 0)
+        .as_enchantment()
+        .with_subtypes(vec!["Aura"])
+        .id();
+    let mut state = scenario.state;
+    attach_aura(&mut state, aura, enchanted);
+
+    // CR 601.2c: both announced objects are captured the way the cast path does.
+    let facts = capture_target_facts(
+        &state,
+        &[TargetRef::Object(enchanted), TargetRef::Object(bare)],
+    );
+    assert_eq!(
+        facts.len(),
+        2,
+        "reach: both announced targets produced a fact"
+    );
+    let ActivationTargetFact::Object {
+        lki: enchanted_lki,
+        zone: enchanted_zone,
+        token: enchanted_token,
+        ..
+    } = &facts[0]
+    else {
+        panic!("reach: the first fact is an object fact");
+    };
+    let ActivationTargetFact::Object {
+        lki: bare_lki,
+        zone: bare_zone,
+        token: bare_token,
+        ..
+    } = &facts[1]
+    else {
+        panic!("reach: the second fact is an object fact");
+    };
+
+    assert_eq!(
+        enchanted_lki
+            .attachments
+            .iter()
+            .map(|attachment| (attachment.object_id, attachment.kind.clone()))
+            .collect::<Vec<_>>(),
+        vec![(aura, AttachmentKind::Aura)],
+        "CR 303.4b + CR 608.2h: the announcement records the Aura that enchants the target"
+    );
+    assert!(
+        bare_lki.attachments.is_empty(),
+        "CR 303.4: an unenchanted target's record states no attachment — the honest answer, \
+         which is what makes the EnchantedBy refusal below attributable to the capture"
+    );
+
+    // CR 115.1 + CR 601.2c: the recorded announcement answers the slot's own
+    // predicate from the capture. The bare creature's record contradicts an
+    // "enchanted permanent" slot (a definite `false`), while an unstated axis
+    // would be `None` — UNRECORDED, which the restore guard treats as no check.
+    let filter = an_enchanted_permanent_filter();
+    let ctx = crate::game::filter::FilterContext::neutral();
+    assert_eq!(
+        crate::game::filter::matches_target_filter_on_recorded_announcement(
+            &state,
+            enchanted,
+            crate::game::filter::AnnouncedTargetRecord {
+                lki: enchanted_lki,
+                zone: enchanted_zone.zone(),
+                token: enchanted_token.bit(),
+                attached_to: None,
+            },
+            &filter,
+            &ctx,
+        ),
+        Some(true),
+        "CR 303.4b: the Aura-enchanted target satisfies 'enchanted permanent' on its own record"
+    );
+    assert_eq!(
+        crate::game::filter::matches_target_filter_on_recorded_announcement(
+            &state,
+            bare,
+            crate::game::filter::AnnouncedTargetRecord {
+                lki: bare_lki,
+                zone: bare_zone.zone(),
+                token: bare_token.bit(),
+                attached_to: None,
+            },
+            &filter,
+            &ctx,
+        ),
+        Some(false),
+        "a recorded empty attachment set is a DEFINITE answer, not an unrecorded one"
+    );
+}
+
+/// CR 601.2c + CR 301.5a + CR 701.3a: the announcement also records the target's
+/// OUTGOING attachment relation — the object it was attached to — and a record
+/// answers a declared-slot attachment requirement from it. Fiery Annihilation's
+/// "Exile up to one target Equipment attached to that creature" is the printed
+/// shape; this test exercises the leaf, not that card.
+#[test]
+fn announced_target_fact_states_the_host_relation_a_declared_slot_requires() {
+    use crate::game::filter::{matches_target_filter_on_recorded_announcement, FilterContext};
+    use crate::game::game_object::AttachTarget;
+    use crate::game::targeting::DeclaredSlotBinding;
+    use crate::types::ability::{AttachmentReferent, FilterProp, TypedFilter};
+    use crate::types::game_state::ActivationTargetFact;
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let host = scenario.add_creature(P1, "Host", 2, 7).id();
+    let other = scenario.add_creature(P1, "Other", 2, 7).id();
+    let gear = scenario.add_creature(P1, "Gear", 0, 0).id();
+    let mut state = scenario.state;
+    attach_aura(&mut state, gear, host);
+
+    let facts = capture_target_facts(&state, &[TargetRef::Object(gear)]);
+    let ActivationTargetFact::Object {
+        lki,
+        zone,
+        token,
+        attached_to,
+        ..
+    } = &facts[0]
+    else {
+        panic!("reach: the announced target produced an object fact");
+    };
+    assert_eq!(
+        *attached_to,
+        Some(AttachTarget::Object(host)),
+        "CR 701.3a: the fact records the object the target was attached to"
+    );
+
+    // CR 601.2c: the leaf's requirement — the target is attached to the object
+    // announced for slot 0.
+    let filter = TargetFilter::Typed(TypedFilter {
+        type_filters: Vec::new(),
+        controller: None,
+        properties: vec![FilterProp::AttachedTo {
+            to: AttachmentReferent::DeclaredTarget { slot: 0 },
+        }],
+    });
+    let ask = |slot_object: ObjectId, recorded_host| {
+        let view = [Some(DeclaredSlotBinding::Announced {
+            target: TargetRef::Object(slot_object),
+            pin: None,
+        })];
+        let ctx = FilterContext::neutral().with_declared_slot_view(&view);
+        matches_target_filter_on_recorded_announcement(
+            &state,
+            gear,
+            crate::game::filter::AnnouncedTargetRecord {
+                lki,
+                zone: zone.zone(),
+                token: token.bit(),
+                attached_to: recorded_host,
+            },
+            &filter,
+            &ctx,
+        )
+    };
+    assert_eq!(
+        ask(host, *attached_to),
+        Some(true),
+        "the recorded host IS the object the slot named"
+    );
+    assert_eq!(
+        ask(other, *attached_to),
+        Some(false),
+        "a recorded host the slot does not name is a DEFINITE contradiction, not an unrecorded axis"
+    );
+    assert_eq!(
+        ask(host, None),
+        None,
+        "a payload that states no relation is UNRECORDED, so the guard has nothing to check"
     );
 }

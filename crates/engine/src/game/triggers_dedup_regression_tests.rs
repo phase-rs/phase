@@ -563,6 +563,7 @@ fn ezio_verbatim_oracle_text_eliminates_damaged_player_when_optional_paid() {
             restrictions: Vec::new(),
             grants: vec![],
             expiry: None,
+            source_incarnation: None,
         });
     }
 

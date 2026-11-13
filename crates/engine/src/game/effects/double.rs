@@ -232,6 +232,7 @@ fn resolve_double_mana(
                 restrictions: vec![],
                 grants: vec![],
                 expiry: None,
+                source_incarnation: None,
             },
         );
 
@@ -1158,6 +1159,7 @@ mod tests {
                     restrictions: vec![],
                     grants: vec![],
                     expiry: None,
+                    source_incarnation: None,
                 },
             );
         }

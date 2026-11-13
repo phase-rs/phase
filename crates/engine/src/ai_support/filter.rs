@@ -1085,6 +1085,9 @@ fn filterprop_reads_only_candidate_fp(p: &FilterProp) -> bool {
         | FilterProp::HasSingleTarget
         | FilterProp::HasXInActivationCost
         | FilterProp::WasKicked
+        // CR 106.3 + CR 601.2h: payment stamps are not part of the candidate
+        // fingerprint, so memoizing them would be unsound.
+        | FilterProp::ManaSpentFromSource { .. }
         // CR 722.3d: the prepare-spell marker (`prepared_copy_source`) is not part
         // of the candidate fingerprint, so two objects differing only by it would
         // share a memo key; memoizing it is unsound.

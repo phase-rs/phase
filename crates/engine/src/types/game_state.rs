@@ -506,6 +506,46 @@ pub enum AssistState {
     Paid { helper: PlayerId, generic: u32 },
 }
 
+/// CR 702.132a + CR 118.3a: one paid Assist contribution, as the typed CLAIM the
+/// payment finalizers record and the restore boundary binds or refuses.
+///
+/// The claim exists so the units and the payment they belong to cannot travel
+/// apart. `AssistState::Paid` alone states an amount and no units; the units alone
+/// state no payer. Carried together with the cast they were spent on, they are one
+/// statement that can be checked: this helper removed these units from its pool to
+/// pay this much of this spell's generic mana.
+///
+/// Held on [`crate::types::game_state::GameState::active_assist_contribution`] for
+/// the duration of a finalize spend (the `PendingCast` is owned by value there), and
+/// rebuilt from `PendingCast::assist_state` + `PendingCast::assist_contributed_units`
+/// by [`crate::types::game_state::PendingCast::assist_contribution`] on every
+/// re-entry, so a pause between the helper's spend and the recording loses nothing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AssistContribution {
+    /// CR 702.132a: the cast this contribution paid toward. A claim is only ever
+    /// about the spell it was captured for, so a claim that names another cast is
+    /// not this cast's and must not be recorded on it.
+    pub source_id: ObjectId,
+    /// The helper that paid (the helper `AssistState::Paid` names).
+    pub helper: PlayerId,
+    /// The generic amount the helper committed to pay, and therefore the number of
+    /// units its spend must have removed.
+    pub generic: u32,
+    /// CR 118.3a: the exact units that helper's spend removed from its mana pool,
+    /// in the order they were removed. These are mana spent to cast `source_id`.
+    pub units: Vec<ManaUnit>,
+}
+
+impl AssistContribution {
+    /// CR 702.132a + CR 118.3a: a helper that pays `generic` generic mana removes
+    /// exactly `generic` units from its pool — one unit per point of generic cost —
+    /// so a contribution whose unit count disagrees with its amount is not the
+    /// payment it claims to be.
+    pub fn is_backed_by_its_units(&self) -> bool {
+        self.units.len() as u32 == self.generic
+    }
+}
+
 /// CR 500.11 + CR 614.10a: One pending "[player] skips their next combat phase"
 /// (Revenant Patriarch, Stonehorn Dignitary, Blinding Angel, Moment of Silence).
 /// It is a virtual replacement of that player's combat phase beginning, used up
@@ -640,7 +680,15 @@ pub struct LKISnapshot {
     ///
     /// Captured via [`capture_attachment_snapshot`](crate::game::zones::capture_attachment_snapshot),
     /// the same authority that fills `ZoneChangeRecord::attachments` — one snapshot
-    /// shape, one capture site.
+    /// shape. That capture runs at the TWO moments a snapshot is the only surviving
+    /// authority for the relation: the battlefield exit (CR 608.2h look-back) and the
+    /// announcement of a committed target
+    /// ([`capture_announced_target_lki`](crate::game::casting)), where the relation
+    /// may be the whole reason the target was legal ("Destroy target enchanted
+    /// permanent" — Venomous Vines, CR 303.4b). An empty set is a RECORDED "nothing
+    /// was attached", never a stand-in for "not captured": a reader that asks an
+    /// attachment predicate is answered from it, so a call site that could have
+    /// captured it must.
     ///
     /// `#[serde(default)]` ⇒ pre-existing saved states deserialize to an empty set,
     /// which is exactly the pre-change fail-closed behavior.
@@ -1362,7 +1410,116 @@ impl<'context, 'state> TriggerSourceRead<'context, 'state> {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ManaSpentSourceSnapshot {
     pub source_id: ObjectId,
+    /// The source's public characteristics as they were when it paid. Encoded
+    /// through [`crate::types::history_snapshot`]'s lossless compact projection:
+    /// the same `LKISnapshot` value, without the default-valued scaffolding that
+    /// would otherwise ride every `StateUpdate` frame.
+    #[serde(with = "crate::types::history_snapshot::compact_history_lki")]
     pub lki: LKISnapshot,
+    /// CR 111.1 + CR 106.3 + CR 608.2h: whether the source WAS a token when it
+    /// produced the mana it paid with, captured with the snapshot above.
+    ///
+    /// The snapshot cannot state it (CR 707.2 keeps token-ness out of the copiable
+    /// projection `LKISnapshot` carries), and a source-qualified predicate can name
+    /// it ("mana from a nontoken source"). The departure capture is keyed by the
+    /// epoch the unit was pinned to, and that capture rolls over at a step
+    /// boundary, so a cast record read later needs the bit ON the fact. `Unknown`
+    /// is the state of a unit whose producer fact named no bit — a payload written
+    /// before this field existed: the leaf then refuses instead of guessing, and no
+    /// current-format write leaves it unstated (a pooled producer row states the bit
+    /// its producing source held).
+    #[serde(default, skip_serializing_if = "CapturedTokenBit::is_unknown")]
+    pub source_token: CapturedTokenBit,
+}
+
+/// CR 106.3 + CR 106.4: the producer fact of a mana unit that is still floating
+/// in a mana pool while its producing source is gone.
+///
+/// CR 106.4 holds unspent mana in a pool, and a "you don't lose unspent mana as
+/// steps and phases end" effect (Upwelling) keeps a unit there across the
+/// step/phase boundary that ends this engine's last-known-information window.
+/// That window is a storage POLICY of this engine — the entry is dropped at step
+/// cleanup because the cache is step-scoped — not a CR requirement: CR 400.7
+/// makes a moved object a new object, which is why the fact must be keyed to the
+/// epoch that produced it, and nothing in the rules bounds how long last-known
+/// information is kept. CR 106.3 makes the unit's source the source of the
+/// ability that produced it, and that binding does not expire while the mana is
+/// unspent — so the fact the unit will owe at payment time has to outlive the
+/// generic cache WITHOUT extending it. One entry per still-pooled unit whose
+/// producing incarnation is gone, and rebuilt from the pools at every boundary,
+/// so nothing is retained beyond a floating unit's own lifetime.
+#[derive(Debug, Clone, Eq, Serialize, Deserialize)]
+pub struct PooledManaProducerSnapshot {
+    /// CR 118.3a: the pooled unit this fact was copied from, by its pip identity.
+    ///
+    /// A producer epoch belongs to ONE unit. One storage id can have several
+    /// floating units from different tenures at once — a copy's trigger mana
+    /// retained across a turn next to the mana the returned permanent's own
+    /// Treasure ability made — and only this key says which fact is which unit's.
+    /// A save that predates the field decodes with the unstamped sentinel, which
+    /// matches no real unit, so such an entry is ignored rather than mis-applied.
+    #[serde(default = "unstamped_pool_pip")]
+    pub pip_id: crate::types::mana::ManaPipId,
+    pub source_id: ObjectId,
+    /// CR 400.7: the epoch that produced the unit — never an epoch that merely
+    /// shares its storage id.
+    pub source_incarnation: u64,
+    /// The producing source's public characteristics at that epoch.
+    #[serde(with = "crate::types::history_snapshot::compact_history_lki")]
+    pub lki: LKISnapshot,
+    /// CR 111.1 + CR 106.3 + CR 400.7: whether the producing source WAS a token at
+    /// that epoch, captured with the fact above.
+    ///
+    /// A retention effect (Upwelling, CR 106.4) keeps a floating unit — and this
+    /// record — past the step boundary that clears every step-scoped capture, so the
+    /// fact has to carry its own bit: `lki` cannot state it (CR 707.2), and both
+    /// `GameState::departure_token_by_incarnation` and the storage-id-keyed pair are
+    /// cleared by the same boundary. `Unknown` is a unit whose producer fact named no
+    /// bit (a payload written before this field, a hidden-zone producer that recorded
+    /// no last-known information): a token leaf over that pip then refuses.
+    #[serde(default, skip_serializing_if = "CapturedTokenBit::is_unknown")]
+    pub source_token: CapturedTokenBit,
+}
+
+// CR 106.3 + CR 118.3a + CR 104.4b: a fact belongs to ONE pooled unit, so equality
+// compares the unit the fact is attached to as well as the fact — `pip_id`, the
+// same ownership key every reader of this ledger uses
+// (`mana_payment::pooled_mana_producer_row`, `GameState::pip_recorded_producer_epochs`).
+// Comparing the fact alone equated two positions that differ only in WHICH unit of a
+// departed source owns the row, and they are not the same position: payment resolves
+// the fact by pip, so a coloured cost recovers the producer from the unit that holds
+// the row and not from the one that does not. `ManaPool`'s own equality is pip-blind
+// (a pip is a monotone mint tag, not a shape), so nothing else carried that
+// association; the pool answers the CANONICAL unit order this field is read against
+// (`ManaPool::units`, "every unit in pool order").
+//
+// The pip compared here is the CANONICAL one, never the mint tag: `normalize_for_loop`
+// renumbers every floating unit's pip to its rank in pool order and carries this
+// ledger's rows onto those ranks (`GameState::canonicalize_floating_pip_identities`),
+// so two positions one cycle apart — which mint different pips for the mana they
+// float — still compare equal, while two positions whose rows sit on different units
+// do not. `Eq` stays derived (it only requires `PartialEq` to exist). A comparison
+// that does NOT go through `normalize_for_loop` (AI-search dedup) reads the live mint
+// key instead: stricter, never looser, and only while a departed producer's mana is
+// still floating.
+impl PartialEq for PooledManaProducerSnapshot {
+    fn eq(&self, other: &Self) -> bool {
+        self.pip_id == other.pip_id
+            && self.source_id == other.source_id
+            && self.source_incarnation == other.source_incarnation
+            && self.lki == other.lki
+            // CR 111.1 + CR 106.3 + CR 608.2h: the token classification the row captured
+            // with the snapshot. Past the step boundary the departure capture is gone and
+            // this row is the ONLY carrier, so two positions differing in it answer a
+            // token-leaf read differently and are not the same position.
+            && self.source_token == other.source_token
+    }
+}
+
+/// CR 118.3a: the unstamped sentinel a save that predates
+/// [`PooledManaProducerSnapshot::pip_id`] decodes with — it matches no real unit.
+fn unstamped_pool_pip() -> crate::types::mana::ManaPipId {
+    crate::types::mana::ManaPipId(0)
 }
 
 /// CR 601.2a + CR 400.7: the identity of one spell on the stack, minted when the
@@ -1411,6 +1568,17 @@ pub struct AbilityActivationRecord {
         skip_serializing_if = "is_battlefield_zone"
     )]
     pub source_zone: Zone,
+    /// CR 111.1 + CR 400.7 + CR 602.2: whether the ability's SOURCE was a token
+    /// when the ability was announced, captured with the snapshot above.
+    ///
+    /// A modifier scoped to "abilities of nontoken creatures you control"
+    /// (Mutagen Man, Living Ooze; The Dining Car) reads this record's source, and
+    /// the snapshot cannot carry the bit (CR 707.2). The alternatives are both
+    /// unsound for the same reason they are for a target: the live object answers
+    /// with the present, and CR 730.2c + CR 730.2d let a merge flip the bit on the
+    /// same object with no zone change to record. See [`CapturedTokenBit`].
+    #[serde(default, skip_serializing_if = "CapturedTokenBit::is_unknown")]
+    pub source_token: CapturedTokenBit,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ability_tag: Option<crate::types::ability::AbilityTag>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -1438,13 +1606,262 @@ fn is_battlefield_zone(zone: &Zone) -> bool {
     *zone == Zone::Battlefield
 }
 
-/// One committed target of an activation, as it was when the ability was
-/// activated.
+/// CR 601.2c + CR 109.2 + CR 109.2a: the zone a committed target occupied when
+/// it was announced, as the save STATES it.
+///
+/// The zone is not a default. CR 109.2 scopes a bare type description ("targets
+/// a creature") to a permanent on the battlefield while CR 109.2a scopes a
+/// "card … in [zone]" description to that zone, so the zone decides whether a
+/// recorded target qualifies for a target-gated rule. A save that does not say
+/// which zone the target was in has not answered that question, and answering
+/// it with the battlefield would fabricate the answer that makes the widest
+/// class of target-gated rules fire (Professor Hojo's "targets a creature you
+/// control" reading a card announced in a graveyard as a battlefield
+/// permanent).
+///
+/// So the two states are different values, and silence is [`Self::Unknown`]:
+/// [`PersistedRestoreError::UnknownAnnouncedTargetZone`] refuses a save that
+/// carries one. A record this build writes always states its zone — including
+/// the battlefield — which is what keeps a current-format save admissible while
+/// a payload that predates the field is refused rather than guessed.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub enum AnnouncedTargetZone {
+    /// The save states no zone for this target: the payload predates the field,
+    /// so which zone the target was announced in is unreconstructable.
+    #[default]
+    Unknown,
+    /// CR 601.2c: the zone the target occupied at announcement.
+    Known(Zone),
+}
+
+impl AnnouncedTargetZone {
+    /// The zone this save states, or `None` when it states none.
+    pub fn zone(self) -> Option<Zone> {
+        match self {
+            Self::Unknown => None,
+            Self::Known(zone) => Some(zone),
+        }
+    }
+
+    fn is_unknown(&self) -> bool {
+        matches!(self, Self::Unknown)
+    }
+}
+
+/// Encoded as the bare zone string, exactly as the field was written before the
+/// type existed, so a payload carrying a zone still decodes to [`Known`]. Only
+/// silence means [`Unknown`] — it is never synthesized from a default.
+///
+/// [`Known`]: AnnouncedTargetZone::Known
+/// [`Unknown`]: AnnouncedTargetZone::Unknown
+impl Serialize for AnnouncedTargetZone {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_some(&self.zone())
+    }
+}
+
+impl<'de> Deserialize<'de> for AnnouncedTargetZone {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        Ok(match Option::<Zone>::deserialize(deserializer)? {
+            Some(zone) => Self::Known(zone),
+            None => Self::Unknown,
+        })
+    }
+}
+
+/// CR 111.1 + CR 400.7 + CR 601.2c + CR 602.2 + CR 115.9: whether a fact's
+/// subject WAS a token at the moment the fact was recorded, as the record STATES
+/// it — an announced target (CR 115.9) and an activation's own source (CR 602.2)
+/// alike.
+///
+/// CR 115.9 makes "the state of the targets at the time they were selected" a
+/// reading of its own, and CR 111.1 makes token-ness one of the state's facts.
+/// That reading has to be CAPTURED: token-ness is not a copiable value
+/// (CR 707.2), so an [`LKISnapshot`] does not carry it, and it is not stable
+/// across the permanent's life — CR 730.2c keeps a merged permanent the same
+/// object while CR 730.2d hands its token-ness to the topmost component, so a
+/// card mutated onto a token flips the bit IN PLACE with no zone change to
+/// write a row for. Reconstructing the selection-time answer from the live
+/// object therefore reports a later epoch, and reconstructing it from a
+/// turn-scoped zone-change journal loses it at rollover. This field is the
+/// capture that dates the bit to the announcement.
+///
+/// The two states are different values, and silence is [`Self::Unknown`]. It is
+/// never synthesized from a default: a bare `bool` field would decode every
+/// payload that predates this one as "not a token", which is exactly the silent
+/// answer the capture exists to replace.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub enum CapturedTokenBit {
+    /// The record states no token bit: the payload predates the field. A leaf
+    /// asked for a selection-time token answer then has no capture to answer
+    /// from and must refuse rather than report the present or the default.
+    #[default]
+    Unknown,
+    /// CR 111.1: the bit the target held when it was committed.
+    Known(bool),
+}
+
+impl CapturedTokenBit {
+    /// The bit this record states, or `None` when it states none.
+    pub fn bit(self) -> Option<bool> {
+        match self {
+            Self::Unknown => None,
+            Self::Known(is_token) => Some(is_token),
+        }
+    }
+
+    fn is_unknown(&self) -> bool {
+        matches!(self, Self::Unknown)
+    }
+}
+
+/// Encoded as the bare boolean, so a payload carrying the bit still decodes to
+/// [`Known`]. Only silence means [`Unknown`].
+///
+/// [`Known`]: CapturedTokenBit::Known
+/// [`Unknown`]: CapturedTokenBit::Unknown
+impl Serialize for CapturedTokenBit {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_some(&self.bit())
+    }
+}
+
+impl<'de> Deserialize<'de> for CapturedTokenBit {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        Ok(match Option::<bool>::deserialize(deserializer)? {
+            Some(is_token) => Self::Known(is_token),
+            None => Self::Unknown,
+        })
+    }
+}
+
+/// CR 115.1 + CR 400.7: one committed target of a spell or ability, as it was
+/// when the target was committed (CR 601.2c). Carried by
+/// `AbilityActivationRecord.targets` for an activated ability and by
+/// `SpellCastRecord.targets` for a cast spell.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
 pub enum ActivationTargetFact {
     Player(PlayerId),
-    Object { id: ObjectId, lki: Box<LKISnapshot> },
+    Object {
+        id: ObjectId,
+        /// The target's public characteristics as they were when it was
+        /// committed. Encoded through
+        /// [`crate::types::history_snapshot`]'s lossless compact projection.
+        #[serde(with = "crate::types::history_snapshot::compact_history_boxed_lki")]
+        lki: Box<LKISnapshot>,
+        /// CR 601.2c + CR 109.2: the zone the target occupied when it was
+        /// announced, captured with the commitment above. A target is announced
+        /// in whatever zone it is legal in — Reanimate's "target creature card
+        /// from a graveyard" announces a card in a graveyard — so a bare type
+        /// description ("targets a creature") needs this zone to mean what
+        /// CR 109.2 says it means: a permanent on the BATTLEFIELD. Without it the
+        /// snapshot's characteristics answer for every zone and a graveyard card
+        /// reads as a battlefield permanent.
+        ///
+        /// NOT defaulted to the battlefield. [`AnnouncedTargetZone`] keeps "the
+        /// save states no zone" (`Unknown`) distinct from "the save states the
+        /// battlefield", because the default would silently convert a payload
+        /// that predates the field into the one claim that makes a bare-type
+        /// target qualifier fire. A record this build captures always states its
+        /// zone, so the field is omitted only by an older payload — which
+        /// [`PersistedRestoreError::UnknownAnnouncedTargetZone`] refuses.
+        #[serde(default, skip_serializing_if = "AnnouncedTargetZone::is_unknown")]
+        zone: AnnouncedTargetZone,
+        /// CR 111.1 + CR 115.9 + CR 730.2c + CR 730.2d: whether the target was a
+        /// token when it was announced, captured with the commitment above.
+        ///
+        /// A selection-time token answer must come from here. The alternatives
+        /// are both unsound: the LIVE object reports whichever bit the object
+        /// holds now, and CR 730.2c + CR 730.2d let a merge flip that bit on the
+        /// same object with no zone change to record it; the zone-change journal
+        /// is turn-scoped and a merge writes no row at all. See
+        /// [`CapturedTokenBit`] for why silence is `Unknown` rather than
+        /// `Known(false)`.
+        #[serde(default, skip_serializing_if = "CapturedTokenBit::is_unknown")]
+        token: CapturedTokenBit,
+        /// CR 601.2c + CR 301.5a + CR 701.3a: the object this target was
+        /// ATTACHED TO when it was announced — the OUTGOING half of the
+        /// attachment relation, captured with the commitment above.
+        ///
+        /// `LKISnapshot::attachments` states only the INCOMING half (what is
+        /// attached to the target), which is what an "enchanted permanent" slot
+        /// needs. The other direction is a target requirement of its own: Fiery
+        /// Annihilation's "Exile up to one target Equipment attached to that
+        /// creature" asks whether the CHOSEN object is attached to the object in
+        /// an earlier declared slot (CR 701.3a), and
+        /// `GameState::reject_contradictory_announced_target_facts` re-reads the
+        /// declaring slot's filter against this fact. Without the host the record
+        /// cannot answer that leaf at all, and a leaf the record cannot answer
+        /// must not be reported as a failed predicate.
+        ///
+        /// `None` is UNRECORDED, never "attached to nothing": a payload written
+        /// before this field existed states no relation, and this build omits the
+        /// field for a target that carried none, so the capture cannot tell the
+        /// two apart. The reader that refuses contradictions therefore answers
+        /// UNKNOWN for `None` (see `filter::epoch_property_answer`) instead of
+        /// reading silence as an unattachment witness. The cost is that a forged
+        /// payload may delete the field — the price of not refusing every save
+        /// written before it existed, and the same trade the combat-role leaves
+        /// make. `Some(host)` is never silent, and a host the declaration did not
+        /// name is refused.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        attached_to: Option<AttachTarget>,
+    },
+}
+
+impl ActivationTargetFact {
+    /// CR 601.2c + CR 115.1: WHAT this fact names, stripped of the announcement-time
+    /// characteristics and zone it also carries. The identity is the one axis a save can
+    /// be checked against the spell's own declaration — the characteristics and the zone
+    /// are claims this record makes about the announcement, while "this object/player
+    /// became a target of that spell" is the relation the chain itself states.
+    fn target_ref(&self) -> crate::types::ability::TargetRef {
+        match self {
+            Self::Player(player) => crate::types::ability::TargetRef::Player(*player),
+            Self::Object { id, .. } => crate::types::ability::TargetRef::Object(*id),
+        }
+    }
+
+    /// CR 111.1 + CR 115.9: the object target whose captured token bit this save
+    /// does not state, or `None` when it states one (or the fact names a player,
+    /// which has no token axis).
+    fn object_target_without_token_capture(&self) -> Option<ObjectId> {
+        match self {
+            Self::Object {
+                id,
+                token: CapturedTokenBit::Unknown,
+                ..
+            } => Some(*id),
+            Self::Object { .. } | Self::Player(_) => None,
+        }
+    }
+
+    /// CR 601.2c + CR 109.2: the object target whose announced zone this save
+    /// does not state, or `None` when it states one (or the fact names a
+    /// player, which has no zone axis).
+    fn object_target_without_announced_zone(&self) -> Option<ObjectId> {
+        match self {
+            Self::Object {
+                id,
+                zone: AnnouncedTargetZone::Unknown,
+                ..
+            } => Some(*id),
+            Self::Object { .. } | Self::Player(_) => None,
+        }
+    }
 }
 
 /// Snapshot of a spell's characteristics at cast time for per-turn history queries.
@@ -1533,6 +1950,78 @@ pub struct SpellCastRecord {
     /// pre-cast probes and the recorded cast agree.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prepared_copy_source: Option<ObjectId>,
+    /// CR 106.3 + CR 601.2h + CR 400.7d: the per-mana-unit payment sources, as they
+    /// were when each unit was paid. Latched so a source-qualified cast predicate
+    /// survives the spell's resolution and the source's departure (CR 400.7).
+    ///
+    /// `Option` distinguishes **unknown** provenance (`None`, a record written
+    /// before this field existed) from **known-empty** (`Some(vec![])`, a cast
+    /// that provably paid no source-attributed mana). A history gate compares a
+    /// qualifying count with zero, so collapsing the two would let an unknown
+    /// record read as "did not qualify" and re-grant a once-per-turn benefit.
+    /// `PersistedGameState::prepare_for_restore` refuses a playable save that
+    /// still carries an unknown, which is the only honest outcome: the paying
+    /// objects are gone, so the provenance is not reconstructable.
+    ///
+    /// On the wire, known-empty is written as an explicit `[]` and an unknown is
+    /// the ABSENT field (`skip_serializing_if = "Option::is_none"`), which decodes
+    /// back to `None`. So a record this build wrote always states its answer, and
+    /// a payload written before the field existed says nothing — which is exactly
+    /// the distinction `PersistedRestoreError::UnknownCastHistoryProvenance`
+    /// acts on.
+    ///
+    /// Absence is also produced outside legacy saves: the LIVE per-spell projection
+    /// states nothing, because CR 601.2f runs before CR 601.2h and the spell it
+    /// describes has therefore paid nothing yet — that projection is never
+    /// persisted, and the filter seam borrows the live object's own facts instead
+    /// (`restrictions::CastPaymentFacts`). `None` keeps meaning "this record states
+    /// no answer" for both shapes; only a persisted `None` is refused, because only
+    /// a persisted record has outlived the objects that could still answer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mana_spent_source_snapshots: Option<Vec<ManaSpentSourceSnapshot>>,
+    /// CR 115.1 + CR 601.2c: the spell's declared targets as the cast committed
+    /// them — each object target's public characteristics snapshotted as they
+    /// were then — so a turn-history predicate such as "the first spell you cast
+    /// during each of your turns that targets a creature" can be counted after
+    /// the spell has left the stack (CR 400.7). Answered under CR 115.9's
+    /// selection-time reading; CR 115.9b's current-state reading governs the
+    /// live per-spell reader instead.
+    ///
+    /// `Option` distinguishes **unknown** provenance (`None`, a record written
+    /// before this field existed) from **known-empty** (`Some(vec![])`, a cast
+    /// that provably declared no target). Every positive read treats an empty
+    /// list as "declared nothing", but a zero-count gate makes that unsafe for
+    /// an unknown: an unknown record would read as "did not qualify" and
+    /// re-grant a once-per-turn benefit. `PersistedGameState::prepare_for_restore`
+    /// therefore refuses a playable save that still carries an unknown — the
+    /// announced targets are gone and cannot be reconstructed.
+    ///
+    /// Absence is also produced outside legacy saves: the live projection passes
+    /// an empty slice deliberately (the live reader answers this property from the
+    /// stack entry instead, and that record is never persisted), and viewer
+    /// redaction blanks a hidden target's snapshot while keeping its slot. Both
+    /// spell that as `Some(vec![])` — "stated empty" — so `None` keeps meaning
+    /// only "this payload predates the field".
+    ///
+    /// Wire encoding matches [`Self::mana_spent_source_snapshots`]: known-empty is
+    /// written as `[]`, and an unknown is the absent field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub targets: Option<Vec<ActivationTargetFact>>,
+}
+
+impl SpellCastRecord {
+    /// The declared-target facts this record proves, or `&[]` when it proves
+    /// none. Callers that must tell "declared nothing" apart from "cannot prove
+    /// what it declared" read [`Self::targets`] directly.
+    pub fn declared_targets(&self) -> &[ActivationTargetFact] {
+        self.targets.as_deref().unwrap_or(&[])
+    }
+
+    /// The payment-source facts this record proves, or `&[]` when it proves
+    /// none. See [`Self::declared_targets`] for the unknown/known-empty split.
+    pub fn mana_source_snapshots(&self) -> &[ManaSpentSourceSnapshot] {
+        self.mana_spent_source_snapshots.as_deref().unwrap_or(&[])
+    }
 }
 
 /// Snapshot of a land play's cast-capable origin for per-turn history queries.
@@ -1568,6 +2057,10 @@ impl Default for SpellCastRecord {
             was_kicked: false,
             spell_object_id: None,
             prepared_copy_source: None,
+            // A hand-built record describes no real cast, so it provably
+            // declared nothing and paid nothing: known-empty, never unknown.
+            mana_spent_source_snapshots: Some(Vec::new()),
+            targets: Some(Vec::new()),
         }
     }
 }
@@ -8908,6 +9401,12 @@ pub struct PendingCast {
     pub pending_loyalty_activation_player: Option<PlayerId>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub target_constraints: Vec<TargetSelectionConstraint>,
+    /// CR 115.1 + CR 601.2c + CR 400.7: the announced target facts, latched at the
+    /// first pre-payment moment and parked here so a payment root that rebuilds
+    /// `FinalizePrePaymentChecks` from scratch still reaches the CR 601.2i write
+    /// with selection-time facts. `None` on a cast that has not latched them yet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub committed_target_facts: Option<Vec<ActivationTargetFact>>,
     /// CR 700.13 + CR 601.2c: Whether this action's announced target set was
     /// a crime at target-declaration time. It is committed only once stack
     /// placement succeeds, so failed casts and activations leave no record.
@@ -9025,6 +9524,25 @@ pub struct PendingCast {
     /// stays in the pool and is consumed by the normal finalize spend.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pinned_pool_units: Vec<ManaPipId>,
+    /// CR 702.132a: the EXACT units a committed Assist helper spent on this cast,
+    /// captured at the spend boundary
+    /// (`casting_costs::apply_committed_assist`) so the completed payment records
+    /// them beside the caster's.
+    ///
+    /// The helper "may pay for any amount of the generic mana in the spell's total
+    /// cost", and paying a cost removes that mana from their pool (CR 118.3a) — so the
+    /// units it removes are mana spent to cast THIS spell, and the cast's snapshot
+    /// (`GameObject::mana_spent_to_cast_amount`, `colors_spent_to_cast`,
+    /// `mana_spent_source_snapshots`) owes them exactly as much as the caster's.
+    /// Keeping only the paid GENERIC AMOUNT (what `AssistState::Paid` records) lost the
+    /// pips: a Treasure the helper sacrificed contributes a unit whose producer a
+    /// `FilterProp::ManaSpentFromSource` predicate (Rain of Riches' cascade) reads.
+    ///
+    /// Held on the root rather than only in a transient because a replacement pause
+    /// between the helper's spend and the caster's final payment saves and restores
+    /// this cast: the units must still be there when the recording happens.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub assist_contributed_units: Vec<ManaUnit>,
     /// CR 601.2i + CR 722.3c: Optional source permanent to re-mark as
     /// prepared if this cast is cancelled and rolled back. Used by the
     /// prepared-copy special action to restore pre-cast state.
@@ -9214,6 +9732,14 @@ pub enum PendingCostMoveCompletion {
         cascade_cast_transformed: bool,
         resolution_success_waiting_for: Option<Box<WaitingFor>>,
         prepaid_actual_mana_spent: Option<u32>,
+        /// CR 115.1 + CR 601.2c + CR 400.7: the announced target facts, carried
+        /// from the pre-payment checks across the parked Sneak/Web-slinging
+        /// returned-creature cost move so the CR 601.2i history write records the
+        /// selection-time characteristics rather than a later incarnation's.
+        /// `None` is a legacy park whose targets are unreconstructable; restore
+        /// admission refuses it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        committed_target_facts: Option<Vec<ActivationTargetFact>>,
     },
     /// CR 601.2h + CR 702.66a: The cast's mana is already paid and `pending`
     /// carries that payment; once the Delve exiles settle, re-enter the inner
@@ -9223,6 +9749,24 @@ pub enum PendingCostMoveCompletion {
         /// `None` when the first pass had not reached the pre-payment checks.
         pre_payment_checks: Option<Box<FinalizePrePaymentChecks>>,
     },
+}
+
+impl PendingCostMoveCompletion {
+    /// CR 601.2h + CR 702.66a: whether reaching this completion means the cast's mana has
+    /// ALREADY been paid, so the cast it holds is a prepaid continuation whose copy the
+    /// restore boundary must validate. Exhaustive by construction: a new completion variant
+    /// must state which side it is on, rather than inheriting a silent "not paid".
+    pub(crate) fn settles_cast_mana(&self) -> bool {
+        match self {
+            // CR 702.190a + CR 702.188a: the Sneak / Web-slinging move pays before it parks.
+            Self::FinalizeCast { .. }
+            // CR 601.2h + CR 702.66a: the delve exiles settle after the mana is spent.
+            | Self::FinalizeDelvedCast { .. } => true,
+            Self::FinishPending
+            | Self::CompleteSelectedReturnToHand { .. }
+            | Self::PublishExileTrackedSet => false,
+        }
+    }
 }
 
 /// CR 601.2h: What a spell's payment commit decided before its mana was spent.
@@ -9248,6 +9792,22 @@ pub struct FinalizePrePaymentChecks {
         deserialize_with = "crate::types::ability::deserialize_enters_with_modifications_compat"
     )]
     pub cast_this_way_enters_mods: crate::types::ability::PendingEntersModifications,
+    /// CR 115.1 + CR 601.2c + CR 400.7: the spell's declared targets as they were
+    /// when they were committed, latched at the one moment before any cost is
+    /// paid and carried across every parked payment continuation. The CR 601.2i
+    /// history write must describe the announced targets, not whatever object
+    /// later shares their storage id: a spell whose additional cost sacrifices a
+    /// target it also targets (Bone Splinters) would otherwise re-read the raw
+    /// id after payment and record the graveyard incarnation's printed
+    /// characteristics instead of the selection-time ones (CR 115.9, CR 115.9b,
+    /// CR 400.7). `Some(vec![])` for a cast that declares no target.
+    ///
+    /// `Option` is deliberate: `None` is a parked cast written before this field
+    /// existed, whose announced targets are gone. Resuming it would write a
+    /// history record that falsely claims "declared nothing", so
+    /// `PersistedGameState::prepare_for_restore` refuses the save.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub committed_target_facts: Option<Vec<ActivationTargetFact>>,
 }
 
 /// CR 605.3b: Selects whether completing a mana-ability cost payment may ask
@@ -9404,6 +9964,19 @@ pub enum PendingSacrificeCostCompletion {
         frame: Box<OptionalEffectFrame>,
         selected: Vec<ObjectIncarnationRef>,
     },
+}
+
+impl PendingSacrificeCostCompletion {
+    /// CR 601.2h + CR 601.2f: whether this sacrifice completion resumes a cast whose mana was
+    /// already paid. Exhaustive by construction, for the same reason as
+    /// [`PendingCostMoveCompletion::settles_cast_mana`].
+    pub(crate) fn settles_cast_mana(&self) -> bool {
+        match self {
+            // CR 601.2f-h: declaration and mana payment are complete.
+            Self::FinalizeSpell { .. } => true,
+            Self::SelectedNonSelf | Self::SelfRef | Self::ResolutionOptionalPayment { .. } => false,
+        }
+    }
 }
 
 /// CR 702.21a + CR 701.21 + CR 616.1: The unpaid work after one ward sacrifice
@@ -9893,6 +10466,7 @@ impl PendingCast {
             activation_ability_index: None,
             pending_loyalty_activation_player: None,
             target_constraints: Vec::new(),
+            committed_target_facts: None,
             crime_candidate: false,
             casting_variant: CastingVariant::Normal,
             casting_permission_index: None,
@@ -9917,6 +10491,7 @@ impl PendingCast {
             delved_cards: Vec::new(),
             deferred_sacrificed_permanents: Vec::new(),
             pinned_pool_units: Vec::new(),
+            assist_contributed_units: Vec::new(),
             cancel_restore_prepared_source: None,
             payment_mode: CastPaymentMode::Auto,
             assist_state: AssistState::NotOffered,
@@ -9932,6 +10507,35 @@ impl PendingCast {
     pub fn with_payment_mode(mut self, payment_mode: CastPaymentMode) -> Self {
         self.payment_mode = payment_mode;
         self
+    }
+
+    /// CR 702.132a + CR 118.3a: the paid Assist contribution this cast carries, as
+    /// ONE typed claim — which helper paid, how much generic mana it committed, and
+    /// the exact units its spend removed.
+    ///
+    /// `None` for every cast no helper paid for (`NotOffered`, `Offered`, and the
+    /// cancellable `Committed`/`PaymentStarted` checkpoints, whose helper resources
+    /// are untouched). `Some` only for [`AssistState::Paid`], the single checkpoint
+    /// stamped immediately after the helper's spend, so the claim exists exactly
+    /// when the units do.
+    ///
+    /// The payment finalizers consume the claim rather than the bare unit list, so
+    /// they can refuse a contribution that does not describe the payment it
+    /// asserts — paying `generic` mana removes exactly `generic` units (CR 118.3a),
+    /// and a claim captured for another cast is not this cast's.
+    pub fn assist_contribution(&self) -> Option<AssistContribution> {
+        match self.assist_state {
+            AssistState::Paid { helper, generic } => Some(AssistContribution {
+                source_id: self.object_id,
+                helper,
+                generic,
+                units: self.assist_contributed_units.clone(),
+            }),
+            AssistState::NotOffered
+            | AssistState::Offered
+            | AssistState::Committed { .. }
+            | AssistState::PaymentStarted { .. } => None,
+        }
     }
 
     /// CR 602.2b: the root of an in-flight ACTIVATED ability. Every activation
@@ -10301,12 +10905,29 @@ impl GameState {
     }
 
     /// Every typed owner currently holding a live [`PendingCast`], in custody
-    /// precedence order.
-    pub(crate) fn live_pending_cast_owners(&self) -> Vec<PendingCastOwner> {
-        let owners: Vec<PendingCastOwner> = PendingCastOwner::ALL
+    /// precedence order, **without** the single-announcement drift assertion.
+    ///
+    /// This is the enumeration itself. Live in-game callers use
+    /// [`Self::live_pending_cast_owners`], which adds the invariant check.
+    /// Restore admission reads untrusted state and must stay fallible, so it
+    /// enumerates here and refuses a disagreement
+    /// ([`Self::reject_conflicting_pending_cast_owners`]) instead of tripping the
+    /// `debug_assert!` at a library boundary.
+    pub(crate) fn pending_cast_owners(&self) -> Vec<PendingCastOwner> {
+        PendingCastOwner::ALL
             .into_iter()
             .filter(|owner| self.pending_cast_at(*owner).is_some())
-            .collect();
+            .collect()
+    }
+
+    /// Every typed owner currently holding a live [`PendingCast`], in custody
+    /// precedence order.
+    ///
+    /// Asserts the live-state invariant that one announcement is in flight at a
+    /// time. Do not call this on restored/untrusted state — use
+    /// [`Self::pending_cast_owners`] there.
+    pub(crate) fn live_pending_cast_owners(&self) -> Vec<PendingCastOwner> {
+        let owners = self.pending_cast_owners();
         // One announcement is in flight at a time (CR 601.2 / CR 602.2 do not
         // nest; mana abilities carry no `PendingCast`), so every owner that is
         // live names the same announcement.
@@ -11103,6 +11724,49 @@ pub struct PendingManaAbility {
     /// causal node after resumption.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rules_execution_node: Option<RulesExecutionNodeRef>,
+    /// CR 605.3b: WHICH activation of `source_id` this parked record is — the
+    /// occurrence [`Self::rules_execution_node`] must belong to.
+    ///
+    /// The node reference alone cannot answer that on restore. Settlement
+    /// ordinals are unique, but a save states only the reference, so a reference
+    /// that names a RETAINED node of this same object and incarnation is
+    /// indistinguishable from this activation's own node — and an object can
+    /// activate a mana ability twice in one incarnation (Prismite: "{2}: Add one
+    /// mana of any color."). CR 605.3b says such an ability "resolves
+    /// immediately after it is activated", so the first activation's node is
+    /// finished; re-entering it for the second would write the second
+    /// activation's settlement into the first.
+    ///
+    /// This field is the second record of the one announcement: the ordinal the
+    /// activation's node was minted under, written beside the node (both come
+    /// from the single value `GameState::begin_activated_mana_journal_node`
+    /// returns) and re-written beside it at every resume that re-binds the node.
+    /// The two must therefore AGREE —
+    /// [`Self::activation_producer_evidence`] refuses a save where they do not, so
+    /// a node of the same source and epoch that belongs to an earlier occurrence
+    /// is a contradiction rather than evidence. When the reference is ABSENT this
+    /// field is not silence either: it still names the node
+    /// ([`Self::recorded_activation_node`]), so a save that keeps only this record
+    /// resolves to the very settlement it was announced under instead of opening a
+    /// second one.
+    ///
+    /// `None` only for a payload written before this field existed (its journal
+    /// is turn-scoped, so the node it names may already have been discarded, and
+    /// the announcement epoch remains the exact evidence such a save carries).
+    /// This field, like the node, is never defaulted to a value: a save that
+    /// states no occurrence claims none.
+    ///
+    /// Protocol: serde-ADDITIVE (`Option`, `#[serde(default)]`, skipped when
+    /// unset), so an older peer parses a payload that carries it and a newer peer
+    /// parses one that does not. No gameplay fact and no rendered feature is
+    /// derived from it — it strengthens restore validation only, so a peer that
+    /// drops it falls back to the pre-change validation rather than losing a
+    /// capability. That is the `crates/lobby-broker/src/protocol.rs` rule for
+    /// optional/defaulted additions ("does not require a bump — unless the client
+    /// stops deriving a fallback for it"), so no protocol record was added.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub activated_mana_occurrence:
+        Option<crate::types::resolved_commands::ManaActivationOccurrence>,
     /// CR 605.3b + CR 400.7: Mana ability choices can be answered after the
     /// source paid a cost that moved it out of existence (Treasure tokens, etc.).
     /// Preserve the activated ability definition from activation time so the
@@ -11334,6 +11998,833 @@ impl PendingManaAbility {
     /// activation for as long as it stands begun: whatever is begun meanwhile stands above it.
     pub(crate) fn chain_place(&self) -> usize {
         self.suspended_chain().skip(1).count()
+    }
+
+    /// CR 605.3b + CR 602.2a + CR 113.7 + CR 400.7: the ONE validation rule for a
+    /// parked mana activation's producer evidence — the epoch its mana is stamped
+    /// with and the settlement node it must settle under, both read against the
+    /// journal that owns the node.
+    ///
+    /// Exactly two boundaries apply it, and neither adds a rule of its own: the
+    /// restore chokepoint runs it over every parked activation a save holds
+    /// ([`GameState::reject_contradictory_parked_activation_evidence`]), and the
+    /// resume authority runs it once per resume
+    /// (`crate::game::mana_abilities::resolve_parked_activation_producer`). While
+    /// each kept its own subset — restore only the node, resume also the epoch
+    /// agreement and the "names nothing" case — they could disagree, and a save
+    /// restore admitted could be refused at the resume that followed it, after the
+    /// activation had already bound production to a node its own next load rejects.
+    ///
+    /// A parked activation names its own announcement TWICE, and this rule reads
+    /// the node from whichever record the save still carries
+    /// ([`Self::recorded_activation_node`]): `rules_execution_node`, the reference
+    /// written at announcement (`GameState::begin_activated_mana_journal_node`) and
+    /// re-written at every resume; and `activated_mana_occurrence`, the ordinal that
+    /// node was minted under. Settlement ordinals come from ONE counter, so an
+    /// ordinal names exactly one node — a save that loses the reference but keeps
+    /// the ordinal still says which settlement this activation is, and reading it as
+    /// absence is what opened a SECOND node for one activation.
+    ///
+    /// The shapes, and they are not interchangeable:
+    ///
+    /// * **nothing retained** — the save names no node the journal still holds: it
+    ///   predates both records, or the turn-scoped journal has since cleared the one
+    ///   it names. That is not a contradiction: the announcement epoch (CR 602.2a,
+    ///   captured before any cost) is the evidence such a save still carries, and
+    ///   recovery opens this activation's own node. A save that carries NEITHER a
+    ///   retained node NOR an announcement epoch names its producer nowhere — this
+    ///   engine's activation entry names it twice — so it is refused rather than
+    ///   priced from whatever object holds the storage id now (CR 400.7)
+    ///   ([`ParkedActivationConflict::NoProducerEvidence`]). A pending with no
+    ///   ability snapshot at all was not built by that entry (a direct
+    ///   prompt/production call on a live state, not a resume of a saved one), so it
+    ///   resolves from the live object instead.
+    /// * **this activation's own activated-mana node** — the journal retains it and
+    ///   it names this activation's source. Its `ObjectIncarnationRef` is the
+    ///   producer, and the node is the one the activation must settle under
+    ///   (CR 113.7: the source of an ability is the object that generated it).
+    /// * **a retained node this activation cannot own** — a `TriggeredMana` node
+    ///   (CR 605.4a: it settles a different ability, however exactly it shares this
+    ///   activation's object and epoch) or an `ActivatedMana` node naming a different
+    ///   object. That is a state contradicting itself, and it is refused rather than
+    ///   read as absence: reading it as absence would price the activation's mana
+    ///   from a node that settles something else. The occurrence ordinal counts here
+    ///   too — it resolves to whatever node the journal retains at that ordinal
+    ///   ([`ResolvedRulesJournal::node_at_ordinal`]), so an ordinal naming another
+    ///   KIND of node is this same contradiction, not a missing record.
+    /// * **a retained activated-mana node of this source that is a DIFFERENT
+    ///   OCCURRENCE** — an earlier activation of the same object in the same
+    ///   incarnation (Prismite can be activated twice; both activations share a
+    ///   source and an epoch). CR 605.3b makes a mana ability resolve "immediately
+    ///   after it is activated", so that earlier node has already settled and this
+    ///   activation must not write into it. The occurrence beside the reference and
+    ///   the reference disagreeing is a contradiction
+    ///   ([`ParkedActivationConflict::ForeignOccurrence`]), not absence.
+    /// * **a retained activated-mana node of this source that has already SETTLED**
+    ///   — settlement is a property of the NODE, so this question is asked whether or
+    ///   not the save also states the occurrence beside the reference, and it is
+    ///   asked AFTER the occurrence-agreement check above rather than instead of it.
+    ///   CR 605.3b settled that node the moment it was activated, so it settles a
+    ///   FINISHED activation and nothing of a still-parked one belongs in it. Two
+    ///   records that agree name ONE node; agreeing is not owning. The answer carries
+    ///   the shape it was reached through
+    ///   ([`ParkedActivationConflict::SettledOccurrence`] when the save states the
+    ///   occurrence, [`ParkedActivationConflict::SettledWithoutOccurrence`] when it
+    ///   states none — the older shape, where nothing beside the reference separates
+    ///   two activations of one object).
+    ///   The witness is the node's own settlement record
+    ///   ([`ResolvedRulesJournal::node_settled`]), NOT the pips it produced: an
+    ///   activation the game state allowed no mana (CR 605.2 — Heronblade Elite at
+    ///   power 0) settled with an empty pip list, and a pip-based reading admitted a
+    ///   later parked activation against it. Reading settlement only when the
+    ///   occurrence was ABSENT let a save whose two records agreed on a finished
+    ///   activation through, and the colour answer then attributed a live
+    ///   activation's mana to a node a finished activation already owned.
+    /// * **the retained node's epoch and the announcement epoch disagree** — two
+    ///   records of one announcement naming two objects (CR 400.7: a moved object is
+    ///   a new object). Neither side is preferred
+    ///   ([`ParkedActivationConflict::ContradictoryAnnouncementEpoch`]).
+    ///
+    /// Both readings the caller makes — the epoch and the node to reuse — come from
+    /// this one answer, so they cannot disagree.
+    pub(crate) fn activation_producer_evidence(
+        &self,
+        journal: &ResolvedRulesJournal,
+    ) -> Result<ParkedActivationNodeEvidence, ParkedActivationConflict> {
+        let Some(node) = self.recorded_activation_node(journal) else {
+            return self.evidence_without_a_node();
+        };
+        let Some(source) = journal.activated_mana_source(node) else {
+            return Err(ParkedActivationConflict::NotAnActivatedManaNode { node });
+        };
+        if source.object_id != self.source_id {
+            return Err(ParkedActivationConflict::ForeignSource {
+                node,
+                source,
+                activation_source: self.source_id,
+            });
+        }
+        let RulesExecutionNodeRef::ActivatedMana(ordinal) = node else {
+            // Unreachable: `activated_mana_source` answered above, so the node is
+            // an activated-mana node.
+            return Err(ParkedActivationConflict::NotAnActivatedManaNode { node });
+        };
+        // CR 605.3b: the node names this object and epoch, but is it THIS
+        // activation's node? The occurrence beside it can only answer the weaker
+        // question "do the save's two records name the SAME node" — it says nothing
+        // about whether that node is still the parked activation's to settle. So the
+        // two questions are asked in order, and neither replaces the other:
+        //
+        //   1. the records must AGREE (a save whose occurrence contradicts its
+        //      reference names two different activations);
+        //   2. the node they name must not have already SETTLED — settlement is a
+        //      property of the node, so this is checked whether or not an occurrence
+        //      is stated. Asking it only when the occurrence was absent let a save
+        //      whose records agreed on a FINISHED activation (Heronblade Elite at
+        //      power 0: settled, zero pips outside the settlement record) through,
+        //      and the colour answer then wrote this activation's production into it.
+        //   3. the save's OCCURRENCE record, when it has one, must name the same node.
+        //      `PendingManaAbility` is persisted by every released build and this field
+        //      only by 0.123, so an absent occurrence is a genuine older save (the
+        //      shim `_LEGACY_PARKED_ACTIVATION_OCCURRENCE_ABSENT_2026Q4`): its
+        //      announcement epoch is still exact evidence, so it is admitted rather
+        //      than refused.
+        match self.activated_mana_occurrence {
+            Some(occurrence) if occurrence.ordinal() != ordinal => {
+                return Err(ParkedActivationConflict::ForeignOccurrence { node, occurrence });
+            }
+            _ => {}
+        }
+        if journal.node_settled(node) {
+            return Err(match self.activated_mana_occurrence {
+                Some(occurrence) => {
+                    ParkedActivationConflict::SettledOccurrence { node, occurrence }
+                }
+                None => ParkedActivationConflict::SettledWithoutOccurrence { node },
+            });
+        }
+        // CR 602.2a + CR 400.7: the node's epoch and the announcement epoch are two
+        // records of ONE announcement, so they must name the same object.
+        if let Some(announced) = self.announced_source_incarnation {
+            if announced != source.incarnation {
+                return Err(ParkedActivationConflict::ContradictoryAnnouncementEpoch {
+                    node,
+                    node_epoch: source.incarnation,
+                    announced,
+                });
+            }
+        }
+        Ok(ParkedActivationNodeEvidence::Owned { source, node })
+    }
+
+    /// CR 605.3b: the settlement node this parked activation's save NAMES — the
+    /// reference it carries when the journal still retains it, and otherwise the one
+    /// its occurrence ordinal resolves to.
+    ///
+    /// Settlement ordinals are minted from one counter
+    /// (`crate::types::resolved_commands::SettlementNodeOrdinal`), so an ordinal
+    /// names exactly one node and one node belongs to exactly one settlement. A save
+    /// that keeps the occurrence and loses the reference therefore still says WHICH
+    /// settlement this activation is; answering "no node" for it let recovery open a
+    /// second node for one activation, leaving the node the save actually named
+    /// settling nothing and the pip attributed to a node the save never mentioned.
+    ///
+    /// The ordinal is resolved through
+    /// [`ResolvedRulesJournal::node_at_ordinal`], which answers the node the journal
+    /// RETAINS at that ordinal whatever KIND it is — not an `ActivatedMana` reference
+    /// filtered by kind. Filtering by kind conflated two different answers: an
+    /// ordinal this journal does hold as, say, a `TriggeredMana` node is a node the
+    /// occurrence NAMES and contradicts, and calling it "missing" let the
+    /// announcement epoch admit a fresh activated node for an activation whose
+    /// occurrence was already spoken for. The contradiction is raised by
+    /// [`Self::activation_producer_evidence`] (the node is not an activated-mana
+    /// node), which is the same rule everywhere else.
+    ///
+    /// `None` when neither record names a node the journal retains. A reference the
+    /// journal has cleared proves nothing (the journal is turn-scoped), so the
+    /// occurrence beside it is still asked.
+    pub(crate) fn recorded_activation_node(
+        &self,
+        journal: &ResolvedRulesJournal,
+    ) -> Option<RulesExecutionNodeRef> {
+        self.rules_execution_node
+            .filter(|node| journal.contains_node(*node))
+            .or_else(|| {
+                self.activated_mana_occurrence
+                    .and_then(|occurrence| journal.node_at_ordinal(occurrence.ordinal()))
+            })
+    }
+
+    /// CR 602.2a + CR 400.7: what a save that names NO retained node still proves
+    /// about this activation's producer — the other half of
+    /// [`Self::activation_producer_evidence`].
+    ///
+    /// The announcement epoch is exact evidence when the save carries it. A save that
+    /// carries neither is refused: this engine's activation entry writes both, so a
+    /// snapshot-carrying pending with no epoch and no node predates them and can only
+    /// be priced from whatever occupies the storage id now (CR 400.7). A pending with
+    /// NO snapshot was not built by that entry at all — a direct prompt/production
+    /// call on a live state — so the live object is its announcement.
+    fn evidence_without_a_node(
+        &self,
+    ) -> Result<ParkedActivationNodeEvidence, ParkedActivationConflict> {
+        if self.ability_snapshot.is_some() && self.announced_source_incarnation.is_none() {
+            return Err(ParkedActivationConflict::NoProducerEvidence {
+                source_id: self.source_id,
+            });
+        }
+        Ok(ParkedActivationNodeEvidence::None)
+    }
+}
+
+/// Legacy on-disk compatibility for `PendingManaAbility::activated_mana_occurrence`.
+///
+/// A save written before the occurrence existed states no occurrence, so
+/// [`PendingManaAbility::activation_producer_evidence`] changes its evidence check
+/// for that payload: the `None` arm asks the node's own settlement record and
+/// refuses a finished one, where the `Some` arm can also compare the stated
+/// occurrence against the node's ordinal. The shape is supported deliberately —
+/// such a save's announcement epoch is still exact evidence — so it is a SHIM
+/// beside the current record, not the rule.
+///
+/// This shim is genuine: `PendingManaAbility` is persisted by every released build
+/// and the occurrence field only since 0.123, so an occurrence-less save is an
+/// older save, not a contradiction.
+///
+/// The shim's deadline is documented, not compiled: it must be removed once a
+/// release above 0.137.0 ships (`+14` releases from the version that ships it),
+/// and removing it means requiring the occurrence on every parked activation — a payload that omits the field then becomes a
+/// refused contradiction rather than the legacy shape. Removing the shim means
+/// deleting both this const and its `docs/LEGACY-COMPAT.md` entry.
+///
+/// The const carries only the grep token on purpose. An earlier revision asserted the
+/// deadline against `CARGO_PKG_VERSION_*` at compile time: that is a new
+/// environment-variable read the intake policy requires a maintainer to review, and it
+/// turned every release bump into a compile failure for `main` and every open PR.
+///
+/// Grep token: `LEGACY_PARKED_ACTIVATION_OCCURRENCE_ABSENT_2026Q4`. See `docs/LEGACY-COMPAT.md`.
+#[allow(dead_code)]
+const _LEGACY_PARKED_ACTIVATION_OCCURRENCE_ABSENT_2026Q4: () = ();
+
+/// CR 605.3b + CR 113.7: the producer evidence a parked mana activation's own
+/// recorded execution node carries, once the journal has been asked what that
+/// node is. See [`PendingManaAbility::activation_producer_evidence`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ParkedActivationNodeEvidence {
+    /// The save records no node the journal still retains — either it predates
+    /// both records, or the turn-scoped journal has since cleared it. Both answer
+    /// the same way (no epoch, no node), and neither is a contradiction.
+    None,
+    /// The journal retains this activation's own activated-mana node, naming
+    /// this exact `ObjectIncarnationRef` as the producer. The node is the one the
+    /// activation must settle under, and the source is the epoch its mana is
+    /// stamped with.
+    Owned {
+        source: ObjectIncarnationRef,
+        node: RulesExecutionNodeRef,
+    },
+}
+
+/// CR 605.3b + CR 602.2a + CR 113.7 + CR 400.7: a parked mana activation's
+/// producer evidence contradicts itself, and both boundaries refuse it — restore
+/// rather than reading the contradiction as absence, and resume rather than
+/// pricing the activation from a settlement that is not its own. See
+/// [`PendingManaAbility::activation_producer_evidence`], the one rule that
+/// produces these.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ParkedActivationConflict {
+    /// The journal retains the recorded node, but it is not an activated-mana
+    /// node. A `TriggeredMana` node settles a triggered mana ability
+    /// (CR 605.4a) — a different occurrence, even when it names the same object
+    /// and epoch — and the other kinds settle no mana ability at all.
+    NotAnActivatedManaNode { node: RulesExecutionNodeRef },
+    /// The journal retains an activated-mana node, but it names a different
+    /// object than the activation's source (CR 400.7: a different object, and
+    /// therefore a different activation's producer).
+    ForeignSource {
+        node: RulesExecutionNodeRef,
+        source: ObjectIncarnationRef,
+        activation_source: ObjectId,
+    },
+    /// CR 605.3b: the journal retains an activated-mana node naming this
+    /// activation's own object and incarnation, but it belongs to a DIFFERENT
+    /// occurrence — an earlier activation of that same object (Prismite's "add
+    /// one mana of any color" can be activated twice in one incarnation). A mana
+    /// ability resolves immediately after it is activated, so the earlier node
+    /// has settled and this activation's settlement must not be written into it.
+    /// `occurrence` is the occurrence the save states for this activation; the
+    /// node's own ordinal is the one it actually names.
+    ForeignOccurrence {
+        node: RulesExecutionNodeRef,
+        occurrence: crate::types::resolved_commands::ManaActivationOccurrence,
+    },
+    /// CR 605.2 + CR 605.3b: the save states an occurrence AND the reference beside
+    /// it agrees with that occurrence, but the node the two name has already
+    /// SETTLED — so the occurrence is STALE: it belongs to an activation that ran to
+    /// completion (a zero-output activation is settled too, CR 605.2, which is why
+    /// the witness is the settlement record and not the pip list), while the pending
+    /// carrying it is still parked before production. Two records that agree name one
+    /// node; they do not make that node a still-parked activation's to settle.
+    ///
+    /// This is the shape a save carries when both of its records were re-pointed at
+    /// an earlier, finished activation of the same object and epoch (Prismite's two
+    /// activations share both). Reading settlement only on the occurrence-ABSENT arm
+    /// let restore admit the second prompt, and the colour answer
+    /// (`crate::game::mana_abilities::handle_choose_mana_color`) then attributed the
+    /// live activation's mana to the old node.
+    SettledOccurrence {
+        node: RulesExecutionNodeRef,
+        occurrence: crate::types::resolved_commands::ManaActivationOccurrence,
+    },
+    /// CR 605.3b: the save states NO occurrence and points at a retained
+    /// activated-mana node of its own source and epoch that has already SETTLED.
+    /// A mana ability resolves immediately after it is activated, so that node
+    /// settled a finished activation; nothing of a still-parked activation belongs
+    /// in it, and no record in the save separates the two, so the reference is
+    /// refused rather than reused as this activation's node. Settlement is the
+    /// node's own record ([`ResolvedRulesJournal::node_settled`]), not its pip
+    /// list: CR 605.2 keeps an ability a mana ability when the game state allows it
+    /// no mana at all, and such an activation settles with no pips.
+    SettledWithoutOccurrence { node: RulesExecutionNodeRef },
+    /// CR 602.2a + CR 400.7: two records of ONE announcement naming two objects.
+    /// The retained node was opened under `node_epoch` and the announcement
+    /// captured `announced`; a moved object is a new object, so one of the two
+    /// describes a different activation's source, and neither side is preferred.
+    ContradictoryAnnouncementEpoch {
+        node: RulesExecutionNodeRef,
+        node_epoch: u64,
+        announced: u64,
+    },
+    /// CR 602.2a + CR 400.7: the save names its producer NOWHERE — no node the
+    /// journal retains, and no announcement epoch — while carrying the ability
+    /// snapshot that only this engine's activation entry writes. Admission and
+    /// resume both refuse it rather than pricing the mana from whatever object
+    /// occupies the storage id now.
+    NoProducerEvidence { source_id: ObjectId },
+}
+
+impl ParkedActivationConflict {
+    /// The node this conflict is about; `None` for a save that names no node at
+    /// all ([`Self::NoProducerEvidence`]).
+    pub fn node(&self) -> Option<RulesExecutionNodeRef> {
+        match self {
+            Self::NotAnActivatedManaNode { node }
+            | Self::ForeignSource { node, .. }
+            | Self::ForeignOccurrence { node, .. }
+            | Self::SettledOccurrence { node, .. }
+            | Self::SettledWithoutOccurrence { node }
+            | Self::ContradictoryAnnouncementEpoch { node, .. } => Some(*node),
+            Self::NoProducerEvidence { .. } => None,
+        }
+    }
+}
+
+impl std::fmt::Display for ParkedActivationConflict {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotAnActivatedManaNode { node } => write!(
+                f,
+                "its execution node {node:?} is not an activated-mana node, so it settles a \
+                 different ability"
+            ),
+            Self::ForeignSource {
+                node,
+                source,
+                activation_source,
+            } => write!(
+                f,
+                "its execution node {node:?} names {:?} epoch {}, not this activation's object {:?}",
+                source.object_id, source.incarnation, activation_source
+            ),
+            Self::ForeignOccurrence { node, occurrence } => write!(
+                f,
+                "its execution node {node:?} belongs to a different activation of the same object \
+                 than the {occurrence} it states — CR 605.3b already settled that one"
+            ),
+            Self::SettledOccurrence { node, occurrence } => write!(
+                f,
+                "its execution node {node:?} has already SETTLED a finished activation of this \
+                 object and epoch, so the {occurrence} it states is stale — CR 605.3b resolved \
+                 that activation immediately after it was activated"
+            ),
+            Self::SettledWithoutOccurrence { node } => write!(
+                f,
+                "its execution node {node:?} has already produced its mana and the save states no \
+                 occurrence, so it belongs to a finished activation of this object and epoch — \
+                 CR 605.3b resolved that one immediately"
+            ),
+            Self::ContradictoryAnnouncementEpoch {
+                node,
+                node_epoch,
+                announced,
+            } => write!(
+                f,
+                "its execution node {node:?} names incarnation {node_epoch} and its announcement \
+                 epoch names {announced}"
+            ),
+            Self::NoProducerEvidence { source_id } => write!(
+                f,
+                "it names no producer epoch for {source_id:?}; refusing to price its mana from \
+                 whatever object holds that storage id now (CR 400.7)"
+            ),
+        }
+    }
+}
+
+/// CR 702.132a + CR 118.3a: why a parked cast's Assist contribution cannot be bound
+/// to the payment it claims. Produced by
+/// [`GameState::bind_or_reject_assist_contribution_provenance`], the one rule that
+/// decides admission for both directions of the contradiction.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AssistContributionConflict {
+    /// CR 118.3a: the cast carries units a helper spent, but no helper is recorded
+    /// as having paid. The units are a payment with no payer, so nothing names whose
+    /// mana they were — and a cast that records them would credit mana to a spell
+    /// whose `AssistState` never reached the paid checkpoint. This is the inverse of
+    /// [`Self::PaidGenericUnproven`] and equally inadmissible.
+    UnitsWithoutPaidHelper { state: AssistState },
+    /// CR 118.3a: the helper is recorded as having paid `generic` generic mana, but
+    /// the units the save carries do not number that amount. Paying `generic` mana
+    /// removes exactly `generic` units, so the two statements disagree about one
+    /// payment and neither side is preferred.
+    UnitCountDisagreesWithPaidGeneric {
+        helper: PlayerId,
+        generic: u32,
+        saved: usize,
+    },
+    /// CR 702.132a + CR 118.3a: the save's units and the journal's own record of the
+    /// same helper's spend on the same spell name DIFFERENT units — a different count,
+    /// or the same count of other pips. The two records are then two payments, and
+    /// nothing in the save settles which one happened, so this boundary refuses rather
+    /// than picking one. (A journal record of the SAME pips whose metadata differs is
+    /// not this conflict: it is one payment described twice, and the journal's
+    /// description is restored over the save's.)
+    JournalDisagreesWithSavedUnits {
+        helper: PlayerId,
+        journal: usize,
+        saved: usize,
+    },
+    /// CR 702.132a + CR 118.3a: the cast names a paid helper and an amount, but
+    /// neither the save nor the journal carries the units that payment removed. The
+    /// payment is unprovable, and reading its absence as "the helper spent nothing"
+    /// would drop mana the helper really spent — the exact loss a source-qualified
+    /// cast predicate (Rain of Riches' cascade) reads.
+    PaidGenericUnproven {
+        helper: PlayerId,
+        generic: u32,
+        /// The journal recorded this many units for the helper on this spell, which
+        /// disagreed with the amount it is recorded as having paid. `None` when the
+        /// journal records no spend by the helper on this cast at all.
+        journal: Option<usize>,
+    },
+    /// CR 702.132a + CR 118.3a: the save carries a correctly sized unit list for a
+    /// PAID helper, but the journal records no spend by that helper on this spell at
+    /// all. A unit list is the save's CLAIM; the journal's `ManaSpend` command is the
+    /// record written where the mana actually left the pool, so with no record the
+    /// payment is unproven. The list is not admitted on its own — "the journal has
+    /// nothing" is not the same fact as "the journal agrees", and the journal's own
+    /// absence answer is `None`, never an empty agreement.
+    JournalRecordsNoSpendForSavedUnits {
+        helper: PlayerId,
+        generic: u32,
+        /// The units the save carries for this helper — correctly sized, and
+        /// unbacked.
+        saved: usize,
+    },
+    /// CR 702.132a + CR 118.3a: the journal DOES prove the payment, but the shared
+    /// owner authority reports no writable cast for the owner that holds it, so the
+    /// recovered units could not be put back. Refused instead of admitted
+    /// half-completed: a recovered contribution that never reaches the carrier is, at
+    /// the finalizer, the same "the helper spent nothing" payment this rule exists to
+    /// reject. Every carrier the finalizers park a cast in is writable through
+    /// [`crate::types::game_state::GameState::pending_cast_at_mut`], so this names the
+    /// one case that genuinely has no destination: the read and write accessors
+    /// disagreeing about one untrusted save.
+    UnwritableRecoveryCarrier {
+        helper: PlayerId,
+        generic: u32,
+        /// The units the journal proved for this helper on this spell.
+        journal: usize,
+    },
+}
+
+impl std::fmt::Display for AssistContributionConflict {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::UnitsWithoutPaidHelper { state } => write!(
+                f,
+                "it carries mana units a helper is said to have spent, but its Assist state is \
+                 {state:?} — no helper is recorded as having paid"
+            ),
+            Self::UnitCountDisagreesWithPaidGeneric {
+                helper,
+                generic,
+                saved,
+            } => write!(
+                f,
+                "it records {helper:?} as having paid {generic} generic mana (CR 118.3a: that is \
+                 {generic} units removed from their pool) but carries {saved} spent units"
+            ),
+            Self::JournalDisagreesWithSavedUnits {
+                helper,
+                journal,
+                saved,
+            } => write!(
+                f,
+                "it carries {saved} units for {helper:?} while the resolved-rules journal records \
+                 {journal} units that helper spent on the same spell, so the two disagree about \
+                 one payment"
+            ),
+            Self::PaidGenericUnproven {
+                helper,
+                generic,
+                journal: Some(journal),
+            } => write!(
+                f,
+                "it records {helper:?} as having paid {generic} generic mana but carries no \
+                 units, and the journal records {journal} units for that helper on this spell \
+                 instead of {generic}"
+            ),
+            Self::PaidGenericUnproven {
+                helper,
+                generic,
+                journal: None,
+            } => write!(
+                f,
+                "it records {helper:?} as having paid {generic} generic mana but carries no \
+                 units, and the resolved-rules journal records no spend by that helper on this \
+                 spell — reading that absence as `spent nothing` would drop mana the helper \
+                 spent (CR 118.3a)"
+            ),
+            Self::JournalRecordsNoSpendForSavedUnits {
+                helper,
+                generic,
+                saved,
+            } => write!(
+                f,
+                "it carries {saved} units for {helper:?}, who is recorded as having paid \
+                 {generic} generic mana, but the resolved-rules journal records no spend by \
+                 that helper on this spell — a unit list nothing vouches for is not proof the \
+                 mana was removed (CR 118.3a)"
+            ),
+            Self::UnwritableRecoveryCarrier {
+                helper,
+                generic,
+                journal,
+            } => write!(
+                f,
+                "it records {helper:?} as having paid {generic} generic mana, and although the \
+                 journal proves {journal} units for that helper on this spell, this save holds \
+                 the cast in a carrier that offers no writable pending cast"
+            ),
+        }
+    }
+}
+
+/// CR 106.3 + CR 118.3a + CR 601.2h: why a parked cast's PREPAID SPELL COPY cannot be
+/// bound to the spend the save settled. Produced by
+/// [`GameState::bind_or_reject_prepaid_spell_copy_provenance`], the one rule that
+/// decides whether the facts a prepaid resume will CONSUME were the facts the spend
+/// established.
+///
+/// The copy is the triple the payment finalizers stamp on the spell object in the same
+/// step they spend — `GameObject::mana_spent_to_cast_amount`,
+/// `GameObject::colors_spent_to_cast`, and `GameObject::mana_spent_source_snapshots`
+/// (`crate::game::casting`'s two `pay_…` finalizers) — and it is the ONE record a
+/// source-qualified cast predicate reads: `FilterProp::ManaSpentFromSource` answers
+/// Rain of Riches' "The first spell you cast each turn that mana from a Treasure was
+/// spent to cast has cascade." from these snapshots. There is no second stamp and no
+/// re-derivation on the prepaid path (`casting_costs` gates the whole payment out on
+/// `prepaid_actual_mana_spent`), so a copy that disagrees with the settled spend is
+/// consumed as written.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PrepaidSpellCopyConflict {
+    /// CR 118.3a + CR 601.2h: the carrier STATES an amount for this payment and it is not
+    /// the size of the payment the save settled. The resumed cast consumes that number as
+    /// its spent mana — the CR 601.2h paid-facts snapshot, the stack entry's recorded
+    /// spend, and the CR 700.14 Expend ledger — without re-deriving it, so an amount the
+    /// settle does not prove would rewrite the cast's expenditure. `settled` is the count
+    /// the resolved-rules journal records for this cast.
+    StatedAmountDisagreesWithSettledSpend {
+        /// The amount the parked carrier states (`PendingCast::prepaid_actual_mana_spent`,
+        /// or the `PendingCostMoveCompletion::FinalizeCast` amount the Sneak /
+        /// Web-slinging resume carries).
+        stated_amount: u32,
+        settled: usize,
+    },
+    /// CR 118.3a + CR 601.2h: the copy states a different number of units than the
+    /// save settled. Paying mana removes exactly that many units from a pool, so the
+    /// two are one payment stated twice and disagreeing about its size. `settled` is
+    /// the count the resolved-rules journal records for this cast.
+    AmountDisagreesWithSettledSpend {
+        copy_amount: u32,
+        /// CR 601.2h: the copy's own "mana was spent" flag. Reported, never compared:
+        /// it is a trigger-collection transient the engine clears after collection
+        /// (`triggers::clear_post_collection_transients`), while the amount, the tally
+        /// and the snapshots are the latched evidence of the payment.
+        copy_marks_spent: bool,
+        settled: usize,
+    },
+    /// CR 207.2c + CR 601.2h: the copy's per-color tally is not the tally of the units
+    /// the save settled — the fact an Adamant-style or "{W}{W} was spent" rider reads.
+    ColorsDisagreeWithSettledSpend {
+        copy: crate::types::mana::ColoredManaCount,
+        settled: crate::types::mana::ColoredManaCount,
+    },
+    /// CR 106.3 + CR 400.7: the copy's producer snapshots are not the ones the settled
+    /// units project. Each entry names the source that PRODUCED one unit (CR 106.3),
+    /// as the epoch that produced it (CR 400.7) — so a difference is either a payment
+    /// of different units or one payment whose copy describes a source that never paid.
+    /// Both lists are the snapshots' `source_id`s: the ids are what a save can be read
+    /// for, and a reader comparing them does not need the two last-known-information
+    /// projections to say which unit is which.
+    ProducersDisagreeWithSettledSpend {
+        copy: Vec<ObjectId>,
+        settled: Vec<ObjectId>,
+    },
+    /// CR 700.14 + CR 702.132a + CR 118.3a: the PER-PAYER split the resumed cast will
+    /// credit to the Expend ledger is not the split this save's payment settled.
+    ///
+    /// The copy above is the cast's COMBINED payment — the spell-wide fact an
+    /// assembled-cost or source-qualified predicate reads. Expend reads the same payment
+    /// per PLAYER: CR 700.14 counts "the amount of mana that player spent this turn to
+    /// cast spells", so the helper's units are the HELPER's expenditure and the caster is
+    /// credited with the remainder (`casting_costs`'s `expend_credits_for_cast`). That
+    /// remainder is derived, not stored: it is the combined amount less the units the
+    /// parked cast's Assist claim names. A save that zeroes the claim — the shape
+    /// `Paid { helper, generic: 0 }` with no units, which
+    /// [`GameState::proven_assist_contribution_units`] admits because a helper CAN pay 0
+    /// (CR 118.3a "0 mana") — while its copy and the journal still hold the helper's
+    /// units leaves the remainder equal to the whole payment, and the caster is then
+    /// credited with mana the helper spent: three helper Treasures fire the CASTER's
+    /// "Whenever you expend 4" (Wandertale Mentor).
+    ///
+    /// The split is therefore read from the same journal that proved the copy, per
+    /// payer, and both halves must match: the units the claim credits the helper, and
+    /// the remainder the resume credits the caster. `None` for a helper means the cast
+    /// names no helper at all, which is the same demand on the caster's side — every
+    /// settled unit must then be the caster's own.
+    PayerSplitDisagreesWithSettledSpend {
+        /// The cast's controller (`ResolvedAbility::controller`, CR 109.5's "you" for
+        /// the spell) — the payer the resume credits with the remainder.
+        caster: PlayerId,
+        /// What the resume will credit the caster: the settled payment less the units
+        /// the cast's contribution names.
+        caster_credit: usize,
+        /// The units the settled spend records as spent BY the caster on this cast.
+        caster_settled: usize,
+        /// The helper the cast's contribution names, or `None` when it names none.
+        helper: Option<PlayerId>,
+        /// The units the contribution credits the helper.
+        helper_credit: usize,
+        /// The units the settled spend records for that helper, `None` when the cast
+        /// names no helper and there is no payer to ask the journal about.
+        helper_settled: Option<usize>,
+    },
+}
+
+impl std::fmt::Display for PrepaidSpellCopyConflict {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::StatedAmountDisagreesWithSettledSpend {
+                stated_amount,
+                settled,
+            } => write!(
+                f,
+                "its parked cast states {stated_amount} units of mana spent while the \
+                 resolved-rules journal records {settled} units spent on this cast (CR 118.3a: \
+                 paying mana is removing exactly those units)"
+            ),
+            Self::AmountDisagreesWithSettledSpend {
+                copy_amount,
+                copy_marks_spent,
+                settled,
+            } => write!(
+                f,
+                "its prepaid spell copy states {copy_amount} units of mana spent \
+                 (mana_spent_to_cast={copy_marks_spent}) while the resolved-rules journal \
+                 records {settled} units spent on this cast (CR 118.3a: paying mana is \
+                 removing exactly those units)"
+            ),
+            Self::ColorsDisagreeWithSettledSpend { copy, settled } => write!(
+                f,
+                "its prepaid spell copy tallies {copy:?} colored mana spent while the settled \
+                 units tally {settled:?}"
+            ),
+            Self::ProducersDisagreeWithSettledSpend { copy, settled } => write!(
+                f,
+                "its prepaid spell copy names the producers {copy:?} while the settled spend \
+                 names {settled:?} (CR 106.3: a unit's source is the source of the ability that \
+                 produced it)"
+            ),
+            Self::PayerSplitDisagreesWithSettledSpend {
+                caster,
+                caster_credit,
+                caster_settled,
+                helper,
+                helper_credit,
+                helper_settled,
+            } => {
+                write!(
+                    f,
+                    "the resumed cast would credit {caster:?} with {caster_credit} of its \
+                     {} settled units while the settled spend records {caster_settled} units \
+                     spent by {caster:?}",
+                    caster_credit + helper_credit,
+                )?;
+                match helper {
+                    Some(helper) => write!(
+                        f,
+                        ", and credit {helper:?} with {helper_credit} units while the settled \
+                         spend records {} for {helper:?} (CR 700.14: Expend counts the mana each \
+                         player spent)",
+                        helper_settled.unwrap_or_default(),
+                    ),
+                    None => write!(
+                        f,
+                        ", and names no helper at all, so the whole settled payment is credited \
+                         to the caster (CR 702.132a: the helper's units are the helper's \
+                         expenditure)"
+                    ),
+                }
+            }
+        }
+    }
+}
+
+/// CR 601.2c + CR 115.1: how a parked cast's announced-target LATCH disagrees with the
+/// declaration its own spell chain still states. Produced by
+/// [`GameState::reject_contradictory_announced_target_facts`].
+///
+/// The latch is one statement about one announcement: `casting::latch_committed_target_facts`
+/// projects `declared_targets_in_chain(ability)` through `casting::capture_target_facts`,
+/// so the fact list IS the chain's declared slots, in order, snapshotted. A save that
+/// states facts the chain does not declare (or omits slots it does) has recorded an
+/// announcement the cast never made — which the CR 601.2i history write would then
+/// publish as the truth about that spell.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AnnouncedTargetFactConflict {
+    /// CR 601.2c: the latch names an object or player as a target of this spell when
+    /// nothing in the spell's declaration names it. The shape that matters is a
+    /// fabricated battlefield PERMANENT: "The chosen objects and/or players each become a
+    /// target of that spell", so a creature the caster never chose is not a target, and
+    /// recording one lets a first-spell gate ("The first spell you cast during each of
+    /// your turns that targets a creature costs {W}{B} less", Head of the Class) read a
+    /// qualification the announcement never produced.
+    UndeclaredTarget {
+        /// The target the latch names and the declaration does not.
+        target: TargetRef,
+    },
+    /// CR 601.2c + CR 115.1: the latch omits a target the spell DID declare, and the
+    /// save still holds that object. An undeclared omission reads as "the cast declared
+    /// nothing", which re-opens the zero-count first-spell gate the cast already spent —
+    /// the loss [`crate::types::game_state::PersistedRestoreError::UnknownPendingTargetFacts`]
+    /// exists to prevent, reached by deleting one fact instead of the whole latch.
+    OmittedDeclaredTarget {
+        /// The declared target the latch omits.
+        target: TargetRef,
+    },
+    /// CR 601.2c + CR 400.7: the latch states a zone that the announced target's own
+    /// incarnation pin forbids. A pin that is still current proves the object never changed
+    /// zones since the declaration, so the zone it was announced in IS the zone it is in
+    /// now; a fact that says otherwise was not captured at that announcement.
+    ///
+    /// This is deliberately an IDENTITY-and-ZONE binding, never a live characteristics
+    /// comparison: an object's characteristics are re-derived continuously (CR 613.1), so
+    /// a target that was a creature when it was announced may not be one by the time the
+    /// cast resumes — Heliod, Sun-Crowned at five devotion, then a white permanent
+    /// sacrificed for mana. Refusing that drift would reject an honest save; the
+    /// announcement-time characteristics live only in the latch and are not re-derivable.
+    /// CR 601.2c + CR 115.4: the fact's recorded snapshot does not satisfy the filter that
+    /// declared this slot, so it records a target the spell could not have announced. The
+    /// slot's filter is recovered by re-walking the effect tree in lockstep with the slot
+    /// builder; the snapshot is evaluated against it as recorded, never against the live
+    /// object, so legitimate characteristics drift is not refused.
+    SnapshotContradictsDeclaredFilter {
+        /// The declared target whose recorded snapshot fails its own slot's filter.
+        target: TargetRef,
+    },
+    ZoneContradictsAnnouncement {
+        /// The declared target whose announcement zone the latch contradicts.
+        target: TargetRef,
+        stated: AnnouncedTargetZone,
+        /// The zone the pin proves the announcement happened in.
+        pinned: Zone,
+    },
+}
+
+impl std::fmt::Display for AnnouncedTargetFactConflict {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::UndeclaredTarget { target } => write!(
+                f,
+                "its announced-target latch names the target {target:?}, which the spell's own \
+                 declaration never chose (CR 601.2c: the chosen objects and/or players each \
+                 become a target of that spell)"
+            ),
+            Self::OmittedDeclaredTarget { target } => write!(
+                f,
+                "its announced-target latch omits the declared target {target:?}, which the \
+                 save still holds, so the record would state a declaration the cast did not \
+                 make (CR 601.2c + CR 115.1)"
+            ),
+            Self::SnapshotContradictsDeclaredFilter { target } => write!(
+                f,
+                "its announced-target latch records characteristics for {target:?} that the \
+                 filter declaring that slot never admitted (CR 601.2c + CR 115.4)"
+            ),
+            Self::ZoneContradictsAnnouncement {
+                target,
+                stated,
+                pinned,
+            } => write!(
+                f,
+                "its announced-target latch states the zone {stated:?} for {target:?}, but that \
+                 target's announcement pin is absent or still current, and the object is in \
+                 {pinned:?} now, so it never changed zones and was announced there \
+                 (CR 601.2c + CR 400.7)"
+            ),
+        }
     }
 }
 
@@ -16412,6 +17903,38 @@ impl TrustedGameStateEnvelope {
     }
 }
 
+/// CR 601.2h + CR 601.2i: one parked carrier that holds a cast whose mana has ALREADY
+/// been paid, and the settled amount that carrier states for it.
+///
+/// A prepaid cast's payment facts travel in several shapes. The ordinary root repeats the
+/// amount it settled on its own [`PendingCast`]
+/// (`PendingCast::prepaid_actual_mana_spent`), and the finalizers gate the whole payment
+/// — and the copy it stamps — out while that field is set. A root suspended by a
+/// commit-time prompt instead carries `PendingCast::prepaid_finalization` and states no
+/// amount at all: its continuation reads the amount off the copy the finalizers stamped.
+/// The Sneak / Web-slinging returned-creature move (CR 702.190a / CR 702.188a) parks a
+/// cast whose `PendingCast` was rebuilt at the park (`PendingCast::new`) and so also
+/// states no amount: its amount rides beside the announced-target latch on
+/// [`PendingCostMoveCompletion::FinalizeCast`]. `stated_amount` keeps that difference
+/// visible rather than collapsing both shapes into "some amount was paid", and `None`
+/// says the resumed cast will read the copy — which is exactly why the copy is validated
+/// for every carrier rather than only the ones that state a number.
+struct PrepaidSpellCopyCarrier<'a> {
+    /// The cast this carrier holds — the temp that carries the payment copy.
+    pending: &'a PendingCast,
+    /// The amount THIS carrier states the payment settled at, or `None` when it states
+    /// none and the resumed cast will read the copy the finalizers stamped.
+    stated_amount: Option<u32>,
+    /// CR 700.14: the player this carrier's continuation passes to the finalizer as its
+    /// `player`, and therefore the player `expend_credits_for_cast` credits with the
+    /// remainder. It is READ FROM THE RESUME ROOT the continuation actually runs, not
+    /// assumed from `pending.ability.controller`: a commit-time prompt
+    /// (`WaitingFor::PayCost { player, .. }`), a replaced life payment and a paused cost
+    /// move each thread their own field into the finalizer, and a save that states a
+    /// different one has decided by itself whose "Whenever you expend N" fires.
+    credited_player: PlayerId,
+}
+
 impl GameState {
     /// CR 616.1 load migration: re-derive `ReplacementChoice::kind` from the
     /// live pending replacement.
@@ -16485,6 +18008,2212 @@ impl GameState {
                 }
             )
         });
+    }
+
+    /// CR 601.2c + CR 115.1 + CR 106.3: refuse a playable save whose cast history
+    /// cannot prove what its spells declared or what paid for them.
+    ///
+    /// `SpellCastRecord` carries `Option` provenance precisely so that "this cast
+    /// declared nothing" (`Some(vec![])`) stays distinguishable from "this record
+    /// predates the field" (`None`). The distinction matters because a first-spell
+    /// gate is a zero-count comparison: treating an unknown as a non-qualifying
+    /// cast would let a later spell receive a once-per-turn benefit a second time.
+    /// The announced targets and the paying mana sources of a finished cast are
+    /// gone, so the provenance is not reconstructable — the honest outcome is to
+    /// refuse the load at the one chokepoint every production restore funnels
+    /// through, rather than to admit an unknown as a known-empty.
+    fn reject_unknown_cast_history_provenance(&self) -> Result<(), PersistedRestoreError> {
+        let unknown = self
+            .spells_cast_this_turn_by_player
+            .values()
+            .chain(self.spells_cast_this_game_by_player.values())
+            .flat_map(|records| records.iter())
+            .find(|record| {
+                record.targets.is_none() || record.mana_spent_source_snapshots.is_none()
+            });
+        match unknown {
+            Some(record) => Err(PersistedRestoreError::UnknownCastHistoryProvenance {
+                spell_object_id: record.spell_object_id,
+            }),
+            None => Ok(()),
+        }
+    }
+
+    /// CR 111.1 + CR 115.9 + CR 601.2c + CR 109.2 + CR 109.2a: refuse a save whose
+    /// committed activation facts leave one of their two unreconstructable axes
+    /// unstated — the target's announcement ZONE and the subject's TOKEN bit.
+    ///
+    /// Both questions are asked of the same carriers in one walk, because both are
+    /// facts about the epoch the record was written for: the zone decides which
+    /// target-gated rules could fire (CR 109.2 / CR 109.2a, below), and the token
+    /// bit decides whether a token leaf over that subject holds
+    /// ([`PersistedRestoreError::UnknownCapturedTokenBit`], which also covers the
+    /// record's own source). Neither is recoverable from anything else the save
+    /// holds, so both are refused rather than defaulted.
+    ///
+    /// [`ActivationTargetFact::Object::zone`] is what separates a permanent on
+    /// the battlefield from a card in some other zone for a bare type
+    /// description (CR 109.2) and for a "card … in [zone]" description
+    /// (CR 109.2a). A save that omits it predates the field, and the record's
+    /// characteristics snapshot answers for every zone — so reading the
+    /// omission as the battlefield would let a card announced in a graveyard
+    /// satisfy a battlefield-scoped qualifier. The announcement is gone, so the
+    /// zone is not reconstructable: the honest outcome is refusal at the shared
+    /// chokepoint, the same outcome
+    /// [`PersistedRestoreError::UnknownCastHistoryProvenance`] gives an unknown
+    /// declared-target or paying-source provenance.
+    ///
+    /// Both carriers of an activation's facts are checked. A COMPLETED
+    /// activation's record is already in [`Self::abilities_activated_this_turn_by_player`],
+    /// which is what a "the first activated ability you activate each turn …"
+    /// reader scans; a PENDING activation's record still rides its
+    /// `ability.activation_record` and is published to that same journal by
+    /// `casting::take_activation_record` when payment finishes, so an unchecked
+    /// pending record would become an unchecked journal row one action later.
+    /// The pending walk reuses [`Self::pending_cast_owners`] rather than
+    /// restating the custody list, so a carrier added to it is covered for free.
+    ///
+    /// CR 115.1 + CR 601.2c + CR 109.2: a SPELL's facts are the same question, so
+    /// they get the same answer. A completed cast's list rides
+    /// [`SpellCastRecord::targets`] in
+    /// [`Self::spells_cast_this_turn_by_player`] /
+    /// [`Self::spells_cast_this_game_by_player`] — the records a "the first spell
+    /// you cast during each of your turns that targets a creature costs {W}{B}
+    /// less" gate counts (Head of the Class). Checking only that the LIST exists
+    /// ([`Self::reject_unknown_cast_history_provenance`]) leaves a list whose
+    /// object target states no zone: the fact then fails every zone-scoped
+    /// qualifier (`filter::declared_target_fact_matches` leaves the zone axis
+    /// unanswerable), the record reads as "did not qualify", and the gate's
+    /// zero-count comparison hands the NEXT spell the same once-per-turn
+    /// reduction a second time. An omitted zone is not evidence of a
+    /// non-qualifying target; it is absent evidence, and it is refused like every
+    /// other absent zone in this walk.
+    ///
+    /// The same list reaches the history one action later through the cast
+    /// FINALIZATION carriers — `PendingCast::committed_target_facts`,
+    /// `PrepaidSpellFinalization` → `FinalizePrePaymentChecks`,
+    /// `PendingCostMoveCompletion::{FinalizeCast, FinalizeDelvedCast}` and
+    /// `PendingSacrificeCostCompletion::FinalizeSpell`. They are checked for the
+    /// same reason the pending activation record is: an unchecked carrier becomes
+    /// an unchecked history row as soon as it finalizes.
+    ///
+    /// The resolved-rules command operand
+    /// (`ResolvedLedgerEdit::AbilityActivated { record }`) is deliberately NOT
+    /// refused. It is not a history reader: it is the replay authority that
+    /// appends the record to the journal above, and an unstated zone there
+    /// answers "no zone" all the way down
+    /// (`filter::declared_target_fact_matches` leaves the zone axis
+    /// unanswerable), so it under-grants a target-gated benefit instead of
+    /// fabricating the battlefield claim this guard exists to stop. Any save
+    /// whose journal row exists is refused on that row regardless of the
+    /// operand.
+    fn reject_unstated_activation_target_facts(&self) -> Result<(), PersistedRestoreError> {
+        /// CR 601.2c + CR 111.1 + CR 115.9: the two facts a committed target MUST
+        /// state — the zone it was announced in and the token bit it held. Both are
+        /// unreconstructable after the fact, for the reasons their error variants
+        /// document.
+        fn check_fact(
+            fact: &ActivationTargetFact,
+            owner: Option<ObjectId>,
+        ) -> Result<(), PersistedRestoreError> {
+            if let Some(target) = fact.object_target_without_announced_zone() {
+                return Err(PersistedRestoreError::UnknownAnnouncedTargetZone { owner, target });
+            }
+            if let Some(subject) = fact.object_target_without_token_capture() {
+                return Err(PersistedRestoreError::UnknownCapturedTokenBit { owner, subject });
+            }
+            Ok(())
+        }
+        fn check(record: &AbilityActivationRecord) -> Result<(), PersistedRestoreError> {
+            // CR 602.2 + CR 111.1: the record's OWN source fact answers a
+            // source-scoped modifier's token leaf (`Mutagen Man, Living Ooze`; `The
+            // Dining Car`), so it is stated by every record this build writes.
+            if record.source_token == CapturedTokenBit::Unknown {
+                return Err(PersistedRestoreError::UnknownCapturedTokenBit {
+                    owner: Some(record.source),
+                    subject: record.source,
+                });
+            }
+            for fact in &record.targets {
+                check_fact(fact, Some(record.source))?;
+            }
+            Ok(())
+        }
+        fn check_facts(facts: &[ActivationTargetFact]) -> Result<(), PersistedRestoreError> {
+            for fact in facts {
+                // A bare fact list names no owning object; the refusal still names
+                // the target whose fact the save cannot prove, which is what a
+                // reader needs.
+                check_fact(fact, None)?;
+            }
+            Ok(())
+        }
+        /// CR 601.2c: check the fact list a cast's OWN finalization latch carries.
+        /// `None` is the pre-latch shape, which
+        /// [`Self::reject_unknown_pending_target_facts`] already refuses; a list
+        /// that exists but states no zone is this guard's question.
+        fn check_latched(
+            facts: &Option<Vec<ActivationTargetFact>>,
+        ) -> Result<(), PersistedRestoreError> {
+            match facts.as_deref() {
+                Some(facts) => check_facts(facts),
+                None => Ok(()),
+            }
+        }
+        /// CR 115.1 + CR 601.2c: the same question for a COMPLETED cast. Its record
+        /// names its own spell, so the refusal can say which one.
+        fn check_completed_cast(record: &SpellCastRecord) -> Result<(), PersistedRestoreError> {
+            let Some(facts) = record.targets.as_deref() else {
+                // An ABSENT list is `reject_unknown_cast_history_provenance`'s
+                // refusal, not this one.
+                return Ok(());
+            };
+            for fact in facts {
+                // The record's own spell object names the owner, already optional.
+                check_fact(fact, record.spell_object_id)?;
+            }
+            Ok(())
+        }
+        fn check_pre_payment_checks(
+            checks: &Option<Box<FinalizePrePaymentChecks>>,
+        ) -> Result<(), PersistedRestoreError> {
+            match checks.as_deref() {
+                Some(checks) => check_latched(&checks.committed_target_facts),
+                None => Ok(()),
+            }
+        }
+        fn check_prepaid(
+            prepared: &Option<Box<PrepaidSpellFinalization>>,
+        ) -> Result<(), PersistedRestoreError> {
+            match prepared.as_deref() {
+                Some(prepared) => check_pre_payment_checks(&prepared.pre_payment_checks),
+                None => Ok(()),
+            }
+        }
+        fn check_completion(
+            completion: &PendingCostMoveCompletion,
+        ) -> Result<(), PersistedRestoreError> {
+            match completion {
+                PendingCostMoveCompletion::FinalizeCast {
+                    committed_target_facts,
+                    ..
+                } => check_latched(committed_target_facts),
+                PendingCostMoveCompletion::FinalizeDelvedCast {
+                    pre_payment_checks, ..
+                } => check_pre_payment_checks(pre_payment_checks),
+                PendingCostMoveCompletion::FinishPending
+                | PendingCostMoveCompletion::CompleteSelectedReturnToHand { .. }
+                | PendingCostMoveCompletion::PublishExileTrackedSet => Ok(()),
+            }
+        }
+        fn check_sacrifice_completion(
+            completion: &PendingSacrificeCostCompletion,
+        ) -> Result<(), PersistedRestoreError> {
+            match completion {
+                PendingSacrificeCostCompletion::FinalizeSpell {
+                    pre_payment_checks, ..
+                } => check_latched(&pre_payment_checks.committed_target_facts),
+                PendingSacrificeCostCompletion::SelectedNonSelf
+                | PendingSacrificeCostCompletion::SelfRef
+                | PendingSacrificeCostCompletion::ResolutionOptionalPayment { .. } => Ok(()),
+            }
+        }
+
+        for record in self
+            .abilities_activated_this_turn_by_player
+            .values()
+            .flat_map(|rows| rows.iter())
+        {
+            check(record)?;
+        }
+        // CR 115.1 + CR 601.2c: completed SPELL history, the records a
+        // "the first spell you cast … that targets a creature" gate counts. A
+        // record whose list is absent is
+        // `reject_unknown_cast_history_provenance`'s question; a list that exists
+        // and states no zone for an object target is this guard's.
+        for record in self
+            .spells_cast_this_turn_by_player
+            .values()
+            .chain(self.spells_cast_this_game_by_player.values())
+            .flat_map(|rows| rows.iter())
+        {
+            check_completed_cast(record)?;
+        }
+        for owner in self.pending_cast_owners() {
+            let Some(pending) = self.pending_cast_at(owner) else {
+                continue;
+            };
+            if let Some(record) = pending.ability.activation_record.as_deref() {
+                check(record)?;
+            }
+            if let Some(facts) = pending.committed_target_facts.as_deref() {
+                check_facts(facts)?;
+            }
+            // CR 601.2h: the same cast's finalization carriers, which write the
+            // history row this walk just read one action later.
+            check_prepaid(&pending.prepaid_finalization)?;
+        }
+        // CR 601.2h + CR 601.2i: the cost-move completion payloads are not
+        // pending-cast owners, so the custody walk above cannot reach them — the
+        // same reason `reject_unknown_pending_target_facts` checks them separately.
+        match self.pending_cost_move_resume.as_ref() {
+            Some(PendingCostMoveResume::Cast { completion, .. }) => check_completion(completion)?,
+            Some(PendingCostMoveResume::SacrificeForCost { completion, .. }) => {
+                check_sacrifice_completion(completion)?
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    /// CR 106.3 + CR 106.4 + CR 400.7: ADMIT or refuse every floating unit, and
+    /// BIND a legacy pin-less one to the producing epoch the SAVE proves.
+    ///
+    /// A current-format save pins every unit at production
+    /// (`ManaUnit::source_incarnation`), so the RECOVERY half of this guard only
+    /// has work to do on legacy pools written before the pin existed. See
+    /// [`Self::saved_producer_epoch`] for the per-unit decision and, for each
+    /// answer, the record in the save that carries it.
+    ///
+    /// An explicit pin is a claim, not proof, and this boundary VALIDATES it
+    /// against the same independent per-pip records
+    /// ([`Self::pip_recorded_producer_epochs`]): the pin, the journal's copy of the
+    /// unit for the pip, the producer NODE production wrote for that pip, and the
+    /// pool's ledger entry for the same pip are all statements about one unit, so two
+    /// epochs among them are a save that contradicts itself. Refusing that
+    /// ([`PersistedRestoreError::ContradictoryFloatingManaProvenance`]) is not
+    /// pedantry: a retained copy's mana re-pinned to the epoch of the Treasure that
+    /// later occupied the same storage id is admitted by a trusting guard and then
+    /// priced as that Treasure at payment time, which is the misattribution the
+    /// whole rule forbids. A save that carries no independent per-pip record
+    /// contradicts nothing, so its pin stands.
+    ///
+    /// The rule is one sentence: **a unit's producer is a fact about that unit,
+    /// recorded where that unit was produced, and nothing re-derived at restore
+    /// time can supply it.** The records that count all name ONE unit: the pin on
+    /// the pooled unit, the pin and producer node the journal wrote for that pip at
+    /// production, the pool's per-unit producer ledger, and — only where the id
+    /// answers for no object at all — the sole epoch its exit last-known
+    /// information records. Whatever occupies the storage ID NOW is not one of
+    /// them: CR 400.7 makes a moved object "a new object with no memory of, or
+    /// relation to, its previous existence", so a save that offers only the live
+    /// occupant offers no evidence, and this guard refuses it. That refusal is the
+    /// whole point — the shape it rejects is the one where a copy's retained trigger
+    /// mana would be priced as the Treasure Cloudshift returned in its place.
+    ///
+    /// Admitting a unit is not enough on its own. A unit admitted without a pin
+    /// re-derives its source from the live board at every later read, so a blink
+    /// that reuses the storage id turns an honest admission into a mis-attributed
+    /// payment. That is why every admitted unit leaves here STAMPED with the epoch
+    /// the save proves — the same value
+    /// `mana_payment::producing_incarnation_for_ability` would have pinned live.
+    ///
+    /// A RECOVERED stamp is applied to BOTH copies of the unit: the pool's, and
+    /// every copy the resolved-rules journal holds of the same pip
+    /// ([`ResolvedRulesJournal::bind_unit_epoch`]). They must agree or the save is
+    /// unreadable — a payment records the spent unit against the produced one and
+    /// `ResolvedRulesJournal::validate_serialized_authority` compares them whole,
+    /// CR 400.7's epoch included — so a pool-only stamp would let this boundary
+    /// admit a save whose successor it writes cannot be loaded.
+    ///
+    /// Recovery is not the only case that writes a journal copy, and that is the
+    /// same rule seen from the other side. Admission never writes one epoch over a
+    /// different one the save carried — that would overwrite one record with the
+    /// other before the decoder that compares copies ever saw the disagreement,
+    /// which is how a contradiction gets laundered into a loadable save. But it also
+    /// never leaves an admitted unit's copies disagreeing, because a copy with NO
+    /// pin beside a pool unit WITH one produces exactly the unreadable successor the
+    /// recovered case exists to prevent. So the decision is single: gather every
+    /// independent record (the pool's pin, the journal copy's pin, the producer node's
+    /// epoch, the pool's ledger entry), refuse if any two disagree, and otherwise let
+    /// the one agreed epoch fill in the copies that state nothing. A pin that arrived
+    /// in the save is evidence, so a copy that already carries the same epoch is left
+    /// exactly as recorded; only a copy that states nothing is completed, and only
+    /// from an epoch another record independently proves.
+    ///
+    /// Convoke markers are taps, not mana production (CR 702.51a), and are never
+    /// refused or stamped. Neither is a unit that names no producing object at all
+    /// ([`NO_PRODUCING_OBJECT`]): CR 106.3 asks which object produced the mana, and
+    /// a unit naming none has no source to bind — and, because that id answers for
+    /// no object and for no last-known information, no later read can attribute it
+    /// to anything either, so admission adds no guess.
+    /// `pub(crate)` so the batch-cost witness can drive the admission pass directly
+    /// instead of round-tripping a save through serde to measure it
+    /// (`mana_payment::pooled_producer_ledger_index_tests`).
+    pub(crate) fn bind_or_reject_floating_mana_provenance(
+        &mut self,
+    ) -> Result<(), PersistedRestoreError> {
+        let mut binding: Vec<(PlayerId, Vec<(usize, u64)>)> = Vec::new();
+        // Every binding the journal's own copies of an admitted unit still owe —
+        // recovered from the save, or completed from an epoch the save proves.
+        // Deferred like `binding` so the read pass above runs on an unmodified state.
+        let mut journal_binding: Vec<(ManaPipId, u64)> = Vec::new();
+        let mut refusal: Option<PersistedRestoreError> = None;
+        // CR 118.3a: the pool's producer ledger is read once per admitted unit, so it
+        // is INDEXED once here for the whole save — the same index the payment path
+        // builds for its batch (`mana_payment::PooledProducerLedgerIndex`). An
+        // unindexed read charges every floating unit a walk of the whole ledger,
+        // which a save holding many carried units makes quadratic on every load.
+        // The index borrows the ledger immutably and is dropped before any binding is
+        // written below.
+        let ledger_index = crate::game::mana_payment::PooledProducerLedgerIndex::new(
+            &self.pooled_mana_producer_snapshots,
+        );
+        for player in &self.players {
+            let mut stamped: Vec<(usize, u64)> = Vec::new();
+            // Pool position, not pip: `ManaPipId(0)` is the unstamped sentinel, so
+            // two unjournaled units of one pool share a pip and only pool order
+            // tells them apart.
+            for (index, unit) in player.mana_pool.units().enumerate() {
+                if unit.is_convoke_payment() || unit.source_id == NO_PRODUCING_OBJECT {
+                    continue;
+                }
+                match unit.source_incarnation {
+                    // CR 106.3 + CR 400.7 + CR 118.3a: an explicit pin is a CLAIM
+                    // about this unit's producer, so admission checks it against the
+                    // save's own INDEPENDENT per-pip records — the journal's
+                    // production record for this pip and the pool's producer ledger
+                    // entry keyed by it — before trusting it. When they disagree, one
+                    // tenure's epoch is being applied to another tenure's unit, which
+                    // is exactly the misattribution this boundary exists to stop: a
+                    // copy's retained mana re-pinned to the Treasure that later
+                    // occupied the same storage id would be priced as that Treasure.
+                    // Neither side is preferred and nothing is repaired here, because
+                    // the only repair available is to overwrite one record with the
+                    // other and BOTH are evidence the game itself wrote; the save is
+                    // refused instead (`ContradictoryFloatingManaProvenance`).
+                    Some(pinned) => match self.pip_recorded_producer_epochs(&ledger_index, &unit) {
+                        Some(recorded) => {
+                            if recorded.iter().any(|epoch| *epoch != pinned) {
+                                refusal = Some(
+                                    PersistedRestoreError::ContradictoryFloatingManaProvenance {
+                                        player: player.id,
+                                        source_id: unit.source_id,
+                                        pinned,
+                                        recorded,
+                                    },
+                                );
+                                break;
+                            }
+                            // CR 118.3a + CR 106.3: every independent record agrees with
+                            // the pin (or the save carries none for this pip — an intact
+                            // save whose pin is the only record of the producer), so the
+                            // epoch is proven and the pin stands. What the pin must not do
+                            // is stand alone: a journal copy that carries NO pin would
+                            // leave the produced unit saying `None` while the payment
+                            // records the spent unit against it carrying this epoch, and
+                            // `ResolvedRulesJournal::validate_serialized_authority`
+                            // compares the copies whole — the save written after that
+                            // payment could not be loaded back. The proven epoch therefore
+                            // COMPLETES the copies that state nothing. A copy that already
+                            // carries an epoch is left exactly as recorded: it was compared
+                            // above, and recovery never overwrites evidence the save
+                            // carried.
+                            if self.journal_copy_omits_pin(&unit) {
+                                journal_binding.push((unit.pip_id, pinned));
+                            }
+                        }
+                        // CR 118.3a + CR 400.7: a per-pip record names a DIFFERENT
+                        // producing object than this unit does. That is the same
+                        // contradiction stated about the source instead of the epoch.
+                        None => {
+                            refusal =
+                                Some(PersistedRestoreError::ContradictoryFloatingManaProvenance {
+                                    player: player.id,
+                                    source_id: unit.source_id,
+                                    pinned,
+                                    recorded: Vec::new(),
+                                });
+                            break;
+                        }
+                    },
+                    None => match self.saved_producer_epoch(&ledger_index, &unit) {
+                        // CR 106.3 + CR 400.7: the save names this unit's epoch, so
+                        // admission BINDS it. An admitted unit left pin-less would
+                        // re-derive its source from the live board at every later
+                        // read, so a blink that reuses the storage id would turn an
+                        // honest admission into a mis-attributed payment.
+                        Some(incarnation) => {
+                            stamped.push((index, incarnation));
+                            // CR 118.3a: a RECOVERED pin is written to the journal's
+                            // copies as well as the pool's, so both copies of the unit
+                            // carry the same epoch and the payment that spends it writes
+                            // a save the next load can read.
+                            journal_binding.push((unit.pip_id, incarnation));
+                        }
+                        // CR 106.3 + CR 400.7: no record in the save names THIS
+                        // unit's producer, and the nearest substitute available here
+                        // — the object that occupies the storage id now — is a
+                        // different object from the one that made the mana
+                        // (CR 400.7), so reading it would fabricate the
+                        // source-qualified answer the game never established.
+                        None => {
+                            refusal =
+                                Some(PersistedRestoreError::AmbiguousFloatingManaProvenance {
+                                    player: player.id,
+                                    source_id: unit.source_id,
+                                });
+                            break;
+                        }
+                    },
+                };
+            }
+            if refusal.is_some() {
+                break;
+            }
+            if !stamped.is_empty() {
+                binding.push((player.id, stamped));
+            }
+        }
+        if let Some(error) = refusal {
+            return Err(error);
+        }
+        // CR 106.3 + CR 118.3a: the journal's copies of each admitted unit carry the
+        // same binding the pool's does, so the payment that spends the restored unit
+        // records a produced unit and a spent unit that agree — the journal compares
+        // them whole when the save is decoded, and one that did not would write a save
+        // the engine could not load back.
+        for (pip, proven) in journal_binding {
+            self.resolved_rules_journal.bind_unit_epoch(pip, proven);
+        }
+        // Rebuilt through `ManaPool::from_units` — the constructor the pool's own
+        // wire codec uses — so slot order, pips and shape merging stay the
+        // engine's, not a second implementation's.
+        for player in &mut self.players {
+            let Some((_, stamped)) = binding.iter().find(|(owner, _)| *owner == player.id) else {
+                continue;
+            };
+            let units: Vec<crate::types::mana::ManaUnit> = player
+                .mana_pool
+                .units()
+                .enumerate()
+                .map(
+                    |(index, unit)| match stamped.iter().find(|(at, _)| *at == index) {
+                        Some((_, incarnation)) => crate::types::mana::ManaUnit {
+                            source_incarnation: Some(*incarnation),
+                            ..unit
+                        },
+                        None => unit,
+                    },
+                )
+                .collect();
+            player.mana_pool = crate::types::mana::ManaPool::from_units(units);
+        }
+        Ok(())
+    }
+
+    /// CR 106.3 + CR 113.7 + CR 118.3a + CR 400.7: every DISTINCT epoch the save's
+    /// PER-PIP records state for ONE floating unit's producer, or `None` when one of
+    /// them names a different producing object than the unit does.
+    ///
+    /// Three records here name a unit by its PIP, and all three are read every time:
+    ///
+    /// * the PIN the journal's own copy of the unit carries
+    ///   (`ManaUnit::source_incarnation` on `ProducedManaUnit`);
+    /// * the PRODUCER NODE production wrote for that pip
+    ///   ([`ResolvedRulesJournal::produced_source_epoch`]) — the object whose ability
+    ///   generated the mana, captured at announcement for an activated mana ability
+    ///   (CR 602.2a) and latched for a triggered one (CR 603.2);
+    /// * the pool's ledger entry keyed by the same pip
+    ///   (`pooled_mana_producer_snapshots`).
+    ///
+    /// The node is read INDEPENDENTLY of the copy's pin, never as its fallback. They
+    /// are different records written by different code, so a save can carry a pin on
+    /// every copy and a node naming another epoch; a guard that consulted the node
+    /// only when the pin was absent would never compare them, and the pin (the value
+    /// the payment resolves through) would go unchecked. CR 113.7 makes the producer
+    /// node the record of which object generated the ability, which is what CR 106.3
+    /// makes the mana's source, so it is a fact about this unit and not a restatement
+    /// of the pin.
+    ///
+    /// Each of these is a statement about this one unit, so they are directly
+    /// comparable — to each other, and to an explicit `ManaUnit::source_incarnation`
+    /// pin the pool carries. Two records stating the SAME epoch are one fact stated
+    /// twice, not two facts, so the answer is deduplicated: the callers compare the
+    /// epochs, and a repeated equal epoch must not read as a disagreement.
+    ///
+    /// The step-scoped exit LKI is deliberately NOT part of this list: it is keyed by
+    /// the storage id, not by the pip, so it can only ever answer the weaker question
+    /// "which tenure of this id left", and that answer belongs to
+    /// [`Self::saved_producer_epoch`]'s recovery path rather than to the validation
+    /// of a pin.
+    ///
+    /// An empty `Vec` means the save names no per-pip producer for this unit at all.
+    ///
+    /// `ledger_index` is the caller's ONE index of
+    /// [`Self::pooled_mana_producer_snapshots`], built for the whole admission batch
+    /// (`mana_payment::PooledProducerLedgerIndex`): every unit this boundary admits
+    /// asks the ledger the same question, so indexing it once keeps admission linear
+    /// in the save's floating units instead of quadratic.
+    fn pip_recorded_producer_epochs(
+        &self,
+        ledger_index: &crate::game::mana_payment::PooledProducerLedgerIndex<'_>,
+        unit: &crate::types::mana::ManaUnit,
+    ) -> Option<Vec<u64>> {
+        fn push_distinct(epochs: &mut Vec<u64>, epoch: u64) {
+            if !epochs.contains(&epoch) {
+                epochs.push(epoch);
+            }
+        }
+        let source_id = unit.source_id;
+        let pip = unit.pip_id;
+        // Every distinct epoch the save's per-pip records state.
+        let mut recorded: Vec<u64> = Vec::new();
+        if pip.0 == 0 {
+            return Some(recorded);
+        }
+        // CR 106.3 + CR 118.3a: the journal's production record belongs to this pip;
+        // one naming a different object is a save contradicting itself.
+        if let Some(produced) = self.resolved_rules_journal.produced_unit(pip) {
+            if produced.source_id != source_id {
+                return None;
+            }
+            // The pin this copy of the unit carries, when it carries one.
+            if let Some(epoch) = produced.source_incarnation {
+                push_distinct(&mut recorded, epoch);
+            }
+            // CR 113.7 + CR 400.7: the producer node names the object that generated
+            // the ability, not whatever holds the id now — and it is compared even
+            // when the copy above already carries a pin.
+            if let Some(note) = self.resolved_rules_journal.produced_source_epoch(pip) {
+                if note.object_id != source_id {
+                    return None;
+                }
+                push_distinct(&mut recorded, note.incarnation);
+            }
+        }
+        // CR 118.3a: the ledger rows keyed by this unit's own pip, read through the
+        // caller's batch index rather than by a scan of the whole ledger.
+        let mut ledger = ledger_index.rows_for(pip);
+        if let Some(snapshot) = ledger.next() {
+            if snapshot.source_id != source_id {
+                return None;
+            }
+            push_distinct(&mut recorded, snapshot.source_incarnation);
+            if ledger.next().is_some() {
+                // CR 400.7: two epochs for one unit are two tenures it cannot be.
+                return None;
+            }
+        }
+        Some(recorded)
+    }
+
+    /// CR 118.3a + CR 400.7: whether the journal holds a copy of THIS unit that
+    /// carries no producing pin — the one shape admission must COMPLETE rather than
+    /// merely validate.
+    ///
+    /// A unit exists twice in a save: in its owner's pool, and in the resolved-rules
+    /// journal that recorded its production and its payment.
+    /// [`ResolvedRulesJournal::validate_serialized_authority`] compares those copies
+    /// whole, CR 400.7's epoch included, so a missing pin on the journal's side is
+    /// not a harmless omission: the payment that spends the pooled copy records a
+    /// spent unit carrying the epoch against a produced unit carrying `None`, and the
+    /// save the engine writes after that payment cannot be read back. Admission
+    /// completes the copy from the epoch the save proves instead, which is safe
+    /// precisely because the epoch was proven by a record this unit owns — a
+    /// disagreeing copy never reaches here, because
+    /// [`Self::pip_recorded_producer_epochs`] refuses the save first.
+    ///
+    /// `false` for a unit the journal does not hold at all (nothing to complete) and
+    /// for one whose copies already carry the pin.
+    fn journal_copy_omits_pin(&self, unit: &crate::types::mana::ManaUnit) -> bool {
+        self.resolved_rules_journal
+            .produced_unit(unit.pip_id)
+            .is_some_and(|produced| produced.source_incarnation.is_none())
+    }
+
+    /// CR 605.3b + CR 602.2a + CR 113.7 + CR 400.7: refuse a save whose PARKED mana
+    /// activation's producer evidence contradicts itself.
+    ///
+    /// The floating-unit validation beside this one
+    /// ([`Self::bind_or_reject_floating_mana_provenance`]) checks every record a
+    /// save carries about its POOL. A parked activation's records are records about
+    /// an activation instead, and nothing compared them: the resume authority read
+    /// the node for its epoch without asking whether it was this activation's node
+    /// at all, so a `TriggeredMana` node naming the same object and epoch, or an
+    /// `ActivatedMana` node naming a different object, was read as evidence — or,
+    /// when the object differed, silently as no evidence, which is the same
+    /// fail-open stated twice.
+    ///
+    /// The same question has further wrong answers, and they are exactly the ones
+    /// this walk used to miss because each boundary kept its own subset of checks:
+    /// an `ActivatedMana` node of this very object and incarnation belonging to an
+    /// EARLIER activation of it (Prismite's "{2}: Add one mana of any color." makes
+    /// that ordinary — two activations, one source, one epoch); the same object and
+    /// epoch on a node that has already SETTLED, whether the save states an
+    /// occurrence beside the reference or none, because a settled node settles a
+    /// finished activation (CR 605.2 + CR 605.3b, which is why the witness is the
+    /// node's settlement record and not its pip list); an announcement epoch that names
+    /// a different incarnation than the retained node does (CR 400.7); and a pending
+    /// that names its producer nowhere at all while carrying the ability snapshot
+    /// only this engine's activation entry writes.
+    ///
+    /// [`PendingManaAbility::activation_producer_evidence`] is the ONE authority on
+    /// those shapes, and this walk applies it to every parked activation the save
+    /// holds — the same call the resume authority makes
+    /// (`crate::game::mana_abilities::resolve_parked_activation_producer`), so
+    /// neither boundary can admit what the other refuses. Absence stays admissible
+    /// (that is the legacy shape, whose announcement epoch is exact evidence); only
+    /// a contradiction is refused.
+    fn reject_contradictory_parked_activation_evidence(&self) -> Result<(), PersistedRestoreError> {
+        let mut refusal: Option<PersistedRestoreError> = None;
+        self.for_each_parked_mana_ability(&mut |pending| {
+            if refusal.is_some() {
+                return;
+            }
+            if let Err(reason) = pending.activation_producer_evidence(&self.resolved_rules_journal)
+            {
+                debug_assert_eq!(
+                    reason.node(),
+                    pending.recorded_activation_node(&self.resolved_rules_journal),
+                    "the refusal must be about the node this save names"
+                );
+                refusal = Some(PersistedRestoreError::ContradictoryParkedActivation {
+                    source_id: pending.source_id,
+                    reason,
+                });
+            }
+        });
+        match refusal {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
+    }
+
+    /// CR 605.3b: refuse a save whose settlement records are not in COHERENT CUSTODY —
+    /// and, for a genuinely older save, bind the records it never stated.
+    ///
+    /// The record is [`SettlementNode::settled`], and the question this boundary
+    /// answers is a question about the PAYLOAD, not about one node: a node that
+    /// states no settlement is the older shape only if the save as a whole is older.
+    /// Asking per node let a CURRENT save delete one key and be read as legacy — the
+    /// two-activation Heronblade Elite witness points both of a parked activation's
+    /// records at the first, zero-output activation (CR 605.2 keeps it a mana ability
+    /// that resolved with no mana, so it carries no pip for the pip-based reading to
+    /// notice), deletes that node's settlement record, and is then admitted: the node
+    /// reads OPEN, and the colour answer writes the second activation's production
+    /// into an activation CR 605.3b already finished.
+    ///
+    /// So the format is decided ONCE, from the markers only this build writes:
+    ///
+    /// * any retained node states a settlement
+    ///   ([`ResolvedRulesJournal::states_settlement_record`]), or
+    /// * any parked mana-ability activation states an occurrence
+    ///   ([`PendingManaAbility::activated_mana_occurrence`], which no released build
+    ///   wrote — `LEGACY_PARKED_ACTIVATION_OCCURRENCE_ABSENT_2026Q4`).
+    ///
+    /// Either marker makes the payload CURRENT, and a current payload in which any
+    /// node of a settlement-recording kind states nothing is `Err`
+    /// ([`PersistedRestoreError::ContradictorySettlementCustody`]) — never the older
+    /// reading. With NEITHER marker the payload is uniformly older, and its records
+    /// are bound from the pip list they were always read from
+    /// ([`ResolvedRulesJournal::bind_legacy_settlement_records`]) so that the next
+    /// save states them and the mixed shape cannot arise.
+    ///
+    /// Deleting the settlement key from a current save cannot spoof this: the key is
+    /// one node's, and the format is read from the whole payload, so every other
+    /// lifecycle node's record and the parked activation's own occurrence remain to
+    /// reveal the format. Stripping EVERY current-format marker is a different act —
+    /// it fabricates a payload this build never wrote, indistinguishable by
+    /// construction from the uniform older saves that must keep restoring (see
+    /// `dina_conqueror_4p.json.gz`) — and that residual shape is exactly the legacy
+    /// admission documented in `docs/LEGACY-COMPAT.md`, not a hole this rule can close
+    /// without refusing real saves.
+    fn bind_or_reject_settlement_custody(&mut self) -> Result<(), PersistedRestoreError> {
+        let mut states_occurrence = false;
+        self.for_each_parked_mana_ability(&mut |pending| {
+            states_occurrence |= pending.activated_mana_occurrence.is_some();
+        });
+        let payload_is_current =
+            states_occurrence || self.resolved_rules_journal.states_settlement_record();
+        if !payload_is_current {
+            self.resolved_rules_journal.bind_legacy_settlement_records();
+            return Ok(());
+        }
+        match self.resolved_rules_journal.unrecorded_settlement_node() {
+            Some(node) => Err(PersistedRestoreError::ContradictorySettlementCustody { node }),
+            None => Ok(()),
+        }
+    }
+
+    /// CR 605.3b: every parked mana-ability activation this saved state holds.
+    ///
+    /// The roots are the state-level fields that can carry one, listed so a new
+    /// carrier has to be classified here:
+    ///
+    /// * the live prompt — through `WaitingFor::continued_mana_ability`, the same
+    ///   authority that decides a prompt continues an activation, so a prompt
+    ///   variant added to that classification is walked for free;
+    /// * the replacement-paused cost root (`pending_cost_move_resume`), together
+    ///   with the suspended parent chain its cost cursor holds (each parent is a
+    ///   parked activation of its own);
+    /// * a paused triggered-mana fixed point (`pending_triggered_mana_resume`),
+    ///   whose `outer_resume` re-enters the suspended mana frame, either through
+    ///   its resume root or through an already-built colour prompt;
+    /// * the deferred-life-cost root (`pending_deferred_life_cost_resume`), whose
+    ///   mana root re-enters one.
+    ///
+    /// Each activation's own suspended chain (CR 605.3c) is walked too.
+    fn for_each_parked_mana_ability(&self, f: &mut impl FnMut(&PendingManaAbility)) {
+        fn for_each_parent_activation(
+            cursor: &ManaAbilityCostCursor,
+            f: &mut impl FnMut(&PendingManaAbility),
+        ) {
+            if let Some(parent) = cursor.parent.as_deref() {
+                parent.pending.suspended_chain().for_each(&mut *f);
+                for_each_parent_activation(&parent.cursor, f);
+            }
+        }
+        if let Some(pending) = self.waiting_for.continued_mana_ability() {
+            pending.suspended_chain().for_each(&mut *f);
+        }
+        if let Some(resume) = self.pending_cost_move_resume.as_ref() {
+            match resume {
+                PendingCostMoveResume::ManaAbilityPayment { pending, cursor } => {
+                    pending.suspended_chain().for_each(&mut *f);
+                    for_each_parent_activation(cursor, f);
+                }
+                PendingCostMoveResume::CollectEvidencePayment { resume, .. } => {
+                    if let CollectEvidenceResume::ManaAbility {
+                        pending_mana_ability,
+                    } = resume.as_ref()
+                    {
+                        pending_mana_ability.suspended_chain().for_each(&mut *f);
+                    }
+                }
+                _ => {}
+            }
+        }
+        if let Some(paused) = self.pending_triggered_mana_resume.as_deref() {
+            match &paused.outer_resume {
+                ManaTriggerFixedPointResume::Root { resume, .. } => {
+                    if let ManaAbilityResume::ManaAbilityManaPayment {
+                        pending_mana_ability,
+                    } = resume.as_ref()
+                    {
+                        pending_mana_ability.suspended_chain().for_each(&mut *f);
+                    }
+                }
+                ManaTriggerFixedPointResume::ColorChoice(choice) => {
+                    if let ManaChoiceContext::ManaAbility(pending) = &choice.context {
+                        pending.suspended_chain().for_each(&mut *f);
+                    }
+                }
+                ManaTriggerFixedPointResume::Parent => {}
+            }
+        }
+        if let Some(DeferredLifeCostResume::ManaRoot { resume, .. }) =
+            self.pending_deferred_life_cost_resume.as_ref()
+        {
+            if let ManaAbilityResume::ManaAbilityManaPayment {
+                pending_mana_ability,
+            } = resume.as_ref()
+            {
+                pending_mana_ability.suspended_chain().for_each(&mut *f);
+            }
+        }
+    }
+
+    /// CR 106.3 + CR 106.4 + CR 400.7 + CR 605.1a: the producing epoch the SAVE
+    /// itself proves for ONE pin-less floating unit, or `None` when it proves none.
+    ///
+    /// The question is which of `source_id`'s tenures made THIS unit (CR 400.7: a
+    /// moved object "becomes a new object with no memory of, or relation to, its
+    /// previous existence"), so every record consulted is a record about this
+    /// unit. Three of them can answer, and none is a read of the board at restore
+    /// time:
+    ///
+    /// 1. **The journal's own production record for this pip**
+    ///    (`ResolvedRulesJournal::produced_unit`,
+    ///    [`ResolvedRulesJournal::produced_source_epoch`]). Production writes the
+    ///    unit against its pip the moment the mana is made, together with the
+    ///    producer node's exact `ObjectIncarnationRef` — the epoch captured at
+    ///    announcement for an activated mana ability (CR 602.2a, before a cost can
+    ///    move the source) and the trigger's own latched source for a triggered one
+    ///    (CR 603.2). This is the finest-grained record in the save: it survives
+    ///    everything except
+    ///    [`GameState::reset_resolved_rules_journal`], which turn advancement runs
+    ///    because the journal is turn-scoped.
+    /// 2. **The unit's own entry in the pool's producer ledger**
+    ///    ([`GameState::pooled_mana_producer_snapshots`]). The engine writes one per
+    ///    still-pooled unit whose producing incarnation is no longer live at a step
+    ///    or phase boundary
+    ///    (`mana_payment::retain_pooled_mana_producer_snapshots`, immediately
+    ///    before the boundary clears the incarnation-keyed LKI caches), keyed by the
+    ///    unit's PIP. It is the record that outlives a cleared journal, so it is what
+    ///    answers for a retention effect ("Players don't lose unspent mana as steps
+    ///    and phases end") carrying mana into a later turn. Its pip key is what stops
+    ///    one tenure's fact being applied to a different tenure's unit sharing the
+    ///    same storage id.
+    /// 3. **The save's step-scoped, incarnation-keyed exit LKI**
+    ///    ([`GameState::lki_by_incarnation`]) when the id holds no object at all.
+    ///    A departure this step writes the departed object's epoch and its
+    ///    last-known information there (CR 400.7 + CR 608.2h), so exactly one
+    ///    epoch for the id names the tenure that left and what it was — the record
+    ///    the payment itself reads (`filter::exit_lki_for_incarnation`). Two are
+    ///    two tenures the save cannot tell apart, and no entry for an id that
+    ///    answers for no object is the refusal below (CR 704.5d makes a token in a
+    ///    non-battlefield zone cease to exist, so a save taken after one names
+    ///    nothing at all about a producer that is gone).
+    ///
+    /// Records 1 and 2 are both about this unit, so they must agree: two epochs for
+    /// one pip are two tenures the save itself contradicts. Two epochs across the
+    /// two records are the same contradiction. Either is refused rather than
+    /// resolved by preference.
+    ///
+    /// Nothing else answers. In particular the object that occupies the storage id
+    /// now does not: CR 400.7 makes it a different object from the one that made
+    /// the mana whenever the id changed tenures, and the save holds no record of
+    /// whether it did — the turn journal that could have said so is cleared at turn
+    /// advancement, which is precisely what let a retention effect carry a unit past
+    /// the tenure that produced it. A guard that read the live object anyway would
+    /// price a copy's retained trigger mana as the Treasure Cloudshift returned in
+    /// its place, and grant cascade for mana a Treasure never made.
+    fn saved_producer_epoch(
+        &self,
+        ledger_index: &crate::game::mana_payment::PooledProducerLedgerIndex<'_>,
+        unit: &crate::types::mana::ManaUnit,
+    ) -> Option<u64> {
+        let source_id = unit.source_id;
+        // CR 118.3a: a per-pip record naming a different object than the unit does is
+        // a save contradicting itself about who produced the mana, so it answers
+        // nothing here rather than answering something weaker.
+        let recorded = self.pip_recorded_producer_epochs(ledger_index, unit)?;
+        if let Some((first, rest)) = recorded.split_first() {
+            // CR 400.7: two epochs recorded for this unit are two tenures, and the
+            // save does not say which produced it.
+            return rest.iter().all(|epoch| epoch == first).then_some(*first);
+        }
+        if self.objects.contains_key(&source_id) {
+            // CR 400.7: an object still occupies the id, and no unit-keyed record
+            // names this unit's producer. The occupant answers for itself, not for
+            // whatever previous tenure made the mana — so there is no answer here.
+            return None;
+        }
+        // CR 400.7 + CR 608.2h: with no object to read, the only record left is the
+        // exit LKI this save carries for the id, keyed by the epoch that left —
+        // exactly one of them is an answer.
+        let mut epochs = self
+            .lki_by_incarnation
+            .get(&source_id)
+            .into_iter()
+            .flat_map(|history| history.keys().copied());
+        epochs
+            .next()
+            .and_then(|proven| epochs.next().is_none().then_some(proven))
+    }
+
+    /// CR 702.132a + CR 118.3a: bind a parked cast's Assist contribution to the
+    /// payment it claims — or refuse the save.
+    ///
+    /// A committed Assist helper's units are mana spent to cast the spell
+    /// (CR 702.132a: the helper pays "before you begin to pay the total cost", and
+    /// CR 118.3a: paying mana is removing the indicated mana from a player's pool),
+    /// so the cast's payment snapshot owes them exactly as much as the caster's own.
+    /// `PendingCast::assist_contributed_units` carries them, `AssistState::Paid`
+    /// records the amount the helper paid, and the resolved-rules journal records the
+    /// same spend as a payment command naming the payer, the recipient and the units
+    /// ([`ResolvedRulesJournal::spent_units_for_payer_and_recipient`]).
+    ///
+    /// Those three are one payment stated up to three times, which makes admission a
+    /// single question asked in both directions:
+    ///
+    /// * **The save states units.** Then a helper must be recorded as having paid
+    ///   for this cast, and the units must number exactly the generic mana the helper
+    ///   committed (CR 118.3a: one unit per point), AND the journal must prove the
+    ///   spend: the save's unit list is a CLAIM, and a correctly sized claim no
+    ///   journal record backs is refused
+    ///   ([`AssistContributionConflict::JournalRecordsNoSpendForSavedUnits`]) rather
+    ///   than admitted on its own. Where the journal did record the same payer's
+    ///   spend on the same spell, the two records must name the same units — the same
+    ///   pips in the same order. A record naming other units is a contradiction and is
+    ///   refused, because nothing in the save settles which payment happened. A record
+    ///   naming the SAME pips but describing them differently (a different source,
+    ///   epoch, restriction, grant or expiry) is one payment whose copy was corrupted:
+    ///   CR 118.3a makes the removal of those very units the payment, so the journal's
+    ///   description — written at the removal — is restored over the save's, and the
+    ///   resumed cast consumes it.
+    /// * **The save states no units but the cast is `Paid`.** Then the units must be
+    ///   RECOVERED from the journal, which recorded them at the spend boundary. They
+    ///   are admitted only when the journal proves exactly the recorded amount for
+    ///   this helper on this spell; otherwise the save is refused
+    ///   ([`AssistContributionConflict::PaidGenericUnproven`]) rather than defaulted
+    ///   to "the helper spent nothing", which is the loss this boundary exists to
+    ///   stop — a source-qualified cast predicate (Rain of Riches' cascade) reads the
+    ///   very pips that default would delete.
+    ///
+    /// A `Paid` helper who paid 0 generic mana is not a gap: nothing was removed from
+    /// anyone's pool, so the empty unit list is the payment.
+    ///
+    /// Every carrier that can hold a parked cast is checked — the assertion-free
+    /// enumeration [`Self::pending_cast_owners`], because this runs on untrusted input.
+    /// A recovery is written back through the shared owner authority
+    /// ([`Self::pending_cast_at_mut`]), so EVERY carrier the finalizers can park a
+    /// cast in receives it. That is not only the external payment root and the
+    /// current prompt: [`apply_committed_assist`](crate::game::casting_costs) pays the
+    /// helper inside the finalizer, and the caster's own payment can then pause on a
+    /// replaced life payment (CR 118.11 — K'rrik's "you may pay 2 life rather than pay
+    /// that mana", a life loss the Bloodletter of Aclazotz class modifies and whose
+    /// ordering or substitute the replacement pipeline has to park, CR 616.1). That
+    /// pause parks the cast — with a paid contribution already on it — in
+    /// [`PendingCastOwner::DeferredLifeCost`], so a boundary that could only write the
+    /// other two would refuse a payment it had already proved. A carrier the shared
+    /// authority reports no writable cast for is still refused rather than admitted
+    /// half-completed: a recovered contribution that could not be put back is exactly
+    /// the "the helper spent nothing" shape this rule exists to reject.
+    ///
+    /// Refusals are made here, at the single chokepoint every production restore
+    /// funnels through ([`Self::prepare_for_restore`]), so resume and admission cannot
+    /// disagree about whether a contribution exists.
+    pub(crate) fn bind_or_reject_assist_contribution_provenance(
+        &mut self,
+    ) -> Result<(), PersistedRestoreError> {
+        // Read pass on an unmodified state: deciding borrows `self` (the parked casts
+        // and the journal), and the write-back below needs it mutably.
+        let mut recoveries: Vec<(PendingCastOwner, AssistContribution)> = Vec::new();
+        for owner in self.pending_cast_owners() {
+            let Some(pending) = self.pending_cast_at(owner) else {
+                continue;
+            };
+            if let Some(claim) = self.proven_assist_contribution_units(pending)? {
+                recoveries.push((owner, claim));
+            }
+        }
+        for (owner, claim) in recoveries {
+            // CR 118.3a: the journal-bound units are the payment the helper actually
+            // made, so admission restores them verbatim — the same units the spend
+            // boundary captured and the finalizers record. The carrier is resolved
+            // through the same owner authority the finalizers park through, so every
+            // prompt shape they can produce is writable here.
+            let Some(pending) = self.pending_cast_at_mut(owner) else {
+                // The read pass above saw this owner holding the cast, so an owner with
+                // no writable counterpart is the two accessors disagreeing about one
+                // untrusted save. Refuse rather than drop a payment the journal proved.
+                return Err(PersistedRestoreError::ContradictoryAssistContribution {
+                    source_id: claim.source_id,
+                    reason: AssistContributionConflict::UnwritableRecoveryCarrier {
+                        helper: claim.helper,
+                        generic: claim.generic,
+                        journal: claim.units.len(),
+                    },
+                });
+            };
+            pending.assist_contributed_units = claim.units;
+        }
+        Ok(())
+    }
+
+    /// CR 702.132a + CR 118.3a: the contribution this save proves for the parked
+    /// cast, or `None` when the save's own units stand (they were present and are the
+    /// proven record). `Some(claim)` is the journal-bound payment the caller must
+    /// write back onto the cast, because the save's copy of it does not say what the
+    /// journal says.
+    ///
+    /// The journal is the record the spend boundary wrote at the removal itself
+    /// (CR 118.3a: paying mana is removing those units), so where the two records name
+    /// the same pips but describe them differently, the journal's description is the
+    /// binding one — a save that keeps the pips and changes a unit's source or epoch
+    /// is carrying a corrupted copy of one payment, not a second payment. The
+    /// differences that cannot be reconciled at all are refused instead: a different
+    /// count, or a different pip (a different unit).
+    fn proven_assist_contribution_units(
+        &self,
+        pending: &PendingCast,
+    ) -> Result<Option<AssistContribution>, PersistedRestoreError> {
+        let source_id = pending.object_id;
+        let saved = &pending.assist_contributed_units;
+        let (helper, generic) = match pending.assist_state {
+            AssistState::Paid { helper, generic } => (helper, generic),
+            // CR 702.132a: the helper's units are captured at the spend boundary and
+            // `Paid` is stamped in the same step, so nothing short of `Paid` can have
+            // produced them. Units with no payer are a payment that names nobody.
+            state => {
+                if saved.is_empty() {
+                    return Ok(None);
+                }
+                return Err(PersistedRestoreError::ContradictoryAssistContribution {
+                    source_id,
+                    reason: AssistContributionConflict::UnitsWithoutPaidHelper { state },
+                });
+            }
+        };
+        // CR 702.132a + CR 118.3a: one typed claim, so the restored units can only
+        // ever travel with the payer and the amount they were proved for.
+        let claim = |units: Vec<ManaUnit>| AssistContribution {
+            source_id,
+            helper,
+            generic,
+            units,
+        };
+        // The spell object is still on the stack under the same storage id, so the
+        // recipient the spend recorded is the live object's own incarnation — the
+        // value `mana_payment_recipient` built at the spend boundary.
+        let recipient = self.mana_payment_recipient(source_id, helper);
+        let journal = self
+            .resolved_rules_journal
+            .spent_units_for_payer_and_recipient(helper, &recipient);
+        if saved.is_empty() {
+            // CR 702.132a: a helper that paid 0 generic mana removed nothing, so the
+            // empty list is the payment and no recovery is owed.
+            if generic == 0 {
+                return Ok(None);
+            }
+            // CR 118.3a: the payment's units must come from the journal's own record
+            // of THIS helper's spend on THIS spell, at exactly the recorded amount.
+            return match journal {
+                Some(units) if units.len() as u32 == generic => Ok(Some(claim(units))),
+                other => Err(PersistedRestoreError::ContradictoryAssistContribution {
+                    source_id,
+                    reason: AssistContributionConflict::PaidGenericUnproven {
+                        helper,
+                        generic,
+                        journal: other.map(|units| units.len()),
+                    },
+                }),
+            };
+        }
+        // CR 118.3a: `generic` generic mana is paid with exactly that many units.
+        if saved.len() as u32 != generic {
+            return Err(PersistedRestoreError::ContradictoryAssistContribution {
+                source_id,
+                reason: AssistContributionConflict::UnitCountDisagreesWithPaidGeneric {
+                    helper,
+                    generic,
+                    saved: saved.len(),
+                },
+            });
+        }
+        // CR 118.3a + CR 702.132a: a POSITIVE contribution is proven by the journal's
+        // own record of this helper's spend on this spell, or it is not admitted (the
+        // `else` below). A correctly sized unit list that no journal record backs is a
+        // claim about a removal the journal never recorded — the save cannot prove the
+        // mana left anyone's pool — so it is refused rather than read as agreement with
+        // a spend that does not exist. (`spent_units_for_payer_and_recipient` answers
+        // `None` for "no record", which is NOT the same fact as "spent nothing".)
+        //
+        // Where the journal DID record the helper's spend on this spell, the two
+        // records are one payment stated twice. They must name the same units — the
+        // same COUNT (one unit per point of generic mana) in the same order — and where
+        // they do, the journal's description of those units is the binding one: it was
+        // written at the removal, so a save that kept the pips but changed a unit's
+        // source, epoch, restrictions, grants or expiry is carrying a corrupted copy of
+        // one payment rather than a second payment, and the resumed cast must consume
+        // the record the spend actually made. Different units altogether cannot be
+        // reconciled and are refused below.
+        if let Some(journal) = journal {
+            let same_units = journal.len() == saved.len()
+                && journal
+                    .iter()
+                    .zip(saved.iter())
+                    .all(|(recorded, carried)| recorded.pip_id == carried.pip_id);
+            if !same_units {
+                return Err(PersistedRestoreError::ContradictoryAssistContribution {
+                    source_id,
+                    reason: AssistContributionConflict::JournalDisagreesWithSavedUnits {
+                        helper,
+                        journal: journal.len(),
+                        saved: saved.len(),
+                    },
+                });
+            }
+            // `ManaUnit`'s `PartialEq` compares exactly what a payment-derived
+            // predicate can read — CR 106.3 source and CR 400.7 producing incarnation,
+            // colour, supertype, CR 106.6 restrictions and grants, expiry — and
+            // deliberately not `pip_id`: the pip is the runtime identity tag the test
+            // above already compared, and it is excluded from unit equality so that
+            // CR 104.4b mandatory-loop detection can still see two pool units of one
+            // shape as equal. So this asks exactly "does the save describe the payment
+            // the journal recorded".
+            let identical = journal
+                .iter()
+                .zip(saved.iter())
+                .all(|(recorded, carried)| recorded == carried);
+            if !identical {
+                return Ok(Some(claim(journal)));
+            }
+            return Ok(None);
+        }
+        // CR 118.3a: the save states a payment the journal never recorded, so nothing
+        // proves the units it names were ever removed from the helper's pool. Absence
+        // is not agreement: admitting this on the save alone is the judgement call the
+        // maintainer rejected.
+        Err(PersistedRestoreError::ContradictoryAssistContribution {
+            source_id,
+            reason: AssistContributionConflict::JournalRecordsNoSpendForSavedUnits {
+                helper,
+                generic,
+                saved: saved.len(),
+            },
+        })
+    }
+
+    /// CR 106.3 + CR 118.3a + CR 601.2h: VALIDATE the prepaid spell copy a parked cast
+    /// carries against the spend the save settled — or refuse the save.
+    ///
+    /// The Assist guard above binds the helper's UNITS to the payment they claim. Those
+    /// units are not the only copy of the payment, and they are not the one the rules
+    /// read: the payment finalizers stamp a second record on the SPELL OBJECT itself —
+    /// the amount spent, the per-color tally, and one producer snapshot per unit
+    /// (`crate::game::casting::mana_spent_source_snapshots`, called from
+    /// `pay_mana_cost_with_choices_and_resume` and its pool-only sibling). That copy is
+    /// what a source-qualified cast predicate answers from: Rain of Riches' "The first
+    /// spell you cast each turn that mana from a Treasure was spent to cast has
+    /// cascade." is `FilterProp::ManaSpentFromSource` over
+    /// `GameObject::mana_spent_source_snapshots`.
+    ///
+    /// A save can therefore carry units that agree with the journal while its spell copy
+    /// disagrees with the same spend — and on the PREPAID path nothing re-derives it:
+    /// `finalize_cast_with_phyrexian_choices_inner` gates the entire payment (and the
+    /// stamping that rides it) out on `pending.prepaid_actual_mana_spent`, so the resumed
+    /// cast consumes whatever the save kept. That gate is why this guard exists, and why
+    /// it is asked here rather than at the finalizer.
+    ///
+    /// **The settled spend** is the resolved-rules journal's own record of every unit
+    /// spent toward THIS cast: one `ManaSpend` command per payment, written where the
+    /// mana left a pool (CR 118.3a: "Paying mana is done by removing the indicated mana
+    /// from a player's mana pool"). Both payers of an assisted cast are in it — the
+    /// helper's command, recorded at its own spend boundary, and the caster's — so the
+    /// same record proves the caster's units and the helper's without this boundary
+    /// having to name which is which. Two adjustments mirror the finalizers exactly:
+    /// convoke/improvise/waterbend markers are recorded but are NOT mana spent to cast
+    /// (CR 702.51a + CR 702.126a + CR 701.67a), so they are dropped, and the copy is
+    /// re-projected through the same capture authority the finalizers used, so the
+    /// comparison is against the facts a payment produces rather than a re-implementation
+    /// of them.
+    ///
+    /// Both directions are refusals, and neither is a rewrite: the copy is a fact about a
+    /// cast the rules already settled, so a save whose copy says something else has not
+    /// recorded that payment.
+    ///
+    /// * **The copy states more than the settle proves.** The units are a payment nobody
+    ///   made — the shape that GRANTS cascade for mana no Treasure produced.
+    /// * **The copy states less.** The saved units are a payment whose record was
+    ///   deleted — the shape that WITHHOLDS cascade for a Treasure the helper really
+    ///   sacrificed, which is the loss the Assist guard above was written to stop.
+    ///
+    /// The inverse zero-contribution case is decided deliberately rather than by
+    /// omission. A helper recorded as having paid 0 generic mana removed nothing
+    /// (CR 118.3a), so `proven_assist_contribution_units` admits the empty unit list as
+    /// the payment and owes no recovery — and the settled spend is then the caster's
+    /// units ALONE. This guard does not read that as "skip the copy": the copy must
+    /// state exactly the caster's spend and nothing more, so a zero contribution can
+    /// never launder a unit that no one paid. Conversely a copy that omits the caster's
+    /// own units is refused even though the helper's contribution is empty, because
+    /// "the helper paid nothing" says nothing about the caster's mana.
+    ///
+    /// Every carrier is checked through the assertion-free enumeration
+    /// ([`Self::pending_cast_owners`]), because this runs on untrusted input. Casts whose
+    /// payment has not run yet are out of scope and are not read: their park predates the
+    /// stamping, the finalizers clear and rewrite the copy when the payment does run, and
+    /// an activation's `prepaid_actual_mana_spent` is a different fact (an activated
+    /// ability's cost is not mana spent to CAST, and its source is a permanent that may
+    /// carry the stamps of its own earlier cast).
+    ///
+    /// The AMOUNT a carrier states is validated, not merely observed
+    /// ([`PrepaidSpellCopyConflict::StatedAmountDisagreesWithSettledSpend`]). The resume
+    /// consumes that number as the cast's `actual_mana_spent` — the CR 601.2h paid-facts
+    /// snapshot, the stack entry's recorded spend, and CR 700.14's per-player Expend
+    /// ledger — without re-deriving it, so a save that states a different amount rewrites
+    /// the cast's expenditure on a payment of another size. Where a carrier states
+    /// nothing, the resume reads the copy below, which is validated on its own.
+    ///
+    /// [`PendingCostMoveCompletion::FinalizeCast`] is a carrier of this payment too, and
+    /// it is not reachable through the `PendingCast` walk's own amount field: the Sneak /
+    /// Web-slinging returned-creature cost move (CR 702.190a / CR 702.188a) parks a
+    /// `PendingCast` rebuilt at the park, so its amount travels on the completion. The
+    /// same three facts are validated there — the stated amount, the copy, and (through
+    /// [`Self::reject_unknown_pending_target_facts`], the sibling rule that refuses it
+    /// before this one runs) the announced-target latch the resumed history write reads.
+    pub(crate) fn bind_or_reject_prepaid_spell_copy_provenance(
+        &self,
+    ) -> Result<(), PersistedRestoreError> {
+        for carrier in self.prepaid_spell_copy_carriers() {
+            self.proven_prepaid_spell_copy(&carrier)?;
+        }
+        Ok(())
+    }
+
+    /// CR 601.2h + CR 702.190a + CR 702.188a: every parked carrier in this save that holds
+    /// a cast whose payment has already run, with the amount each one states for it — or
+    /// `None` where the carrier states no amount and its continuation reads the copy.
+    ///
+    /// The `PendingCast` walk reuses [`Self::pending_cast_owners`], the single authority on
+    /// inline cast custody, and admits the two shapes that prove the payment ran: a stated
+    /// amount, and the commit-time `prepaid_finalization` whose continuation reads the
+    /// amount off the spell copy. The Sneak / Web-slinging cost-move carrier is added
+    /// separately because its amount is not on the cast it holds
+    /// ([`PendingCostMoveCompletion::FinalizeCast`]): reaching that park means the
+    /// finalizer already paid (it pays before handing the returned creature to the move),
+    /// so the copy on the spell is this cast's payment and is validated even when the
+    /// completion states no amount.
+    fn prepaid_spell_copy_carriers(&self) -> Vec<PrepaidSpellCopyCarrier<'_>> {
+        let mut carriers = Vec::new();
+        for owner in self.pending_cast_owners() {
+            let Some(pending) = self.pending_cast_at(owner) else {
+                continue;
+            };
+            // CR 601.2h: an activation's `prepaid_actual_mana_spent` is a different fact.
+            if pending.activation_ability_index.is_some() {
+                continue;
+            }
+            // CR 601.2h: TWO distinct shapes prove this cast's payment has already run,
+            // and a cast whose payment has not run states neither. The ordinary root
+            // repeats the amount it settled (`prepaid_actual_mana_spent`). The other
+            // shape is the commit-time prompt park — a hand discard or a sacrifice
+            // arrangement (`continue_after_cost_discard`, `pay_deferred_spell_sacrifices_at_commit`)
+            // — which carries `prepaid_finalization` instead: its continuation re-enters
+            // `resume_prepaid_spell_finalization`, and THAT reads the amount off the
+            // spell copy (`recorded_mana_spent_to_cast`) rather than off the root. Keying
+            // this enumeration on the amount alone would therefore skip exactly the roots
+            // whose continuation consumes an amount the root never states, leaving the
+            // copy that supplies it unvalidated. Both are admitted; `stated_amount` keeps
+            // "this root states no amount" (`None`) distinct from "it states this one",
+            // and the copy itself is validated against the settled spend either way.
+            if pending.prepaid_actual_mana_spent.is_none() && pending.prepaid_finalization.is_none()
+            {
+                continue;
+            }
+            carriers.push(PrepaidSpellCopyCarrier {
+                pending,
+                stated_amount: pending.prepaid_actual_mana_spent,
+                credited_player: self.pending_cast_resume_player(owner, pending),
+            });
+        }
+        // CR 601.2h + CR 700.14 + CR 702.66a: the cost-move roots are keyed by their
+        // COMPLETION VARIANT, because the completion is what decides whether the parked
+        // cast's mana has already been paid — not the optional data the `PendingCast`
+        // happens to carry. All three of these re-enter the same prepaid resume
+        // (`casting_costs.rs`'s `resume_prepaid_spell_finalization`), which consumes
+        // `pending.prepaid_actual_mana_spent` when it is set and otherwise falls back to
+        // the spell COPY (`recorded_mana_spent_to_cast`); that number then becomes the
+        // cast's `actual_mana_spent` — the CR 601.2h paid-facts snapshot and CR 700.14's
+        // per-player Expend ledger. A save that parked one of these with the amount erased
+        // would otherwise be skipped by the `PendingCast` walk above (which admits only a
+        // stated amount or a `prepaid_finalization`) and still resume against an
+        // unvalidated copy.
+        //
+        // The completion decides whether this park has already paid the cast's mana, so the
+        // match is exhaustive over BOTH enums: a wildcard here would be the same
+        // default-open shape this whole change exists to remove, and a future completion
+        // variant would inherit it silently.
+        let carried: Option<(&PendingCast, Option<u32>)> =
+            match self.pending_cost_move_resume.as_ref() {
+                Some(PendingCostMoveResume::Cast {
+                    pending,
+                    completion,
+                    ..
+                }) => pending.as_deref().and_then(|pending| {
+                    if !completion.settles_cast_mana() {
+                        return None;
+                    }
+                    // CR 702.190a + CR 702.188a: the Sneak / Web-slinging park REBUILT the
+                    // cast, so the amount rides on the completion rather than on the cast.
+                    let stated = match completion {
+                        PendingCostMoveCompletion::FinalizeCast {
+                            prepaid_actual_mana_spent,
+                            ..
+                        } => *prepaid_actual_mana_spent,
+                        PendingCostMoveCompletion::FinalizeDelvedCast { .. }
+                        | PendingCostMoveCompletion::FinishPending
+                        | PendingCostMoveCompletion::CompleteSelectedReturnToHand { .. }
+                        | PendingCostMoveCompletion::PublishExileTrackedSet => {
+                            pending.prepaid_actual_mana_spent
+                        }
+                    };
+                    Some((pending, stated))
+                }),
+                Some(PendingCostMoveResume::SacrificeForCost {
+                    pending,
+                    completion,
+                    ..
+                }) => pending.as_deref().and_then(|pending| {
+                    completion
+                        .settles_cast_mana()
+                        .then_some((pending, pending.prepaid_actual_mana_spent))
+                }),
+                Some(
+                    PendingCostMoveResume::WardSacrificePayment { .. }
+                    | PendingCostMoveResume::ReplacementMayCost { .. }
+                    | PendingCostMoveResume::Foretell { .. }
+                    | PendingCostMoveResume::UnlessBouncePayment { .. }
+                    | PendingCostMoveResume::ManaAbilityPayment { .. }
+                    | PendingCostMoveResume::LoyaltyActivation { .. }
+                    | PendingCostMoveResume::CounterAdditionUnlessPayment { .. }
+                    | PendingCostMoveResume::RandomDiscardUnlessPayment(..)
+                    | PendingCostMoveResume::TurnFaceUpCostMove { .. }
+                    | PendingCostMoveResume::CounterCostRemovalPayment { .. }
+                    | PendingCostMoveResume::CollectEvidencePayment { .. }
+                    | PendingCostMoveResume::ActivationMillPayment { .. },
+                )
+                | None => None,
+            };
+        if let Some((pending, stated_amount)) = carried {
+            if pending.activation_ability_index.is_none() {
+                carriers.push(PrepaidSpellCopyCarrier {
+                    pending,
+                    stated_amount,
+                    credited_player: self
+                        .pending_cast_resume_player(PendingCastOwner::CostMove, pending),
+                });
+            }
+        }
+        carriers
+    }
+
+    /// CR 700.14 + CR 601.2h: the player the continuation of `owner`'s parked cast passes to
+    /// the finalizer as its `player` — the field `expend_credits_for_cast` credits with the
+    /// payment's remainder, and therefore the field the split is decided against.
+    ///
+    /// This is READ from the resume root rather than assumed from
+    /// `PendingCast::ability`. A commit-time prompt threads `WaitingFor::PayCost::player`
+    /// through `continue_after_cost_discard` into `resume_prepaid_spell_finalization`; a
+    /// replaced life payment threads `DeferredLifeCostResume::Cast::player`; a paused cost
+    /// move threads `PendingCostMoveResume::Cast/SacrificeForCost::player`. Each of those is
+    /// an independent, save-decodable field, so "the cast's controller pays" is a claim the
+    /// save can falsify unless the guard reads the same field the resume does.
+    ///
+    /// A root that states no such field is answered with the cast's own controller, which
+    /// is then genuinely the value its continuation derives — there is nothing for the save
+    /// to disagree with.
+    fn pending_cast_resume_player(
+        &self,
+        owner: PendingCastOwner,
+        pending: &PendingCast,
+    ) -> PlayerId {
+        let stated = match owner {
+            // The external announcement carrier is resumed by the mana-payment prompt that
+            // owns it; the prompt states the payer of the outer spell cost.
+            // CR 601.2c + CR 700.14: the prompt that holds the cast STATES who acts on it, and
+            // that is the `player` its continuation hands the finalizer — `DistributeAmong`
+            // credits its own `player` (`engine.rs`, the distribution resume), not the cast's
+            // controller. Every cast-continuing prompt here carries both the cast and that
+            // field, so the payer is read from the same root the resume reads rather than
+            // guessed from `ability.controller`.
+            PendingCastOwner::External => match &self.waiting_for {
+                WaitingFor::ManaPayment { player, .. }
+                | WaitingFor::TargetSelection { player, .. }
+                | WaitingFor::ChooseXValue { player, .. }
+                | WaitingFor::ModeChoice { player, .. }
+                | WaitingFor::DistributeAmong { player, .. }
+                | WaitingFor::OptionalCostChoice { player, .. }
+                | WaitingFor::ChooseGiftRecipient { player, .. }
+                | WaitingFor::SpliceOffer { player, .. }
+                | WaitingFor::DefilerPayment { player, .. }
+                | WaitingFor::OrderCostReductions { player, .. }
+                | WaitingFor::ActivationCostOneOfChoice { player, .. }
+                | WaitingFor::CostTypeChoice { player, .. }
+                | WaitingFor::BlightChoice { player, .. }
+                | WaitingFor::HarmonizeTapChoice { player, .. }
+                | WaitingFor::ChooseAnnouncingOpponent { player, .. } => Some(*player),
+                _ => None,
+            },
+            PendingCastOwner::Prompt => match &self.waiting_for {
+                WaitingFor::PayCost {
+                    player,
+                    resume: CostResume::Spell { .. } | CostResume::SpellCost { .. },
+                    ..
+                } => Some(*player),
+                _ => None,
+            },
+            PendingCastOwner::DeferredLifeCost => {
+                match self.pending_deferred_life_cost_resume.as_ref() {
+                    Some(DeferredLifeCostResume::Cast { player, .. }) => Some(*player),
+                    Some(
+                        DeferredLifeCostResume::PayAmount { .. }
+                        | DeferredLifeCostResume::ManaRoot { .. }
+                        | DeferredLifeCostResume::TurnFaceUp { .. },
+                    )
+                    | None => None,
+                }
+            }
+            PendingCastOwner::CostMove => match self.pending_cost_move_resume.as_ref() {
+                Some(
+                    PendingCostMoveResume::Cast { player, .. }
+                    | PendingCostMoveResume::SacrificeForCost { player, .. }
+                    | PendingCostMoveResume::CounterCostRemovalPayment { player, .. }
+                    // CR 701.59: a collect-evidence cost can hold a CAST
+                    // (`CollectEvidenceResume::Casting`), and the root states the
+                    // player the resume credits, so it is read like the other
+                    // cast-holding roots.
+                    | PendingCostMoveResume::CollectEvidencePayment { player, .. },
+                ) => Some(*player),
+                Some(
+                    // CR 701.59: a mill cost parks ACTIVATIONS only
+                    // (`activation_ability_index` is `Some` on its pending), so no
+                    // cast carrier is ever resumed through it.
+                    PendingCostMoveResume::ActivationMillPayment { .. }
+                    | PendingCostMoveResume::WardSacrificePayment { .. }
+                    | PendingCostMoveResume::ReplacementMayCost { .. }
+                    | PendingCostMoveResume::Foretell { .. }
+                    | PendingCostMoveResume::UnlessBouncePayment { .. }
+                    | PendingCostMoveResume::ManaAbilityPayment { .. }
+                    | PendingCostMoveResume::LoyaltyActivation { .. }
+                    | PendingCostMoveResume::CounterAdditionUnlessPayment { .. }
+                    | PendingCostMoveResume::RandomDiscardUnlessPayment(..)
+                    | PendingCostMoveResume::TurnFaceUpCostMove { .. },
+                )
+                | None => None,
+            },
+            PendingCastOwner::DiscardForCost => {
+                self.pending_discard_for_cost
+                    .as_deref()
+                    .map(|resume| match resume {
+                        PendingDiscardForCostResume::Chosen { player, .. }
+                        | PendingDiscardForCostResume::Random { player, .. } => *player,
+                    })
+            }
+        };
+        stated.unwrap_or(pending.ability.controller)
+    }
+
+    /// CR 106.3 + CR 118.3a + CR 601.2h: the copy this save's settled spend proves for
+    /// one parked carrier, or the refusal that says how the two disagree. See
+    /// [`Self::bind_or_reject_prepaid_spell_copy_provenance`] for the rule.
+    fn proven_prepaid_spell_copy(
+        &self,
+        carrier: &PrepaidSpellCopyCarrier<'_>,
+    ) -> Result<(), PersistedRestoreError> {
+        let pending = carrier.pending;
+        if pending.activation_ability_index.is_some() {
+            return Ok(());
+        }
+        self.prove_prepaid_spell_copy(pending, carrier.stated_amount, carrier.credited_player)
+            .map(|_| ())
+    }
+
+    /// CR 601.2h + CR 700.14 + CR 118.3a + CR 207.2c: the ONE authority on "is this save's
+    /// prepaid spell copy the payment the journal records?".
+    ///
+    /// It compares every fact the copy carries against the settled spend together — the
+    /// stated amount, `mana_spent_to_cast_amount`, `colors_spent_to_cast`,
+    /// `mana_spent_source_snapshots`, and the per-player split the resume credits — because a
+    /// save that leaves one honest and forges another is exactly the shape that reaches the
+    /// CR 601.2i history. Both callers wrap the conflict in their own envelope: the restore
+    /// boundary refuses the load, the consumption site refuses the finalize.
+    pub(crate) fn prove_prepaid_spell_copy(
+        &self,
+        pending: &PendingCast,
+        stated_amount: Option<u32>,
+        credited_player: PlayerId,
+    ) -> Result<usize, PersistedRestoreError> {
+        let source_id = pending.object_id;
+        // CR 601.2h: only a cast whose payment has already run can carry a copy of THIS
+        // cast. Before that the field still holds whatever the object carried in — stale
+        // stamps from an earlier cast of the same card — and the finalizers overwrite it
+        // when the payment happens, so there is nothing here to validate.
+        //
+        // `prepaid_spell_copy_carriers` already drops every carrier this excludes; the
+        // discriminator is restated HERE, beside the read it protects, so a carrier added
+        // to that enumeration later cannot start validating a payment that never ran.
+        if pending.activation_ability_index.is_some() {
+            return Ok(0);
+        }
+        // A cast object this save does not carry is a different guard's question (the
+        // finalizers refuse to publish a spell whose object is gone); there is no copy to
+        // compare, and this rule does not invent one.
+        let Some(spell) = self.objects.get(&source_id) else {
+            return Ok(0);
+        };
+        // CR 118.3a: the recipient the spend was recorded against is the spell's own
+        // incarnation — the value `GameState::mana_payment_recipient` builds from the live
+        // object at every payment, and the value the helper's guard already asks for.
+        let recipient = ManaPaymentRecipient::Object(ObjectIncarnationRef::from_object(spell));
+        let settled: Vec<ManaUnit> = self
+            .resolved_rules_journal
+            .spent_mana()
+            .iter()
+            .filter(|spent| spent.recipient == recipient)
+            .map(|spent| spent.unit.clone())
+            .filter(|unit| !unit.is_convoke_payment())
+            .collect();
+        // CR 118.3a: paying mana removes exactly as many units as it pays, so the amount a
+        // carrier STATES for this payment must be the size of the payment the journal
+        // recorded. Presence is not the fact: the resume consumes this number as the
+        // cast's spent mana (CR 601.2h paid facts, CR 700.14 Expend) instead of
+        // re-deriving it, so a save stating another amount has not recorded this payment.
+        if let Some(stated_amount) = stated_amount {
+            if stated_amount as usize != settled.len() {
+                return Err(PersistedRestoreError::ContradictoryPrepaidSpellCopy {
+                    source_id,
+                    reason: PrepaidSpellCopyConflict::StatedAmountDisagreesWithSettledSpend {
+                        stated_amount,
+                        settled: settled.len(),
+                    },
+                });
+            }
+        }
+        // CR 207.2c: the color tally the settled units produce, through the same fold the
+        // finalizers use. Colorless mana contributes nothing, exactly as there.
+        let mut settled_colors = crate::types::mana::ColoredManaCount::default();
+        for unit in &settled {
+            settled_colors.add_unit(unit);
+        }
+        if spell.mana_spent_to_cast_amount as usize != settled.len() {
+            return Err(PersistedRestoreError::ContradictoryPrepaidSpellCopy {
+                source_id,
+                reason: PrepaidSpellCopyConflict::AmountDisagreesWithSettledSpend {
+                    copy_amount: spell.mana_spent_to_cast_amount,
+                    // CR 601.2h: reported, never compared — this flag is a
+                    // trigger-collection transient the engine clears after collection,
+                    // while the amount and the snapshots are the latched payment facts.
+                    copy_marks_spent: spell.mana_spent_to_cast,
+                    settled: settled.len(),
+                },
+            });
+        }
+        if spell.colors_spent_to_cast != settled_colors {
+            return Err(PersistedRestoreError::ContradictoryPrepaidSpellCopy {
+                source_id,
+                reason: PrepaidSpellCopyConflict::ColorsDisagreeWithSettledSpend {
+                    copy: spell.colors_spent_to_cast.clone(),
+                    settled: settled_colors,
+                },
+            });
+        }
+        // CR 106.3 + CR 400.7: the producers are the payment's own provenance, re-projected
+        // through the single capture authority rather than compared field by field here, so
+        // this guard cannot drift from what the finalizers write.
+        let settled_producers = crate::game::casting::mana_spent_source_snapshots(self, &settled);
+        if spell.mana_spent_source_snapshots != settled_producers {
+            return Err(PersistedRestoreError::ContradictoryPrepaidSpellCopy {
+                source_id,
+                reason: PrepaidSpellCopyConflict::ProducersDisagreeWithSettledSpend {
+                    copy: spell
+                        .mana_spent_source_snapshots
+                        .iter()
+                        .map(|snapshot| snapshot.source_id)
+                        .collect(),
+                    settled: settled_producers
+                        .iter()
+                        .map(|snapshot| snapshot.source_id)
+                        .collect(),
+                },
+            });
+        }
+        // CR 700.14 + CR 702.132a + CR 118.3a: the copy above is this cast's COMBINED
+        // payment; the resume spends it per PLAYER, and every one of those credits is
+        // derived from the parked cast rather than read from the copy. So the SPLIT is
+        // validated here, against the same journal that proved the copy, or the save
+        // decides who spent what by itself.
+        //
+        // The caster is credited with the remainder (`expend_credits_for_cast`), which is
+        // the whole payment when the cast carries no contribution and the payment less the
+        // contribution's units otherwise. `assist_contribution` is the same typed claim
+        // that split is computed from, filtered to this cast exactly as that function
+        // filters it.
+        let contribution = pending
+            .assist_contribution()
+            .filter(|contribution| contribution.source_id == source_id);
+        // CR 118.3a: paying mana removes exactly the units it pays, so the units the
+        // contribution credits the helper must be the units the journal records as spent
+        // BY that helper on this cast. The sibling Assist guard binds the contribution's
+        // unit LIST; this binds its SIZE to the same payer-keyed record the resume's credit
+        // is spent from — including the zero case, where "the helper paid 0" is only true
+        // if the journal records no spend by the helper at all.
+        let helper_settled = contribution
+            .as_ref()
+            .map(|contribution| self.payer_settled_units(contribution.helper, &recipient));
+        let helper_credit = contribution
+            .as_ref()
+            .map_or(0, |contribution| contribution.units.len());
+        // CR 700.14: the caster's share is the remainder of the combined payment. Reading
+        // it, rather than assuming the caster paid it all, is what keeps a helper's mana out
+        // of the caster's Expend tally (and the caster's mana out of the helper's).
+        //
+        // The payer is the one the RESUME credits, read off its own root by
+        // [`Self::pending_cast_resume_player`], not `pending.ability.controller` by
+        // assumption: `expend_credits_for_cast` is handed the continuation's `player`
+        // (`WaitingFor::PayCost::player` on the commit-time prompt path), so a save that
+        // states a different player there credits that player — an opponent's "Whenever you
+        // expend N" instead of the caster's. Requiring the journal to corroborate that
+        // player makes the field and the record agree, or the save is refused.
+        //
+        // CR 118.3a: the helper's settled units are a subset of the settled payment, so a
+        // claim larger than the payment itself fails the `helper_settled == helper_credit`
+        // conjunct below rather than underflowing this subtraction — no save can reach the
+        // remainder with a claim the payment cannot cover.
+        let caster = credited_player;
+        let caster_credit = settled.len().saturating_sub(helper_credit);
+        let caster_settled = self.payer_settled_units(caster, &recipient);
+        if helper_settled.unwrap_or_default() != helper_credit || caster_settled != caster_credit {
+            return Err(PersistedRestoreError::ContradictoryPrepaidSpellCopy {
+                source_id,
+                reason: PrepaidSpellCopyConflict::PayerSplitDisagreesWithSettledSpend {
+                    caster,
+                    caster_credit,
+                    caster_settled,
+                    helper: contribution
+                        .as_ref()
+                        .map(|contribution| contribution.helper),
+                    helper_credit,
+                    helper_settled,
+                },
+            });
+        }
+        Ok(settled.len())
+    }
+
+    /// CR 118.3a + CR 700.14: how many units the resolved-rules journal records as spent by
+    /// `payer` toward `recipient` — the same count, and the same convoke exclusion, as the
+    /// settled-spend projection [`Self::proven_prepaid_spell_copy`] compares the cast copy
+    /// with (CR 702.51a: a convoked creature's tap is not mana paid).
+    fn payer_settled_units(&self, payer: PlayerId, recipient: &ManaPaymentRecipient) -> usize {
+        self.resolved_rules_journal
+            .spent_units_for_payer_and_recipient(payer, recipient)
+            .map_or(0, |units| {
+                units
+                    .iter()
+                    .filter(|unit| !unit.is_convoke_payment())
+                    .count()
+            })
+    }
+
+    /// CR 601.2 / CR 602.2: at most one announcement is in flight, so every live
+    /// `PendingCast` owner names the same cast.
+    ///
+    /// Live state asserts that in [`Self::live_pending_cast_owners`]. A persisted
+    /// save can violate it, and admitting it would move the failure to that
+    /// assertion — a process panic at a library boundary — or, in release builds,
+    /// silently keep two announcements. Refuse the save here instead.
+    fn reject_conflicting_pending_cast_owners(&self) -> Result<(), PersistedRestoreError> {
+        let mut live = self
+            .pending_cast_owners()
+            .into_iter()
+            .filter_map(|owner| self.pending_cast_at(owner));
+        let Some(first) = live.next() else {
+            return Ok(());
+        };
+        match live.find(|pending| {
+            pending.object_id != first.object_id
+                || pending.activation_ability_index != first.activation_ability_index
+        }) {
+            Some(second) => Err(PersistedRestoreError::ConflictingPendingCastOwners {
+                first: first.object_id,
+                first_ability_index: first.activation_ability_index,
+                second: second.object_id,
+                second_ability_index: second.activation_ability_index,
+            }),
+            None => Ok(()),
+        }
+    }
+
+    /// CR 601.2c + CR 115.1 + CR 400.7 + CR 613.1: refuse a parked cast whose save
+    /// does not carry the facts its announcement owed.
+    ///
+    /// Every carrier that resumes a cast re-enters `finalize_cast_*` with
+    /// `Some(pre_payment_checks)` and therefore skips reconstruction. A save
+    /// written before the latch existed carries `None` there, so resuming it would
+    /// write a CR 601.2i record that falsely claims the cast declared nothing —
+    /// and a zero-count first-spell gate would re-grant a benefit the cast had
+    /// already spent. The latch is the ONLY record of what was announced at
+    /// CR 601.2c, so a carrier that owes it and does not carry it is refused here,
+    /// at the shared chokepoint, rather than resumed into a raw-id re-read.
+    ///
+    /// The cast-carrier inspection reuses [`Self::pending_cast_owners`], the
+    /// single authority on inline `PendingCast` custody, rather than restating
+    /// that owner list. It takes the assertion-free enumeration because this runs
+    /// on untrusted restore input; the live-state drift check stays in
+    /// [`Self::live_pending_cast_owners`].
+    ///
+    /// `prepaid_finalization` is not the only shape that parks a cast whose
+    /// targets may already have moved. A cast that pauses on the ordinary manual
+    /// `ManaPayment` / `PayCost` prompts carries neither `prepaid_finalization`
+    /// nor `committed_target_facts`, and a save written before the latch is then
+    /// resumed into the raw-id fallback in `finalize_cast_pre_payment_checks`.
+    /// That fallback reads the board at resume time, after CR 601.2g mana
+    /// abilities and CR 601.2h cost payments may already have changed what the
+    /// target is, so whether the save is repairable is decided from the save
+    /// itself — by the record the latch captures from:
+    ///
+    /// * [`declared_target_entries_in_chain`] names the cast's declared slots.
+    ///   A cast that has not declared yet (CR 601.2a–b), one that declared
+    ///   nothing at all (`None` and `Some(vec![])` describe the same facts), and
+    ///   every activation (whose CR 601.2i-equivalent record is its
+    ///   `activation_record`) contribute no entry, so they owe nothing and stay
+    ///   admitted.
+    /// * A cast whose facts are already present on either carrier — its own
+    ///   latch or its `prepaid_finalization` pre-payment checks — owes nothing
+    ///   further. That is the historical-evidence case, and the facts it carries
+    ///   are the ones every later reader prefers.
+    ///
+    /// A live read of the announced object is NOT a substitute, and this guard
+    /// must never fall back to one. Each declared object target does carry an
+    /// announcement-time incarnation pin, and a pin that is still [`is_current`]
+    /// proves which OBJECT was announced (CR 400.7): the same storage id still
+    /// holding the same incarnation. It does not prove that object kept the
+    /// CHARACTERISTICS it had at CR 601.2c. An object's characteristics are
+    /// derived continuously from its printed values plus every applicable
+    /// continuous effect (CR 613.1), and layers 4, 6 and 7 change card types,
+    /// abilities and power/toughness with no zone change to invalidate the pin.
+    /// Announce Lightning Bolt targeting Heliod, Sun-Crowned as a creature at
+    /// five devotion (Heliod + Benalish Marshal + Savannah Lions), then pay
+    /// CR 601.2g mana by sacrificing the Lions to Ashnod's Altar: devotion drops
+    /// to four, Heliod's own "As long as your devotion to white is less than
+    /// five, Heliod isn't a creature" removes its creature type, and the pin
+    /// still matches because nothing changed zones. Reading the live object
+    /// there records post-payment characteristics as the announcement facts,
+    /// which is exactly the claim the ledger promises it will not make. The
+    /// announcement is gone, so the honest outcome is refusal.
+    ///
+    /// [`declared_target_entries_in_chain`]:
+    ///     crate::game::ability_utils::declared_target_entries_in_chain
+    /// [`is_current`]: crate::game::game_object::ObjectIncarnationRefExt::is_current
+    fn reject_unknown_pending_target_facts(&self) -> Result<(), PersistedRestoreError> {
+        fn checks_unknown(checks: &Option<Box<FinalizePrePaymentChecks>>) -> bool {
+            checks
+                .as_deref()
+                .is_some_and(|checks| checks.committed_target_facts.is_none())
+        }
+        fn prepared_unknown(prepared: &Option<Box<PrepaidSpellFinalization>>) -> bool {
+            prepared
+                .as_deref()
+                .is_some_and(|prepared| checks_unknown(&prepared.pre_payment_checks))
+        }
+        /// CR 601.2c + CR 115.1: does this carrier owe the announced-target
+        /// latch without carrying it?
+        ///
+        /// `activation_ability_index.is_some()` is the same typed
+        /// spell/activation discriminator the latch uses
+        /// (`finish_pending_cast_cost_or_pay`): an activation never writes this
+        /// latch, its announced targets reaching the CR 601.2i-equivalent history
+        /// through `activation_record` instead.
+        fn facts_owed(pending: &PendingCast) -> bool {
+            if pending.activation_ability_index.is_some()
+                || pending.committed_target_facts.is_some()
+                || pending
+                    .prepaid_finalization
+                    .as_deref()
+                    .and_then(|prepared| prepared.pre_payment_checks.as_deref())
+                    .is_some_and(|checks| checks.committed_target_facts.is_some())
+            {
+                return false;
+            }
+            !crate::game::ability_utils::declared_target_entries_in_chain(&pending.ability)
+                .is_empty()
+        }
+        fn move_unknown(completion: &PendingCostMoveCompletion) -> bool {
+            match completion {
+                PendingCostMoveCompletion::FinalizeCast {
+                    committed_target_facts,
+                    ..
+                } => committed_target_facts.is_none(),
+                PendingCostMoveCompletion::FinalizeDelvedCast {
+                    pre_payment_checks, ..
+                } => checks_unknown(pre_payment_checks),
+                _ => false,
+            }
+        }
+        fn sacrifice_unknown(completion: &PendingSacrificeCostCompletion) -> bool {
+            match completion {
+                PendingSacrificeCostCompletion::FinalizeSpell {
+                    pre_payment_checks, ..
+                } => pre_payment_checks.committed_target_facts.is_none(),
+                _ => false,
+            }
+        }
+
+        // CR 601.2c: the cast-custody walk is the single authority on which
+        // carriers hold an inline `PendingCast` (`PendingCastOwner::ALL` via
+        // `pending_cast_at`). Read it rather than restating the owner list here,
+        // so a carrier added to the walk is admitted-checked for free.
+        // `pending_cast_owners` is the assertion-free enumeration: this runs on
+        // untrusted restore input, where a crafted save must be refused, not
+        // panic on the live-state drift assertion. Only a cast whose finalization
+        // has begun, or that declared a target, but whose carriers never latched
+        // target facts is refused — the pre-declaration `None` stays legitimate.
+        for owner in self.pending_cast_owners() {
+            let Some(pending) = self.pending_cast_at(owner) else {
+                continue;
+            };
+            if prepared_unknown(&pending.prepaid_finalization) || facts_owed(pending) {
+                return Err(PersistedRestoreError::UnknownPendingTargetFacts {
+                    spell_object_id: Some(pending.object_id),
+                });
+            }
+        }
+
+        // CR 601.2h + CR 601.2i: these cost-move completion payloads are not
+        // pending-cast owners — `FinalizeCast` / `FinalizeDelvedCast` /
+        // `FinalizeSpell` carry their own pre-payment checks on the resume root,
+        // so the custody walk cannot reach them and they keep their own check.
+        let completion = match self.pending_cost_move_resume.as_ref() {
+            Some(PendingCostMoveResume::Cast {
+                pending,
+                completion,
+                ..
+            }) if move_unknown(completion) => Some(pending.as_ref().map(|p| p.object_id)),
+            Some(PendingCostMoveResume::SacrificeForCost {
+                pending,
+                completion,
+                ..
+            }) if sacrifice_unknown(completion) => Some(pending.as_ref().map(|p| p.object_id)),
+            _ => None,
+        };
+
+        match completion {
+            Some(spell_object_id) => {
+                Err(PersistedRestoreError::UnknownPendingTargetFacts { spell_object_id })
+            }
+            None => Ok(()),
+        }
+    }
+
+    /// CR 601.2c + CR 115.1: refuse a parked cast whose announced-target LATCH is not the
+    /// declaration its own spell chain states.
+    ///
+    /// [`Self::reject_unknown_pending_target_facts`] and
+    /// [`Self::reject_unstated_activation_target_facts`] ask whether the latch EXISTS and
+    /// whether its object facts state a zone. Neither asks the question the latch is FOR:
+    /// `casting::latch_committed_target_facts` writes it by projecting
+    /// `declared_targets_in_chain(ability)` through
+    /// `casting::capture_target_facts`, so the latch and the chain's declared slots are
+    /// one statement about one announcement (CR 601.2c: "The chosen objects and/or
+    /// players each become a target of that spell"). A save can keep a well-formed,
+    /// zone-stating, non-empty latch whose facts name something else entirely, and a
+    /// resumed cast publishes that latch as its CR 601.2i history row.
+    ///
+    /// The consequence is a fabricated target: Spider-Sense's "Counter target instant
+    /// spell, sorcery spell, or triggered ability." admits no battlefield permanent, so a
+    /// latch naming a battlefield creature has recorded a target that spell cannot have.
+    /// Head of the Class's "The first spell you cast during each of your turns that
+    /// targets a creature costs {W}{B} less to cast." is a zero-count gate over exactly
+    /// those records (`filter::declared_target_fact_matches` reads the fact's zone and
+    /// characteristics), so a fabricated battlefield-creature fact both consumes the gate
+    /// and qualifies a spell the announcement never qualified. The mirror direction — a
+    /// latch with a declared fact deleted — is refused for the same reason the absent
+    /// latch is: it reads as "the cast declared nothing", which re-opens a gate the cast
+    /// already spent.
+    ///
+    /// Both directions are decided against the CHAIN, never against the live board. The
+    /// declared slots are what the announcement chose, they travel on the cast itself, and
+    /// they survive every cost the payment moved. A declared object the save no longer
+    /// holds (a token that ceased, CR 704.5d) is exempt from the omission direction —
+    /// `capture_target_facts` drops an id it cannot snapshot, so a shorter latch is the
+    /// honest capture of that board — while a fact it holds IS still required in the
+    /// latch, because the capture that wrote the latch saw it.
+    ///
+    /// Every carrier the other latch guards read is read here: the cast's own
+    /// `committed_target_facts`, the copy inside `prepaid_finalization`'s pre-payment
+    /// checks, and the cost-move completions (`FinalizeCast`, `FinalizeDelvedCast`,
+    /// `FinalizeSpell`) that carry their latch beside a rebuilt cast. A carrier with no
+    /// cast to compare against, and a latch that is absent altogether, are the other
+    /// guards' questions.
+    ///
+    /// Each fact is bound to the slot that produced it POSITIONALLY, not by identity
+    /// (the pairing walk in `check` below). CR 601.2c lets one object fill two slots —
+    /// "if the spell uses the word 'target' in multiple places, the same object or player
+    /// can be chosen once for each instance of the word 'target'" — so a repeated
+    /// target's second fact judged against the first slot's requirement leaves the second
+    /// slot unchecked altogether, in both directions: a deleted fact for the repeated
+    /// target is not "omitted" when membership alone answers, and a rewritten snapshot
+    /// that fails only its own slot's filter is not "contradictory" when the first slot
+    /// admits it.
+    fn reject_contradictory_announced_target_facts(&self) -> Result<(), PersistedRestoreError> {
+        /// CR 601.2c: the latch must name exactly the targets the cast's chain declares,
+        /// one fact per declared slot. The characteristics and zone a fact also carries
+        /// describe the announcement, which is gone; the id list is what the chain still
+        /// states.
+        fn check(
+            state: &GameState,
+            pending: &PendingCast,
+            latched: Option<&[ActivationTargetFact]>,
+        ) -> Result<(), PersistedRestoreError> {
+            let Some(latched_facts) = latched else {
+                // An ABSENT latch is `reject_unknown_pending_target_facts`'s refusal.
+                return Ok(());
+            };
+            // CR 602.2b: an activation's announced targets travel on its
+            // `activation_record`, not on this latch, which only a cast writes.
+            if pending.activation_ability_index.is_some() {
+                return Ok(());
+            }
+            // CR 601.2c + CR 400.7: the declared slots AND their announcement pins. The pin
+            // is the recorded authority this guard binds the latch to; the object's live
+            // characteristics are never read.
+            let declared_entries =
+                crate::game::ability_utils::declared_target_entries_in_chain(&pending.ability);
+            // CR 601.2c: pair each recorded fact with the DECLARED SLOT it came from, by
+            // position — never by first-match on the fact's object id.
+            //
+            // `casting::latch_committed_target_facts` writes the latch by projecting
+            // `declared_targets_in_chain` through `casting::capture_target_facts`, which
+            // visits the declared slots in numbering order and drops only a target it cannot
+            // snapshot (CR 704.5d, an id with no object row). The n-th fact is therefore the
+            // n-th SURVIVING slot, and this walk is the same projection read from the other
+            // side: a fact may only pair with a slot at or after the previous fact's slot,
+            // and the earliest such slot is the one that produced it.
+            //
+            // Identity alone cannot answer this. CR 601.2c: "if the spell uses the word
+            // 'target' in multiple places, the same object or player can be chosen once for
+            // each instance of the word 'target' (as long as it fits the targeting
+            // criteria)", so one object may legally fill two slots with two different
+            // requirements. Kolaghan's Command's "Destroy target artifact" and "Kolaghan's
+            // Command deals 2 damage to any target" can both be announced at the same artifact
+            // creature; looking the second fact up by identity would judge it against the
+            // FIRST slot's artifact requirement and never check the damage slot at all. Each
+            // paired slot also supplies its OWN announcement pin
+            // (`ResolvedAbility::target_pin_at`), which is what makes a repeated target's two
+            // occurrences distinguishable at all.
+            let mut fact_of_slot: Vec<Option<usize>> = vec![None; declared_entries.len()];
+            let mut next_slot = 0usize;
+            for (fact_index, fact) in latched_facts.iter().enumerate() {
+                let target = fact.target_ref();
+                let slot = declared_entries[next_slot..]
+                    .iter()
+                    .position(|entry| entry.target == target)
+                    .map(|offset| next_slot + offset);
+                let Some(slot) = slot else {
+                    return Err(PersistedRestoreError::ContradictoryAnnouncedTargetFacts {
+                        spell_object_id: pending.object_id,
+                        reason: AnnouncedTargetFactConflict::UndeclaredTarget { target },
+                    });
+                };
+                fact_of_slot[slot] = Some(fact_index);
+                next_slot = slot + 1;
+            }
+            // CR 601.2c + CR 704.5d: a declared target the save can no longer carry is one
+            // the honest capture would have dropped, so it owes no fact; one it still holds
+            // would have produced a fact, and its absence from the latch is a deletion.
+            let omitted = declared_entries
+                .iter()
+                .enumerate()
+                .find_map(|(slot, entry)| {
+                    (fact_of_slot[slot].is_none()
+                        && match &entry.target {
+                            TargetRef::Object(id) => state.objects.contains_key(id),
+                            TargetRef::Player(_) => true,
+                        })
+                    .then(|| entry.target.clone())
+                });
+            if let Some(target) = omitted {
+                return Err(PersistedRestoreError::ContradictoryAnnouncedTargetFacts {
+                    spell_object_id: pending.object_id,
+                    reason: AnnouncedTargetFactConflict::OmittedDeclaredTarget {
+                        target: target.clone(),
+                    },
+                });
+            }
+            // CR 601.2c + CR 400.7: check each object fact's stated ZONE against the
+            // announcement pin recorded for the slot that declared it. A still-current (or
+            // absent) pin means the object has not been recorded as leaving the zone since
+            // CR 601.2c, so the zone it was announced in is the zone it occupies now — a
+            // fact that says otherwise was captured at some other moment and is not this
+            // announcement.
+            //
+            // This is a CONSISTENCY check, not a provenance proof: it cannot show where a
+            // fact came from, only that it does not contradict the record the save still
+            // holds.
+            //
+            // This is the ONLY announcement-time property a save can still be checked
+            // against. The characteristics the fact carries are likewise announcement-time
+            // (the latch is their only record), and they are deliberately NOT compared with
+            // the live object: CR 613.1 re-derives them continuously, so an announced
+            // creature can legitimately stop being one during the payment (Heliod,
+            // Sun-Crowned at five devotion, then a white permanent sacrificed for mana).
+            // Refusing that drift would reject an honest save, which is the opposite of the
+            // error this guard exists to catch.
+            //
+            // CR 601.2c + CR 115.1: the DECLARED-SLOT VIEW the filter evaluation reads to
+            // name the object a slot chose. A filter like "Exile up to one target Equipment
+            // attached to that creature" (Fiery Annihilation) compares the recorded target
+            // against the object announced for an EARLIER slot, and that comparison cannot be
+            // read off the fact's own snapshot — the snapshot is one target, the chain that
+            // numbered the slots is the cast. `declared_entries` IS that chain, read from the
+            // same walk the fact pairing above uses, so it is the authority for the objects
+            // the announcement chose, in the order it chose them.
+            //
+            // CR 601.2c: but a REFERENT is numbered in the STATIC declared-slot space, and
+            // `declared_entries` is COMPACTED — a declining optional slot pushes no target
+            // and therefore leaves no hole — so the two spaces diverge as soon as an optional
+            // slot is declined. The builder answers `None` there rather than index one space
+            // with the other: a referent resolved at the wrong index names the wrong object,
+            // which a record comparison reports as a DEFINITE contradiction and this guard
+            // would refuse an honest save on. No view means every referent answers UNKNOWN,
+            // which is the governing answer for an axis the record cannot state.
+            let declared_slot_view = crate::game::ability_utils::record_check_declared_slot_view(
+                state,
+                &pending.ability,
+                &declared_entries,
+            );
+            for (slot, entry) in declared_entries.iter().enumerate() {
+                // CR 601.2c: the fact THIS slot produced, from the pairing above. A slot whose
+                // target the capture dropped has no fact to judge, and a first-match on
+                // identity is exactly what would hand a repeated target's second fact to the
+                // first slot's requirement.
+                let Some(fact) = fact_of_slot[slot].map(|fact_index| &latched_facts[fact_index])
+                else {
+                    continue;
+                };
+                let ActivationTargetFact::Object {
+                    id,
+                    lki,
+                    zone,
+                    token,
+                    attached_to,
+                    ..
+                } = fact
+                else {
+                    continue;
+                };
+                // CR 601.2c + CR 115.4: the fact's recorded snapshot must satisfy the filter
+                // that DECLARED this slot. This is not a live-object comparison — the
+                // snapshot is the announcement's own record — so honest drift still passes:
+                // Heliod announced as a creature satisfies "any target" and "target
+                // creature" on its recorded snapshot even after devotion drops. A save that
+                // rewrites the snapshot to the post-payment type does not.
+                //
+                // CR 400.7: this check runs BEFORE the stale-pin skip below. A pin that
+                // proves the object moved makes the LIVE zone comparison invalid; it does not
+                // make the RECORDED requirement optional. Bone Splinters ("As an additional
+                // cost to cast this spell, sacrifice a creature. / Destroy target creature.")
+                // can announce the caster's own creature and then lose it to a cost, so the
+                // honest park has a stale pin and a still-binding recorded creature
+                // requirement: the creature it recorded is exactly what the declaring slot
+                // admitted, and a save that restates it as anything else was not this
+                // announcement. A requirement that names a ZONE is part of that record too —
+                // "any target" is a creature, player, planeswalker or battle, and a creature,
+                // planeswalker or battle is a permanent (CR 115.4 + CR 109.2) — so for a moved
+                // target the recorded zone is the only zone evidence left.
+                if let Some(filter) = entry.filter.as_ref() {
+                    // CR 601.2c: the announcing cast is the filter's source authority — the
+                    // spell itself, controlled by its controller. Nothing else is bound: this
+                    // asks only what the recorded snapshot looks like.
+                    let context = crate::game::filter::FilterContext {
+                        source_id: pending.object_id,
+                        source_controller: Some(pending.ability.controller),
+                        ability: Some(&pending.ability),
+                        ability_targets: None,
+                        trigger_source: None,
+                        recipient_id: None,
+                        scoped_iteration_player: None,
+                        triggering_object: None,
+                        declared_slot_view: declared_slot_view.as_deref(),
+                        granting_object: None,
+                    };
+                    // CR 109.2a + CR 115.9: judge the filter against the RECORDED
+                    // ANNOUNCEMENT — the zone it was announced in, the token bit it then
+                    // held, and the object it was then attached to. Evaluating through the
+                    // projection that omits them would refuse an untouched save whose filter
+                    // names a zone ("target creature card from a graveyard"), reads a token
+                    // leaf, or requires the target to be attached to an earlier slot's object
+                    // ("Exile up to one target Equipment attached to that creature" — Fiery
+                    // Annihilation).
+                    //
+                    // CR 508.1k + CR 601.2c: only a DEFINITE failure contradicts the
+                    // declaration. The announcement records no combat role — an `LKISnapshot`
+                    // snapshots none, and CR 613.1 re-derives creature state continuously, so
+                    // the record is the only surviving authority and it says nothing about
+                    // attacking or blocking. Answer `None` (UNRECORDED) therefore means this
+                    // guard has nothing to check, not that the target failed its slot: an
+                    // honest Kill Shot ("Destroy target attacking creature.") announced at an
+                    // attacker would otherwise be refused on restore because the projected
+                    // record's zeroed `ZoneChangeCombatStatus` reads as "nonattacking". A
+                    // missing recorded fact is not a failed predicate.
+                    if crate::game::filter::matches_target_filter_on_recorded_announcement(
+                        state,
+                        *id,
+                        crate::game::filter::AnnouncedTargetRecord {
+                            lki,
+                            zone: zone.zone(),
+                            token: token.bit(),
+                            attached_to: *attached_to,
+                        },
+                        filter,
+                        &context,
+                    ) == Some(false)
+                    {
+                        return Err(PersistedRestoreError::ContradictoryAnnouncedTargetFacts {
+                            spell_object_id: pending.object_id,
+                            reason:
+                                AnnouncedTargetFactConflict::SnapshotContradictsDeclaredFilter {
+                                    target: TargetRef::Object(*id),
+                                },
+                        });
+                    }
+                }
+                // CR 400.7: a pin that is present AND stale proves the object left the
+                // announced zone since CR 601.2c, so its live zone is not comparable and the
+                // latch is the only surviving record. An ABSENT pin is NOT that case: the
+                // save simply dropped the pin, and skipping on absence made this whole
+                // check optional-by-payload — drop `target_pins` (or null one slot) and a
+                // forged zone publishes freely. Absence therefore falls through to the same
+                // comparison, which an honest pinless save passes (its stated zone IS the
+                // live zone, because nothing moved it) and a forged one fails.
+                //
+                // Only the LIVE comparison is skipped here: the recorded-announcement check
+                // above already ran, because a stale pin cannot make it optional.
+                if entry.pin.as_ref().is_some_and(|pin| !pin.is_current(state)) {
+                    continue;
+                }
+                let Some(object) = state.objects.get(id) else {
+                    continue;
+                };
+                if *zone != AnnouncedTargetZone::Known(object.zone) {
+                    return Err(PersistedRestoreError::ContradictoryAnnouncedTargetFacts {
+                        spell_object_id: pending.object_id,
+                        reason: AnnouncedTargetFactConflict::ZoneContradictsAnnouncement {
+                            target: TargetRef::Object(*id),
+                            stated: *zone,
+                            pinned: object.zone,
+                        },
+                    });
+                }
+            }
+            Ok(())
+        }
+        /// CR 601.2h: the same check for a latch carried on a finalization payload.
+        fn check_checks(
+            state: &GameState,
+            pending: &PendingCast,
+            checks: Option<&FinalizePrePaymentChecks>,
+        ) -> Result<(), PersistedRestoreError> {
+            check(
+                state,
+                pending,
+                checks.and_then(|checks| checks.committed_target_facts.as_deref()),
+            )
+        }
+
+        for owner in self.pending_cast_owners() {
+            let Some(pending) = self.pending_cast_at(owner) else {
+                continue;
+            };
+            check(self, pending, pending.committed_target_facts.as_deref())?;
+            if let Some(prepared) = pending.prepaid_finalization.as_deref() {
+                check_checks(self, pending, prepared.pre_payment_checks.as_deref())?;
+            }
+        }
+        // CR 601.2h + CR 601.2i: the cost-move completions are not pending-cast owners, so
+        // the custody walk above cannot reach them — the same reason the sibling latch
+        // guards check them separately.
+        match self.pending_cost_move_resume.as_ref() {
+            Some(PendingCostMoveResume::Cast {
+                pending: Some(pending),
+                completion,
+                ..
+            }) => match completion {
+                PendingCostMoveCompletion::FinalizeCast {
+                    committed_target_facts,
+                    ..
+                } => check(self, pending, committed_target_facts.as_deref())?,
+                PendingCostMoveCompletion::FinalizeDelvedCast {
+                    pre_payment_checks, ..
+                } => check_checks(self, pending, pre_payment_checks.as_deref())?,
+                PendingCostMoveCompletion::FinishPending
+                | PendingCostMoveCompletion::CompleteSelectedReturnToHand { .. }
+                | PendingCostMoveCompletion::PublishExileTrackedSet => {}
+            },
+            Some(PendingCostMoveResume::SacrificeForCost {
+                pending: Some(pending),
+                completion:
+                    PendingSacrificeCostCompletion::FinalizeSpell {
+                        pre_payment_checks, ..
+                    },
+                ..
+            }) => check_checks(self, pending, Some(pre_payment_checks))?,
+            _ => {}
+        }
+        Ok(())
     }
 
     /// A staged payment is a replay authority, not merely display data.  Keep
@@ -16639,6 +20368,15 @@ pub struct PreparedPersistedGameState {
     recovered_terminal_rest: bool,
 }
 
+/// CR 106.3: the mana-pool sentinel for "this unit names no producing object".
+///
+/// The object allocator starts at 1 and never reissues a retired id
+/// (`GameState::next_object_id`), so `ObjectId(0)` names no object in any state —
+/// production always names the source that made the mana. Frames that assemble a
+/// pool without one (scenario scaffolding, analysis previews) use it, and such a
+/// unit carries no source for CR 106.3 to resolve, in this engine or any other.
+const NO_PRODUCING_OBJECT: ObjectId = ObjectId(0);
+
 /// A persisted state reached a priority window with unresolved resolution
 /// ownership and no exact engine-owned terminal repair.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -16681,6 +20419,262 @@ pub enum PersistedRestoreError {
     /// never inferred, so the save is not resumable.
     #[error("persisted copy announcement for {copy_id:?} has targets before its announcing-opponent election and is not resumable")]
     UnelectedCopyAnnouncer { copy_id: ObjectId },
+    /// CR 601.2c + CR 115.1 + CR 106.3: a saved cast-history record predates the
+    /// declared-target and mana-source provenance fields. Its announced targets
+    /// and paying sources are gone, so the history is neither reconstructable nor
+    /// safe to read as "declared nothing": a zero-count first-spell gate would
+    /// re-grant a once-per-turn benefit. Restore refuses the state rather than
+    /// admitting an unknown as a known-empty.
+    #[error(
+        "persisted cast history carries unknown target/mana-source provenance for spell \
+         {spell_object_id:?} and cannot be restored"
+    )]
+    UnknownCastHistoryProvenance { spell_object_id: Option<ObjectId> },
+    /// CR 601.2c + CR 115.1 + CR 400.7: a cast is parked mid-payment and its
+    /// carrier holds no announced-target facts. The save predates the latch, so
+    /// what the spell declared is unreconstructable; resuming it would write a
+    /// CR 601.2i record that falsely claims the cast declared nothing, and a
+    /// first-spell gate would then re-grant a benefit the cast had already spent.
+    #[error(
+        "persisted pending cast carries unknown announced-target facts for spell \
+         {spell_object_id:?} and cannot be resumed"
+    )]
+    UnknownPendingTargetFacts { spell_object_id: Option<ObjectId> },
+    /// CR 601.2c + CR 115.1: a parked cast's announced-target latch is not the declaration
+    /// its own spell chain states — it names a target the announcement never chose, or
+    /// omits one it did. The latch is the only record of what the cast announced (the
+    /// announcement itself is gone, and the live board's later state is not a substitute
+    /// for it), so admitting a latch the chain does not corroborate would publish a
+    /// fabricated target in the CR 601.2i history row the resumed cast writes, and a
+    /// zero-count first-spell gate reading that row would grant or consume a benefit the
+    /// announcement never earned.
+    #[error(
+        "persisted announced-target latch on spell {spell_object_id:?} does not name the \
+         targets its own declaration chose and cannot be restored: {reason}"
+    )]
+    ContradictoryAnnouncedTargetFacts {
+        spell_object_id: ObjectId,
+        reason: AnnouncedTargetFactConflict,
+    },
+    /// CR 601.2c + CR 109.2 + CR 109.2a: a saved activation record's object
+    /// target does not state the zone it was announced in. CR 109.2 scopes a
+    /// bare type description to a permanent on the battlefield and CR 109.2a
+    /// scopes a "card … in [zone]" description to that zone, so the zone is what
+    /// decides whether the recorded target satisfies a target-gated rule (a
+    /// first-activation cost reduction reading "targets a creature you
+    /// control"). A payload that predates the field is not recoverable — the
+    /// announcement is gone — so restore refuses it rather than defaulting the
+    /// omission to the battlefield, which would fabricate the claim that makes
+    /// the widest class of those rules fire.
+    #[error(
+        "persisted committed target facts owned by {owner:?} carry an unknown announced zone \
+         for target {target:?} and cannot be restored"
+    )]
+    UnknownAnnouncedTargetZone {
+        /// The record's owning object — the activation's source — or `None` for
+        /// the bare fact list a parked cast's latch carries.
+        owner: Option<ObjectId>,
+        target: ObjectId,
+    },
+    /// CR 111.1 + CR 115.9 + CR 601.2c: a committed target fact, or an
+    /// activation record's own source fact, does not state the token bit it held
+    /// when it was recorded.
+    ///
+    /// CR 115.9 makes "the state of the targets at the time they were selected" a
+    /// reading of its own, and CR 111.1 makes token-ness part of it; token-ness is
+    /// not a copiable value (CR 707.2), so no snapshot in the save can supply the
+    /// missing answer, and CR 730.2d lets the live object's bit change in place.
+    /// A payload that predicates the field is therefore unreconstructable, and
+    /// restore refuses it for the same reason it refuses an unstated zone: the
+    /// alternative is the silent default the capture exists to replace. Silence is
+    /// not even fail-closed for a negated predicate — `TriggerCondition::Not`
+    /// inverts the leaf's answer, so an unstated bit would turn Progenitor Mimic's
+    /// "if this creature isn't a token" into a match for a token.
+    #[error(
+        "persisted activation facts owned by {owner:?} carry an unknown captured token bit \
+         for {subject:?} and cannot be restored"
+    )]
+    UnknownCapturedTokenBit {
+        /// The record's owning object — the activation's source — or `None` for
+        /// the bare fact list a parked cast's latch carries.
+        owner: Option<ObjectId>,
+        /// The object whose token bit the save leaves unstated: the committed
+        /// target, or the record's own source.
+        subject: ObjectId,
+    },
+    /// CR 106.3 + CR 400.7: a saved mana pool holds floating mana whose producing
+    /// object the save does not name. `ManaUnit::source_incarnation` is the pin
+    /// that binds a unit to the epoch that produced it, and
+    /// `pooled_mana_producer_snapshots` is the pool's own record of the epochs its
+    /// floating units were produced at; a save written before the pin existed
+    /// carries neither, and neither does any other record it holds supply the
+    /// epoch — `GameObject::incarnation` names only the CURRENT object under the
+    /// storage id, so the producing epoch would have to be guessed. What the save
+    /// does establish is that no reading of it names the producer: the id is empty
+    /// with its step-scoped exit LKI cleared too
+    /// (CR 704.5d: a token in a non-battlefield zone ceases to exist), or the live
+    /// object there is off the battlefield so pricing the unit from it would name
+    /// an object that never made the mana (CR 400.7: a moved object "becomes a new
+    /// object with no memory of, or relation to, its previous existence"), or the
+    /// journal records an earlier tenure of the id, or two epochs are recorded for
+    /// it. Restore therefore refuses rather than admitting that pool, because a
+    /// source-qualified payment answer the game never established is the same class
+    /// of unknown `UnknownCastHistoryProvenance` refuses — and because an admitted
+    /// pin-less unit silently loses the producer fact a cascade or SpendOnlyOn
+    /// payment owed it.
+    #[error(
+        "persisted mana pool of player {player:?} holds floating mana whose producing object \
+         {source_id:?} cannot be proven and cannot be restored"
+    )]
+    AmbiguousFloatingManaProvenance {
+        player: PlayerId,
+        source_id: ObjectId,
+    },
+
+    /// CR 106.3 + CR 400.7 + CR 118.3a: a saved mana pool holds floating mana whose
+    /// explicit producing-incarnation pin CONTRADICTS the save's own independent
+    /// per-pip records for the same unit.
+    ///
+    /// A pin is a claim about one unit's producer, and so is the journal's copy of
+    /// that unit, the producer NODE production wrote for its pip, and the pool's
+    /// producer ledger entry keyed by it. All of them name the same unit, so two
+    /// epochs among them are a save that contradicts itself about which tenure of the
+    /// storage id made the mana — and the shape that produces it is not hypothetical:
+    /// a copy's retained mana re-pinned to the live successor epoch (the Treasure a
+    /// blink put under the same id, CR 400.7) is admitted by a guard that trusts the
+    /// pin, and the payment then prices that mana as the successor's. Restore refuses
+    /// instead of preferring either side, because the only repair available at this
+    /// boundary is to overwrite one record with the other before the decoder that
+    /// compares records ever sees them, which would launder the contradiction into a
+    /// loadable save.
+    ///
+    /// The producer node is compared even when every unit copy already carries the
+    /// same pin. The copies are one record (the journal compares them to each other at
+    /// decode) and the node is another, written by different code at a different
+    /// moment; a guard that read the node only where the pin was absent would let a
+    /// pin every copy agrees on go unchecked, and the payment resolves the pip through
+    /// the pin, not the node — so a wrong epoch there silently costs the unit its
+    /// producing source.
+    ///
+    /// `recorded` is every epoch the save's per-pip records state for this unit —
+    /// at least one that disagrees with `pinned`; it is empty when a per-pip record
+    /// instead names a different producing OBJECT than the unit does, which is the
+    /// same contradiction stated about the source.
+    #[error(
+        "persisted mana pool of player {player:?} pins floating mana from {source_id:?} to \
+         incarnation {pinned} but that unit's own per-pip records state {recorded:?}, and the \
+         save cannot be restored"
+    )]
+    ContradictoryFloatingManaProvenance {
+        player: PlayerId,
+        source_id: ObjectId,
+        pinned: u64,
+        recorded: Vec<u64>,
+    },
+
+    /// CR 601.2 / CR 602.2: at most one announcement is in flight, so every live
+    /// `PendingCast` owner names the same cast. A persisted save that parks two
+    /// different announcements is corrupt; admitting it would move the failure to
+    /// the live-state drift assertion (a library-boundary panic in debug builds)
+    /// instead of refusing it here.
+    #[error(
+        "persisted state parks two live pending casts naming different announcements \
+         ({first:?} at ability {first_ability_index:?} and {second:?} at ability \
+         {second_ability_index:?}) and cannot be restored"
+    )]
+    ConflictingPendingCastOwners {
+        first: ObjectId,
+        first_ability_index: Option<usize>,
+        second: ObjectId,
+        second_ability_index: Option<usize>,
+    },
+
+    /// CR 605.3b + CR 602.2a + CR 113.7 + CR 400.7: a parked mana activation's
+    /// producer evidence contradicts itself — a retained execution node that cannot
+    /// be that activation's own (a triggered-mana node per CR 605.4a, an
+    /// activated-mana node of a different object, or one belonging to a DIFFERENT
+    /// occurrence, including a node — with or without an occurrence stated beside
+    /// the reference — that has already SETTLED and so settles a finished
+    /// activation), two records of one announcement naming two incarnations,
+    /// or no producer record at all behind an activation snapshot.
+    ///
+    /// The distinction this refuses on is the one the resume boundary needs: a save
+    /// that records no node it can still read (both records predate the save, or the
+    /// turn-scoped journal cleared the node) is a legacy save whose announcement
+    /// epoch is still exact evidence, and it is recovered. A save whose records
+    /// contradict each other is not a legacy save — it is a reference to somebody
+    /// else's settlement, or no reference at all — and reading it as absent would
+    /// let the activation's mana be priced from a node that settles a different
+    /// ability. `mana_abilities`' resume authority applies the SAME rule
+    /// ([`PendingManaAbility::activation_producer_evidence`]); the refusal is also
+    /// made here, at the one admission chokepoint every restore funnels through, so
+    /// a save can never be admitted and then refused mid-resume after the activation
+    /// has already bound production to it.
+    #[error("persisted mana ability activation for {source_id:?} cannot be restored: {reason}")]
+    ContradictoryParkedActivation {
+        source_id: ObjectId,
+        reason: ParkedActivationConflict,
+    },
+
+    /// CR 605.3b: this payload is CURRENT format — it carries a marker only this
+    /// build writes, either a settlement record on some node or an occurrence on a
+    /// parked mana-ability activation — and yet `node` is of a kind whose settlement
+    /// IS recorded and states none.
+    ///
+    /// The older shape is not one missing node: no released build wrote
+    /// [`SettlementNode::settled`] anywhere
+    /// (`LEGACY_JOURNAL_SETTLED_PIP_INFERENCE_2026Q4`), while this build writes it for
+    /// every node with a settlement lifecycle. A payload that states it somewhere was
+    /// therefore written by a build that states it here too, so the key was deleted —
+    /// the save is contradicting itself, not predating the field. Reading it as the
+    /// older shape is what let a parked activation claim a finished zero-output
+    /// activation's node (CR 605.2: an activation that the game state allowed no mana
+    /// still resolved, and its record — not its empty pip list — is the witness).
+    #[error(
+        "persisted settlement node {node:?} states no settlement in a payload that states \
+         settlements, and cannot be restored"
+    )]
+    ContradictorySettlementCustody { node: RulesExecutionNodeRef },
+
+    /// CR 702.132a + CR 118.3a: a parked cast's Assist contribution is not bound to
+    /// the payment it claims, so admitting the save would record mana spent to cast
+    /// the spell that the game never established — or omit mana the helper really
+    /// did spend. Both directions are covered: units on the cast with no paid helper
+    /// ([`AssistContributionConflict::UnitsWithoutPaidHelper`]), and a paid helper
+    /// whose units the save does not carry and the journal does not prove
+    /// ([`AssistContributionConflict::PaidGenericUnproven`]).
+    ///
+    /// CR 118.3a is what makes the two one fact: paying mana IS removing the
+    /// indicated mana from a player's pool, so the units and the amount are the same
+    /// payment stated twice. A save that states one and not the other has not
+    /// recorded a payment, and this boundary will not invent the missing half — the
+    /// journal recovers it where the journal recorded the payer, the recipient and
+    /// the units, and the save is refused where the paid root is contradictory or
+    /// unprovable.
+    #[error("persisted Assist contribution to spell {source_id:?} cannot be restored: {reason}")]
+    ContradictoryAssistContribution {
+        source_id: ObjectId,
+        reason: AssistContributionConflict,
+    },
+
+    /// CR 106.3 + CR 118.3a + CR 601.2h: a parked cast's PREPAID SPELL COPY — the amount,
+    /// the per-color tally and the producer snapshots the finalizers stamped on the spell
+    /// object before the cast parked — is not the projection of the spend this save
+    /// settled. The prepaid resume consumes that copy instead of re-deriving it
+    /// (`casting_costs` gates the payment out on `prepaid_actual_mana_spent`), and it is
+    /// the record `FilterProp::ManaSpentFromSource` answers from, so admitting a copy the
+    /// settle does not prove would price the cast off facts the game never established:
+    /// Rain of Riches would grant — or withhold — cascade for a Treasure that never paid,
+    /// or for one that did and whose pip the save deleted.
+    ///
+    /// The bytes are refusable in both directions because the two records are one payment
+    /// stated twice: the journal's `ManaSpend` commands are the removals themselves
+    /// (CR 118.3a), and the copy is the projection those removals produce.
+    #[error("persisted prepaid spell copy on {source_id:?} cannot be restored: {reason}")]
+    ContradictoryPrepaidSpellCopy {
+        source_id: ObjectId,
+        reason: PrepaidSpellCopyConflict,
+    },
 }
 
 impl PreparedPersistedGameState {
@@ -16892,6 +20886,34 @@ impl PersistedGameState {
         state
             .validate_payment_transaction()
             .map_err(PersistedRestoreError::InvalidPaymentTransaction)?;
+        state.reject_unknown_cast_history_provenance()?;
+        state.reject_unstated_activation_target_facts()?;
+        state.bind_or_reject_floating_mana_provenance()?;
+        // CR 605.3b: decide this payload's settlement-record format BEFORE any reader
+        // asks whether a node resolved, so a current save cannot lose one node's
+        // record and be read as the older shape. A genuinely older payload keeps its
+        // pip-derived reading, bound into the record here.
+        state.bind_or_reject_settlement_custody()?;
+        state.reject_contradictory_parked_activation_evidence()?;
+        state.reject_conflicting_pending_cast_owners()?;
+        state.reject_unknown_pending_target_facts()?;
+        // CR 601.2c + CR 115.1: the latch those guards require must also be the
+        // announcement this cast's own chain declares, or the resumed cast writes a
+        // history row about targets it never chose.
+        state.reject_contradictory_announced_target_facts()?;
+        // CR 702.132a + CR 118.3a: a parked cast's Assist contribution is bound to
+        // the payment it claims (or recovered from the journal's own record of that
+        // payment) before any finalizer can read it. Refusing here — the chokepoint
+        // every production restore funnels through — means resume and admission can
+        // never disagree about whether the helper's units exist.
+        state.bind_or_reject_assist_contribution_provenance()?;
+        // CR 106.3 + CR 118.3a + CR 601.2h: the SEPARATE copy the payment finalizers
+        // stamped on the spell object — amount, color tally and producer snapshots — is
+        // validated against the same settled spend, AFTER the Assist units above are
+        // bound, so the copy is read against the units this save settled rather than the
+        // ones it claimed. A prepaid cast never re-derives it, so this boundary is the
+        // only place the two records can be reconciled.
+        state.bind_or_reject_prepaid_spell_copy_provenance()?;
         crate::game::effects::choose_from_zone::migrate_legacy_per_player_frame_on_restore(
             &mut state,
         )
@@ -23646,9 +27668,41 @@ pub fn record_captured_onsets(document: &mut serde_json::Value) {
     fn mark(root: &mut serde_json::Value) {
         let recorded = serde_json::to_value(AbilityOnsetRecord::Recorded)
             .expect("AbilityOnsetRecord serializes");
-        root.as_object_mut()
-            .expect("a committed capture's game-state root is a JSON object")
-            .insert(ABILITY_ONSET_RECORD_FIELD.to_string(), recorded);
+        let object = root
+            .as_object_mut()
+            .expect("a committed capture's game-state root is a JSON object");
+        object.insert(ABILITY_ONSET_RECORD_FIELD.to_string(), recorded);
+        // CR 601.2c + CR 106.3: every committed capture was taken before the
+        // cast-history provenance fields existed, so production admission rightly
+        // refuses it (`UnknownCastHistoryProvenance`). These captures are fixtures
+        // for tests that assert unrelated behaviour, so the test loader admits their
+        // cast records as known-empty. This is a FIXTURE-ONLY concession: it is
+        // `#[cfg(any(test, feature = "test-support"))]`, it never runs in a product
+        // build, and it does not weaken the production rule — a real save with
+        // unknown provenance is still refused.
+        for field in [
+            "spells_cast_this_turn_by_player",
+            "spells_cast_this_game_by_player",
+        ] {
+            let Some(by_player) = object.get_mut(field).and_then(|v| v.as_object_mut()) else {
+                continue;
+            };
+            for records in by_player.values_mut() {
+                let Some(records) = records.as_array_mut() else {
+                    continue;
+                };
+                for record in records {
+                    let Some(record) = record.as_object_mut() else {
+                        continue;
+                    };
+                    for provenance in ["targets", "mana_spent_source_snapshots"] {
+                        record
+                            .entry(provenance)
+                            .or_insert_with(|| serde_json::Value::Array(Vec::new()));
+                    }
+                }
+            }
+        }
     }
     let Some(object) = document.as_object_mut() else {
         return;
@@ -23851,6 +27905,24 @@ declare_game_state! {
     /// state equality — it is empty outside the synchronous finalize window.
     #[serde(skip)]
     pub active_payment_pins: Vec<ManaPipId>,
+    /// CR 702.132a: transient carrier for a committed Assist helper's PAID
+    /// CONTRIBUTION (the helper, the generic amount it committed, the exact units it
+    /// spent, and the cast they were spent on) during a single finalize spend.
+    /// `finalize_mana_payment` owns the `PendingCast` by value, so the claim it
+    /// captured at the spend boundary is moved here for the duration of the payment
+    /// and cleared immediately after — the same handoff, for the same reason, as
+    /// `active_payment_pins`. A PAUSE re-establishes it from the restored root, so a
+    /// replacement choice between the helper's spend and the recording loses nothing.
+    ///
+    /// The claim is typed rather than a bare unit list because the finalizers must be
+    /// able to REFUSE a contribution that does not describe the payment it asserts:
+    /// units with no paid helper, or a paid helper whose units are missing, are both
+    /// shapes that would silently omit (or fabricate) mana spent to cast the spell.
+    /// Boxed: `GameState` has a stack budget (`game_state_size`), and this claim is
+    /// populated only inside a synchronous finalize window.
+    /// Never serialized and never part of state equality.
+    #[serde(skip)]
+    pub active_assist_contribution: Option<Box<AssistContribution>>,
     /// The synchronous rules-execution scope receiving newly produced mana.
     /// It is empty outside an activation or inline trigger and is never wire
     /// authority on its own.
@@ -26462,6 +30534,27 @@ declare_game_state! {
     #[serde(default, skip_serializing_if = "im::HashMap::is_empty")]
     #[serde(serialize_with = "crate::types::deterministic_serde::im_hash_map")]
     pub lki_cache: im::HashMap<ObjectId, LKISnapshot>,
+    /// CR 111.1 + CR 400.7 + CR 608.2h: the token bit the departure that wrote
+    /// each [`Self::lki_cache`] entry held AS IT LEFT, keyed by the same storage
+    /// id and written in the same block by the same departure.
+    ///
+    /// Structurally the snapshot's twin, down to holding no epoch: the id is the
+    /// key, every new departure overwrites the entry, the step boundary clears it,
+    /// hidden-identity redaction drops it, and loop normalization re-keys nothing
+    /// because there is nothing to re-key. That is what makes the pair
+    /// consistent BY CONSTRUCTION — a snapshot can never be read beside another
+    /// lifetime's bit — and what keeps loop comparison converged exactly as the
+    /// snapshot does (CR 104.4b).
+    ///
+    /// The snapshot cannot carry the bit (CR 707.2) and no later source can
+    /// reconstruct it (CR 111.8: a token that has left the battlefield can never
+    /// come back to answer for itself), so a door whose subject is "the object as
+    /// it left" reads it from here. The epoch-keyed twin
+    /// ([`Self::departure_token_by_incarnation`]) is the authority whenever the
+    /// caller can NAME the epoch.
+    #[serde(default, skip_serializing_if = "im::HashMap::is_empty")]
+    #[serde(serialize_with = "crate::types::deterministic_serde::im_hash_map")]
+    pub departure_token_cache: im::HashMap<ObjectId, bool>,
     /// CR 608.2h + CR 707.2: Full copiable-values LKI for objects that leave a
     /// public zone. Ordinary `LKISnapshot` is intentionally filter-shaped and
     /// does not carry ability definitions; copy effects need the complete
@@ -26490,6 +30583,47 @@ declare_game_state! {
     #[serde(serialize_with = "crate::types::deterministic_serde::im_hash_map_of_im_hash_map")]
     pub lki_copiable_values_by_incarnation:
         im::HashMap<ObjectId, im::HashMap<u64, CopiableValues>>,
+    /// CR 111.1 + CR 111.7 + CR 608.2h + CR 400.7: the token bit each departing
+    /// incarnation held AS IT LEFT, keyed by exact object incarnation — the
+    /// departure-epoch capture `LKISnapshot` cannot carry (CR 707.2: token-ness
+    /// is not a copiable value, so it is not part of the snapshot's characteristic
+    /// projection).
+    ///
+    /// Written by the same `zones.rs` departure that writes
+    /// `lki_by_incarnation`, and cleared with it on step transitions: a departure
+    /// capture lives exactly as long as the last-known information it belongs to.
+    /// Every other source of this bit is unsound for a HISTORICAL answer. The live
+    /// object is the present, not the epoch (CR 400.7 makes the storage id
+    /// reusable, and CR 730.2c + CR 730.2d let a merge flip the bit in place on
+    /// the same object with no zone change to record it). The zone-change journal
+    /// is turn-scoped and is cleared at rollover, so a tracked-set member read
+    /// after that boundary would answer from the absence of evidence. That absence
+    /// is repaired here, and where even this capture is missing the answer is
+    /// UNKNOWN — never the silent "nontoken" a `bool` default would give. A token
+    /// never returns to answer for itself (CR 111.8), so an entry for a departed
+    /// token is the ONLY evidence there will ever be about that epoch.
+    #[serde(default, skip_serializing_if = "im::HashMap::is_empty")]
+    #[serde(serialize_with = "crate::types::deterministic_serde::im_hash_map_of_im_hash_map")]
+    pub departure_token_by_incarnation: im::HashMap<ObjectId, im::HashMap<u64, bool>>,
+    /// CR 106.3 + CR 106.4 + CR 400.7: producer facts of the mana units that are
+    /// still floating in a pool, for the units whose producing incarnation is no
+    /// longer live at the storage id. Written by
+    /// `mana_payment::retain_pooled_mana_producer_snapshots` immediately BEFORE
+    /// the step/phase boundary clears the incarnation-keyed LKI caches, and
+    /// rebuilt from the pools at each boundary, so an entry exists exactly while
+    /// a pool still holds its unit — never as a general LKI extension. A unit
+    /// retained across a boundary (Upwelling's "you don't lose unspent mana as
+    /// steps and phases end") keeps the producer fact CR 106.3 owes the payment
+    /// that eventually spends it.
+    ///
+    /// Authority only. Each entry names the object that produced the mana, and the
+    /// storage id it names may since have been occupied by a card in a hidden zone
+    /// (CR 400.2), so the viewer projection drops the entries a viewer cannot
+    /// identify (`visibility::redact_hidden_identity_side_tables`, on the same rule
+    /// as every other id-keyed LKI table). The engine keeps them: the payment that
+    /// spends the unit reads them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pooled_mana_producer_snapshots: Vec<PooledManaProducerSnapshot>,
 
     /// CR 608.2h + CR 707.2: A spell's stack entry and object as they last
     /// existed on the stack (`stack::record_departed_stack_spell`) — keyed by storage id,
@@ -30352,6 +34486,28 @@ fn annotate_paused_exile_event(
     Some(occurrence)
 }
 
+/// CR 106.3 + CR 106.4 + CR 732.2a: whether a loop comparison still HOLDS the
+/// position's mana — which decides whether a floating unit's producer pin references
+/// that producer's exit record.
+///
+/// The record is what `game::casting::mana_spent_source_snapshot` reads while no
+/// step/phase boundary has carried the fact into the pool's per-unit ledger. A
+/// comparison that still holds the mana must keep it: two positions with identical
+/// pools that differ only in that record pay differently for the next spell, and
+/// CR 732.2a forbids the comparator to equate them.
+///
+/// A comparison that projects the pools AWAY — `project_out_resources` clears every
+/// pool — has no floating unit left and no price to compare, so the record is history
+/// there. Keeping it made each cycle's fresh producer a per-cycle difference and
+/// refused legitimate mana loops (Kitten + Blazing Firesinger).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FloatingProducerReferences {
+    /// The comparison still holds the mana: the pin references its exit record.
+    Kept,
+    /// The comparison projects the mana away: nothing is referenced.
+    ProjectedOut,
+}
+
 impl GameState {
     /// CR 608.2n: the final part the resolving instant or sorcery still owes, if any.
     pub fn owed_spell_final_part(&self) -> Option<&OwedSpellFinalPart> {
@@ -33531,6 +37687,11 @@ impl GameState {
     /// CR 605.3b: Begin the distinct, immediate execution node for one
     /// activated mana ability. A nested activation records its active parent as
     /// the causal dependency without changing activation behavior.
+    ///
+    /// This is the LIVE-announcement form: it names the object standing at
+    /// `source_id` now, which is the right answer at the moment an ability is
+    /// announced. A parked activation being RESUMED cannot use it — see
+    /// [`Self::begin_activated_mana_journal_node_for_source`].
     pub(crate) fn begin_activated_mana_journal_node(
         &mut self,
         source_id: ObjectId,
@@ -33540,6 +37701,22 @@ impl GameState {
             .get(&source_id)
             .map(ObjectIncarnationRef::from_object)
             .expect("mana ability activation source must exist");
+        self.begin_activated_mana_journal_node_for_source(source)
+    }
+
+    /// CR 605.3b + CR 400.7: Begin the execution node for one activated mana
+    /// ability from an EXPLICIT `(object, incarnation)` identity.
+    ///
+    /// A mana ability's cost is paid after it is announced (CR 602.2b routes it
+    /// through CR 601.2h), and a self-sacrificing or self-exiling cost moves the
+    /// source, so by the time a parked activation resumes, `source_id` names a
+    /// DIFFERENT object than the one that generated the ability (CR 400.7). The
+    /// node this function opens names the epoch the caller resolved, so the
+    /// journal's production record and the mana it produces describe one object.
+    pub(crate) fn begin_activated_mana_journal_node_for_source(
+        &mut self,
+        source: ObjectIncarnationRef,
+    ) -> RulesExecutionNodeRef {
         let parent = self.live_active_rules_execution_node();
         self.resolved_rules_journal
             .begin_activated_mana(source, parent)
@@ -33572,6 +37749,30 @@ impl GameState {
         let result = operation(self);
         self.active_rules_execution_node = previous;
         result
+    }
+
+    /// CR 605.3b: record that the settlement node `node` has RESOLVED.
+    ///
+    /// The one writer behind [`ResolvedRulesJournal::node_settled`] and the one
+    /// place settlement is decided: production calls it for the activation it just
+    /// produced for, AFTER the production ran and whether or not any mana came out
+    /// of it. A mana ability "resolves immediately after it is activated", and CR
+    /// 605.2 keeps one that the game state allows no mana to produce a mana ability
+    /// (Heronblade Elite's "{T}: Add X mana of any one color, where X is this
+    /// creature's power." at power 0) — so zero output is a settled activation, not
+    /// an unfinished one, and this record is what says so without reading the pip
+    /// list.
+    ///
+    /// A node the journal no longer retains is silently a no-op: the journal is
+    /// turn-scoped, and a settlement record for a node it has dropped would describe
+    /// nothing.
+    pub(crate) fn settle_mana_activation(&mut self, node: RulesExecutionNodeRef) {
+        if !self.resolved_rules_journal.contains_node(node) {
+            return;
+        }
+        self.resolved_rules_journal
+            .settle_node(node)
+            .expect("a retained settlement node accepts its own settlement record");
     }
 
     /// `with_rules_execution_node` for callers whose node is conditional
@@ -34025,6 +38226,7 @@ impl GameState {
             resolved_rules_journal: ResolvedRulesJournal::default(),
             ability_onset_record: AbilityOnsetRecord::Recorded,
             active_payment_pins: Vec::new(),
+            active_assist_contribution: None,
             active_rules_execution_node: None,
             active_casting_permission_index: None,
             active_graveyard_permission_latch: None,
@@ -34328,9 +38530,12 @@ impl GameState {
             stack_trigger_event_batches: HashMap::new(),
             stack_trigger_firings: HashMap::new(),
             lki_cache: im::HashMap::new(),
+            departure_token_cache: im::HashMap::new(),
             lki_copiable_values: im::HashMap::new(),
             lki_by_incarnation: im::HashMap::new(),
             lki_copiable_values_by_incarnation: im::HashMap::new(),
+            departure_token_by_incarnation: im::HashMap::new(),
+            pooled_mana_producer_snapshots: Vec::new(),
             departed_stack_spells: im::HashMap::new(),
             departed_activated_abilities: im::HashMap::new(),
             linked_exile_lki: HashMap::new(),
@@ -35483,6 +39688,18 @@ impl GameState {
     /// impl compares zeroed/canonicalized, so two states reached at different
     /// times can compare equal on everything a mandatory action could change.
     pub(crate) fn normalize_for_loop(&self) -> GameState {
+        self.normalize_for_loop_with(FloatingProducerReferences::Kept)
+    }
+
+    /// [`Self::normalize_for_loop`], stating whether the caller still COMPARES the mana
+    /// the position holds — see [`FloatingProducerReferences`]. The order matters: the
+    /// pin arm of `retain_carrier_referenced_lki` reads the pools, which the resource
+    /// projection clears only afterwards, and the prune it feeds is what
+    /// `canonicalize_floating_pip_identities` then re-keys.
+    pub(crate) fn normalize_for_loop_with(
+        &self,
+        floating_producer_references: FloatingProducerReferences,
+    ) -> GameState {
         let mut clone = self.clone();
         // apply() resets these at the start of every player action, so a position compares as
         // the next action starts from it.
@@ -35809,7 +40026,17 @@ impl GameState {
         // keeps apart; entries are append-only and immutable, so two samples
         // of one game hold equal entries at every common position anyway.
 
-        clone.retain_carrier_referenced_lki();
+        clone.retain_carrier_referenced_lki(floating_producer_references);
+        // CR 106.3 + CR 118.3a + CR 104.4b: the producer ledger's facts are keyed by
+        // pip, and `PooledManaProducerSnapshot`'s equality compares that key — it is
+        // what keeps a fact attached to the unit that owns it, so two positions
+        // differing only in WHICH live pip carries a row compare unequal. The pip is
+        // also a monotone mint tag, so comparing it as minted would split two
+        // positions one cycle apart. Renumber both sides by rank in pool order, AFTER
+        // the prune above (which reads real pips), and the key becomes canonical: the
+        // unit at rank `i` holds pip `i + 1` on every side, and the ledger follows the
+        // unit it describes. The allocator is residue, like `next_object_id`.
+        clone.canonicalize_floating_pip_identities();
         // CR 104.4b + CR 608.2h: last-known copiable values no ability can still
         // read as its own copy source are history, not position — pruned against
         // the set captured above, before the identities were erased.
@@ -35852,13 +40079,84 @@ impl GameState {
         }
     }
 
-    pub(crate) fn retain_carrier_referenced_lki(&mut self) {
+    /// CR 106.3 + CR 118.3a + CR 104.4b: renumber every floating unit's pip to its
+    /// rank in pooled unit order, and carry the producer ledger onto those ranks.
+    ///
+    /// A pip is the key that keeps a retained producer fact attached to the unit it
+    /// describes, and `PooledManaProducerSnapshot`'s equality compares it — without
+    /// it, two positions differing only in WHICH live unit of a departed source owns
+    /// a row compared equal, though payment resolves the fact by pip and so recovers
+    /// the producer from one unit and not the other. A pip is ALSO a monotone mint
+    /// tag, so comparing it as minted would split two positions one cycle apart,
+    /// which float their mana under fresh pips. Ranking both the pool and the ledger
+    /// by pool order answers both questions with one key: `ManaPool::eq` already
+    /// compares units in that same order, so equal pools produce equal ranks, while
+    /// a fact attached to a different unit produces a different rank.
+    ///
+    /// The key is the association itself, not a copy of the pool: this runs inside
+    /// `normalize_for_loop`, which the resource projection then clears the pools
+    /// (`project_out_player_consumables`) — a rank computed at comparison time would
+    /// have no units left to rank.
+    ///
+    /// Idempotent (a second call rewrites nothing), and applied only to a
+    /// normalized clone: a live pool's pips are the player's pin identities.
+    pub(crate) fn canonicalize_floating_pip_identities(&mut self) {
+        let mut next: u64 = 1;
+        let mut renamed: HashMap<crate::types::mana::ManaPipId, crate::types::mana::ManaPipId> =
+            HashMap::new();
+        for player in &mut self.players {
+            player
+                .mana_pool
+                .canonicalize_pip_ids(&mut next, &mut renamed);
+        }
+        // A row whose pip no pool holds was pruned by
+        // [`Self::retain_carrier_referenced_lki`] before this ran; should one survive
+        // (a direct caller), it keeps the key it had rather than borrowing a unit's.
+        for row in &mut self.pooled_mana_producer_snapshots {
+            if let Some(canonical) = renamed.get(&row.pip_id) {
+                row.pip_id = *canonical;
+            }
+        }
+        // The ledger is compared positionally, and its writer orders rows by the pip
+        // as MINTED. Ranks follow pool order instead, so the order is re-established
+        // in the new key: two positions holding the same facts on the same units then
+        // list them the same way even if the minted numbers ran in another order.
+        self.pooled_mana_producer_snapshots
+            .sort_by_key(|row| (row.source_id, row.source_incarnation, row.pip_id));
+        self.next_pip_id = 0;
+    }
+
+    /// CR 104.4b + CR 732.2a: retain only the incarnation-keyed LKI something can
+    /// still READ, then prune the pool's producer ledger to the units still pooled.
+    ///
+    /// The readers are the trigger-event carriers this function walks, the frame
+    /// anaphors below, and the producer pins of the mana that is still FLOATING.
+    ///
+    /// CR 106.3 + CR 106.4: a floating unit's pin references its producer's exit
+    /// record, because that record is what the payment reads while no step/phase
+    /// boundary has carried the fact into `pooled_mana_producer_snapshots`
+    /// (`game::casting::mana_spent_source_snapshot`). Two positions holding the same
+    /// pools but differing in it price the next spell differently, which CR 732.2a's
+    /// "predictable results" forbid the comparator to equate.
+    ///
+    /// A projection that clears the pools references nothing — there is no floating
+    /// unit left and no price to compare — and says so by calling
+    /// [`Self::project_out_floating_producer_references`] after this. Keeping the
+    /// records there made every cycle's fresh producer a per-cycle difference and
+    /// refused legitimate mana loops (Kitten + Blazing Firesinger).
+    pub(crate) fn retain_carrier_referenced_lki(
+        &mut self,
+        floating_producer_references: FloatingProducerReferences,
+    ) {
         // CR 104.4b + CR 732.2a: incarnation-versioned LKI is historical support
         // state, not independently loop-material state. Retain only snapshots
-        // reachable from trigger-event carriers that can still resume or resolve
+        // reachable from something that can still READ them: trigger-event carriers
+        // that can still resume or resolve
         // (`for_each_trigger_event_carrier_mut`: stack/resolving entries,
         // pending/deferred/ordering triggers, current and batched trigger events,
-        // every parked resolution frame, and a paused triggered mana ability).
+        // every parked resolution frame, and a paused triggered mana ability), the
+        // frame anaphors below, and — the third reader — the producer pins of the
+        // mana that is still FLOATING (see the block after this one).
         // WaitingFor copies are intentionally not a separate authority: every
         // trigger-event-bearing prompt has one of those pending/continuation
         // carriers, and loop samples are taken at the post-pipeline Priority frame.
@@ -35886,6 +40184,37 @@ impl GameState {
 
         // CR 104.4b: the same traversal identity canonicalization uses.
         self.for_each_trigger_event_carrier_mut(&mut |event| record_event(event));
+
+        // CR 106.3 + CR 106.4 + CR 732.2a: mana that is still FLOATING names its
+        // producer by the epoch it pinned at production, and the payment that spends
+        // it reads that epoch's exit last-known information while the carry ledger
+        // does not yet exist ([`Self::retain_pooled_mana_producer_snapshots`] writes
+        // that ledger at a step or phase boundary, and a unit produced and spent in
+        // ONE step never reaches one). So a floating unit's pin IS a reference:
+        // dropping the snapshot it names would leave the same pools paying
+        // differently on the two compared positions, which is exactly the difference
+        // CR 732.2a's "predictable results" forbids the comparator to ignore. It is
+        // also what a step-scoped record can lose first — Minimus Containment makes
+        // its enchanted permanent a Treasure, its `{T}, Sacrifice` ability is a
+        // departure (CR 400.7), and the LKI written there is the only record of who
+        // made that mana until a boundary carries it into the ledger.
+        //
+        // A unit with no pin (`pip_id` unstamped, `source_incarnation` absent) names
+        // no epoch, and a unit naming no producing object has none to name: neither
+        // adds a reference, so nothing is retained for them here.
+        if floating_producer_references == FloatingProducerReferences::Kept {
+            for player in &self.players {
+                for unit in player.mana_pool.units() {
+                    if unit.pip_id.0 == 0 || unit.source_id == NO_PRODUCING_OBJECT {
+                        continue;
+                    }
+                    if let Some(incarnation) = unit.source_incarnation {
+                        referenced_lki
+                            .insert(ObjectIncarnationRef::of(unit.source_id, incarnation));
+                    }
+                }
+            }
+        }
 
         // CR 608.2c: the departure snapshots the frame's live tracked-set
         // anaphor reads — the resolved set's origins
@@ -35917,6 +40246,49 @@ impl GameState {
                 (!history.is_empty()).then_some((object_id, history))
             })
             .collect();
+
+        // CR 104.4b + CR 732.2a + CR 608.2h: the departure token captures are the
+        // same historical support state, keyed by the same incarnations, so they are
+        // pruned by the same references. Not pruning them would make every loop
+        // cycle's departures accumulate in a compared field: two positions that
+        // differ only in a departure behind them would never compare equal, and an
+        // ordinary sacrifice loop would stop certifying (CR 732.2a: the loop is
+        // judged on reproducible results, not on the history that produced them).
+        self.departure_token_by_incarnation =
+            std::mem::take(&mut self.departure_token_by_incarnation)
+                .into_iter()
+                .filter_map(|(object_id, mut history)| {
+                    history.retain(|incarnation, _| {
+                        referenced_lki.contains(&ObjectIncarnationRef::of(object_id, *incarnation))
+                    });
+                    (!history.is_empty()).then_some((object_id, history))
+                })
+                .collect();
+
+        // CR 106.3 + CR 106.4 + CR 104.4b: a floating unit's retained producer
+        // fact is read by the POOL, not by a trigger-event carrier, so it is
+        // pruned against the units pooled mana still holds rather than against
+        // `referenced_lki`. It is then a function of the pools alone — two
+        // samples of one game holding the same pools hold the same entries — so
+        // it is loop-material position without being a per-cycle accumulator.
+        //
+        // The key is the UNIT's pip, the same ownership key every reader of this
+        // ledger uses (`mana_payment::pooled_mana_producer_row`,
+        // `GameState::pip_recorded_producer_epochs`): a row exists exactly while the
+        // unit it describes is still floating. Pruning by `(source, incarnation)`
+        // kept every row of a tenure whose producer still appeared SOMEWHERE in a
+        // pool — one source can make several units in one tenure, so spending one
+        // of them left that unit's row behind, describing a unit no pool holds. The
+        // ledger is compared whole in `GameState::eq`, so that leftover row made two
+        // positions describing the same game compare as different.
+        let pooled_pips: HashSet<crate::types::mana::ManaPipId> = self
+            .players
+            .iter()
+            .flat_map(|player| player.mana_pool.units())
+            .map(|unit| unit.pip_id)
+            .collect();
+        self.pooled_mana_producer_snapshots
+            .retain(|snapshot| pooled_pips.contains(&snapshot.pip_id));
     }
 
     /// CR 104.4b + CR 608.2h: keeps only the `departed_stack_spells` records a spell-cast
@@ -36318,7 +40690,10 @@ impl GameState {
             lki_incarnations(lki, f);
             attachment_incarnations(attachments, f);
             linked_exile_incarnations(linked_exile_snapshot, f);
-            for ManaSpentSourceSnapshot { source_id: _, lki } in mana_spent_source_snapshots {
+            for ManaSpentSourceSnapshot {
+                source_id: _, lki, ..
+            } in mana_spent_source_snapshots
+            {
                 lki_incarnations(lki, f);
             }
             if let Some(CostPaidObjectSnapshot {
@@ -36609,6 +40984,16 @@ impl GameState {
                 (*set, members)
             })
             .collect();
+        // The epochs the snapshot map is about to be re-keyed FROM. A capture can
+        // only be placed while its own epoch still names a snapshot, so this is
+        // read before the rename: after it, the minted numbers no longer exist.
+        let mut placeable_epochs: HashMap<ObjectId, HashSet<u64>> = HashMap::new();
+        for (object_id, history) in self.lki_by_incarnation.iter() {
+            placeable_epochs
+                .entry(*object_id)
+                .or_default()
+                .extend(history.keys().copied());
+        }
         self.lki_by_incarnation = std::mem::take(&mut self.lki_by_incarnation)
             .into_iter()
             .map(|(object_id, history)| {
@@ -36619,6 +41004,71 @@ impl GameState {
                 (object_id, history)
             })
             .collect();
+        // CR 111.1 + CR 400.7 + CR 608.2h: a departure token capture is keyed by
+        // the same epoch as the snapshot that departure wrote, so it is renamed by
+        // the same function. Leaving it under the minted numbers while the origin
+        // stamps above are re-keyed would make the two positions describe the same
+        // game while the capture could no longer be found from the epoch the
+        // origin names.
+        //
+        // A capture no ranked epoch can place is re-keyed by its RANK among that
+        // object's unplaceable epochs, never by the minted number. The two
+        // departure tables are serialized independently, so a restored payload is
+        // untrusted and may name an epoch whose snapshot is gone; calling
+        // `key_name` for it would index a ranked map by an object nothing ranked
+        // (`above` panics), and keeping the minted number would compare a MONOTONE
+        // per-cycle value — the same defect CR 104.4b forbids for pip ids and
+        // object ids, and one an ordinary sacrifice loop trips over
+        // (`analysis::corpus_tests::drive_combo_61_kitten_firesinger`). The rank is
+        // position-derived, so two positions holding the same unplaceable captures
+        // still compare equal.
+        let placeable = |object_id: ObjectId, incarnation: u64| {
+            placeable_epochs
+                .get(&object_id)
+                .is_some_and(|epochs| epochs.contains(&incarnation))
+        };
+        // The unplaceable epochs, ranked per object (see above). The rank key lives
+        // in a range `key_name` never produces (`u64::MAX - 1 - 2 * rank` for a
+        // canonical key, `u64::MAX - 2 * rank` for an unpooled one), and is far
+        // above any origin sentinel, so the two key spaces cannot collide.
+        let mut unplaced: HashMap<ObjectId, Vec<u64>> = HashMap::new();
+        for (object_id, history) in self.departure_token_by_incarnation.iter() {
+            let epochs = unplaced.entry(*object_id).or_default();
+            epochs.extend(
+                history
+                    .keys()
+                    .copied()
+                    .filter(|incarnation| !placeable(*object_id, *incarnation)),
+            );
+            epochs.sort_unstable();
+            epochs.dedup();
+        }
+        // Re-key a placeable epoch with the snapshots it belongs to; rank an
+        // unplaceable one among its own kind.
+        let capture_key = |object_id: ObjectId, incarnation: u64| {
+            if placeable(object_id, incarnation) {
+                key_name(object_id, incarnation)
+            } else {
+                let rank = unplaced
+                    .get(&object_id)
+                    .and_then(|epochs| epochs.binary_search(&incarnation).ok())
+                    .unwrap_or_default();
+                u64::MAX / 2 + 1 + rank as u64
+            }
+        };
+        self.departure_token_by_incarnation =
+            std::mem::take(&mut self.departure_token_by_incarnation)
+                .into_iter()
+                .map(|(object_id, history)| {
+                    let history: im::HashMap<u64, bool> = history
+                        .into_iter()
+                        .map(|(incarnation, is_token)| {
+                            (capture_key(object_id, incarnation), is_token)
+                        })
+                        .collect();
+                    (object_id, history)
+                })
+                .collect();
         self.lki_copiable_values_by_incarnation =
             std::mem::take(&mut self.lki_copiable_values_by_incarnation)
                 .into_iter()
@@ -37952,6 +42402,7 @@ fn _gamestate_partition_is_total(s: &GameState) {
         resolved_rules_journal: _,
         ability_onset_record: _,
         active_payment_pins: _,
+        active_assist_contribution: _,
         active_rules_execution_node: _,
         active_casting_permission_index: _,
         active_graveyard_permission_latch: _,
@@ -38290,6 +42741,21 @@ fn _gamestate_partition_is_total(s: &GameState) {
         lki_copiable_values: _,
         lki_by_incarnation: _,
         lki_copiable_values_by_incarnation: _,
+        // CR 111.1 + CR 104.4b + CR 608.2h: COMPARED, like the historical captures
+        // they twin. Each bit is written by the same departure, under the same id and
+        // epoch keys, as the last-known record it shadows, so
+        // `HistoryMember::LastKnownRecords` (`analysis/resource.rs`) equalizes it with
+        // that record before comparing and judges what the period added; a bit either
+        // frame states differently refuses, because a token that left is not
+        // interchangeable with a non-token that left (CR 111.8).
+        departure_token_cache: _,
+        departure_token_by_incarnation: _,
+        // CR 106.3 + CR 106.4 + CR 400.7: COMPARED, like the incarnation-keyed
+        // LKI caches it shadows. It is a function of the pools (an entry exists
+        // only while a pool holds the exact unit it describes), so it carries no
+        // per-cycle accumulator: a completed loop spends the mana it produced
+        // and the boundary rebuild drops the entry.
+        pooled_mana_producer_snapshots: _,
         departed_stack_spells: _,
         departed_activated_abilities: _,
         linked_exile_lki: _,
@@ -38672,6 +43138,9 @@ impl PartialEq for GameState {
             && self.lki_by_incarnation == other.lki_by_incarnation
             && self.lki_copiable_values_by_incarnation
                 == other.lki_copiable_values_by_incarnation
+            && self.departure_token_cache == other.departure_token_cache
+            && self.departure_token_by_incarnation == other.departure_token_by_incarnation
+            && self.pooled_mana_producer_snapshots == other.pooled_mana_producer_snapshots
             && self.departed_stack_spells == other.departed_stack_spells
             && self.departed_activated_abilities == other.departed_activated_abilities
             && self.city_blessing == other.city_blessing
@@ -40495,6 +44964,7 @@ mod tests {
             source,
             source_lki: state.objects[&source].snapshot_public_characteristics(),
             source_zone: Zone::Battlefield,
+            source_token: CapturedTokenBit::Known(state.objects[&source].is_token),
             ability_tag: None,
             is_loyalty_ability: false,
             activation_cost: BoundActivationCost::Cost(Box::new(
@@ -47339,6 +51809,7 @@ mod tests {
                         source_id: ObjectId(1),
                         ability_index: None,
                         rules_execution_node: None,
+                        activated_mana_occurrence: None,
                         ability_snapshot: None,
                         announced_source_incarnation: None,
                         color_override: None,
@@ -47456,6 +51927,7 @@ mod tests {
                     source_id: ObjectId(1),
                     ability_index: None,
                     rules_execution_node: None,
+                    activated_mana_occurrence: None,
                     ability_snapshot: None,
                     announced_source_incarnation: None,
                     color_override: None,
@@ -49289,6 +53761,296 @@ mod tests {
             .is_none());
     }
 
+    /// CR 700.14 + CR 601.2h + CR 701.59: the payer a CAST-holding collect-evidence
+    /// root STATES is the payer its continuation credits.
+    ///
+    /// `pending_cast_resume_player` is read from the resume root rather than assumed
+    /// from the cast's controller, because a save that states a different player there
+    /// credits that player (`expend_credits_for_cast`). A collect-evidence cost can
+    /// hold a cast (`CollectEvidenceResume::Casting`), so its root belongs with the
+    /// other cast-holding roots rather than in the no-payer fallback.
+    ///
+    /// Revert-probe: leaving the arm in the fallback answers the cast's controller
+    /// (P0) and fails the assertion.
+    #[test]
+    fn a_collect_evidence_root_states_the_payer_its_cast_credits() {
+        use crate::types::ability::{Effect, QuantityExpr, TargetFilter};
+
+        let mut state = GameState::new_two_player(7);
+        let pending = PendingCast::new(
+            ObjectId(1),
+            CardId(1),
+            ResolvedAbility::new(
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                },
+                vec![],
+                ObjectId(5),
+                PlayerId(0),
+            ),
+            crate::types::mana::ManaCost::NoCost,
+        );
+        assert_eq!(
+            pending.ability.controller,
+            PlayerId(0),
+            "fixture precondition: the cast's controller is P0"
+        );
+        state.pending_cost_move_resume = Some(PendingCostMoveResume::CollectEvidencePayment {
+            player: PlayerId(1),
+            chosen: Vec::new(),
+            paused_at_index: 0,
+            resume: Box::new(CollectEvidenceResume::Casting {
+                pending_cast: Box::new(pending.clone()),
+                source: SpellCostSource::Other,
+            }),
+        });
+
+        assert_eq!(
+            state.pending_cast_resume_player(PendingCastOwner::CostMove, &pending),
+            PlayerId(1),
+            "the root's stated payer is what the resume credits, not the controller"
+        );
+    }
+
+    /// CR 400.7 + CR 104.4b: a restored payload is UNTRUSTED, and its two
+    /// departure tables are serialized independently, so a capture can name an
+    /// epoch whose last-known information is gone. Loop normalization must place
+    /// it without panicking: an UNREFERENCED capture is pruned with the snapshot
+    /// it shadows, and a REFERENCED one — a tracked-set origin names its
+    /// incarnation, so the prune keeps it — keeps its MINTED epoch. That can only
+    /// make two positions compare unequal, never equal, so a loop is never
+    /// certified over a difference CR 104.4b must see.
+    ///
+    /// Revert-probe: re-keying every capture unconditionally panics here
+    /// (`above` indexes the ranked map by an object id nothing ranked).
+    #[test]
+    fn normalize_for_loop_places_a_departure_capture_with_no_lki_row_under_its_minted_epoch() {
+        let mut a = GameState::new_two_player(7);
+        assert!(a.lki_by_incarnation.is_empty());
+        a.departure_token_by_incarnation
+            .entry(ObjectId(50))
+            .or_default()
+            .insert(3, true);
+        assert!(
+            a.normalize_for_loop()
+                .departure_token_by_incarnation
+                .is_empty(),
+            "an unreferenced capture is pruned with the snapshot it shadows"
+        );
+
+        let member = ObjectId(51);
+        let set_id = TrackedSetId(1);
+        let mut b = GameState::new_two_player(7);
+        b.chain_tracked_set_id = Some(set_id);
+        b.tracked_object_sets.insert(set_id, vec![member]);
+        b.tracked_set_member_origins.insert(
+            set_id,
+            [(
+                member,
+                TrackedMemberOrigin {
+                    departed_from: Zone::Battlefield,
+                    departure_incarnation: 3,
+                },
+            )]
+            .into_iter()
+            .collect(),
+        );
+        b.departure_token_by_incarnation
+            .entry(member)
+            .or_default()
+            .insert(3, true);
+        assert!(
+            !b.lki_by_incarnation.contains_key(&member),
+            "fixture precondition: the capture names an epoch with no snapshot"
+        );
+        let normalized = b.normalize_for_loop();
+        assert_eq!(
+            normalized.departure_token_by_incarnation[&member]
+                .values()
+                .collect::<Vec<_>>(),
+            vec![&true],
+            "a capture no ranked epoch can place is kept, re-keyed by rank"
+        );
+        assert_eq!(
+            normalized.departure_token_by_incarnation,
+            b.clone()
+                .normalize_for_loop()
+                .departure_token_by_incarnation,
+            "and the re-keying is position-derived, not minted-number-derived"
+        );
+    }
+
+    /// CR 400.7 + CR 104.4b: loop normalization re-keys a departure's epoch, and
+    /// BOTH token captures must move with it — the epoch-keyed bit beside the
+    /// snapshot it belongs to, and the storage-id-keyed pair beside the cache.
+    /// The tracked-set origin is what names that epoch for a later read, so a
+    /// capture left behind at the minted number would make that read miss.
+    ///
+    /// Revert-probe: re-keying only the snapshot (or only one of the two
+    /// captures) makes both lookups miss the renamed epoch.
+    #[test]
+    fn normalize_for_loop_rekeys_a_departure_token_capture_with_its_origin() {
+        let mut state = GameState::new_two_player(7);
+        let member = create_object(
+            &mut state,
+            CardId(960),
+            PlayerId(0),
+            "Departed Token".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&member).unwrap().is_token = true;
+        // CR 111.7: the engine's own departure writes the snapshot and both
+        // captures under one incarnation.
+        let mut events = Vec::new();
+        crate::game::zones::move_to_zone(&mut state, member, Zone::Graveyard, &mut events);
+        let minted = *state.departure_token_by_incarnation[&member]
+            .keys()
+            .next()
+            .expect("one departure, one incarnation");
+
+        // A tracked set names that epoch: it is the reference that keeps both the
+        // snapshot and the capture through pruning.
+        let set_id = TrackedSetId(1);
+        state.chain_tracked_set_id = Some(set_id);
+        state.tracked_object_sets.insert(set_id, vec![member]);
+        state.tracked_set_member_origins.insert(
+            set_id,
+            [(
+                member,
+                TrackedMemberOrigin {
+                    departed_from: Zone::Battlefield,
+                    departure_incarnation: minted,
+                },
+            )]
+            .into_iter()
+            .collect(),
+        );
+
+        let normalized = state.normalize_for_loop();
+        let renamed = normalized.tracked_set_member_origins[&set_id][&member].departure_incarnation;
+        assert_ne!(
+            renamed, minted,
+            "fixture precondition: the epoch is re-keyed"
+        );
+        assert_eq!(
+            normalized.departure_token_by_incarnation[&member].get(&renamed),
+            Some(&true),
+            "the epoch-keyed capture answers for the epoch the origin now names"
+        );
+        assert!(
+            normalized.departure_token_cache[&member],
+            "and the storage-id-keyed twin still states the bit"
+        );
+        assert_eq!(
+            normalized.departure_token_by_incarnation[&member].len(),
+            1,
+            "the capture did not survive under both the minted and the renamed key"
+        );
+    }
+
+    /// CR 104.4b + CR 111.1 + CR 608.2h: the departure token captures are part of the
+    /// loop comparand, and this pins both halves of that decision.
+    ///
+    /// The captures CONVERGE across normalization: an unreferenced superseded epoch is
+    /// pruned from both tables, so positions one cycle apart stay equal. And a bit the
+    /// positions state differently DOES distinguish them: each bit is written by the
+    /// same departure as the last-known record it shadows and is the only evidence of
+    /// the epoch it was taken from (CR 111.8), so a token that left is not
+    /// interchangeable with a non-token that left.
+    ///
+    /// Revert-probe: taking either field back out of `impl PartialEq` makes the second
+    /// assertion fail.
+    #[test]
+    fn normalize_for_loop_compares_a_departure_token_bit_but_prunes_a_superseded_epoch() {
+        fn departed_state(superseded: Option<u64>, bit: bool) -> (GameState, ObjectId) {
+            let mut state = GameState::new_two_player(7);
+            let member = create_object(
+                &mut state,
+                CardId(961),
+                PlayerId(0),
+                "Loop Token".to_string(),
+                Zone::Battlefield,
+            );
+            state.objects.get_mut(&member).unwrap().is_token = true;
+            let mut events = Vec::new();
+            crate::game::zones::move_to_zone(&mut state, member, Zone::Graveyard, &mut events);
+            let minted = *state.departure_token_by_incarnation[&member]
+                .keys()
+                .next()
+                .expect("one departure, one incarnation");
+            // A tracked set names the epoch, so the prune keeps the departure's
+            // snapshot and its capture: both states still CARRY the departure.
+            let set_id = TrackedSetId(1);
+            state.chain_tracked_set_id = Some(set_id);
+            state.tracked_object_sets.insert(set_id, vec![member]);
+            state.tracked_set_member_origins.insert(
+                set_id,
+                [(
+                    member,
+                    TrackedMemberOrigin {
+                        departed_from: Zone::Battlefield,
+                        departure_incarnation: minted,
+                    },
+                )]
+                .into_iter()
+                .collect(),
+            );
+            state
+                .departure_token_by_incarnation
+                .get_mut(&member)
+                .unwrap()
+                .insert(minted, bit);
+            *state.departure_token_cache.get_mut(&member).unwrap() = bit;
+            if let Some(extra) = superseded {
+                // An epoch nothing references: history, pruned from both tables.
+                state
+                    .departure_token_by_incarnation
+                    .entry(member)
+                    .or_default()
+                    .insert(extra, false);
+            }
+            (state, member)
+        }
+
+        let (a, member) = departed_state(None, true);
+        let (b, _) = departed_state(Some(99), true);
+        assert!(
+            a.departure_token_by_incarnation[&member].len() == 1
+                && b.departure_token_by_incarnation[&member].len() == 2,
+            "fixture precondition: the captures differ before normalization (the states \
+             do not, the fields being outside the comparand)"
+        );
+        let (na, nb) = (a.normalize_for_loop(), b.normalize_for_loop());
+        assert!(
+            na.departure_token_by_incarnation.contains_key(&member),
+            "reach: the referenced departure survives normalization"
+        );
+        assert_eq!(
+            na, nb,
+            "an unreferenced superseded capture must not distinguish two equal positions"
+        );
+        assert_eq!(
+            nb.departure_token_by_incarnation[&member].len(),
+            1,
+            "the superseded epoch is pruned from the table"
+        );
+
+        let (flipped, _) = departed_state(None, false);
+        let normalized_flipped = flipped.normalize_for_loop();
+        assert_ne!(
+            normalized_flipped, na,
+            "a departure token bit either position states differently distinguishes them"
+        );
+        assert!(
+            normalized_flipped
+                .departure_token_cache
+                .contains_key(&member)
+                && !normalized_flipped.departure_token_cache[&member],
+            "reach: the flipped bit is still state, and now comparand"
+        );
+    }
+
     /// CR 104.4b + CR 732.2a: repeated same-step zone cycles accumulate
     /// incarnation-versioned LKI, but snapshots no pending trigger can consume
     /// are history rather than a change to the recurring game state. A snapshot
@@ -49410,6 +54172,113 @@ mod tests {
         assert!(
             !loop_states_equal(&normalized_a, &changed_reference.normalize_for_loop()),
             "different LKI for a still-referenced incarnation remains meaningful"
+        );
+    }
+
+    /// CR 106.3 + CR 106.4 + CR 732.2a: a FLOATING unit's producer pin references
+    /// its producer's exit record — before any step/phase boundary has carried the
+    /// fact into the pool's per-unit ledger.
+    ///
+    /// The board is Minimus Containment's in shape: a Treasure whose
+    /// "{T}, Sacrifice this artifact: Add one mana of any color" produced the mana AND
+    /// moved its source to the graveyard, so CR 400.7 makes the graveyard card a new
+    /// object and the exit record that departure wrote is the ONLY account of who made
+    /// the mana. No boundary has run, so `pooled_mana_producer_snapshots` is empty and
+    /// `game::casting::mana_spent_source_snapshot` reads that record.
+    ///
+    /// Two positions with the same pools that differ only in the record pay
+    /// differently for the next spell — one can prove "mana from a Treasure was spent
+    /// to cast" (Rain of Riches' cascade) and the other cannot — so the strict
+    /// comparison must see the difference, and the projection that CLEARS the pools
+    /// must not: there the price is not compared at all, and keeping the record made
+    /// each cycle's fresh producer a per-cycle difference that refused a real mana
+    /// loop (Kitten + Blazing Firesinger).
+    #[test]
+    fn a_floating_pin_references_its_exit_record_only_while_the_mana_is_compared() {
+        fn snapshot(name: &str) -> LKISnapshot {
+            let mut snapshot = LKISnapshot {
+                name: name.to_string(),
+                token_image_ref: None,
+                power: None,
+                toughness: None,
+                base_power: None,
+                base_toughness: None,
+                mana_value: 0,
+                controller: PlayerId(0),
+                owner: PlayerId(0),
+                card_types: vec![CoreType::Artifact],
+                subtypes: vec!["Treasure".to_string()],
+                supertypes: Vec::new(),
+                keywords: Vec::new(),
+                colors: Vec::new(),
+                chosen_attributes: Vec::new(),
+                counters: HashMap::new(),
+                tapped: false,
+                is_suspected: false,
+                was_prepared: false,
+                attachments: Vec::new(),
+                intensity: 0,
+            };
+            snapshot.name = name.to_string();
+            snapshot
+        }
+
+        let treasure = ObjectId(80);
+        let producing_incarnation = 4;
+        let mut with_the_fact = GameState::new_two_player(7);
+        // CR 400.7: the producer departed, so no live object answers for the unit.
+        with_the_fact
+            .lki_by_incarnation
+            .entry(treasure)
+            .or_default()
+            .insert(producing_incarnation, snapshot("Treasure"));
+        let mut unit = ManaUnit::new(ManaType::Red, treasure, false, vec![]);
+        unit.pip_id = ManaPipId(1);
+        unit.source_incarnation = Some(producing_incarnation);
+        with_the_fact.players[PlayerId(0).0 as usize]
+            .mana_pool
+            .add(unit);
+        assert!(
+            with_the_fact.pooled_mana_producer_snapshots.is_empty(),
+            "reach-guard: no step/phase boundary has written the ledger, so the exit \
+             record is the only account of this unit's producer"
+        );
+
+        // The same position with that ONE record removed: the pools are identical.
+        let mut without_the_fact = with_the_fact.clone();
+        without_the_fact.lki_by_incarnation.remove(&treasure);
+        assert_eq!(
+            without_the_fact.players[PlayerId(0).0 as usize]
+                .mana_pool
+                .units()
+                .collect::<Vec<_>>(),
+            with_the_fact.players[PlayerId(0).0 as usize]
+                .mana_pool
+                .units()
+                .collect::<Vec<_>>(),
+            "reach-guard: the two positions hold IDENTICAL pools"
+        );
+
+        assert!(
+            !loop_states_equal(
+                &with_the_fact.normalize_for_loop(),
+                &without_the_fact.normalize_for_loop()
+            ),
+            "CR 106.3 + CR 732.2a: the pin references the record, so a position that still \
+             proves the producer and one that does not are DIFFERENT positions — the next \
+             spell's price reads it"
+        );
+
+        // The projection that CLEARS the pools compares no price, so there the record is
+        // history and the two positions are the same one. Keeping it there refused a
+        // real mana loop whose every cycle mints a fresh producer.
+        assert!(
+            loop_states_equal(
+                &with_the_fact.normalize_for_loop_with(FloatingProducerReferences::ProjectedOut),
+                &without_the_fact.normalize_for_loop_with(FloatingProducerReferences::ProjectedOut)
+            ),
+            "control: with the pools projected away the record is not position, so a \
+             legitimate mana loop is not refused"
         );
     }
 
@@ -49895,6 +54764,7 @@ mod tests {
             context.mana_spent_source_snapshots = vec![ManaSpentSourceSnapshot {
                 source_id: x,
                 lki: context.lki.clone(),
+                source_token: crate::types::game_state::CapturedTokenBit::Unknown,
             }];
             context.granting_object = Some(reference);
             let event = GameEvent::ZoneChanged {
@@ -50636,6 +55506,7 @@ mod tests {
                 source_id: ObjectId(1),
                 ability_index: Some(0),
                 rules_execution_node: None,
+                activated_mana_occurrence: None,
                 ability_snapshot: None,
                 announced_source_incarnation: None,
                 color_override: None,
@@ -53307,6 +58178,7 @@ mod tests {
                 activation_ability_index: None,
                 pending_loyalty_activation_player: None,
                 target_constraints: vec![],
+                committed_target_facts: None,
                 crime_candidate: false,
                 casting_variant: CastingVariant::Normal,
                 casting_permission_index: None,
@@ -53331,6 +58203,7 @@ mod tests {
                 delved_cards: Vec::new(),
                 deferred_sacrificed_permanents: Vec::new(),
                 pinned_pool_units: Vec::new(),
+                assist_contributed_units: Vec::new(),
                 cancel_restore_prepared_source: None,
                 payment_mode: CastPaymentMode::Auto,
                 assist_state: AssistState::NotOffered,
@@ -53860,6 +58733,7 @@ mod tests {
             activation_ability_index: None,
             pending_loyalty_activation_player: None,
             target_constraints: vec![],
+            committed_target_facts: None,
             crime_candidate: false,
             casting_variant: CastingVariant::Normal,
             casting_permission_index: None,
@@ -53884,6 +58758,7 @@ mod tests {
             delved_cards: Vec::new(),
             deferred_sacrificed_permanents: Vec::new(),
             pinned_pool_units: Vec::new(),
+            assist_contributed_units: Vec::new(),
             cancel_restore_prepared_source: None,
             payment_mode: CastPaymentMode::Auto,
             assist_state: AssistState::NotOffered,
@@ -53966,6 +58841,7 @@ mod tests {
                     source_id: ObjectId(1),
                     ability_index: None,
                     rules_execution_node: None,
+                    activated_mana_occurrence: None,
                     ability_snapshot: None,
                     announced_source_incarnation: None,
                     color_override: None,
@@ -54230,6 +59106,7 @@ mod tests {
             source_id: ObjectId(1),
             ability_index: Some(0),
             rules_execution_node: None,
+            activated_mana_occurrence: None,
             ability_snapshot: None,
             announced_source_incarnation: None,
             color_override: None,
@@ -54346,6 +59223,202 @@ mod tests {
             paused_at_index: 0,
         }));
         assert!(state.withholds_priority());
+    }
+
+    /// CR 601.2c + CR 601.2i: the three shapes a parked cast's target facts can
+    /// take, for the restore-guard unit tests below.
+    #[derive(Clone, Copy)]
+    enum ParkedFacts {
+        /// Pre-declaration (CR 601.2a–b): no `prepaid_finalization` at all.
+        PreDeclaration,
+        /// Finalization began but the pre-payment checks never latched facts.
+        Unknown,
+        /// A cast that declared no target (`Some(vec![])`).
+        Known,
+    }
+
+    fn parked_cast(object_id: ObjectId, facts: ParkedFacts) -> PendingCast {
+        let ability = crate::types::ability::ResolvedAbility::new(
+            crate::types::ability::Effect::Draw {
+                count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
+                target: crate::types::ability::TargetFilter::Controller,
+            },
+            Vec::new(),
+            object_id,
+            PlayerId(0),
+        );
+        let mut pending =
+            PendingCast::new(object_id, CardId(object_id.0), ability, ManaCost::zero());
+        if !matches!(facts, ParkedFacts::PreDeclaration) {
+            pending.prepaid_finalization = Some(Box::new(PrepaidSpellFinalization {
+                phyrexian_choices: None,
+                pre_payment_checks: Some(Box::new(FinalizePrePaymentChecks {
+                    early_waiting_for: None,
+                    cascade_cast_transformed: false,
+                    resolution_success_waiting_for: None,
+                    cast_this_way_etb_counter: None,
+                    cast_this_way_enters_mods: Default::default(),
+                    committed_target_facts: matches!(facts, ParkedFacts::Known).then(Vec::new),
+                })),
+            }));
+        }
+        pending
+    }
+
+    fn discard_for_cost(state: &mut GameState, pending: PendingCast) {
+        state.pending_discard_for_cost = Some(Box::new(PendingDiscardForCostResume::Chosen {
+            player: PlayerId(0),
+            pending,
+            chosen: vec![ObjectId(3)],
+            paused_at_index: 0,
+        }));
+    }
+
+    /// CR 601.2 / CR 602.2: restore admission reads untrusted state, so the
+    /// cast-custody walk it reuses must be the assertion-free enumeration. A
+    /// crafted save that parks two different announcements is refused with the
+    /// ordinary error — not a `debug_assert!` panic at a library boundary. Both
+    /// carriers here carry KNOWN facts, so only the owner-agreement check can
+    /// catch it; reverting the walk to `live_pending_cast_owners` would panic.
+    #[test]
+    fn reject_conflicting_pending_cast_owners_refuses_two_announcements_without_panicking() {
+        let mut state = GameState::new_two_player(42);
+        state.pending_cast = Some(Box::new(parked_cast(ObjectId(2), ParkedFacts::Known)));
+        discard_for_cost(&mut state, parked_cast(ObjectId(9), ParkedFacts::Known));
+
+        let refused = state.reject_conflicting_pending_cast_owners();
+        assert!(
+            matches!(
+                refused,
+                Err(PersistedRestoreError::ConflictingPendingCastOwners {
+                    first: ObjectId(2),
+                    second: ObjectId(9),
+                    ..
+                })
+            ),
+            "two live announcements are refused, not panicked on: {refused:?}"
+        );
+
+        // Agreement is admitted: both owners name the same cast.
+        let mut agreeing = GameState::new_two_player(42);
+        agreeing.pending_cast = Some(Box::new(parked_cast(ObjectId(2), ParkedFacts::Known)));
+        discard_for_cost(&mut agreeing, parked_cast(ObjectId(2), ParkedFacts::Known));
+        assert!(agreeing.reject_conflicting_pending_cast_owners().is_ok());
+
+        // The diagnostic must describe an ability-index-only disagreement too,
+        // not collapse it to one object id.
+        let mut same_object = GameState::new_two_player(42);
+        let mut first = parked_cast(ObjectId(5), ParkedFacts::Known);
+        first.activation_ability_index = Some(0);
+        let mut second = parked_cast(ObjectId(5), ParkedFacts::Known);
+        second.activation_ability_index = Some(1);
+        same_object.pending_cast = Some(Box::new(first));
+        discard_for_cost(&mut same_object, second);
+        assert!(
+            matches!(
+                same_object.reject_conflicting_pending_cast_owners(),
+                Err(PersistedRestoreError::ConflictingPendingCastOwners {
+                    first: ObjectId(5),
+                    first_ability_index: Some(0),
+                    second: ObjectId(5),
+                    second_ability_index: Some(1),
+                })
+            ),
+            "an ability-index-only disagreement is described, not collapsed to one id"
+        );
+    }
+
+    /// The conflict guard must be wired into the production chokepoint, not just
+    /// callable. A persisted save that parks two different announcements is
+    /// refused by `PersistedGameState::into_game_state`, so deleting the
+    /// `prepare_for_restore` call fails this test.
+    #[test]
+    fn prepare_for_restore_refuses_two_announcements_on_the_persisted_path() {
+        let mut state = GameState::new_two_player(42);
+        state.pending_cast = Some(Box::new(parked_cast(ObjectId(2), ParkedFacts::Known)));
+        // A different announcement on the prompt — a shape only a crafted save
+        // can carry, since live play keeps one announcement in flight.
+        state.waiting_for = WaitingFor::PayCost {
+            player: PlayerId(0),
+            kind: PayCostKind::Sacrifice,
+            choices: Vec::new(),
+            count: 0,
+            min_count: 0,
+            resume: CostResume::Spell {
+                spell: Box::new(parked_cast(ObjectId(9), ParkedFacts::Known)),
+            },
+        };
+
+        let json =
+            serde_json::to_value(PersistedGameState::capture(state)).expect("the park serializes");
+        let refused = serde_json::from_value::<PersistedGameState>(json)
+            .expect("the park decodes")
+            .into_game_state();
+        assert!(
+            matches!(
+                refused,
+                Err(PersistedRestoreError::ConflictingPendingCastOwners {
+                    first: ObjectId(2),
+                    second: ObjectId(9),
+                    ..
+                })
+            ),
+            "the persisted path refuses two announcements: {refused:?}"
+        );
+    }
+
+    /// CR 601.2c + CR 601.2i + CR 602.2b: the walk covers a serialized carrier the
+    /// old hand-written list never inspected
+    /// (`PendingCostMoveResume::ActivationMillPayment`, an activation cost move).
+    /// The refusal is reached through the production `into_game_state` chokepoint,
+    /// so a regression that drops this carrier from the walk fails here.
+    #[test]
+    fn prepare_for_restore_checks_the_activation_mill_carrier() {
+        let mut state = GameState::new_two_player(42);
+        state.pending_cost_move_resume = Some(PendingCostMoveResume::ActivationMillPayment {
+            player: PlayerId(0),
+            pending: Box::new(parked_cast(ObjectId(9), ParkedFacts::Unknown)),
+        });
+
+        let json =
+            serde_json::to_value(PersistedGameState::capture(state)).expect("the park serializes");
+        let refused = serde_json::from_value::<PersistedGameState>(json)
+            .expect("the park decodes")
+            .into_game_state();
+        assert!(
+            matches!(
+                refused,
+                Err(PersistedRestoreError::UnknownPendingTargetFacts {
+                    spell_object_id: Some(ObjectId(9)),
+                })
+            ),
+            "the ActivationMill carrier's unknown facts are refused: {refused:?}"
+        );
+    }
+
+    /// Function-level reach pin for the `DiscardForCost` arm. That field is
+    /// `#[serde(skip)]`, so a restored save cannot carry it; the serialized
+    /// carrier above is the restore-path witness. This still fails if the walk is
+    /// narrowed to `External` only, which is what it guards.
+    #[test]
+    fn reject_unknown_pending_target_facts_checks_the_discard_for_cost_owner() {
+        let mut state = GameState::new_two_player(42);
+        state.pending_cast = Some(Box::new(parked_cast(
+            ObjectId(2),
+            ParkedFacts::PreDeclaration,
+        )));
+        discard_for_cost(&mut state, parked_cast(ObjectId(9), ParkedFacts::Unknown));
+
+        let refused = state.reject_unknown_pending_target_facts();
+        assert!(
+            matches!(
+                refused,
+                Err(PersistedRestoreError::UnknownPendingTargetFacts {
+                    spell_object_id: Some(ObjectId(9)),
+                })
+            ),
+            "the DiscardForCost cast's unknown facts are refused: {refused:?}"
+        );
     }
 
     #[test]
@@ -56495,6 +61568,9 @@ mod tests {
             was_kicked: false,
             spell_object_id: None,
             prepared_copy_source: None,
+            mana_spent_source_snapshots: Some(vec![]),
+            // A hand-built case record carries no announced cast, so it declares no target.
+            targets: Some(Vec::new()),
         };
         let json = serde_json::to_string(&original).unwrap();
         let round_tripped: SpellCastRecord = serde_json::from_str(&json).unwrap();
@@ -59135,6 +64211,7 @@ mod restored_exact_attack_authority_tests {
             source_id: attacker,
             ability_index: None,
             rules_execution_node: None,
+            activated_mana_occurrence: None,
             ability_snapshot: None,
             announced_source_incarnation: None,
             color_override: None,
@@ -59178,6 +64255,7 @@ mod restored_exact_attack_authority_tests {
             resolution_success_waiting_for: None,
             cast_this_way_etb_counter: None,
             cast_this_way_enters_mods: Default::default(),
+            committed_target_facts: Some(Vec::new()),
         };
         let mut admitted = Vec::new();
         for carrier in 0..26 {
@@ -59501,6 +64579,7 @@ mod restored_exact_attack_authority_tests {
                                 },
                             )),
                             prepaid_actual_mana_spent: None,
+                            committed_target_facts: Some(Vec::new()),
                         },
                         requested_cost_count: None,
                         deferred_cost_events: vec![],
@@ -59573,6 +64652,7 @@ mod restored_exact_attack_authority_tests {
                                 cascade_cast_transformed: false,
                                 resolution_success_waiting_for: Some(Box::new(token_host())),
                                 prepaid_actual_mana_spent: None,
+                                committed_target_facts: Some(Vec::new()),
                             },
                         });
                     state.waiting_for.clone()
@@ -60103,6 +65183,75 @@ mod zone_change_combat_status_tests {
             None
         );
         assert_eq!(legacy.combat_status.defending_player, Some(PlayerId(2)));
+    }
+}
+
+/// CR 106.3 + CR 118.3a + CR 104.4b: the pool's per-unit producer ledger is keyed
+/// by the UNIT — its pip — at every reader AND at the loop-comparison
+/// normalization that prunes it.
+///
+/// One source can produce several units in one tenure `(source, incarnation)`
+/// (Prismite activated twice, a Trinket that makes two mana), so a rule that keeps
+/// every row whose tenure still appears SOMEWHERE in a pool keeps the rows of units
+/// no pool holds any more. The ledger is compared whole when two loop positions are
+/// compared (`GameState::eq` reads `pooled_mana_producer_snapshots`), so a leftover
+/// row is non-positional content that can make two descriptions of one position
+/// differ — the CR 104.4b mandatory-loop certification reads exactly that
+/// comparison.
+#[cfg(test)]
+mod pooled_producer_ledger_key_tests {
+    use super::{GameState, PooledManaProducerSnapshot};
+    use crate::game::zones::create_object;
+    use crate::types::identifiers::CardId;
+    use crate::types::mana::{ManaPipId, ManaType, ManaUnit};
+    use crate::types::player::PlayerId;
+    use crate::types::zones::Zone;
+
+    /// CR 118.3a: the survivor's row stays, the spent pip's row goes, even though
+    /// both name ONE producing tenure and that tenure is still pooled.
+    #[test]
+    fn a_row_whose_pip_left_the_pool_is_pruned_even_while_its_tenure_is_still_pooled() {
+        let mut state = GameState::new_two_player(11);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Mox Jet".to_string(),
+            Zone::Battlefield,
+        );
+        let incarnation = state.objects[&source].incarnation;
+        let lki = state.objects[&source].snapshot_public_characteristics();
+
+        // ONE unit of that tenure is still floating; the other was spent, and only
+        // its ledger row remains.
+        let mut held = ManaUnit::new(ManaType::Black, source, false, vec![]);
+        held.pip_id = ManaPipId(1);
+        held.source_incarnation = Some(incarnation);
+        state.players[PlayerId(0).0 as usize].mana_pool.add(held);
+
+        let row = |pip: u64| PooledManaProducerSnapshot {
+            pip_id: ManaPipId(pip),
+            source_id: source,
+            source_incarnation: incarnation,
+            lki: lki.clone(),
+            source_token: crate::types::game_state::CapturedTokenBit::Unknown,
+        };
+        state.pooled_mana_producer_snapshots = vec![row(1), row(2)];
+
+        state.retain_carrier_referenced_lki(
+            crate::types::game_state::FloatingProducerReferences::Kept,
+        );
+
+        assert_eq!(
+            state
+                .pooled_mana_producer_snapshots
+                .iter()
+                .map(|snapshot| snapshot.pip_id.0)
+                .collect::<Vec<_>>(),
+            vec![1],
+            "the row belongs to its pip: pip 2 is spent, so its row must be pruned even though \
+             pip 1 names the same (source, incarnation) tenure and is still pooled"
+        );
     }
 }
 

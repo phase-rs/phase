@@ -7,7 +7,9 @@ use crate::types::ability::{
 };
 use crate::types::card_type::{CoreType, Supertype};
 use crate::types::counter::CounterType;
-use crate::types::game_state::{BattlefieldEntryRecord, CastOccurrence, CastingVariant};
+use crate::types::game_state::{
+    ActivationTargetFact, BattlefieldEntryRecord, CastOccurrence, CastingVariant,
+};
 use crate::types::keywords::Keyword;
 use crate::types::mana::{ManaColor, ManaCost};
 use crate::types::phase::Phase;
@@ -297,11 +299,15 @@ pub fn add_mana_cost(base: &ManaCost, extra: &ManaCost) -> ManaCost {
 /// objects (tokens, emblems) lack one. Tests that exercise this helper without
 /// having gone through the cast pipeline default the missing zone to
 /// `Zone::Hand` — the canonical fallback used elsewhere by `SpellCastRecord`.
+/// `committed_targets` is the cast's committed declared-target facts, captured
+/// at target settlement (CR 601.2c); an empty slice is a claim that the cast
+/// declared none.
 pub fn record_spell_cast(
     state: &mut crate::types::game_state::GameState,
     player: PlayerId,
     obj: &GameObject,
     cast_variant: crate::types::game_state::CastingVariant,
+    committed_targets: &[crate::types::game_state::ActivationTargetFact],
 ) -> Result<CastOccurrence, crate::types::resolved_commands::ResolvedLedgerEditReplayInvariantError>
 {
     record_spell_cast_from_zone(
@@ -310,7 +316,29 @@ pub fn record_spell_cast(
         obj,
         obj.cast_from_zone.unwrap_or(Zone::Hand),
         cast_variant,
+        committed_targets,
     )
+}
+
+/// CR 106.3 + CR 601.2h: where a projected [`SpellCastRecord`] gets the
+/// per-mana-unit payment facts it states.
+///
+/// A record that outlives the cast must OWN those facts: the objects that paid are
+/// gone by the time a turn-history predicate reads the record (CR 400.7), so the
+/// projection copies them. A record projected for a LIVE filter seam must not: the
+/// spell being filtered has not paid anything yet (CR 601.2f precedes CR 601.2h),
+/// the seam is not persisted, and the paying object is still in hand — so the
+/// record states nothing and the filter reads the object's own facts by
+/// BORROWING them at match time (`filter::spell_object_matches_filter_inner`).
+/// Copying them there charged every live projection a deep clone of a payment
+/// snapshot it would never be asked about.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum CastPaymentFacts<'a> {
+    /// A completed cast the record must describe on its own: the facts are copied.
+    Recorded(&'a [crate::types::game_state::ManaSpentSourceSnapshot]),
+    /// A live pre-payment seam: no facts are copied, and the filter borrows the
+    /// live spell object's own.
+    LivePrePayment,
 }
 
 /// CR 708.4: Project a spell-cast record for a LIVE per-spell filter seam, which
@@ -334,7 +362,20 @@ pub(crate) fn live_spell_cast_record_for(
     } else {
         crate::types::game_state::CastingVariant::Normal
     };
-    spell_cast_record_for(obj, from_zone, cast_variant, fused_hint)
+    // CR 115.9 + CR 601.2c: `&[]` is intentional, not a default. The live
+    // per-spell path answers `FilterProp::Targets` through
+    // `filter::matches_filter_prop` → `stack_entry_targets_satisfy` (CR 115.9b,
+    // the targets' current state), which is the single answer on that path;
+    // giving this projection facts would create a second, divergent answer from
+    // the same record.
+    spell_cast_record_for(
+        obj,
+        from_zone,
+        cast_variant,
+        fused_hint,
+        &[],
+        CastPaymentFacts::LivePrePayment,
+    )
 }
 
 /// The single fuse-aware authority for spell-cast record projection. `fused_hint` is the caller's
@@ -350,6 +391,8 @@ pub(crate) fn spell_cast_record_for(
     from_zone: Zone,
     cast_variant: crate::types::game_state::CastingVariant,
     fused_hint: bool,
+    targets: &[ActivationTargetFact],
+    payment: CastPaymentFacts<'_>,
 ) -> SpellCastRecord {
     let fused = fused_hint || obj.fused_split_spell;
     SpellCastRecord {
@@ -387,19 +430,51 @@ pub(crate) fn spell_cast_record_for(
         // live candidate seam projects the linked copy while it still waits in
         // exile, and that object can only be cast as a prepare spell.
         prepared_copy_source: obj.prepared_copy_source,
+        // CR 106.3 + CR 601.2h: the payment-time source snapshots are stated by the
+        // projection that can prove them. A LIVE seam cannot — CR 601.2f runs before
+        // CR 601.2h, so the spell being filtered has paid nothing, and the object
+        // that will pay is still in hand: the record states `None` and the filter
+        // borrows the object's own facts. A completed cast must state them, so a
+        // source-qualified cast predicate survives resolution and the source's
+        // departure (CR 400.7d, CR 400.7), and those ARE copied — the record outlives
+        // the objects that paid. Only a legacy payload decodes to `None`.
+        mana_spent_source_snapshots: match payment {
+            CastPaymentFacts::Recorded(facts) => Some(facts.to_vec()),
+            CastPaymentFacts::LivePrePayment => None,
+        },
+        // CR 115.1 + CR 601.2c: the committed declared targets, captured by the
+        // caller that holds them. The pure projection never reaches for ambient
+        // state: a caller with no committed list must pass an empty slice and say why.
+        // `Some` for the same reason as the source snapshots above.
+        targets: Some(targets.to_vec()),
     }
 }
 
+/// CR 601.2c + CR 601.2i: every caller must pass the cast's committed
+/// declared-target facts, **captured at target settlement** (CR 601.2c), not
+/// derived at this write. The write happens at CR 601.2i, after the cost has
+/// been paid (CR 601.2h), and paying it can change or remove a target; reading
+/// the targets' characteristics here would record what they had become rather
+/// than what they were when committed. An empty slice is a claim that the cast
+/// declared none.
 pub fn record_spell_cast_from_zone(
     state: &mut crate::types::game_state::GameState,
     player: PlayerId,
     obj: &GameObject,
     from_zone: Zone,
     cast_variant: crate::types::game_state::CastingVariant,
+    committed_targets: &[crate::types::game_state::ActivationTargetFact],
 ) -> Result<CastOccurrence, crate::types::resolved_commands::ResolvedLedgerEditReplayInvariantError>
 {
     // CR 117.1: Record spell characteristics for general-purpose filtered counting.
-    let record = spell_cast_record_for(obj, from_zone, cast_variant, false);
+    let record = spell_cast_record_for(
+        obj,
+        from_zone,
+        cast_variant,
+        false,
+        committed_targets,
+        CastPaymentFacts::Recorded(&obj.mana_spent_source_snapshots),
+    );
     crate::game::ledger::record_spell_cast(state, player, record)
 }
 
@@ -1869,21 +1944,31 @@ fn evaluate_condition_for_granter(
             .players
             .get(usize::from(player.0))
             .is_some_and(|player| player.lands_played_this_turn > 0),
-        ParsedCondition::YouCastSpellThisTurn { filter } => state
-            .spells_cast_this_turn_by_player
-            .get(&player)
-            .is_some_and(|spells| {
-                spells.iter().any(|record| {
-                    filter.as_ref().is_none_or(|filter| {
-                        crate::game::filter::spell_record_matches_filter(
-                            record,
-                            filter,
-                            player,
-                            &state.all_creature_types,
-                        )
+        ParsedCondition::YouCastSpellThisTurn { filter } => {
+            // CR 601.2i + CR 106.3: a source-qualified cast-payment read needs the
+            // state and a source context. Build the same context the sibling
+            // `YouAttackedWithAtLeast` arm above builds, so the two record reads in
+            // one condition evaluator cannot diverge.
+            let filter_ctx =
+                crate::game::filter::FilterContext::from_source_with_controller(source_id, player)
+                    .with_granting_object(granting_object);
+            state
+                .spells_cast_this_turn_by_player
+                .get(&player)
+                .is_some_and(|spells| {
+                    spells.iter().any(|record| {
+                        filter.as_ref().is_none_or(|filter| {
+                            crate::game::filter::spell_record_matches_filter(
+                                record,
+                                filter,
+                                player,
+                                state,
+                                &filter_ctx,
+                            )
+                        })
                     })
                 })
-            }),
+        }
         ParsedCondition::YouCastNoncreatureSpellThisTurn => state
             .spells_cast_this_turn_by_player
             .get(&player)
@@ -4324,6 +4409,9 @@ mod tests {
                 was_kicked: false,
                 spell_object_id: None,
                 prepared_copy_source: None,
+                mana_spent_source_snapshots: Some(Vec::new()),
+                // A hand-built case record carries no announced cast, so it declares no target.
+                targets: Some(Vec::new()),
             }]),
         );
 
@@ -4362,6 +4450,9 @@ mod tests {
                     was_kicked: false,
                     spell_object_id: None,
                     prepared_copy_source: None,
+                    mana_spent_source_snapshots: Some(Vec::new()),
+                    // A hand-built case record carries no announced cast, so it declares no target.
+                    targets: Some(Vec::new()),
                 },
                 crate::types::game_state::SpellCastRecord {
                     name: String::new(),
@@ -4378,6 +4469,9 @@ mod tests {
                     was_kicked: false,
                     spell_object_id: None,
                     prepared_copy_source: None,
+                    mana_spent_source_snapshots: Some(Vec::new()),
+                    // A hand-built case record carries no announced cast, so it declares no target.
+                    targets: Some(Vec::new()),
                 },
                 crate::types::game_state::SpellCastRecord {
                     name: String::new(),
@@ -4394,6 +4488,9 @@ mod tests {
                     was_kicked: false,
                     spell_object_id: None,
                     prepared_copy_source: None,
+                    mana_spent_source_snapshots: Some(Vec::new()),
+                    // A hand-built case record carries no announced cast, so it declares no target.
+                    targets: Some(Vec::new()),
                 },
             ]),
         );
@@ -5096,6 +5193,9 @@ mod tests {
             caster,
             &approach,
             crate::types::game_state::CastingVariant::Normal,
+            // A hand-built case object carries no announced ability, so it declares no
+            // target.
+            &[],
         )
         .expect("test spell-cast ledger is valid");
         let history = state
@@ -5120,6 +5220,9 @@ mod tests {
             caster,
             &approach,
             crate::types::game_state::CastingVariant::Normal,
+            // A hand-built case object carries no announced ability, so it declares no
+            // target.
+            &[],
         )
         .expect("test spell-cast ledger is valid");
         assert_eq!(
@@ -5136,6 +5239,9 @@ mod tests {
             opponent,
             &approach,
             crate::types::game_state::CastingVariant::Normal,
+            // A hand-built case object carries no announced ability, so it declares no
+            // target.
+            &[],
         )
         .expect("test spell-cast ledger is valid");
         assert_eq!(
@@ -5172,8 +5278,16 @@ mod tests {
         ));
 
         // A normal cast records `CastingVariant::Normal` → warp query still false.
-        record_spell_cast(&mut state, caster, &spell, CastingVariant::Normal)
-            .expect("test spell-cast ledger is valid");
+        record_spell_cast(
+            &mut state,
+            caster,
+            &spell,
+            CastingVariant::Normal,
+            // A hand-built case object carries no announced ability, so it declares no
+            // target.
+            &[],
+        )
+        .expect("test spell-cast ledger is valid");
         assert_eq!(
             state.spells_cast_this_turn_by_player[&caster][0].cast_variant,
             CastingVariant::Normal
@@ -5184,8 +5298,16 @@ mod tests {
         ));
 
         // A warp cast records `CastingVariant::Warp` → warp query becomes true.
-        record_spell_cast(&mut state, caster, &spell, CastingVariant::Warp)
-            .expect("test spell-cast ledger is valid");
+        record_spell_cast(
+            &mut state,
+            caster,
+            &spell,
+            CastingVariant::Warp,
+            // A hand-built case object carries no announced ability, so it declares no
+            // target.
+            &[],
+        )
+        .expect("test spell-cast ledger is valid");
         assert_eq!(
             state.spells_cast_this_turn_by_player[&caster][1].cast_variant,
             CastingVariant::Warp

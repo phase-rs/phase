@@ -1041,6 +1041,12 @@ pub(crate) fn committed_document(path: &Path) -> serde_json::Value {
         .unwrap_or_else(|error| panic!("{} must parse as JSON: {error}", path.display()));
     // Committed pre-onset capture; onset-independent test (see record_captured_onsets).
     engine::types::game_state::record_captured_onsets(&mut document);
+    // Committed PRE-PIN captures hold floating mana written before
+    // `ManaUnit::source_incarnation`, which production now refuses unless the save
+    // proves the producing epoch. The documented test-only migration stamps the epochs
+    // these captures prove (see `record_captured_floating_mana_provenance`); it never
+    // runs in a product build.
+    engine::types::legacy_capture_fixture::record_captured_floating_mana_provenance(&mut document);
     document
 }
 

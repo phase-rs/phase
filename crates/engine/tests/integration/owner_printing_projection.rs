@@ -777,6 +777,7 @@ fn lki_and_side_tables_follow_the_name() {
             .map(|source| ManaSpentSourceSnapshot {
                 source_id: source,
                 lki: state.objects[&source].snapshot_for_mana_spent(),
+                source_token: engine::types::game_state::CapturedTokenBit::Unknown,
             })
             .to_vec();
         state
@@ -802,8 +803,7 @@ fn lki_and_side_tables_follow_the_name() {
     assert_eq!(declared.len(), 1, "reach: the attack was recorded");
     assert!(declared[0]["lki"].get("printing").is_none());
     assert_eq!(
-        authoritative["objects"][paid.0.to_string()]["mana_spent_source_snapshots"][0]["lki"]
-            ["name"],
+        authoritative["objects"][paid.0.to_string()]["mana_spent_source_snapshots"][0]["lki"]["n"],
         "Mana Rock",
         "reach: the payment snapshot is recorded with its name"
     );
@@ -830,9 +830,9 @@ fn lki_and_side_tables_follow_the_name() {
     let p1 = board.forms(Viewer::Seat(P1));
     let state_form = &p1[0].1;
     let paid_snapshots = &state_form["objects"][paid.0.to_string()]["mana_spent_source_snapshots"];
-    assert_eq!(paid_snapshots[0]["lki"]["name"], HIDDEN);
+    assert_eq!(paid_snapshots[0]["lki"]["n"], HIDDEN);
     assert!(paid_snapshots[0]["lki"].get("printing").is_none());
-    assert_eq!(paid_snapshots[1]["lki"]["name"], "Public Forest");
+    assert_eq!(paid_snapshots[1]["lki"]["n"], "Public Forest");
     assert!(paid_snapshots[1]["lki"].get("printing").is_none());
     let declared = records_of(state_form, "attacker_declarations_this_turn", attacker);
     assert_eq!(declared.len(), 1);
@@ -869,7 +869,7 @@ fn lki_and_side_tables_follow_the_name() {
     let p0 = board.forms(Viewer::Seat(P0));
     let state_form = &p0[0].1;
     let paid_snapshots = &state_form["objects"][paid.0.to_string()]["mana_spent_source_snapshots"];
-    assert_eq!(paid_snapshots[0]["lki"]["name"], "Mana Rock");
+    assert_eq!(paid_snapshots[0]["lki"]["n"], "Mana Rock");
     assert!(paid_snapshots[0]["lki"].get("printing").is_none());
     let declared = records_of(state_form, "attacker_declarations_this_turn", attacker);
     assert_eq!(declared[0]["lki"]["name"], "Hidden Attacker");

@@ -1088,6 +1088,10 @@ fn handle_replacement_choice_inner(
                         // an interactive choice.
                         let source_is_snow =
                             crate::game::mana_sources::source_is_snow(state, source_id);
+                        // CR 106.3 + CR 400.7: the replacement executes production
+                        // in place, so the source's live epoch is the producer.
+                        let source_incarnation =
+                            crate::game::mana_payment::live_source_incarnation(state, source_id);
                         for _ in 0..count {
                             let unit = crate::types::mana::ManaUnit {
                                 color: mana_type,
@@ -1099,6 +1103,7 @@ fn handle_replacement_choice_inner(
                                 restrictions: Vec::new(),
                                 grants: Vec::new(),
                                 expiry: None,
+                                source_incarnation,
                             };
                             // CR 118.3a: stamp a stable pip id on pool entry so the unit
                             // can be pinned to direct payment.

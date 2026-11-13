@@ -183,6 +183,15 @@ pub(crate) fn parse_activated_ability_cost_head(
 /// CR 115.9b + CR 602.2b: the optional intervening target restriction on an
 /// activated-ability cost modifier — "… that target[s] <subject> …".
 /// Returns the source subject and parsed target filter. Input is lowercase.
+///
+/// CR 109.2: the restriction is a bare type description ("targets a creature you
+/// control"), so it means a permanent of that type ON THE BATTLEFIELD — the same
+/// default `parse_cost_modifier_target_filter` applies to the spell-side seam,
+/// applied here through the same shaper so the two cannot drift. A description
+/// that names its own zone or uses a CR 109.2a–d word keeps what it has. Without
+/// the scope, an ability activated with a creature CARD in a graveyard as its
+/// target satisfies "targets a creature you control" and consumes a
+/// first-activation discount that a real battlefield target should have taken.
 pub(crate) fn split_ability_target_restriction(
     i: &str,
 ) -> OracleResult<'_, (&str, Option<TargetFilter>)> {
@@ -197,13 +206,36 @@ pub(crate) fn split_ability_target_restriction(
         .parse(i);
     if let Ok((rest, (subject, _, target_text))) = parsed {
         let (_, _) = eof::<_, OracleError<'_>>.parse(rest)?;
-        let (filter, remainder) = parse_type_phrase_folding(target_text.trim());
+        let target_text = target_text.trim();
+        let (filter, remainder) = parse_type_phrase_folding(target_text);
         if remainder.trim().is_empty() && !matches!(filter, TargetFilter::Any) {
-            return Ok(("", (subject.trim(), Some(filter))));
+            return Ok((
+                "",
+                (
+                    subject.trim(),
+                    Some(
+                        crate::parser::oracle_target::scope_type_phrase_to_the_battlefield(
+                            target_text,
+                            filter,
+                        ),
+                    ),
+                ),
+            ));
         }
-        let (filter, remainder) = parse_target(target_text.trim());
+        let (filter, remainder) = parse_target(target_text);
         if remainder.trim().is_empty() && !matches!(filter, TargetFilter::Any) {
-            return Ok(("", (subject.trim(), Some(filter))));
+            return Ok((
+                "",
+                (
+                    subject.trim(),
+                    Some(
+                        crate::parser::oracle_target::scope_type_phrase_to_the_battlefield(
+                            target_text,
+                            filter,
+                        ),
+                    ),
+                ),
+            ));
         }
         return Err(oracle_err(i));
     }

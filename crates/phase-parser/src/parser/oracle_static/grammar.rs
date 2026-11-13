@@ -10,8 +10,8 @@ use crate::parser::oracle_effect::parse_effect_chain_with_context_ability_root;
 use crate::parser::oracle_nom::defender_exception;
 use crate::parser::oracle_nom::defender_exception::DefenderExceptionSegment;
 use crate::types::ability::PlayerFilter;
-use nom::character::complete::{alphanumeric1, char, digit1, one_of};
-use nom::combinator::{all_consuming, map_res, not, opt, peek, recognize};
+use nom::character::complete::{alphanumeric1, char, digit1, multispace0, one_of};
+use nom::combinator::{all_consuming, map_res, not, opt, peek, recognize, verify};
 use nom::sequence::{delimited, pair, terminated};
 
 /// Lower a parsed rule-static predicate into the runtime static mode.
@@ -2349,10 +2349,12 @@ pub(crate) enum NthQualifiedSpell {
     /// The subject is not a "the <ordinal> … spell <timing> costs …" line; the
     /// caller proceeds with its ordinary cost-modifier parsing.
     NotApplicable,
-    /// A representable Nth-spell subject: the qualifying spell filter, the timing
-    /// window over which the ordinal is measured, and the 1-based ordinal `N`
-    /// ("first" → 1, "second" → 2, …). The gate is
-    /// `SpellsCastThisTurn(filter) == N - 1` (see [`nth_qualified_spell_condition`]).
+    /// A representable Nth-spell subject: the qualifying spell filter — the
+    /// pre-spell type, the pre-timing post-spell modifier and every clause of the
+    /// post-timing qualifier region — the timing window over which the ordinal is
+    /// measured, and the 1-based ordinal `N` ("first" → 1, "second" → 2, …). The
+    /// gate is `SpellsCastThisTurn(filter) == N - 1` (see
+    /// [`nth_qualified_spell_condition`]).
     Supported {
         filter: TargetFilter,
         timing: NthEventTimingKind,
@@ -2362,7 +2364,9 @@ pub(crate) enum NthQualifiedSpell {
     /// timing window can't be lowered to a spell filter + once-per-turn gate
     /// (e.g. "the first kicked spell you cast each turn" — kicker-paid state is
     /// not a representable spell-cost filter, or an opponent-/their-turn window
-    /// with no static condition). The caller must decline the cost static.
+    /// with no static condition, or a post-timing region that neither a shared
+    /// clause authority nor the cost-predicate boundary accounts for). The caller
+    /// must decline rather than emit a partially constrained filter.
     UnsupportedQualifier,
 }
 
@@ -2406,11 +2410,144 @@ fn parse_ordinal_word(i: &str) -> OracleResult<'_, u32> {
     .parse(i)
 }
 
+/// CR 106.3 + CR 601.2h: one clause of the post-timing qualifier region — the
+/// source-qualified payment relative clause "that mana from a <source> [that]
+/// was spent to cast". Lowers to the Phase 1 payment-provenance property, the
+/// same construction `parse_cost_modifier_target_filter` uses for `Targets`.
+///
+/// The clause introduces with `that ` and delegates the rest of the phrase to
+/// the subject-less sibling of the payment-verb family, so both the introducer
+/// and the source phrase are recognized by an existing authority.
+fn parse_mana_source_spent_relative_clause(i: &str) -> OracleResult<'_, TargetFilter> {
+    let (rest, _) = tag::<_, _, OracleError<'_>>("that ").parse(i)?;
+    let (rest, source_filter) =
+        nom_quantity::parse_mana_from_source_spent_to_cast_subjectless(rest)?;
+    Ok((
+        rest,
+        TargetFilter::Typed(TypedFilter::card().properties(vec![
+            FilterProp::ManaSpentFromSource {
+                source_filter: Box::new(source_filter),
+            },
+        ])),
+    ))
+}
+
+/// CR 202.3 (mana value) / delegated: one clause of the post-timing qualifier
+/// region — a post-spell modifier ("with mana value 2 or greater") lowered by
+/// the shared `oracle_trigger::parse_post_spell_modifier` authority. No second
+/// mana-value parser lives here.
+///
+/// The authority is all-consuming by its own contract — the same contract it
+/// honours in the pre-timing region above — so it is tried as a whole-region
+/// clause. The region loop has already consumed the clause's separator via
+/// `multispace0`, so this combinator takes its input directly.
+fn parse_region_post_spell_modifier(i: &str) -> OracleResult<'_, TargetFilter> {
+    match super::oracle_trigger::parse_post_spell_modifier(i) {
+        Some(filter) => Ok(("", filter)),
+        None => Err(nom::Err::Error(OracleError::new(
+            i,
+            nom::error::ErrorKind::Verify,
+        ))),
+    }
+}
+
+/// CR 601.2f: the shared clause `alt` of the post-timing region. A future
+/// printed clause form joins this one `alt` rather than re-arming a count.
+fn parse_post_timing_qualifier_clause(i: &str) -> OracleResult<'_, TargetFilter> {
+    alt((
+        parse_mana_source_spent_relative_clause,
+        parse_region_post_spell_modifier,
+    ))
+    .parse(i)
+}
+
+/// CR 601.2f: recognition only — the region's end, yielding `()`.
+///
+/// Never a second claimant of the cost predicate (charter decision 5): it
+/// delegates recognition to the cost consumer's own
+/// [`parse_cost_modifier_target_filter`], so the two cannot drift, and it never
+/// lowers, so the one lowering authority remains that function, which
+/// `merge_cost_modifier_target_filter` appends exactly once.
+///
+/// Two alternatives, because the cost consumer's production has two forms:
+/// the bare cost verb ("costs …") and the target relative clause followed by it
+/// ("that targets a creature costs …"). The ordinal subject is singular by
+/// construction ("the <ordinal> spell … **costs**"), so the bare verb is the
+/// singular form only.
+fn parse_cost_predicate_head(i: &str) -> OracleResult<'_, ()> {
+    alt((
+        value((), preceded(multispace0, tag("costs"))),
+        // The anchor is the literal `" that target"`, which a trimmed slice no
+        // longer contains — so this alternative reads the remainder with its
+        // separator space intact. `verify` asserts the anchor sits at the start
+        // (nothing precedes the target clause), so no text is silently skipped.
+        preceded(
+            verify(
+                take_until::<_, _, OracleError<'_>>(" that target"),
+                str::is_empty,
+            ),
+            recognize_cost_predicate,
+        ),
+    ))
+    .parse(i)
+}
+
+/// The recognizer [`parse_cost_predicate_head`]'s target-clause alternative runs
+/// after the anchor. Named rather than a closure so the input lifetime is the
+/// parser's own — the error it builds is tagged with `rest`.
+fn recognize_cost_predicate(rest: &str) -> OracleResult<'_, ()> {
+    match parse_cost_modifier_target_filter(rest) {
+        Some(_) => Ok(("", ())),
+        None => Err(nom::Err::Error(OracleError::new(
+            rest,
+            nom::error::ErrorKind::Verify,
+        ))),
+    }
+}
+
+/// CR 601.2f: the post-timing qualifier region of a first-qualified-spell
+/// subject, bounded by the cost consumer's own production ([`parse_cost_predicate_head`]).
+///
+/// **Whitespace is structure here, not a `str` trim.** `scan_preceded` returns
+/// the remainder *after* the matched timing tag, so the region always begins
+/// with the separator space, and its two boundary alternatives need that space
+/// treated differently: the bare cost verb wants it consumed (`multispace0`),
+/// while the target form anchors on the literal `" that target"`. Hence the
+/// completeness test reads the `multispace0`-stripped slice for emptiness while
+/// the boundary recognizer reads `rest` with its separator space intact. A trim
+/// at either position is wrong in a different direction: one loses the anchor
+/// (deleting the target-clause cost reducer's whole static), the other loses the
+/// bare-verb boundary (deleting every bare ordinal reducer's static).
+///
+/// Inside the bounded region parsing is all-consuming: every clause lowers
+/// through the single `alt` of shared clause authorities, or the caller answers
+/// `UnsupportedQualifier` — never a partially constrained filter (charter
+/// decision 5).
+fn parse_post_timing_qualifier_region(i: &str) -> OracleResult<'_, Option<TargetFilter>> {
+    let (rest, parts) =
+        many0(preceded(multispace0, parse_post_timing_qualifier_clause)).parse(i)?;
+    let (after_separator, _) = multispace0.parse(rest)?;
+    if !(after_separator.is_empty() || parse_cost_predicate_head(rest).is_ok()) {
+        return Err(nom::Err::Error(OracleError::new(
+            rest,
+            nom::error::ErrorKind::Verify,
+        )));
+    }
+    Ok((
+        after_separator,
+        match parts.len() {
+            0 => None,
+            1 => parts.into_iter().next(),
+            _ => Some(TargetFilter::And { filters: parts }),
+        },
+    ))
+}
+
 /// CR 601.2f + CR 107.3: Parse a "first qualified spell <timing> costs less"
 /// cost-reduction subject into the spell filter that qualifies the spell and the
 /// timing window over which "first" is measured.
 ///
-/// Builds for the class, not the card. The subject decomposes into three
+/// Builds for the class, not the card. The subject decomposes into four
 /// independent axes, each parsed by a shared building block:
 ///   1. Pre-spell type qualifier ("non-Lemur creature spell with flying") — via
 ///      `parse_type_phrase_folding`, which preserves keyword qualifiers.
@@ -2421,6 +2558,10 @@ fn parse_ordinal_word(i: &str) -> OracleResult<'_, u32> {
 ///      `split_first_spell_timing`, which distinguishes the unrestricted
 ///      ("each turn", any player's turn) from the controller-turn restricted
 ///      form (reusing `NthEventTimingKind` from the paired trigger).
+///   4. Post-timing qualifier region ("that mana from a Treasure was spent to
+///      cast", "with mana value 2 or greater") — via
+///      [`parse_post_timing_qualifier_region`], bounded by the cost consumer's
+///      own production so it fits both callers' spans.
 ///
 /// Examples this covers (previously only the "during each of your turns" form
 /// parsed; the "each turn" + "with {X}" form silently dropped its filter and
@@ -2429,6 +2570,10 @@ fn parse_ordinal_word(i: &str) -> OracleResult<'_, u32> {
 ///     cost each turn costs {1} less to cast for each +1/+1 counter on ~."
 ///   - "The first non-Lemur creature spell with flying you cast during each of
 ///     your turns costs {1} less to cast."
+///   - Rain of Riches: "The first spell you cast each turn that mana from a
+///     Treasure was spent to cast has cascade."
+///   - TARDIS Bay: "The first spell you cast during each of your turns with mana
+///     value 2 or greater has cascade."
 ///
 /// Returns [`NthQualifiedSpell::UnsupportedQualifier`] when the
 /// "the <ordinal> … spell <timing>" shape is present but the qualifier/timing
@@ -2447,14 +2592,16 @@ pub(crate) fn parse_nth_qualified_spell_filter(lower: &str) -> NthQualifiedSpell
         return NthQualifiedSpell::NotApplicable;
     };
 
-    // Scan the post-caster region for the timing phrase. Everything before
-    // it is a leading post-spell modifier ("with {X} in its mana cost"); the
-    // cost-modification verb ("costs {1} less …") follows the timing phrase and
-    // is discarded. The timing phrase — not a " cost" literal — is the anchor,
-    // because " cost" also occurs inside "in its mana cost". A missing timing
-    // phrase means this is some other "the first … you cast" construction, not
-    // the per-turn first-spell cost template.
-    let Some((timing, post_modifier_text)) = split_first_spell_timing(post.trim()) else {
+    // Scan the post-caster region for the timing phrase. Everything before it is
+    // a leading post-spell modifier ("with {X} in its mana cost"); everything
+    // after it is the post-timing qualifier region, which starts with the
+    // separator space `scan_preceded` leaves behind. The timing phrase — not a
+    // " cost" literal — is the anchor, because " cost" also occurs inside "in
+    // its mana cost". A missing timing phrase means this is some other "the
+    // first … you cast" construction, not the per-turn first-spell template.
+    let Some((timing, post_modifier_text, post_timing_text)) =
+        split_first_spell_timing(post.trim())
+    else {
         return NthQualifiedSpell::NotApplicable;
     };
 
@@ -2540,50 +2687,39 @@ pub(crate) fn parse_nth_qualified_spell_filter(lower: &str) -> NthQualifiedSpell
         }
     };
 
-    let filter = match (type_filter, post_filter) {
-        (None, None) => TargetFilter::Typed(TypedFilter::card()),
-        (Some(f), None) | (None, Some(f)) => f,
-        (Some(a), Some(b)) => TargetFilter::And {
-            filters: vec![a, b],
-        },
+    // Post-timing qualifier region ("that mana from a Treasure was spent to
+    // cast", "with mana value 2 or greater"), bounded by the cost consumer's own
+    // production so the same answer serves both callers' spans. A region the
+    // shared clause authorities cannot consume in full is an unsupported
+    // qualifier — decline rather than emit a partially constrained filter.
+    let post_timing_filter = match parse_post_timing_qualifier_region(post_timing_text) {
+        Ok((_, filter)) => filter,
+        Err(_) => return NthQualifiedSpell::UnsupportedQualifier,
+    };
+
+    // One value, every reader: the region joins the pre-spell type and the
+    // pre-timing post-spell modifier in the order the previous two-way fold
+    // produced, so a subject with an empty region keeps today's exact shape.
+    let mut parts: Vec<TargetFilter> = Vec::new();
+    parts.extend(type_filter);
+    parts.extend(post_filter);
+    match post_timing_filter {
+        // Flatten a multi-clause region into the same `And` as the other axes,
+        // rather than nesting an `And` inside an `And`.
+        Some(TargetFilter::And { filters }) => parts.extend(filters),
+        Some(filter) => parts.push(filter),
+        None => {}
+    }
+    let filter = match parts.len() {
+        0 => TargetFilter::Typed(TypedFilter::card()),
+        1 => parts.remove(0),
+        _ => TargetFilter::And { filters: parts },
     };
     NthQualifiedSpell::Supported {
         filter,
         timing,
         ordinal,
     }
-}
-
-/// CR 601.2f: Audit that a "the <ordinal> … spell <timing> has [keyword]" subject
-/// is FULLY represented by `parse_nth_qualified_spell_filter` — i.e. the text
-/// AFTER the timing phrase is empty.
-///
-/// `parse_nth_qualified_spell_filter` discards everything after the timing
-/// phrase (the cost-modification verb on the cost-reducer path, "costs {1} less
-/// …"). On the keyword-grant path the grant verb was already split off by the
-/// caller, so a clean subject must terminate at the timing phrase. Any trailing
-/// residue means an unrepresentable qualifier sits in the discarded region
-/// (Rain of Riches' "that mana from a Treasure was spent to cast"; TARDIS Bay's
-/// post-timing "with mana value 2 or greater"), so the keyword-grant caller must
-/// decline rather than emit a residue-blind gate.
-///
-/// Lives next to the parser whose discard it audits. Called ONLY from the
-/// keyword-grant arm — the cost-modifier consumer legitimately expects trailing
-/// cost-verb text, so this guard must NOT move into the shared
-/// `parse_nth_qualified_spell_filter`.
-pub(crate) fn nth_qualified_spell_subject_fully_consumed(subject: &str) -> bool {
-    let Some((_ordinal, after_prefix)) = parse_spell_ordinal_prefix(subject) else {
-        return false;
-    };
-    let Some((_, post)) = split_first_spell_cast_region(after_prefix) else {
-        return false;
-    };
-    let Some((_, _, after_timing)) =
-        nom_primitives::scan_preceded(post.trim(), parse_first_spell_timing_phrase)
-    else {
-        return false;
-    };
-    after_timing.trim().is_empty()
 }
 
 fn split_first_spell_cast_region(subject: &str) -> Option<(&str, &str)> {
@@ -2633,10 +2769,17 @@ fn parse_first_spell_timing_phrase(i: &str) -> OracleResult<'_, NthEventTimingKi
 /// Isolate the timing phrase of a first-qualified-spell subject from any leading
 /// post-spell modifier. Word-boundary scans for the position where
 /// `parse_first_spell_timing_phrase` matches; text before that is the post-spell
-/// modifier. Returns `None` when no recognized timing phrase is present.
-fn split_first_spell_timing(text: &str) -> Option<(NthEventTimingKind, &str)> {
-    let (before, timing, _) = nom_primitives::scan_preceded(text, parse_first_spell_timing_phrase)?;
-    Some((timing, before.trim_end()))
+/// modifier, and text after it is the post-timing qualifier region. Returns
+/// `None` when no recognized timing phrase is present.
+///
+/// The `after` slice is `scan_preceded`'s own remainder, so it begins with the
+/// separator space that follows the timing phrase — the structure
+/// [`parse_post_timing_qualifier_region`] relies on. Trailing whitespace only is
+/// stripped from `before`, which is the pre-timing modifier.
+fn split_first_spell_timing(text: &str) -> Option<(NthEventTimingKind, &str, &str)> {
+    let (before, timing, after) =
+        nom_primitives::scan_preceded(text, parse_first_spell_timing_phrase)?;
+    Some((timing, before.trim_end(), after))
 }
 
 /// CR 601.2f + CR 107.3: Build the "the <ordinal> qualified spell <timing>" gate.
@@ -2752,6 +2895,11 @@ pub(crate) fn parse_cost_modifier_target_filter(lower: &str) -> Option<TargetFil
             }
         })
     }?;
+    // CR 109.2: "spells that target a creature" is a BATTLEFIELD-creature
+    // qualifier. An explicitly-zoned phrase ("a creature card from a graveyard",
+    // CR 109.2a) and a "spell" phrase (CR 109.2b) keep their own scope, so a
+    // Reanimate-class target can never satisfy the qualifier.
+    let target_filter = scope_type_phrase_to_the_battlefield(target_text, target_filter);
 
     Some(TargetFilter::Typed(TypedFilter::card().properties(vec![
         FilterProp::Targets {

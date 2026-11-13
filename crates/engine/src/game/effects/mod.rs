@@ -27363,8 +27363,10 @@ fn controller_sacrificed_matching_this_way(
 
     candidate_ids.iter().any(|&id| {
         if let Some(lki) = state.lki_cache.get(&id) {
+            // CR 608.2h + CR 111.8: the cached snapshot is this storage id's
+            // latest departure, whose token bit the same departure captured.
             lki.controller == controller
-                && crate::game::filter::matches_target_filter_on_lki_snapshot(
+                && crate::game::filter::matches_target_filter_on_cached_departure_lki(
                     state, id, lki, filter, &ctx,
                 )
         } else if let Some(obj) = state.objects.get(&id) {
@@ -27843,6 +27845,9 @@ pub(crate) fn evaluate_condition(
             let subtype_matches = match subtype_filter.as_ref() {
                 None => true,
                 Some(filter) => subject.as_ref().is_some_and(|(id, lki)| match lki {
+                    // CR 111.7: the subject is a CARD revealed from a library, and a
+                    // token in a non-battlefield zone ceases to exist, so no token
+                    // leaf can hold of it — the refusal is the right answer here.
                     Some(lki) => crate::game::filter::matches_target_filter_on_lki_snapshot(
                         state,
                         *id,
@@ -27879,6 +27884,7 @@ pub(crate) fn evaluate_condition(
                         properties: vec![prop.clone()],
                     });
                     match lki {
+                        // CR 111.7: a revealed library CARD, never a token.
                         Some(lki) => crate::game::filter::matches_target_filter_on_lki_snapshot(
                             state,
                             *id,
@@ -28157,6 +28163,8 @@ pub(crate) fn evaluate_condition(
             .direct_discard_result
             .as_ref()
             .is_some_and(|result| {
+                // CR 111.7: a card DISCARDED from a hand, never a token (a token in
+                // a non-battlefield zone ceases to exist).
                 crate::game::filter::matches_target_filter_on_lki_snapshot(
                     state,
                     result.object_id,
@@ -28274,7 +28282,10 @@ pub(crate) fn evaluate_condition(
                     // CR 400.7: Check last-known information for past-tense conditions.
                     // Try LKI cache first, fall back to current state if object still exists.
                     if let Some(lki) = state.lki_cache.get(&id) {
-                        crate::game::filter::matches_target_filter_on_lki_snapshot(
+                        // CR 608.2h + CR 111.8: the cached snapshot is this
+                        // storage id's latest departure, whose token bit the same
+                        // departure captured.
+                        crate::game::filter::matches_target_filter_on_cached_departure_lki(
                             state,
                             id,
                             lki,

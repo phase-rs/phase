@@ -367,10 +367,15 @@ pub fn resolve(
     // into that player's mana pool.
     let produced_mana = !mana_types.is_empty();
     let mut deposited = false;
+    // CR 106.3 + CR 113.7 + CR 400.7: bind the epoch that generated this
+    // ability, so an activated ability whose own cost moved its source still
+    // stamps the object that produced the mana.
+    let source_incarnation = mana_payment::producing_incarnation_for_ability(state, ability);
     for &mana_type in &mana_types {
         deposited |= !mana_payment::produce_mana_with_attributes_from_source_quality(
             state,
             ability.source_id,
+            source_incarnation,
             mana_type,
             recipient,
             false,
@@ -501,10 +506,15 @@ pub fn handle_choose_mana_effect(
         crate::game::mana_abilities::is_resolving_triggered_mana(state, ability);
     let mut deposited = false;
     if let Some(recipient) = recipient {
+        // CR 106.3 + CR 113.7 + CR 400.7: the same producing-epoch authority as
+        // `resolve`, so the prompt-completion path cannot stamp a different
+        // source than the path that offered the choice.
+        let source_incarnation = mana_payment::producing_incarnation_for_ability(state, ability);
         for &mana_type in &mana_types {
             deposited |= !mana_payment::produce_mana_with_attributes_from_source_quality(
                 state,
                 ability.source_id,
+                source_incarnation,
                 mana_type,
                 recipient,
                 false,

@@ -631,7 +631,14 @@ impl std::fmt::Debug for ManaPool {
     }
 }
 
-// Pips are excluded, as `ManaUnit` equality excludes them (CR 104.4b).
+// Pips are excluded, as `ManaUnit` equality excludes them (CR 104.4b): a pip is a
+// monotone mint tag, so two positions one cycle apart mint different pips for the
+// mana they hold. What the pool DOES carry for a comparison that needs unit
+// identity is the canonical order of its units ([`Self::units`], pool order) —
+// `GameState::canonicalize_floating_pip_identities` reads it to renumber pips by
+// rank before two positions are compared, so the producer ledger's pip-keyed rows
+// (compared WITH their pip, CR 106.3) stay attached to the unit they describe
+// without the mint tag leaking into equality.
 impl PartialEq for ManaPool {
     fn eq(&self, other: &Self) -> bool {
         let this = self.ordered();
@@ -918,6 +925,49 @@ impl ManaPool {
             }
         }
         self.entries = merged;
+    }
+
+    /// CR 118.3a + CR 104.4b: renumber every unit's pip to its rank in pool order,
+    /// continuing the shared counter `next`, and report each `old → new` pair in
+    /// `renamed`.
+    ///
+    /// This is the canonicalization half of a loop comparison (the reader is
+    /// `GameState::canonicalize_floating_pip_identities`). A pip is minted from a
+    /// monotone counter, so two positions one cycle apart hold the same mana under
+    /// different pips; but a pip is also the ONLY key that says which unit a
+    /// producer fact belongs to, and a pool that ignored it would let two positions
+    /// whose facts sit on different units compare equal. Ranking pips by pool order
+    /// answers both: equal pools (which `PartialEq` compares in that same order)
+    /// produce equal ranks, and a fact attached to a different unit produces a
+    /// different rank.
+    ///
+    /// Idempotent: after one call the unit at rank `i` holds pip `i + 1`, so a
+    /// second call rewrites nothing. Only a normalized clone is rewritten — a lived
+    /// pool's pips are its pin identities and are never renumbered in place.
+    pub(crate) fn canonicalize_pip_ids(
+        &mut self,
+        next: &mut u64,
+        renamed: &mut std::collections::HashMap<ManaPipId, ManaPipId>,
+    ) {
+        let slots: Vec<PoolSlot> = self
+            .ordered()
+            .into_iter()
+            .map(|(slot, _, _)| slot)
+            .collect();
+        for slot in slots {
+            let Some(held) = self
+                .entry_of_slot(slot)
+                .and_then(|index| self.entries[index].slots.get(&slot).copied())
+            else {
+                continue;
+            };
+            let canonical = ManaPipId(*next);
+            *next += 1;
+            if held != canonical {
+                self.set_pip_at(slot, canonical);
+            }
+            renamed.insert(held, canonical);
+        }
     }
 
     /// Keeps only entries whose shape satisfies `keep`.

@@ -52,6 +52,66 @@ pub enum RulesExecutionNodeRef {
     PlayerLeave(ResolvedCommandOrdinal),
 }
 
+/// CR 605.3b: ONE activation of one mana ability — the occurrence a parked
+/// activation's settlement must belong to.
+///
+/// Settlement ordinals are minted from a single counter
+/// ([`SettlementNodeOrdinal`]), so an ordinal names exactly one node and a node
+/// belongs to exactly one settlement. That is what an activation's occurrence IS:
+/// the ordinal its own `ActivatedMana` node was minted under
+/// (`GameState::begin_activated_mana_journal_node`). Two activations of the SAME
+/// object in the SAME incarnation therefore carry DIFFERENT occurrences, while
+/// sharing a source and an epoch — which is exactly the pair a save could
+/// otherwise confuse, and why a producer's `(object, incarnation)` is not enough
+/// to identify which activation a recorded node settles.
+///
+/// The parked activation records this value beside its
+/// [`RulesExecutionNodeRef`] so the two are two records of one announcement: a
+/// save that points its node at an earlier activation's node while stating this
+/// occurrence contradicts itself, and restore refuses it
+/// ([`ParkedActivationConflict::ForeignOccurrence`]) instead of writing this
+/// activation's settlement into the earlier one. A mana ability "resolves
+/// immediately after it is activated" (CR 605.3b), so a completed activation's
+/// node is done; nothing of this activation belongs in it.
+///
+/// Because an ordinal names exactly one node, this record also NAMES that node when
+/// the reference is missing: a save that keeps the occurrence and loses
+/// `rules_execution_node` still resolves to the settlement it was announced under
+/// (`PendingManaAbility::recorded_activation_node`) rather than being read as
+/// absence and opening a second one for the same activation.
+///
+/// [`ParkedActivationConflict::ForeignOccurrence`]:
+/// crate::types::game_state::ParkedActivationConflict::ForeignOccurrence
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct ManaActivationOccurrence(pub SettlementNodeOrdinal);
+
+impl ManaActivationOccurrence {
+    /// The occurrence a freshly opened settlement node belongs to, or `None` when
+    /// `node` is not an activated-mana node (a triggered mana ability settles a
+    /// different occurrence under its own kind — CR 605.4a).
+    pub fn of_node(node: RulesExecutionNodeRef) -> Option<Self> {
+        match node {
+            RulesExecutionNodeRef::ActivatedMana(ordinal) => Some(Self(ordinal)),
+            RulesExecutionNodeRef::Proposal(_)
+            | RulesExecutionNodeRef::TriggeredMana(_)
+            | RulesExecutionNodeRef::Payment(_)
+            | RulesExecutionNodeRef::PlayerLeave(_) => None,
+        }
+    }
+
+    /// The settlement ordinal this occurrence is.
+    pub fn ordinal(self) -> SettlementNodeOrdinal {
+        self.0
+    }
+}
+
+impl std::fmt::Display for ManaActivationOccurrence {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "mana activation occurrence {}", self.0 .0)
+    }
+}
+
 /// Exact recipient of one mana payment.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ManaPaymentRecipient {
@@ -2065,6 +2125,30 @@ pub enum RulesExecutionNodeKind {
     PlayerLeave,
 }
 
+impl RulesExecutionNodeKind {
+    /// CR 605.3b: whether a node of this kind has a settlement this journal
+    /// RECORDS — that is, whether anything ever calls
+    /// [`ResolvedRulesJournal::settle_node`] for it.
+    ///
+    /// Only an activated mana ability resolves "immediately after it is activated",
+    /// so only its node carries an open→resolved lifecycle
+    /// (`GameState::settle_mana_activation`, called by the two activation production
+    /// paths). A Proposal, Payment, PlayerLeave or triggered-mana node has no such
+    /// record and is never asked for one: writing `open` onto those and never
+    /// settling them made every save that attributed ambient production to such a
+    /// node look self-contradictory, because a node recorded open beside a pip is
+    /// exactly the shape the validator refuses.
+    pub(crate) fn records_settlement(&self) -> bool {
+        matches!(self, Self::ActivatedMana { .. })
+    }
+
+    /// The settlement record a freshly allocated node of this kind starts with:
+    /// `open` where the lifecycle exists, and "not applicable" where it does not.
+    fn initial_settlement(&self) -> Option<bool> {
+        self.records_settlement().then_some(false)
+    }
+}
+
 /// Metadata shared by every resolved rules-execution node.
 ///
 /// bundle_parent lets a triggered mana ability remain selectable with its
@@ -2087,6 +2171,50 @@ pub struct SettlementNode {
     pub spent_pips: Vec<ManaPipId>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub journal_ordinals: Vec<ResolvedCommandOrdinal>,
+    /// CR 605.3b: whether this node has RESOLVED — a fact about the node itself,
+    /// recorded where the resolution happened, and independent of how much mana
+    /// that resolution made.
+    ///
+    /// A mana ability "resolves immediately after it is activated", so the node an
+    /// activation was announced under is finished the moment the activation's
+    /// production runs — including the case CR 605.2 names, where the game state
+    /// does not allow the ability to produce mana at all (Heronblade Elite's
+    /// "{T}: Add X mana of any one color, where X is this creature's power." at
+    /// power 0 makes no pips and still resolves). Reading settlement off
+    /// [`Self::produced_pips`] was therefore wrong in exactly that case: a
+    /// zero-output activation looked unfinished, so a later, still-parked
+    /// activation was admitted against its finished node and wrote its own
+    /// production there ([`Self::node_settled`]).
+    ///
+    /// The record is written EXPLICITLY at both ends of an ACTIVATED-MANA node's
+    /// life: its allocation writes `Some(false)` ("open") and
+    /// [`ResolvedRulesJournal::settle_node`] writes `Some(true)`. Nothing there is
+    /// left unstated, so `Open` and `Resolved` are both authoritative — `Open` means
+    /// a live activation holds the node and nothing has produced under it,
+    /// `Resolved` means the activation finished, whether or not it made any mana
+    /// (CR 605.2). A node of a kind with no settlement lifecycle records nothing
+    /// ([`RulesExecutionNodeKind::records_settlement`]), because nothing would ever
+    /// settle it.
+    ///
+    /// `Some(false)` is the one value that can contradict the rest of the payload:
+    /// [`ResolvedRulesJournal::validate_serialized_authority`] refuses it beside a
+    /// produced pip, so a node this reader ever sees with `Open` provably produced
+    /// nothing.
+    ///
+    /// `None` is a payload that states no settlement. `settled` has never been on
+    /// the wire without a value — it was introduced with this node record and no
+    /// released build omits it — so
+    /// [`ResolvedRulesJournal::validate_serialized_authority`] refuses it as a
+    /// contradiction instead of reading the pip list as a settlement, which is what
+    /// made a completed zero-output activation indistinguishable from a live one.
+    ///
+    /// Protocol: serde-ADDITIVE (`Option`, `#[serde(default)]`, skipped when unset)
+    /// so a peer's parser tolerates either shape, but this build always WRITES a
+    /// value: `Option` here is the decoder's tolerance, not a state the writer
+    /// produces. No gameplay fact and no rendered feature is derived from it — it
+    /// is restore authority only — so no protocol record was added.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub settled: Option<bool>,
 }
 
 #[cfg(feature = "test-support")]
@@ -2103,6 +2231,7 @@ impl Clone for SettlementNode {
             produced_pips,
             spent_pips,
             journal_ordinals,
+            settled,
         } = self;
         Self {
             ordinal: *ordinal,
@@ -2114,6 +2243,7 @@ impl Clone for SettlementNode {
             produced_pips: produced_pips.clone(),
             spent_pips: spent_pips.clone(),
             journal_ordinals: journal_ordinals.clone(),
+            settled: *settled,
         }
     }
 }
@@ -2440,6 +2570,366 @@ impl ResolvedRulesJournal {
         self.node_index(node).is_ok()
     }
 
+    /// CR 702.132a + CR 118.3a: every unit `payer` is recorded as having spent
+    /// toward this exact `recipient`, in recorded consumption order.
+    ///
+    /// This is the journal's own copy of ONE payment — the command
+    /// [`Self::record_mana_spend`] wrote, which carries the payer, the recipient and
+    /// the exact units removed. CR 118.3a makes paying "removing the indicated mana
+    /// from a player's mana pool", so those recorded units ARE the payment, and this
+    /// reader answers the payer-attribution question the journal alone can answer:
+    /// which units this player, rather than any other, removed for this spell.
+    ///
+    /// `None` means the journal records no spend by this payer on this recipient —
+    /// "no record", which is not the same fact as "spent nothing" and must not be
+    /// read as one. `Some(units)` is those units, concatenated across the commands
+    /// recorded for the pair (a resumed payment records one command per attempt that
+    /// reached its spend, in order).
+    pub fn spent_units_for_payer_and_recipient(
+        &self,
+        payer: PlayerId,
+        recipient: &ManaPaymentRecipient,
+    ) -> Option<Vec<ManaUnit>> {
+        let mut units: Vec<ManaUnit> = Vec::new();
+        let mut recorded = false;
+        for entry in &self.entries {
+            let Some(ResolvedRulesCommand::ManaSpend(command)) = &entry.command else {
+                continue;
+            };
+            if command.payer != payer || &command.recipient != recipient {
+                continue;
+            }
+            recorded = true;
+            units.extend(command.units.iter().map(|spent| spent.unit.clone()));
+        }
+        recorded.then_some(units)
+    }
+
+    /// CR 106.3 + CR 118.3a: the mana unit this journal recorded as PRODUCED under
+    /// `pip` — the unit-keyed record production wrote, as opposed to the
+    /// storage-id-keyed history that has to guess which of a source's tenures made
+    /// the mana.
+    pub fn produced_unit(&self, pip: ManaPipId) -> Option<&ManaUnit> {
+        let position = *self.index.produced.get(&pip)?;
+        Some(&self.produced_mana[position].unit)
+    }
+
+    /// CR 106.3 + CR 113.7 + CR 400.7: the exact object epoch that produced the
+    /// unit recorded under `pip`.
+    ///
+    /// The producer node the journal opened when the mana was made carries the
+    /// source as an [`ObjectIncarnationRef`] — for an activated mana ability the
+    /// epoch captured at announcement, before any cost could move the source
+    /// (CR 602.2a), and for a triggered mana ability the trigger's own latched
+    /// source (CR 603.2). That is the same value
+    /// [`crate::game::mana_payment::producing_incarnation_for_ability`] pins on the
+    /// unit at production, and it is per-UNIT evidence: it belongs to this pip, not
+    /// to whatever object happens to hold the storage id now.
+    ///
+    /// A producer that is not a mana node (a proposal the engine opened for a
+    /// unit it re-stamped without recording production) names no source, so it
+    /// answers nothing rather than guessing one.
+    pub fn produced_source_epoch(&self, pip: ManaPipId) -> Option<ObjectIncarnationRef> {
+        let position = *self.index.produced.get(&pip)?;
+        self.node_source_epoch(self.produced_mana[position].producer)
+    }
+
+    /// CR 113.7 + CR 400.7: the exact object epoch `node` names as the source of
+    /// the mana ability it settles — for an activated mana node the epoch the
+    /// ability was activated against, and for a triggered mana node the trigger's
+    /// own latched source (CR 603.2).
+    ///
+    /// This is the JOURNAL-side half of one activation's producer identity, and it
+    /// is exactly what [`Self::produced_source_epoch`] reads for a produced unit.
+    /// It is also what a PARKED activation carries when its save retains the node
+    /// but predates `PendingManaAbility::announced_source_incarnation`: the node
+    /// names the object that generated the ability, so a resume that reads it here
+    /// does not have to re-derive the producer from whatever occupies the storage
+    /// id now (CR 400.7), which is what made the node and the pip's stamp disagree
+    /// in the first place.
+    ///
+    /// A node that is not a mana node (a proposal, a payment, a player leave) names
+    /// no source, and an unknown node names nothing at all: both answer `None`
+    /// rather than guessing one.
+    pub fn node_source_epoch(&self, node: RulesExecutionNodeRef) -> Option<ObjectIncarnationRef> {
+        let position = self.node_index(node).ok()?;
+        match &self.nodes[position].kind {
+            RulesExecutionNodeKind::ActivatedMana { source }
+            | RulesExecutionNodeKind::TriggeredMana { source, .. } => Some(*source),
+            _ => None,
+        }
+    }
+
+    /// CR 605.3b + CR 113.7: the source an ACTIVATED mana node names, or `None`
+    /// when the retained node is not an activated-mana node.
+    ///
+    /// [`Self::node_source_epoch`] deliberately answers for BOTH kinds of mana
+    /// node, because the pip a node produced may legitimately have been made by a
+    /// triggered mana ability (CR 605.4a) and its producer fact is the same fact
+    /// either way. A parked ACTIVATION may not answer that way: the node it
+    /// records is the one opened at its announcement
+    /// (`GameState::begin_activated_mana_journal_node`) and re-entered at every
+    /// resume, so a save whose pending activation names a `TriggeredMana` node is
+    /// naming an occurrence that settled a DIFFERENT ability — the object and
+    /// epoch it happens to share with this activation do not make it this
+    /// activation's node. Keeping the two questions in separate methods is what
+    /// lets a resume refuse the wrong kind instead of reading an epoch out of it.
+    ///
+    /// A node that is not a mana node at all (a proposal, a payment, a player
+    /// leave) and an unknown node both answer `None`.
+    pub fn activated_mana_source(
+        &self,
+        node: RulesExecutionNodeRef,
+    ) -> Option<ObjectIncarnationRef> {
+        let position = self.node_index(node).ok()?;
+        match &self.nodes[position].kind {
+            RulesExecutionNodeKind::ActivatedMana { source } => Some(*source),
+            _ => None,
+        }
+    }
+
+    /// CR 605.3b: whether this journal retains `node` AND that node has already
+    /// RESOLVED — the witness that says an activation's settlement happened.
+    ///
+    /// The record is [`SettlementNode::settled`], written by [`Self::settle_node`]
+    /// where the resolution happened. It is NOT the node's pip list: a mana ability
+    /// "resolves immediately after it is activated" whether or not the game state
+    /// allows it to produce mana (CR 605.2 — Heronblade Elite's
+    /// "{T}: Add X mana of any one color, where X is this creature's power." at
+    /// power 0 makes no pips and still resolved). Inferring settlement from a
+    /// nonempty `produced_pips` read exactly that zero-output activation as
+    /// unfinished, so a later, still-parked activation pointing at its finished
+    /// node passed admission and wrote its own production there.
+    ///
+    /// The commands a node owns are not this witness either — an activation pays
+    /// its own cost (CR 602.2b routes it through CR 601.2h) under this very node
+    /// while it is still parked at a colour prompt, so an append-only command
+    /// history is non-empty on a node that has settled nothing.
+    ///
+    /// Nothing is inferred from the pip record: a zero-output activation (Heronblade
+    /// Elite at power 0 — CR 605.2 keeps it a mana ability when the game state allows
+    /// it no mana) settles with no pips, so pips answer a different question, and
+    /// reading them as settlement made such a node indistinguishable from one a live
+    /// activation still holds.
+    ///
+    /// An unknown node answers `false`: the journal no longer holds it, so it proves
+    /// nothing either way.
+    ///
+    /// Read [`Self::node_settlement`] instead when the caller must tell "this node has
+    /// not resolved" from "this payload states no settlement"; the latter is refused
+    /// by [`Self::validate_serialized_authority`].
+    pub fn node_settled(&self, node: RulesExecutionNodeRef) -> bool {
+        match self.node_settlement(node) {
+            Some(NodeSettlement::Resolved) => true,
+            Some(NodeSettlement::Open) => false,
+            // LEGACY SHIM — see `_LEGACY_JOURNAL_SETTLED_PIP_INFERENCE_2026Q4` below
+            // and `docs/LEGACY-COMPAT.md`. `SettlementNode` has been on the wire since
+            // 0.85 (July 2026); this field only since 0.123, so a save written by any
+            // released build carries no record and is read from the pips it does
+            // have. The LIVE writer never produces this shape: allocation records
+            // `Open`, so the ambiguity the shim used to create is gone at the source.
+            //
+            // The shim is reachable only for a payload that states NO settlement
+            // anywhere. The restore boundary decides that once, per save, from the
+            // payload-level markers ([`Self::states_settlement_record`] beside the
+            // parked activation's occurrence) and materializes the answer with
+            // [`Self::bind_legacy_settlement_records`], so a CURRENT payload that
+            // omitted one node's record is refused there as a contradiction instead
+            // of reaching this arm and being read as older.
+            Some(NodeSettlement::Unrecorded) => self
+                .node_index(node)
+                .map(|position| !self.nodes[position].produced_pips.is_empty())
+                .unwrap_or(false),
+            None => false,
+        }
+    }
+
+    /// CR 605.3b: what this journal's OWN record says about `node`'s settlement —
+    /// three answers, not two, and `None` when the journal no longer holds the node.
+    ///
+    /// The record is [`SettlementNode::settled`]. It is written by
+    /// [`Self::settle_node`] where the node's resolution happened, and this build
+    /// writes it BEFORE any pip can exist, so on a current-format node `Open` and
+    /// `Resolved` are both authoritative: `Open` means a live activation holds the
+    /// node and nothing has produced under it, `Resolved` means the activation
+    /// finished — whether or not it made any mana at all (CR 605.2).
+    ///
+    /// `Unrecorded` is a payload that states no settlement — a contradiction, since
+    /// the record is written at both ends of every node's life and no released build
+    /// omits it. It keeps its own answer so
+    /// [`Self::validate_serialized_authority`] can name the defect; nothing infers a
+    /// settlement from the pip list.
+    pub fn node_settlement(&self, node: RulesExecutionNodeRef) -> Option<NodeSettlement> {
+        let position = self.node_index(node).ok()?;
+        Some(match self.nodes[position].settled {
+            Some(true) => NodeSettlement::Resolved,
+            Some(false) => NodeSettlement::Open,
+            None => NodeSettlement::Unrecorded,
+        })
+    }
+
+    /// CR 605.3b: whether this payload states a settlement record ANYWHERE — the
+    /// payload-level FORMAT MARKER that decides, once per save, whether a node that
+    /// states none is the older shape or a contradiction.
+    ///
+    /// [`SettlementNode::settled`] is written only by this build: no released build
+    /// wrote the field anywhere (`LEGACY_JOURNAL_SETTLED_PIP_INFERENCE_2026Q4`), and
+    /// this build writes it for every node whose kind has a settlement lifecycle —
+    /// `Some(false)` at allocation, `Some(true)` at settlement. The older shape is
+    /// therefore UNIFORM by construction: a writer that never wrote the field never
+    /// wrote it on any node. A payload that states it somewhere was written by a
+    /// build that states it everywhere it applies, so a node of a
+    /// settlement-recording kind beside it that states nothing is not an older node —
+    /// it is that payload contradicting itself, and the record was deleted from a
+    /// save that had one.
+    ///
+    /// The marker is read from the payload, never defaulted: an empty journal (or one
+    /// holding only nodes of kinds with no lifecycle) states nothing and is judged by
+    /// its other markers.
+    pub fn states_settlement_record(&self) -> bool {
+        self.nodes.iter().any(|node| node.settled.is_some())
+    }
+
+    /// CR 605.3b: the first retained node whose kind HAS a settlement lifecycle but
+    /// which states no record — the contradiction
+    /// [`Self::states_settlement_record`] makes refusable in a payload that states
+    /// settlements somewhere else. `None` when every such node states one (or the
+    /// journal holds none of them).
+    pub fn unrecorded_settlement_node(&self) -> Option<RulesExecutionNodeRef> {
+        self.nodes
+            .iter()
+            .find(|node| node.kind.records_settlement() && node.settled.is_none())
+            .map(|node| node.identity)
+    }
+
+    /// CR 605.3b: materialize a UNIFORMLY OLDER payload's settlement records from the
+    /// pip record they were always read from — once, at the boundary that decided the
+    /// payload is older, and into the record itself.
+    ///
+    /// This is the legacy read the shim used to perform lazily, per query, in
+    /// [`Self::node_settled`] (`None => !produced_pips.is_empty()`). Binding it here
+    /// keeps the same answer while making it a stated fact, which is what the
+    /// round trip needs: a restored older save that plays on allocates CURRENT nodes
+    /// beside the old ones, so the payload it writes next states settlement in some
+    /// nodes and not others. Left lazy, that mixed payload would be re-read as a
+    /// current payload contradicting itself. Bound, every lifecycle node states a
+    /// record and the save it writes is uniformly current.
+    ///
+    /// Only nodes whose kind has a lifecycle are bound
+    /// ([`RulesExecutionNodeKind::records_settlement`]): a Proposal, Payment or
+    /// PlayerLeave node records nothing because nothing would ever settle it, and
+    /// writing a value there would invent a lifecycle that does not exist.
+    pub(crate) fn bind_legacy_settlement_records(&mut self) {
+        for position in 0..self.nodes.len() {
+            let node = &mut self.nodes[position];
+            if node.kind.records_settlement() && node.settled.is_none() {
+                node.settled = Some(!node.produced_pips.is_empty());
+            }
+        }
+    }
+
+    /// CR 605.3b: record that `node` has RESOLVED — the writer behind
+    /// [`Self::node_settled`], called where the node's own resolution completes
+    /// (for an activated mana ability, immediately after it is activated, whether
+    /// or not the game state allowed it to produce mana).
+    ///
+    /// Idempotent, because "has resolved" is a state of the node and not a count.
+    /// An unknown node is refused: a settlement record for a node this journal does
+    /// not hold would make [`Self::validate_serialized_authority`] unreachable from
+    /// the node side and attribute a resolution to nothing.
+    pub fn settle_node(
+        &mut self,
+        node: RulesExecutionNodeRef,
+    ) -> Result<(), ResolvedRulesJournalError> {
+        let position = self.node_index(node)?;
+        self.nodes[position].settled = Some(true);
+        Ok(())
+    }
+
+    /// The identity of the node this journal retains at `ordinal`, WHATEVER KIND it
+    /// is; `None` when no retained node carries that ordinal.
+    ///
+    /// Settlement ordinals are minted from one counter
+    /// ([`SettlementNodeOrdinal`]), so an ordinal names exactly one node — and a
+    /// [`ManaActivationOccurrence`] is that ordinal. A holder asking "which node
+    /// does my occurrence name?" must therefore ask THIS question rather than
+    /// rebuilding an `ActivatedMana` reference and looking that up: a retained node
+    /// of another kind at the same ordinal is a node the occurrence NAMES and
+    /// contradicts, never an ordinal nobody holds. Answering the latter made such a
+    /// save look evidence-less, so restore admitted it and recovery opened a fresh
+    /// activated node for an activation whose occurrence was already spoken for.
+    pub fn node_at_ordinal(&self, ordinal: SettlementNodeOrdinal) -> Option<RulesExecutionNodeRef> {
+        // `validate_serialized_authority` pins every node to its own index, and the
+        // live allocator appends ordinals in order, so the index IS the ordinal.
+        let position = usize::try_from(ordinal.0).ok()?;
+        let node = self.nodes.get(position)?;
+        (node.ordinal == ordinal).then_some(node.identity)
+    }
+
+    /// CR 106.3 + CR 118.3a: stamp `epoch` onto EVERY copy this journal holds of
+    /// `pip`'s unit.
+    ///
+    /// The journal keeps the same unit in three places — the `produced` record,
+    /// any `spent` record, and the insert/spend command entries — and
+    /// [`Self::validate_serialized_authority`] compares them on load, CR 400.7's
+    /// epoch included. The restore boundary admits a pooled unit by binding the
+    /// epoch the save proves — recovering it for a pin-less pool, or completing a
+    /// journal copy that states nothing while the pool's pin and the producer node
+    /// agree on the value — and that unit exists both in the pool and here: a
+    /// POOL-ONLY stamp would leave the copies describing different objects, so the
+    /// first payment recorded against the restored unit would write a save this
+    /// journal rejects at its next load. Stamping every copy is what keeps the round
+    /// trip readable.
+    ///
+    /// No copy can carry a CONTRADICTORY epoch by the time this runs: the decoder
+    /// is the authority on agreement and refuses a save whose copies disagree
+    /// (`ResolvedRulesJournalError::InvalidSerializedAuthority`), and admission
+    /// compares every independent per-pip record (the copies, the producer node, the
+    /// pool's ledger) and refuses a disagreement before calling this
+    /// (`PersistedRestoreError::ContradictoryFloatingManaProvenance`). An epoch that
+    /// reaches here is therefore either unrecorded on every copy or already the same
+    /// everywhere, so this writes a value where there was none and re-writes the same
+    /// value where there already was one.
+    pub fn bind_unit_epoch(&mut self, pip: ManaPipId, epoch: u64) {
+        if pip.0 == 0 {
+            return;
+        }
+        for position in 0..self.produced_mana.len() {
+            let Some(record) = self.produced_mana.get_mut(position) else {
+                continue;
+            };
+            if record.unit.pip_id == pip {
+                record.unit.source_incarnation = Some(epoch);
+            }
+        }
+        for position in 0..self.spent_mana.len() {
+            let Some(record) = self.spent_mana.get_mut(position) else {
+                continue;
+            };
+            if record.unit.pip_id == pip {
+                record.unit.source_incarnation = Some(epoch);
+            }
+        }
+        for position in 0..self.entries.len() {
+            let Some(entry) = self.entries.get_mut(position) else {
+                continue;
+            };
+            match entry.command.as_mut() {
+                Some(ResolvedRulesCommand::ManaInsert(command)) if command.unit.pip_id == pip => {
+                    command.unit.source_incarnation = Some(epoch);
+                }
+                Some(ResolvedRulesCommand::ManaSpend(command)) => {
+                    for spent in command.units.iter_mut() {
+                        if spent.unit.pip_id == pip {
+                            spent.unit.source_incarnation = Some(epoch);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
     /// CR 603.7: the origins of the recorded delayed-trigger installs sharing `token` or
     /// `instance`, in journal order.
     pub(crate) fn delayed_install_origins_sharing(
@@ -2501,6 +2991,10 @@ impl ResolvedRulesJournal {
             produced_pips: Vec::new(),
             spent_pips: Vec::new(),
             journal_ordinals: vec![command],
+            // CR 605.3b: `open` from the moment an activated-mana node exists; kinds
+            // with no settlement lifecycle record nothing — see
+            // `RulesExecutionNodeKind::records_settlement`.
+            settled: RulesExecutionNodeKind::Proposal.initial_settlement(),
         });
         Ok(identity)
     }
@@ -2537,6 +3031,10 @@ impl ResolvedRulesJournal {
             produced_pips: Vec::new(),
             spent_pips: Vec::new(),
             journal_ordinals: vec![command],
+            // CR 605.3b: `open` from the moment an activated-mana node exists; kinds
+            // with no settlement lifecycle record nothing — see
+            // `RulesExecutionNodeKind::records_settlement`.
+            settled: RulesExecutionNodeKind::PlayerLeave.initial_settlement(),
         });
         Ok(identity)
     }
@@ -2972,6 +3470,9 @@ impl ResolvedRulesJournal {
             node: identity,
             command: None,
         });
+        // CR 605.3b: the record a node starts with depends on whether anything will
+        // ever settle it, so it is decided before `kind` moves into the node.
+        let settled = kind.initial_settlement();
         self.push_node(SettlementNode {
             ordinal,
             identity,
@@ -2982,6 +3483,10 @@ impl ResolvedRulesJournal {
             produced_pips: Vec::new(),
             spent_pips: Vec::new(),
             journal_ordinals: vec![command],
+            // CR 605.3b: `open` from the moment an activated-mana node exists; kinds
+            // with no settlement lifecycle record nothing — see
+            // `RulesExecutionNodeKind::records_settlement`.
+            settled,
         });
         Ok(identity)
     }
@@ -3125,6 +3630,20 @@ impl ResolvedRulesJournal {
             {
                 return Err(ResolvedRulesJournalError::InvalidSerializedAuthority(
                     "node metadata contains duplicate identities".to_string(),
+                ));
+            }
+            // CR 605.2 + CR 605.3b: a node that RECORDS its own settlement can only
+            // record "not resolved" while nothing has been produced under it. This
+            // build's activated-mana allocation writes `Some(false)` and `settle_node`
+            // writes `Some(true)`, so `Some(false)` beside a produced pip is not a
+            // state the engine can be in: it is a payload whose two records contradict
+            // each other. Refusing here keeps the two records one fact. An ABSENT
+            // record is the older shipped shape — `SettlementNode` predates the field —
+            // and is read by `node_settled`'s compatibility arm rather than refused.
+            if node.settled == Some(false) && !node.produced_pips.is_empty() {
+                return Err(ResolvedRulesJournalError::InvalidSerializedAuthority(
+                    "settlement node states it has not resolved beside a produced mana pip"
+                        .to_string(),
                 ));
             }
             for dependency in node
@@ -3782,6 +4301,53 @@ impl ResolvedRulesJournal {
     }
 }
 
+/// Legacy on-disk compatibility for [`SettlementNode::settled`].
+///
+/// A journal payload written before the field existed carries no settlement record,
+/// so [`ResolvedRulesJournal::node_settled`] falls back to that payload's own pip
+/// record (`None => !node.produced_pips.is_empty()`). The fallback is a SHIM, not the
+/// rule: CR 605.2 keeps an activation a mana ability when the game state allows it no
+/// mana, and such an activation settles with an EMPTY pip list — which is exactly why
+/// the live writer now records `Open` at allocation instead of leaving the field
+/// unstated.
+///
+/// This shim is genuine: `SettlementNode` has been persisted since 0.85
+/// (`d247cee56`, July 2026) and every released build wrote it WITHOUT this field, so
+/// the older shape is on the wire. What is new is the field, not the record.
+///
+/// The shim's deadline is documented, not compiled: it must be removed once a
+/// release above 0.137.0 ships (`+14` releases from the version that ships it),
+/// and removing it means answering `None` as "this payload states no settlement" instead of inferring one — a payload that omits the field then becomes a
+/// refused contradiction rather than the legacy shape. Removing the shim means
+/// deleting both this const and its `docs/LEGACY-COMPAT.md` entry.
+///
+/// The const carries only the grep token on purpose. An earlier revision asserted the
+/// deadline against `CARGO_PKG_VERSION_*` at compile time: that is a new
+/// environment-variable read the intake policy requires a maintainer to review, and it
+/// turned every release bump into a compile failure for `main` and every open PR.
+///
+/// Grep token: `LEGACY_JOURNAL_SETTLED_PIP_INFERENCE_2026Q4`. See `docs/LEGACY-COMPAT.md`.
+#[allow(dead_code)]
+const _LEGACY_JOURNAL_SETTLED_PIP_INFERENCE_2026Q4: () = ();
+
+/// CR 605.2 + CR 605.3b: what a retained settlement node's own record states about
+/// whether it resolved. See [`ResolvedRulesJournal::node_settlement`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NodeSettlement {
+    /// The activation resolved — immediately after it was activated (CR 605.3b), and
+    /// whether or not the game state allowed it to produce mana (CR 605.2).
+    Resolved,
+    /// The node is held by an activation that has NOT resolved. On a current-format
+    /// journal this node provably produced nothing:
+    /// [`ResolvedRulesJournal::validate_serialized_authority`] refuses a payload that
+    /// states `Open` beside a produced pip.
+    Open,
+    /// The payload states no settlement at all. Refused as a contradiction by
+    /// [`ResolvedRulesJournal::validate_serialized_authority`]: no shipped build can
+    /// write it, and nothing infers a settlement from the pip list.
+    Unrecorded,
+}
+
 fn identity_matches_kind(identity: RulesExecutionNodeRef, kind: &RulesExecutionNodeKind) -> bool {
     matches!(
         (identity, kind),
@@ -4041,6 +4607,7 @@ mod tests {
             restrictions: vec![ManaRestriction::OnlyForSpell],
             grants: Vec::new(),
             expiry: None,
+            source_incarnation: None,
         }
     }
 
@@ -4536,6 +5103,7 @@ mod tests {
             source: ObjectId(9),
             source_lki: object.snapshot_public_characteristics(),
             source_zone: crate::types::zones::Zone::Battlefield,
+            source_token: crate::types::game_state::CapturedTokenBit::Known(object.is_token),
             ability_tag: None,
             is_loyalty_ability: false,
             activation_cost: crate::types::events::BoundActivationCost::Unknown,

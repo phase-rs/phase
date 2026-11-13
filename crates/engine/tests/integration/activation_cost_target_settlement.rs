@@ -1259,7 +1259,7 @@ fn after_loyalty_paid(loyalty: Option<(&str, usize)>) -> usize {
             assert!(
                 matches!(
                     rows[0].targets.as_slice(),
-                    [ActivationTargetFact::Object { id, lki }] if *id == hojo && lki.controller == P0
+                    [ActivationTargetFact::Object { id, lki, .. }] if *id == hojo && lki.controller == P0
                 ),
                 "journaled with its committed target as it was: {:?}",
                 rows[0]

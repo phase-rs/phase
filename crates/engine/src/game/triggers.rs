@@ -53,7 +53,8 @@ use super::conditions::{
 };
 use super::filter::{
     matches_target_filter, matches_target_filter_on_damage_record_source,
-    matches_target_filter_on_lki_snapshot, spell_record_matches_filter, FilterContext,
+    matches_target_filter_on_departed_lki_at_incarnation, matches_target_filter_on_stated_lki,
+    spell_record_matches_filter, FilterContext,
 };
 use super::game_object::GameObject;
 use super::speed::{
@@ -4006,10 +4007,15 @@ fn event_is_suppressed_by_static_triggers_cached(
             let Some(trigger_source) = trigger_source else {
                 continue;
             };
-            if !matches_target_filter_on_lki_snapshot(
+            // CR 111.1 + CR 115.9 + CR 608.2h: the suppressor's context latched
+            // the bit with this snapshot, so that latch answers rather than the
+            // step-scoped departure capture.
+            if !matches_target_filter_on_stated_lki(
                 state,
                 trigger_source.identity.reference.object_id,
                 &trigger_source.lki,
+                None,
+                Some(trigger_source.is_token),
                 trigger_source_filter,
                 &filter_ctx,
             ) {
@@ -12536,10 +12542,17 @@ fn trigger_source_matches_doubler_filter(
     if source_is_still_on_battlefield {
         matches_target_filter(state, trigger.source_id, filter, &filter_context)
     } else {
-        matches_target_filter_on_lki_snapshot(
+        // CR 111.1 + CR 115.9 + CR 608.2h: the context LATCHED the bit beside
+        // this snapshot (`TriggerSourceContext::is_token`), and the latch outlives
+        // the step-scoped departure capture, so it is the answer here — the same
+        // authority `filter::source_subject_matches_filter` uses for its Latched
+        // arm.
+        matches_target_filter_on_stated_lki(
             state,
             trigger.source_id,
             &source_context.lki,
+            None,
+            Some(source_context.is_token),
             filter,
             &filter_context,
         )
@@ -12959,6 +12972,9 @@ fn latched_property_kind(
         | FilterProp::HasXInManaCost
         | FilterProp::HasXInActivationCost
         | FilterProp::WasKicked
+        // CR 106.3 + CR 601.2h: a payment snapshot is a LEDGER entry, which the
+        // group's own contract lists as not judgeable against a latched doubler.
+        | FilterProp::ManaSpentFromSource { .. }
         | FilterProp::HasManaAbility
         | FilterProp::HasNoAbilities
         | FilterProp::Named { .. }
@@ -13014,10 +13030,17 @@ fn latched_scope_plan_matches(
                 && relative
                     .iter()
                     .all(|property| latched_relative_matches(state, watcher, *property, doubler))
-                && matches_target_filter_on_lki_snapshot(
+                // CR 111.1 + CR 115.9 + CR 608.2h: the latched context states
+                // the bit it observed. Reading the step-scoped departure capture
+                // instead would refuse once the step rolls over — and
+                // `LatchedScopePlan::Not` above would then invert that refusal
+                // into a MATCH.
+                && matches_target_filter_on_stated_lki(
                     state,
                     watcher.identity.reference.object_id,
                     &watcher.lki,
+                    None,
+                    Some(watcher.is_token),
                     characteristics,
                     &FilterContext::neutral(),
                 )
@@ -14736,7 +14759,12 @@ fn filter_prop_binding_diverges(prop: &FilterProp) -> bool {
         FilterProp::CanEnchant { target } => filter_binding_diverges(target),
         FilterProp::DifferentNameFrom { filter }
         | FilterProp::TargetsOnly { filter }
-        | FilterProp::Targets { filter } => filter_binding_diverges(filter),
+        | FilterProp::Targets { filter }
+        // CR 106.3 + CR 601.2h: the paid mana source phrase nests a `TargetFilter`;
+        // it diverges exactly when that filter does.
+        | FilterProp::ManaSpentFromSource {
+            source_filter: filter,
+        } => filter_binding_diverges(filter),
         // CR 701.3a: the filter-matched host axis resolves its host set from the
         // RESOLVING ability (the parent target) or from the trigger event
         // (`TriggeringSource`), so it diverges exactly when the nested filter
@@ -16805,15 +16833,18 @@ fn check_trigger_constraint_with_ref(
                 _ => return false,
             };
             let spells = state.spells_cast_this_turn_by_player.get(&caster);
+            // CR 603.2 + CR 604.1: the record read needs the state and a context.
+            // A trigger that holds a source context passes it; one with nothing in
+            // scope passes the neutral context — the same construction
+            // `TriggerCondition::ControlCount` uses in `check_trigger_condition`.
+            let filter_ctx = source_context.map_or_else(FilterContext::neutral, |source| {
+                FilterContext::from_trigger_source_with_controller(source, controller)
+            });
             if let (Some(filter), Some(current_record)) =
                 (filter.as_ref(), spells.and_then(|spells| spells.back()))
             {
-                if !spell_record_matches_filter(
-                    current_record,
-                    filter,
-                    caster,
-                    &state.all_creature_types,
-                ) {
+                if !spell_record_matches_filter(current_record, filter, caster, state, &filter_ctx)
+                {
                     return false;
                 }
             }
@@ -16822,12 +16853,7 @@ fn check_trigger_constraint_with_ref(
                 Some(filter) => spells
                     .iter()
                     .filter(|record| {
-                        spell_record_matches_filter(
-                            record,
-                            filter,
-                            caster,
-                            &state.all_creature_types,
-                        )
+                        spell_record_matches_filter(record, filter, caster, state, &filter_ctx)
                     })
                     .count() as u32,
             });
@@ -17840,7 +17866,10 @@ fn evaluate_trigger_condition_with_source(
                     return true;
                 }
                 state.lki_cache.get(&object_id).is_some_and(|lki| {
-                    super::filter::matches_target_filter_on_lki_snapshot(
+                    // CR 608.2h + CR 111.8: the cached snapshot is this storage
+                    // id's latest departure, whose token bit the same departure
+                    // captured.
+                    super::filter::matches_target_filter_on_cached_departure_lki(
                         state, object_id, lki, filter, &ctx,
                     )
                 })
@@ -18030,19 +18059,26 @@ fn evaluate_trigger_condition_with_source(
                 .spells_cast_this_turn_by_player
                 .get(&controller)
                 .is_some_and(|spells| !spells.is_empty()),
-            Some(filter) => state
-                .spells_cast_this_turn_by_player
-                .get(&controller)
-                .is_some_and(|spells| {
-                    spells.iter().any(|record| {
-                        spell_record_matches_filter(
-                            record,
-                            filter,
-                            controller,
-                            &state.all_creature_types,
-                        )
+            Some(filter) => {
+                // CR 603.4 + CR 604.1: same construction as the sibling arms above.
+                let filter_ctx = source_context.map_or_else(FilterContext::neutral, |source| {
+                    FilterContext::from_trigger_source_with_controller(source, controller)
+                });
+                state
+                    .spells_cast_this_turn_by_player
+                    .get(&controller)
+                    .is_some_and(|spells| {
+                        spells.iter().any(|record| {
+                            spell_record_matches_filter(
+                                record,
+                                filter,
+                                controller,
+                                state,
+                                &filter_ctx,
+                            )
+                        })
                     })
-                }),
+            }
         },
         TriggerCondition::QuantityComparison {
             lhs,
@@ -18795,7 +18831,16 @@ fn attack_declaration_attacker_matches_filter(
         .get(&attacker_id)
         .and_then(|history| history.get(&attacking.incarnation))
         .is_some_and(|lki| {
-            matches_target_filter_on_lki_snapshot(state, attacker_id, lki, filter, context)
+            // CR 400.7 + CR 608.2h: the snapshot is pinned to the attacking
+            // incarnation, and so is the token bit.
+            matches_target_filter_on_departed_lki_at_incarnation(
+                state,
+                attacker_id,
+                lki,
+                attacking.incarnation,
+                filter,
+                context,
+            )
         })
 }
 
@@ -24813,6 +24858,9 @@ pub mod tests {
             was_kicked: false,
             spell_object_id: None,
             prepared_copy_source: None,
+            mana_spent_source_snapshots: Some(Vec::new()),
+            // A hand-built case record carries no announced cast, so it declares no target.
+            targets: Some(Vec::new()),
         };
         let current_record = SpellCastRecord {
             name: String::new(),
@@ -24829,6 +24877,9 @@ pub mod tests {
             was_kicked: false,
             spell_object_id: None,
             prepared_copy_source: None,
+            mana_spent_source_snapshots: Some(Vec::new()),
+            // A hand-built case record carries no announced cast, so it declares no target.
+            targets: Some(Vec::new()),
         };
         state.spells_cast_this_turn_by_player.insert(
             player,
@@ -33201,6 +33252,9 @@ pub mod tests {
                     was_kicked: false,
                     spell_object_id: None,
                     prepared_copy_source: None,
+                    mana_spent_source_snapshots: Some(Vec::new()),
+                    // A hand-built case record carries no announced cast, so it declares no target.
+                    targets: Some(Vec::new()),
                 },
                 SpellCastRecord {
                     name: String::new(),
@@ -33217,6 +33271,9 @@ pub mod tests {
                     was_kicked: false,
                     spell_object_id: None,
                     prepared_copy_source: None,
+                    mana_spent_source_snapshots: Some(Vec::new()),
+                    // A hand-built case record carries no announced cast, so it declares no target.
+                    targets: Some(Vec::new()),
                 },
             ]),
         );
@@ -39821,6 +39878,9 @@ pub mod tests {
                 was_kicked: false,
                 spell_object_id: None,
                 prepared_copy_source: None,
+                mana_spent_source_snapshots: Some(Vec::new()),
+                // A hand-built case record carries no announced cast, so it declares no target.
+                targets: Some(Vec::new()),
             }]),
         );
         assert!(
@@ -39846,6 +39906,9 @@ pub mod tests {
                 was_kicked: false,
                 spell_object_id: None,
                 prepared_copy_source: None,
+                mana_spent_source_snapshots: Some(Vec::new()),
+                // A hand-built case record carries no announced cast, so it declares no target.
+                targets: Some(Vec::new()),
             }]),
         );
         assert!(
@@ -39872,6 +39935,9 @@ pub mod tests {
                     was_kicked: false,
                     spell_object_id: None,
                     prepared_copy_source: None,
+                    mana_spent_source_snapshots: Some(Vec::new()),
+                    // A hand-built case record carries no announced cast, so it declares no target.
+                    targets: Some(Vec::new()),
                 },
                 SpellCastRecord {
                     name: String::new(),
@@ -39888,6 +39954,9 @@ pub mod tests {
                     was_kicked: false,
                     spell_object_id: None,
                     prepared_copy_source: None,
+                    mana_spent_source_snapshots: Some(Vec::new()),
+                    // A hand-built case record carries no announced cast, so it declares no target.
+                    targets: Some(Vec::new()),
                 },
             ]),
         );
@@ -39917,6 +39986,9 @@ pub mod tests {
                     was_kicked: false,
                     spell_object_id: None,
                     prepared_copy_source: None,
+                    mana_spent_source_snapshots: Some(Vec::new()),
+                    // A hand-built case record carries no announced cast, so it declares no target.
+                    targets: Some(Vec::new()),
                 },
                 SpellCastRecord {
                     name: String::new(),
@@ -39933,6 +40005,9 @@ pub mod tests {
                     was_kicked: false,
                     spell_object_id: None,
                     prepared_copy_source: None,
+                    mana_spent_source_snapshots: Some(Vec::new()),
+                    // A hand-built case record carries no announced cast, so it declares no target.
+                    targets: Some(Vec::new()),
                 },
             ]),
         );
@@ -39960,6 +40035,9 @@ pub mod tests {
                     was_kicked: false,
                     spell_object_id: None,
                     prepared_copy_source: None,
+                    mana_spent_source_snapshots: Some(Vec::new()),
+                    // A hand-built case record carries no announced cast, so it declares no target.
+                    targets: Some(Vec::new()),
                 },
                 SpellCastRecord {
                     name: String::new(),
@@ -39976,6 +40054,9 @@ pub mod tests {
                     was_kicked: false,
                     spell_object_id: None,
                     prepared_copy_source: None,
+                    mana_spent_source_snapshots: Some(Vec::new()),
+                    // A hand-built case record carries no announced cast, so it declares no target.
+                    targets: Some(Vec::new()),
                 },
                 SpellCastRecord {
                     name: String::new(),
@@ -39992,6 +40073,9 @@ pub mod tests {
                     was_kicked: false,
                     spell_object_id: None,
                     prepared_copy_source: None,
+                    mana_spent_source_snapshots: Some(Vec::new()),
+                    // A hand-built case record carries no announced cast, so it declares no target.
+                    targets: Some(Vec::new()),
                 },
             ]),
         );
@@ -40019,6 +40103,9 @@ pub mod tests {
                 was_kicked: false,
                 spell_object_id: None,
                 prepared_copy_source: None,
+                mana_spent_source_snapshots: Some(Vec::new()),
+                // A hand-built case record carries no announced cast, so it declares no target.
+                targets: Some(Vec::new()),
             }
         }
 
@@ -42380,8 +42467,13 @@ pub mod tests {
             obj.colors_spent_to_cast.add(ManaColor::White, 2);
             obj.mana_spent_to_cast_amount = 2;
             let lki = obj.snapshot_for_mana_spent();
-            obj.mana_spent_source_snapshots
-                .push(crate::types::game_state::ManaSpentSourceSnapshot { source_id: id, lki });
+            obj.mana_spent_source_snapshots.push(
+                crate::types::game_state::ManaSpentSourceSnapshot {
+                    source_id: id,
+                    lki,
+                    source_token: crate::types::game_state::CapturedTokenBit::Unknown,
+                },
+            );
         }
 
         clear_post_collection_transients(&mut state);
@@ -49031,6 +49123,7 @@ pub mod tests {
                     restrictions: Vec::new(),
                     grants: vec![],
                     expiry: None,
+                    source_incarnation: None,
                 });
                 p0.mana_pool.add(ManaUnit {
                     color: ManaType::Black,
@@ -49041,6 +49134,7 @@ pub mod tests {
                     restrictions: Vec::new(),
                     grants: vec![],
                     expiry: None,
+                    source_incarnation: None,
                 });
             }
         }
@@ -49191,6 +49285,7 @@ pub mod tests {
                 restrictions: Vec::new(),
                 grants: vec![],
                 expiry: None,
+                source_incarnation: None,
             });
         }
     }
@@ -49372,6 +49467,7 @@ pub mod tests {
                 restrictions: Vec::new(),
                 grants: vec![],
                 expiry: None,
+                source_incarnation: None,
             });
         }
     }
@@ -56781,6 +56877,109 @@ mod object_sweep_sharing_tests {
             &[ids[0], ids[3], ids[4]],
             clear_post_collection_transients,
             reference_clear_post_collection_transients,
+        );
+    }
+}
+
+#[cfg(test)]
+mod latched_token_scope_tests {
+    //! CR 111.1 + CR 115.9 + CR 603.2d + CR 608.2h: the doubler-scope door reads
+    //! the bit its LATCHED context captured, not the step-scoped departure
+    //! capture — which is gone the moment the step rolls over, and whose
+    //! `LatchedScopePlan::Not` inversion would turn a refusal into a match.
+
+    use super::*;
+    use crate::game::zones::create_object;
+    use crate::types::ability::{FilterProp, TargetFilter, TypedFilter};
+    use crate::types::events::LatchedTriggerDoubler;
+    use crate::types::identifiers::CardId;
+
+    fn prop(prop: FilterProp) -> TargetFilter {
+        TargetFilter::Typed(TypedFilter::default().properties(vec![prop]))
+    }
+
+    /// A watcher context latched while its source WAS a token, read after the
+    /// departure capture that belonged to its epoch has been dropped.
+    #[test]
+    fn a_latched_watcher_states_its_token_bit_to_the_scope_plan() {
+        use crate::types::statics::TriggerCause;
+
+        let mut state = GameState::new_two_player(7);
+        let watcher_id = create_object(
+            &mut state,
+            CardId(980),
+            PlayerId(0),
+            "Latched Token".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&watcher_id).unwrap().is_token = true;
+        let snapshot = state
+            .objects
+            .get(&watcher_id)
+            .unwrap()
+            .snapshot_for_zone_change(watcher_id, Some(Zone::Battlefield), Zone::Graveyard);
+        let watcher = snapshot
+            .trigger_source_context()
+            .cloned()
+            .expect("the snapshot latches a source context");
+        assert!(watcher.is_token, "fixture precondition: latched as a token");
+
+        // CR 514.2 + CR 608.2h: the departure capture a later step would have
+        // read is gone; the LATCH is what survives with the pending trigger.
+        let mut events = Vec::new();
+        crate::game::zones::move_to_zone(&mut state, watcher_id, Zone::Graveyard, &mut events);
+        state.departure_token_by_incarnation.clear();
+        state.lki_by_incarnation.clear();
+
+        let doubler_id = create_object(
+            &mut state,
+            CardId(981),
+            PlayerId(0),
+            "Doubler".to_string(),
+            Zone::Battlefield,
+        );
+        let doubler_snapshot = state
+            .objects
+            .get(&doubler_id)
+            .unwrap()
+            .snapshot_for_zone_change(doubler_id, Some(Zone::Battlefield), Zone::Graveyard);
+        let doubler = LatchedTriggerDoubler {
+            source: doubler_snapshot
+                .trigger_source_context()
+                .cloned()
+                .expect("the doubler latches its own context"),
+            cause: TriggerCause::CreatureAttacking,
+            affected: None,
+        };
+        let plan = |characteristics: TargetFilter| LatchedScopePlan::Typed {
+            controller: None,
+            relative: Vec::new(),
+            characteristics,
+        };
+
+        assert!(
+            latched_scope_plan_matches(&state, &watcher, &plan(prop(FilterProp::Token)), &doubler),
+            "the latched token answers `token` after its epoch's capture is gone"
+        );
+        assert!(
+            !latched_scope_plan_matches(
+                &state,
+                &watcher,
+                &plan(prop(FilterProp::NonToken)),
+                &doubler
+            ),
+            "and does not answer `nontoken`"
+        );
+        // CR 603.2d: the inversion this closes. A refusal here is not
+        // fail-closed once negated — it becomes a MATCH.
+        assert!(
+            !latched_scope_plan_matches(
+                &state,
+                &watcher,
+                &LatchedScopePlan::Not(Box::new(plan(prop(FilterProp::Token)))),
+                &doubler
+            ),
+            "`Not(token)` must be false for a latched token, not an inverted refusal"
         );
     }
 }

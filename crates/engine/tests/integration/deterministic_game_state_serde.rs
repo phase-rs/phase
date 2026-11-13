@@ -18,8 +18,9 @@ use engine::types::counter::CounterType;
 use engine::types::definitions::Definitions;
 use engine::types::events::{BoundActivationCost, GameEvent, PlayerActionKind};
 use engine::types::game_state::{
-    AbilityActivationRecord, ActivationTargetFact, AutoPassMode, DepartedStackSpell,
-    LandPlayRecord, LiminalEntrant, LiminalEntry, LinkedExileLki, LinkedExileSnapshot,
+    AbilityActivationRecord, ActivationTargetFact, AnnouncedTargetZone, AutoPassMode,
+    CapturedTokenBit, DepartedStackSpell, LKISnapshot, LandPlayRecord, LiminalEntrant,
+    LiminalEntry, LinkedExileLki, LinkedExileSnapshot, ManaSpentSourceSnapshot,
     PendingConniveReentry, PersistedGameState, PriorityPassingMode, SpellCastRecord, StackEntry,
     StackEntryKind, StackPaidSnapshot, StackResolutionAutoPassOverlay, StackResolutionBudget,
     StackResolutionEntryFence, StackResolutionPolicy, StackResolutionSession, TokenProjection,
@@ -130,9 +131,11 @@ const NUMERIC_MAP_ROUND_TRIP_OWNERS: &[NumericRoundTripOwner] = &[
     NumericRoundTripOwner { id: "src/types/game_state.rs::GameState::stack_trigger_event_batches", map_key_types: &["ObjectId"], group: RoundTripGroup::DirectGameState, numeric_deserializer: None },
     NumericRoundTripOwner { id: "src/types/game_state.rs::GameState::stack_trigger_firings", map_key_types: &["ObjectId"], group: RoundTripGroup::DirectGameState, numeric_deserializer: None },
     NumericRoundTripOwner { id: "src/types/game_state.rs::GameState::lki_cache", map_key_types: &["ObjectId"], group: RoundTripGroup::DirectGameState, numeric_deserializer: None },
+    NumericRoundTripOwner { id: "src/types/game_state.rs::GameState::departure_token_cache", map_key_types: &["ObjectId"], group: RoundTripGroup::DirectGameState, numeric_deserializer: None },
     NumericRoundTripOwner { id: "src/types/game_state.rs::GameState::lki_copiable_values", map_key_types: &["ObjectId"], group: RoundTripGroup::DirectGameState, numeric_deserializer: None },
     NumericRoundTripOwner { id: "src/types/game_state.rs::GameState::lki_by_incarnation", map_key_types: &["ObjectId", "u64"], group: RoundTripGroup::DirectGameState, numeric_deserializer: None },
     NumericRoundTripOwner { id: "src/types/game_state.rs::GameState::lki_copiable_values_by_incarnation", map_key_types: &["ObjectId", "u64"], group: RoundTripGroup::DirectGameState, numeric_deserializer: None },
+    NumericRoundTripOwner { id: "src/types/game_state.rs::GameState::departure_token_by_incarnation", map_key_types: &["ObjectId", "u64"], group: RoundTripGroup::DirectGameState, numeric_deserializer: None },
     NumericRoundTripOwner { id: "src/types/game_state.rs::GameState::departed_stack_spells", map_key_types: &["ObjectId", "u64"], group: RoundTripGroup::DirectGameState, numeric_deserializer: None },
     NumericRoundTripOwner { id: "src/types/game_state.rs::GameState::departed_activated_abilities", map_key_types: &["ObjectId"], group: RoundTripGroup::DirectGameState, numeric_deserializer: None },
     NumericRoundTripOwner { id: "src/types/game_state.rs::GameState::linked_exile_lki", map_key_types: &["ObjectId"], group: RoundTripGroup::DirectGameState, numeric_deserializer: None },
@@ -412,6 +415,7 @@ fn expected_manifest() -> BTreeMap<String, OwnerSpec> {
     for field in [
         "attribution",
         "lki_cache",
+        "departure_token_cache",
         "lki_copiable_values",
         "tracked_object_sets",
         "departed_activated_abilities",
@@ -441,6 +445,15 @@ fn expected_manifest() -> BTreeMap<String, OwnerSpec> {
         "GameState",
         None,
         "lki_copiable_values_by_incarnation",
+        "im::HashMap<im::HashMap>",
+        Classification::Canonical(IM_HASH_MAP_OF_IM_HASH_MAP),
+    );
+    add_spec(
+        &mut specs,
+        game_state,
+        "GameState",
+        None,
+        "departure_token_by_incarnation",
         "im::HashMap<im::HashMap>",
         Classification::Canonical(IM_HASH_MAP_OF_IM_HASH_MAP),
     );
@@ -1345,7 +1358,7 @@ fn serde_hash_owner_census_is_exhaustive_and_every_canonical_owner_names_its_ada
 
     assert_eq!(
         NUMERIC_MAP_ROUND_TRIP_OWNERS.len(),
-        61,
+        63,
         "the reviewed numeric-map owner matrix must remain exact"
     );
     for group in [
@@ -2052,12 +2065,16 @@ fn build_all_direct_numeric_maps_state() -> GameState {
                 source: ObjectId(1),
                 source_lki: first_lki.clone(),
                 source_zone: engine::types::zones::Zone::Battlefield,
+                source_token: CapturedTokenBit::Known(true),
                 ability_tag: None,
                 is_loyalty_ability: false,
                 activation_cost: BoundActivationCost::Cost(Box::new(AbilityCost::Tap)),
                 targets: vec![ActivationTargetFact::Object {
                     id: ObjectId(2),
                     lki: Box::new(second_lki.clone()),
+                    zone: AnnouncedTargetZone::Known(engine::types::zones::Zone::Battlefield),
+                    token: CapturedTokenBit::Known(false),
+                    attached_to: None,
                 }],
             }]),
         ),
@@ -2068,6 +2085,7 @@ fn build_all_direct_numeric_maps_state() -> GameState {
                 source: ObjectId(2),
                 source_lki: second_lki.clone(),
                 source_zone: engine::types::zones::Zone::Battlefield,
+                source_token: CapturedTokenBit::Known(false),
                 ability_tag: None,
                 is_loyalty_ability: true,
                 activation_cost: BoundActivationCost::Cost(Box::new(AbilityCost::Loyalty {
@@ -2077,6 +2095,10 @@ fn build_all_direct_numeric_maps_state() -> GameState {
             }]),
         ),
     ]));
+    // CR 111.1 + CR 608.2h: the storage-id-keyed departure bits pair with the
+    // snapshots above, one per storage id.
+    state.departure_token_cache =
+        im::HashMap::from_iter([(ObjectId(1), true), (ObjectId(2), false)]);
     state.lki_copiable_values = im::HashMap::from_iter([
         (ObjectId(1), intrinsic_copiable_values(&first)),
         (ObjectId(2), intrinsic_copiable_values(&second)),
@@ -2106,6 +2128,12 @@ fn build_all_direct_numeric_maps_state() -> GameState {
                 (2, intrinsic_copiable_values(&first)),
             ]),
         ),
+    ]);
+    // CR 111.1 + CR 608.2h: the departure token captures are keyed by the same
+    // epochs as the snapshots above, one bit per departing incarnation.
+    state.departure_token_by_incarnation = im::HashMap::from_iter([
+        (ObjectId(1), im::HashMap::from_iter([(1, true), (2, false)])),
+        (ObjectId(2), im::HashMap::from_iter([(1, false), (2, true)])),
     ]);
     let departed_spell =
         |entry_id: ObjectId, controller: PlayerId, object: &GameObject| DepartedStackSpell {
@@ -2274,9 +2302,11 @@ fn every_direct_numeric_key_game_state_map_round_trips_populated() {
         "last_effect_counts_by_player",
         "stack_trigger_event_batches",
         "lki_cache",
+        "departure_token_cache",
         "lki_copiable_values",
         "lki_by_incarnation",
         "lki_copiable_values_by_incarnation",
+        "departure_token_by_incarnation",
         "departed_stack_spells",
         "departed_activated_abilities",
         "linked_exile_lki",
@@ -2287,7 +2317,7 @@ fn every_direct_numeric_key_game_state_map_round_trips_populated() {
     ];
     assert_eq!(
         direct_fields.len(),
-        46,
+        48,
         "private stack_trigger_firings is covered by its unit test"
     );
     for field in direct_fields {
@@ -2307,6 +2337,7 @@ fn every_direct_numeric_key_game_state_map_round_trips_populated() {
         "tracked_set_member_origins",
         "lki_by_incarnation",
         "lki_copiable_values_by_incarnation",
+        "departure_token_by_incarnation",
         "departed_stack_spells",
     ] {
         for (outer_key, inner) in before[field].as_object().unwrap() {
@@ -3224,4 +3255,413 @@ fn block_history_pair_sets_round_trip_through_all_persistence_forms() {
             "{persistence_name} persistence restores the turn-scoped ledger"
         );
     }
+}
+
+/// CR 106.3 + CR 601.2h + CR 400.7d: `SpellCastRecord::mana_spent_source_snapshots`
+/// is the cast-history carrier for "mana from a <source> was spent to cast". It is
+/// additive on the wire: a record that carries snapshots round-trips them intact, a
+/// record with none emits no key, and a payload that predates the field (no key)
+/// deserializes to an empty vector — which honestly means "cannot prove a
+/// source-qualified payment", never "proved false".
+#[test]
+fn mana_spent_source_snapshots_round_trip_and_stay_backward_compatible() {
+    let source_id = ObjectId(77);
+    let populated = SpellCastRecord {
+        name: "Grizzly Bears".to_string(),
+        mana_value: 2,
+        mana_spent_source_snapshots: Some(vec![ManaSpentSourceSnapshot {
+            source_id,
+            lki: LKISnapshot {
+                name: "Treasure".to_string(),
+                token_image_ref: None,
+                power: None,
+                toughness: None,
+                base_power: None,
+                base_toughness: None,
+                mana_value: 0,
+                controller: PlayerId(0),
+                owner: PlayerId(0),
+                card_types: vec![CoreType::Artifact],
+                subtypes: vec!["Treasure".to_string()],
+                supertypes: vec![],
+                keywords: vec![],
+                colors: vec![],
+                chosen_attributes: vec![],
+                counters: Default::default(),
+                tapped: false,
+                is_suspected: false,
+                was_prepared: false,
+                attachments: Vec::new(),
+                intensity: 0,
+            },
+            // CR 106.3: the fixture's Treasure is a real artifact, not a token.
+            source_token: engine::types::game_state::CapturedTokenBit::Known(false),
+        }]),
+        ..Default::default()
+    };
+
+    // (1) The populated record round-trips byte-stably and keeps its slot.
+    let populated_json = serde_json::to_string(&populated).expect("record serializes");
+    assert!(
+        populated_json.contains("mana_spent_source_snapshots"),
+        "a populated record emits the key"
+    );
+    let restored: SpellCastRecord =
+        serde_json::from_str(&populated_json).expect("populated record deserializes");
+    assert_eq!(restored, populated, "the snapshot survives the round-trip");
+    assert_eq!(restored.mana_source_snapshots().len(), 1);
+    assert_eq!(restored.mana_source_snapshots()[0].source_id, source_id);
+    assert_eq!(
+        serde_json::to_string(&restored).expect("restored record reserializes"),
+        populated_json,
+        "reserialization is byte-identical"
+    );
+
+    // (2) A KNOWN-EMPTY vector is written as an explicit `[]`, so it cannot be
+    // confused with the absent field a legacy payload has (which decodes to
+    // unknown). This is the whole point of the `Option` split.
+    let empty = SpellCastRecord {
+        name: "Grizzly Bears".to_string(),
+        ..Default::default()
+    };
+    let empty_json = serde_json::to_string(&empty).expect("empty record serializes");
+    assert!(
+        empty_json.contains("\"mana_spent_source_snapshots\":[]"),
+        "known-empty is written explicitly, not omitted like an unknown: {empty_json}"
+    );
+    // Positive reach guard: a sibling `skip_serializing_if` field on the SAME record
+    // still emits its key when set, so the omission above is attributable to
+    // `Vec::is_empty`, not to a serializer that dropped this record's keys.
+    let kicked_json = serde_json::to_string(&SpellCastRecord {
+        was_kicked: true,
+        ..Default::default()
+    })
+    .expect("kicked record serializes");
+    assert!(
+        kicked_json.contains("was_kicked"),
+        "the sibling cast-fact key is still emitted when set"
+    );
+
+    // (3) A payload that predates the field (no key at all) decodes to `None`:
+    // UNKNOWN provenance, which is not the same claim as "this cast provably paid
+    // no source-attributed mana".
+    let keyless_json = empty_json.replace(",\"mana_spent_source_snapshots\":[]", "");
+    assert!(
+        !keyless_json.contains("mana_spent_source_snapshots"),
+        "reach: the fixture really has no key"
+    );
+    let legacy: SpellCastRecord =
+        serde_json::from_str(&keyless_json).expect("keyless payload deserializes");
+    assert!(
+        legacy.mana_spent_source_snapshots.is_none(),
+        "a record predating the field has unknown payment provenance, not a proven empty"
+    );
+
+    // A record this build wrote states the answer even when the answer is "none",
+    // so the two readings stay distinguishable on the wire.
+    assert_eq!(empty.mana_spent_source_snapshots, Some(Vec::new()));
+    let mut state = GameState::new(FormatConfig::standard(), 2, 42);
+    state.spells_cast_this_turn_by_player =
+        HashMap::from([(PlayerId(0), im::Vector::from(vec![empty.clone()]))]);
+    let persisted = PersistedGameState::capture(state);
+    let bytes = serde_json::to_string(&persisted).expect("persisted state serializes");
+    assert!(
+        bytes.contains("\"mana_spent_source_snapshots\":[]"),
+        "known-empty is spelled out so it cannot be confused with a legacy absent field"
+    );
+    let restored_state = serde_json::from_str::<PersistedGameState>(&bytes)
+        .expect("persisted state deserializes")
+        .into_game_state()
+        .expect("persisted state finalizes");
+    let record = &restored_state.spells_cast_this_turn_by_player[&PlayerId(0)][0];
+    assert_eq!(record.mana_spent_source_snapshots, Some(Vec::new()));
+    assert_eq!(record.name, "Grizzly Bears");
+
+    // A save whose cast history cannot prove what paid for its spells is refused at
+    // the shared restore boundary. Admitting it would let the unknown read as "this
+    // spell did not qualify", and a zero-count first-spell gate would re-grant a
+    // once-per-turn benefit the save had already spent.
+    let mut unknown_state = GameState::new(FormatConfig::standard(), 2, 42);
+    unknown_state.spells_cast_this_turn_by_player =
+        HashMap::from([(PlayerId(0), im::Vector::from(vec![legacy.clone()]))]);
+    let persisted = PersistedGameState::capture(unknown_state);
+    let bytes = serde_json::to_string(&persisted).expect("persisted state serializes");
+    let refused = serde_json::from_str::<PersistedGameState>(&bytes)
+        .expect("persisted state deserializes")
+        .into_game_state();
+    assert!(
+        matches!(
+            refused,
+            Err(engine::types::game_state::PersistedRestoreError::UnknownCastHistoryProvenance { .. })
+        ),
+        "an unknown-provenance save is refused rather than read as zero qualifying history: {refused:?}"
+    );
+}
+
+/// CR 115.1 + CR 601.2c + CR 400.7: `SpellCastRecord::targets` is the cast-history
+/// carrier for "a spell that targets [something]" answered after the spell left the
+/// stack. It is additive on the wire: a record that carries committed targets
+/// round-trips them intact, a record with none emits no key, and a payload that
+/// predates the field (no key) deserializes to an empty vector — which honestly
+/// means "cannot prove which targets were declared", never a vacuous match.
+#[test]
+fn cast_record_targets_round_trip_and_stay_backward_compatible() {
+    let target_id = ObjectId(78);
+    let populated = SpellCastRecord {
+        name: "Giant Growth".to_string(),
+        mana_value: 1,
+        targets: Some(vec![
+            ActivationTargetFact::Object {
+                id: target_id,
+                lki: Box::new(LKISnapshot {
+                    name: "Grizzly Bears".to_string(),
+                    token_image_ref: None,
+                    power: Some(2),
+                    toughness: Some(2),
+                    base_power: Some(2),
+                    base_toughness: Some(2),
+                    mana_value: 2,
+                    controller: PlayerId(0),
+                    owner: PlayerId(0),
+                    card_types: vec![CoreType::Creature],
+                    subtypes: vec!["Bear".to_string()],
+                    supertypes: vec![],
+                    keywords: vec![],
+                    colors: vec![ManaColor::Green],
+                    chosen_attributes: vec![],
+                    counters: Default::default(),
+                    tapped: false,
+                    is_suspected: false,
+                    was_prepared: false,
+                    attachments: Vec::new(),
+                    intensity: 0,
+                }),
+                zone: AnnouncedTargetZone::Known(engine::types::zones::Zone::Battlefield),
+                token: CapturedTokenBit::Known(false),
+                attached_to: None,
+            },
+            // The player axis carries no snapshot at all.
+            ActivationTargetFact::Player(PlayerId(1)),
+        ]),
+        ..Default::default()
+    };
+
+    // (1) The populated record round-trips byte-stably through BOTH axes.
+    let populated_json = serde_json::to_string(&populated).expect("record serializes");
+    assert!(
+        populated_json.contains("targets"),
+        "a populated record emits the key"
+    );
+    let restored: SpellCastRecord =
+        serde_json::from_str(&populated_json).expect("populated record deserializes");
+    assert_eq!(
+        restored, populated,
+        "the committed targets survive the round-trip"
+    );
+    assert_eq!(restored.declared_targets().len(), 2);
+    let ActivationTargetFact::Object { id, lki, .. } = &restored.declared_targets()[0] else {
+        panic!("index 0 is an object fact");
+    };
+    assert_eq!(*id, target_id, "the object fact keeps its stable id");
+    assert_eq!(lki.name, "Grizzly Bears", "the latched snapshot survives");
+    assert_eq!(lki.power, Some(2));
+    assert_eq!(
+        restored.declared_targets()[1],
+        ActivationTargetFact::Player(PlayerId(1))
+    );
+    assert_eq!(
+        serde_json::to_string(&restored).expect("restored record reserializes"),
+        populated_json,
+        "reserialization is byte-identical"
+    );
+
+    // (1a) CR 601.2c + CR 109.2: a record this build captures STATES the
+    // announcement zone, battlefield included. Omission is not a shorthand for
+    // the battlefield: an absent zone means the payload never recorded one, so
+    // writing the battlefield is what keeps a current-format save provably
+    // different from a payload predating the field.
+    assert!(
+        populated_json.contains("\"zone\":\"Battlefield\""),
+        "a battlefield target must state its zone: {populated_json}"
+    );
+
+    // (1b) A NON-battlefield announcement — Reanimate's "target creature card
+    // from a graveyard" (CR 109.2a) — states its zone too, and a payload that
+    // predates the field is UNKNOWN rather than a battlefield claim.
+    let ActivationTargetFact::Object { lki, .. } = &populated.targets.as_ref().expect("targets")[0]
+    else {
+        panic!("index 0 is an object fact");
+    };
+    let graveyard_fact = ActivationTargetFact::Object {
+        id: target_id,
+        lki: lki.clone(),
+        zone: AnnouncedTargetZone::Known(engine::types::zones::Zone::Graveyard),
+        token: CapturedTokenBit::Known(false),
+        attached_to: None,
+    };
+    let graveyard_json = serde_json::to_string(&graveyard_fact).expect("fact serializes");
+    assert!(
+        graveyard_json.contains("Graveyard"),
+        "a graveyard-announced target emits its zone: {graveyard_json}"
+    );
+    assert_eq!(
+        serde_json::from_str::<ActivationTargetFact>(&graveyard_json).expect("fact deserializes"),
+        graveyard_fact,
+        "the announcement zone survives the round-trip"
+    );
+    let legacy_json = graveyard_json.replace(",\"zone\":\"Graveyard\"", "");
+    assert_ne!(
+        legacy_json, graveyard_json,
+        "reach: the zone key really was present"
+    );
+    let legacy_fact = serde_json::from_str::<ActivationTargetFact>(&legacy_json)
+        .expect("a legacy payload parses");
+    let ActivationTargetFact::Object { zone, .. } = &legacy_fact else {
+        panic!("the legacy payload is an object fact");
+    };
+    assert_eq!(
+        *zone,
+        AnnouncedTargetZone::Unknown,
+        "CR 601.2c: a record predating the field states no zone; it is not a \
+         battlefield announcement"
+    );
+    assert_ne!(
+        legacy_fact,
+        ActivationTargetFact::Object {
+            id: target_id,
+            lki: lki.clone(),
+            zone: AnnouncedTargetZone::Known(engine::types::zones::Zone::Battlefield),
+            token: CapturedTokenBit::Known(false),
+            attached_to: None,
+        },
+        "silence is a different value from a stated battlefield"
+    );
+
+    // (1c) CR 111.1 + CR 115.9: the announced TOKEN bit is captured the same way,
+    // and silence about it is a different value from a stated `false`. A token
+    // target writes the key; a payload that predates the capture decodes to
+    // Unknown, which the selection-time leaf refuses rather than reading as
+    // "nontoken".
+    let token_fact = ActivationTargetFact::Object {
+        id: target_id,
+        lki: lki.clone(),
+        zone: AnnouncedTargetZone::Known(engine::types::zones::Zone::Battlefield),
+        token: CapturedTokenBit::Known(true),
+        attached_to: None,
+    };
+    let token_json = serde_json::to_string(&token_fact).expect("fact serializes");
+    assert!(
+        token_json.contains("\"token\":true"),
+        "a token-announced target emits its captured bit: {token_json}"
+    );
+    assert_eq!(
+        serde_json::from_str::<ActivationTargetFact>(&token_json).expect("fact deserializes"),
+        token_fact,
+        "the announced token bit survives the round-trip"
+    );
+    let legacy_token_json = token_json.replace(",\"token\":true", "");
+    assert_ne!(
+        legacy_token_json, token_json,
+        "reach: the token key really was present"
+    );
+    let legacy_token_fact = serde_json::from_str::<ActivationTargetFact>(&legacy_token_json)
+        .expect("a legacy payload parses");
+    let ActivationTargetFact::Object { token, .. } = &legacy_token_fact else {
+        panic!("the legacy payload is an object fact");
+    };
+    assert_eq!(
+        *token,
+        CapturedTokenBit::Unknown,
+        "CR 115.9: a record predating the capture states no token bit; it is not \
+         a stated `false`"
+    );
+    assert_ne!(
+        legacy_token_fact,
+        ActivationTargetFact::Object {
+            id: target_id,
+            lki: lki.clone(),
+            zone: AnnouncedTargetZone::Known(engine::types::zones::Zone::Battlefield),
+            token: CapturedTokenBit::Known(false),
+            attached_to: None,
+        },
+        "silence is a different value from a stated `false`"
+    );
+
+    // (2) A KNOWN-EMPTY vector is written as an explicit `[]`, so it cannot be
+    // confused with the absent field a legacy payload has (which decodes to
+    // unknown). This is the whole point of the `Option` split.
+    let empty = SpellCastRecord {
+        name: "Grizzly Bears".to_string(),
+        ..Default::default()
+    };
+    let empty_json = serde_json::to_string(&empty).expect("empty record serializes");
+    assert!(
+        empty_json.contains("\"targets\":[]"),
+        "known-empty is written explicitly, not omitted like an unknown: {empty_json}"
+    );
+    // Positive reach guard: a sibling `skip_serializing_if` field on the SAME record
+    // still emits its key when set, so the omission above is attributable to
+    // `Vec::is_empty`, not to a serializer that dropped this record's keys.
+    let kicked_json = serde_json::to_string(&SpellCastRecord {
+        was_kicked: true,
+        ..Default::default()
+    })
+    .expect("kicked record serializes");
+    assert!(
+        kicked_json.contains("was_kicked"),
+        "the sibling cast-fact key is still emitted when set"
+    );
+
+    // (3) A payload that predates the field (no key at all) decodes to `None`:
+    // UNKNOWN provenance, which is not the same claim as "this spell provably
+    // declared no target".
+    let keyless_json = empty_json.replace(",\"targets\":[]", "");
+    assert!(
+        !keyless_json.contains("\"targets\""),
+        "reach: the fixture really has no key"
+    );
+    let legacy: SpellCastRecord =
+        serde_json::from_str(&keyless_json).expect("keyless payload deserializes");
+    assert!(
+        legacy.targets.is_none(),
+        "a record predating the field has unknown committed-target provenance"
+    );
+
+    // A record this build wrote states the answer even when the answer is "none".
+    assert_eq!(empty.targets, Some(Vec::new()));
+    let mut state = GameState::new(FormatConfig::standard(), 2, 42);
+    state.spells_cast_this_turn_by_player =
+        HashMap::from([(PlayerId(0), im::Vector::from(vec![empty.clone()]))]);
+    let persisted = PersistedGameState::capture(state);
+    let bytes = serde_json::to_string(&persisted).expect("persisted state serializes");
+    assert!(
+        bytes.contains("\"targets\":[]"),
+        "known-empty is spelled out so it cannot be confused with a legacy absent field"
+    );
+    let restored_state = serde_json::from_str::<PersistedGameState>(&bytes)
+        .expect("persisted state deserializes")
+        .into_game_state()
+        .expect("persisted state finalizes");
+    let record = &restored_state.spells_cast_this_turn_by_player[&PlayerId(0)][0];
+    assert_eq!(record.targets, Some(Vec::new()));
+    assert_eq!(record.name, "Grizzly Bears");
+
+    // A save whose cast history cannot prove what its spells declared is refused at
+    // the shared restore boundary rather than read as history in which nothing
+    // qualified.
+    let mut unknown_state = GameState::new(FormatConfig::standard(), 2, 42);
+    unknown_state.spells_cast_this_turn_by_player =
+        HashMap::from([(PlayerId(0), im::Vector::from(vec![legacy.clone()]))]);
+    let persisted = PersistedGameState::capture(unknown_state);
+    let bytes = serde_json::to_string(&persisted).expect("persisted state serializes");
+    let refused = serde_json::from_str::<PersistedGameState>(&bytes)
+        .expect("persisted state deserializes")
+        .into_game_state();
+    assert!(
+        matches!(
+            refused,
+            Err(engine::types::game_state::PersistedRestoreError::UnknownCastHistoryProvenance { .. })
+        ),
+        "an unknown-provenance save is refused rather than read as zero qualifying history: {refused:?}"
+    );
 }

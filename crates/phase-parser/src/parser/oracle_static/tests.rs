@@ -27833,12 +27833,14 @@ fn static_spells_from_exile_have_convoke() {
 // has [keyword]" once-per-turn keyword grants (cluster-04). ---
 
 /// CR 611.2f: assert a `CastWithKeyword` static's condition is the
-/// `SpellsCastThisTurn(filter) == 0` first-spell gate, optionally wrapped in an
-/// `And` with `DuringYourTurn`. Returns the inner spell filter for further
-/// assertions.
+/// `SpellsCastThisTurn(filter) == ordinal - 1` first-spell gate, optionally
+/// wrapped in an `And` with `DuringYourTurn`. `expected_prior_casts` is that
+/// right-hand side (`ordinal - 1`: `0` for "the first", `1` for "the second").
+/// Returns the inner spell filter for further assertions.
 fn assert_first_spell_gate(
     condition: &StaticCondition,
     expect_during_your_turn: bool,
+    expected_prior_casts: u32,
 ) -> TargetFilter {
     let gate = if expect_during_your_turn {
         let StaticCondition::And { conditions } = condition else {
@@ -27866,12 +27868,46 @@ fn assert_first_spell_gate(
                     },
             },
         comparator: Comparator::EQ,
-        rhs: QuantityExpr::Fixed { value: 0 },
+        rhs: QuantityExpr::Fixed { value },
     } = gate
     else {
-        panic!("expected SpellsCastThisTurn(filter) == 0 gate, got {gate:?}");
+        panic!("expected SpellsCastThisTurn(filter) == ordinal - 1 gate, got {gate:?}");
     };
+    assert_eq!(
+        value, expected_prior_casts as i32,
+        "the gate must read SpellsCastThisTurn(filter) == ordinal - 1"
+    );
     inner
+}
+
+/// CR 601.2f + charter decision 8: assert a cost reducer's discount filter and
+/// its once-per-turn gate are built from THE SAME value — the gate can only be
+/// as complete as the discount it gates. Returns that shared value.
+fn assert_cost_reducer_gate_matches_discount(
+    def: &StaticDefinition,
+    expect_during_your_turn: bool,
+    expected_prior_casts: u32,
+) -> TargetFilter {
+    let StaticMode::ModifyCost {
+        spell_filter: Some(discount),
+        ..
+    } = &def.mode
+    else {
+        panic!(
+            "expected a ModifyCost static with a discount filter, got {:?}",
+            def.mode
+        );
+    };
+    let gate_filter = assert_first_spell_gate(
+        def.condition.as_ref().expect("expected a first-spell gate"),
+        expect_during_your_turn,
+        expected_prior_casts,
+    );
+    assert_eq!(
+        &gate_filter, discount,
+        "the gate must count exactly the set the discount applies to"
+    );
+    gate_filter
 }
 
 #[test]
@@ -27898,6 +27934,7 @@ fn static_peri_brown_first_historic_spell_each_turn_has_convoke() {
     let inner = assert_first_spell_gate(
         def.condition.as_ref().expect("expected first-spell gate"),
         false,
+        0,
     );
     let TargetFilter::Typed(inner_tf) = inner else {
         panic!("expected typed inner filter");
@@ -27935,6 +27972,7 @@ fn static_twelfth_doctor_first_spell_from_nonhand_each_turn_has_demonstrate() {
     assert_first_spell_gate(
         def.condition.as_ref().expect("expected first-spell gate"),
         false,
+        0,
     );
 }
 
@@ -27963,6 +28001,7 @@ fn static_wild_magic_sorcerer_first_spell_from_exile_each_turn_has_cascade() {
     assert_first_spell_gate(
         def.condition.as_ref().expect("expected first-spell gate"),
         false,
+        0,
     );
 }
 
@@ -27984,6 +28023,7 @@ fn static_maelstrom_nexus_first_spell_each_turn_has_cascade() {
     assert_first_spell_gate(
         def.condition.as_ref().expect("expected first-spell gate"),
         false,
+        0,
     );
 }
 
@@ -28011,51 +28051,373 @@ fn static_current_curriculum_first_merfolk_spell_each_turn_has_convoke() {
     assert_first_spell_gate(
         def.condition.as_ref().expect("expected first-spell gate"),
         false,
+        0,
     );
 }
 
 #[test]
-fn static_tardis_bay_post_timing_mv_qualifier_declined_to_existing() {
-    // CR 601.2f: TARDIS Bay — "with mana value 2 or greater" sits AFTER the timing
-    // phrase ("during each of your turns"), which the shared first-spell parser
-    // discards. The keyword-grant trailing-residue guard therefore declines the
-    // gated form and falls through to the existing gateless static (no regression,
-    // no MV-blind gate). Tracked coverage gap, like Rain of Riches.
+fn static_tardis_bay_post_timing_mv_qualifier_reaches_both_readers() {
+    // CR 202.3 + CR 601.2f + CR 611.2f: TARDIS Bay — "with mana value 2 or greater"
+    // sits AFTER the timing phrase ("during each of your turns"). The shared parser
+    // now consumes that post-timing region, delegating the mana-value clause to
+    // `parse_post_spell_modifier`, so the qualifier reaches BOTH readers of the
+    // qualifying filter: the grant's affected filter and its `SpellsCastThisTurn`
+    // gate. Before the fix both were qualifier-blind and the grant applied to every
+    // spell of the turn.
     let def = parse_static_line(
         "The first spell you cast during each of your turns with mana value 2 or greater has cascade.",
     )
-    .unwrap();
+    .expect("TARDIS Bay's grant must parse");
     assert_eq!(
         def.mode,
         StaticMode::CastWithKeyword {
             keyword: Keyword::Cascade,
         }
     );
+    // The shape `parse_post_spell_modifier` emits for this clause (measured at the
+    // base through the pre-timing region, probe B1).
+    let expected_mv = FilterProp::Cmc {
+        comparator: Comparator::GE,
+        value: QuantityExpr::Fixed { value: 2 },
+    };
+    let Some(TargetFilter::Typed(tf)) = &def.affected else {
+        panic!("expected Typed affected, got {:?}", def.affected);
+    };
+    assert_eq!(tf.controller, Some(ControllerRef::You));
+    assert!(
+        tf.properties.contains(&expected_mv),
+        "the affected reader must carry the MV qualifier, got {:?}",
+        tf.properties
+    );
+
+    // The gate reads the same value: controller-turn timing ⇒ `And[DuringYourTurn,
+    // SpellsCastThisTurn(filter) == 0]`, and that filter carries the MV qualifier.
+    let inner = assert_first_spell_gate(
+        def.condition.as_ref().expect("expected first-spell gate"),
+        true,
+        0,
+    );
+    let TargetFilter::Typed(inner_tf) = inner else {
+        panic!("expected a Typed gate filter, got {inner:?}");
+    };
+    // The gate's controller scoping comes from `CountScope::Controller`, not from
+    // the filter (the pre-existing shape of every clean grant's gate), so only the
+    // qualifier is asserted here.
+    assert!(
+        inner_tf.properties.contains(&expected_mv),
+        "the gate must count the same MV-qualified set, got {:?}",
+        inner_tf.properties
+    );
+
+    // Negative sibling, synthetic and labelled as such: the printed corpus has no
+    // grant whose post-timing region no shared clause authority lowers (measured —
+    // the class's three printed members are Rain of Riches and TARDIS Bay above plus
+    // Head of the Class, a cost reducer). Nearest printed cards: Rain of Riches /
+    // TARDIS Bay. Such a region must still decline to today's gateless static — the
+    // no-regression arm — rather than emit a qualifier-blind gate.
+    let unrepresentable =
+        parse_static_line("The first spell you cast each turn that somehow qualifies has cascade.")
+            .expect("the line must still lower to a static");
     assert_eq!(
-        def.condition, None,
-        "post-timing MV residue must fall through to the gateless static, not emit an MV-blind gate"
+        unrepresentable.condition, None,
+        "an unrepresentable post-timing region must stay on the no-regression fall-through"
     );
 }
 
 #[test]
-fn static_rain_of_riches_treasure_qualifier_declined_to_existing() {
-    // CR 601.2f: Rain of Riches — "that mana from a Treasure was spent to cast" is
-    // unrepresentable and sits in the post-timing discarded region. The trailing-
-    // residue guard declines the gated form (no Treasure-blind gate); the existing
-    // gateless static is preserved (unchanged-broken, not regressed).
+fn static_rain_of_riches_treasure_qualifier_reaches_both_readers() {
+    // CR 106.3 + CR 601.2h + CR 601.2f + CR 611.2f: Rain of Riches — "that mana
+    // from a Treasure was spent to cast" follows the timing phrase. The shared
+    // parser lowers it to Phase 1's payment-provenance property, and the qualifier
+    // reaches BOTH readers: the grant's affected filter and its
+    // `SpellsCastThisTurn` gate. Before the fix the grant was unconditional.
     let def = parse_static_line(
         "The first spell you cast each turn that mana from a Treasure was spent to cast has cascade.",
     )
-    .unwrap();
+    .expect("Rain of Riches' grant must parse");
     assert_eq!(
         def.mode,
         StaticMode::CastWithKeyword {
             keyword: Keyword::Cascade,
         }
     );
+    let Some(TargetFilter::Typed(tf)) = &def.affected else {
+        panic!("expected Typed affected, got {:?}", def.affected);
+    };
     assert_eq!(
-        def.condition, None,
-        "unrepresentable Treasure qualifier must fall through to the gateless static"
+        tf.controller,
+        Some(ControllerRef::You),
+        "CR 601.2a: the grant scopes to the controller's own spells"
+    );
+    assert_eq!(
+        tf.properties.len(),
+        1,
+        "expected exactly the payment-provenance property, got {:?}",
+        tf.properties
+    );
+    assert_treasure_source_prop(&tf.properties[0]);
+
+    let inner = assert_first_spell_gate(
+        def.condition.as_ref().expect("expected first-spell gate"),
+        false,
+        0,
+    );
+    let TargetFilter::Typed(inner_tf) = inner else {
+        panic!("expected a Typed gate filter, got {inner:?}");
+    };
+    assert_eq!(
+        inner_tf.properties.len(),
+        1,
+        "the gate must carry the same single property, got {:?}",
+        inner_tf.properties
+    );
+    assert_treasure_source_prop(&inner_tf.properties[0]);
+
+    // Positive control in-file: the class's clean sibling — no post-timing region —
+    // still yields the bare `Typed{Card}` gate at ordinal 1.
+    let nexus = parse_static_line("The first spell you cast each turn has cascade.")
+        .expect("Maelstrom Nexus must parse");
+    let nexus_inner = assert_first_spell_gate(
+        nexus.condition.as_ref().expect("expected first-spell gate"),
+        false,
+        0,
+    );
+    assert_eq!(
+        nexus_inner,
+        TargetFilter::Typed(TypedFilter::card()),
+        "the clean Supported path must stay qualifier-free"
+    );
+
+    // CR 110.1 + CR 111.1 + CR 603.6a (R14 preservation): Rain of Riches' FIRST
+    // ability — "create two Treasure tokens" on entry — is untouched by this phase.
+    {
+        use crate::types::triggers::TriggerMode;
+
+        let parsed = crate::parser::oracle::parse_oracle_text(
+            "When Rain of Riches enters the battlefield, create two Treasure tokens.\nThe first spell you cast each turn that mana from a Treasure was spent to cast has cascade.",
+            "Rain of Riches",
+            &[],
+            &["Enchantment".to_string()],
+            &[],
+        );
+        let etb = parsed
+            .triggers
+            .iter()
+            .find(|t| t.mode == TriggerMode::ChangesZone)
+            .expect("Rain of Riches must keep its enters-the-battlefield trigger");
+        let execute = etb
+            .execute
+            .as_ref()
+            .expect("the ETB trigger must carry an effect");
+        assert!(
+            matches!(
+                execute.effect.as_ref(),
+                Effect::Token { name, count, .. }
+                    if name == "Treasure" && *count == QuantityExpr::Fixed { value: 2 }
+            ),
+            "expected two Treasure tokens, got {:?}",
+            execute.effect
+        );
+    }
+}
+
+/// CR 106.3 + CR 601.2h: the `ManaSpentFromSource` property over a
+/// Treasure-subtype source filter — the exact lowering both Rain of Riches
+/// readers must carry.
+fn assert_treasure_source_prop(prop: &FilterProp) {
+    let FilterProp::ManaSpentFromSource { source_filter } = prop else {
+        panic!("expected FilterProp::ManaSpentFromSource, got {prop:?}");
+    };
+    let TargetFilter::Typed(source_tf) = source_filter.as_ref() else {
+        panic!("expected a Typed source filter, got {source_filter:?}");
+    };
+    assert!(
+        source_tf
+            .type_filters
+            .iter()
+            .any(|t| matches!(t, TypeFilter::Subtype(s) if s == "Treasure")),
+        "expected the Treasure subtype in the source filter, got {:?}",
+        source_tf.type_filters
+    );
+}
+
+#[test]
+fn static_head_of_the_class_gate_carries_its_target_clause() {
+    // CR 601.2f + CR 115.1 + CR 601.2c: Head of the Class — the printed qualifier
+    // "that targets a creature" is the COST consumer's own target clause (charter
+    // decision 5). It reaches both readers from one value now: before the fix the
+    // discount carried it while the gate filter was the qualifier-free
+    // `Typed{Card, []}`, so a prior non-targeting spell spent the discount the card
+    // prints for its first creature-targeting spell only.
+    let def = parse_static_line(
+        "The first spell you cast during each of your turns that targets a creature costs {W}{B} less to cast. This effect reduces only the amount of colored mana you pay.",
+    )
+    .expect("Head of the Class must parse");
+    let shared = assert_cost_reducer_gate_matches_discount(&def, true, 0);
+    let TargetFilter::Typed(tf) = &shared else {
+        panic!("expected a Typed shared filter, got {shared:?}");
+    };
+    assert_eq!(
+        tf.properties.len(),
+        1,
+        "the target clause is appended exactly once, got {:?}",
+        tf.properties
+    );
+    let FilterProp::Targets { filter } = &tf.properties[0] else {
+        panic!("expected FilterProp::Targets, got {:?}", tf.properties[0]);
+    };
+    assert!(
+        matches!(filter.as_ref(), TargetFilter::Typed(tf) if tf.type_filters.contains(&TypeFilter::Creature)),
+        "expected the printed creature target filter, got {filter:?}"
+    );
+
+    // Positive control in-file (charter decision 9's sibling control): Highspire
+    // Bell-Ringer's plain reducer is untouched — its gate still equals its discount
+    // filter, and both are the bare `Typed{Card}` the class had before this phase.
+    let bell = parse_static_line("The second spell you cast each turn costs {1} less to cast.")
+        .expect("Highspire Bell-Ringer must parse");
+    let bell_shared = assert_cost_reducer_gate_matches_discount(&bell, false, 1);
+    assert_eq!(
+        bell_shared,
+        TargetFilter::Typed(TypedFilter::card()),
+        "the unqualified sibling's gate filter must stay bare"
+    );
+}
+
+#[test]
+fn static_highspire_bell_ringer_gate_unchanged() {
+    // CR 601.2f preservation (derived, then measured at the base): with no
+    // post-timing qualifier the qualifying set is "spells you cast" on both
+    // readers, so the gate filter equals the discount filter — exactly the bare
+    // `Typed{Card, []}` — and "the second spell" reads `== 1`.
+    let def = parse_static_line("The second spell you cast each turn costs {1} less to cast.")
+        .expect("Highspire Bell-Ringer must parse");
+    let shared = assert_cost_reducer_gate_matches_discount(&def, false, 1);
+    assert_eq!(
+        shared,
+        TargetFilter::Typed(TypedFilter::card()),
+        "Highspire's parsed gate filter must stay byte-identical to its discount filter"
+    );
+}
+
+#[test]
+fn nth_qualified_spell_accepts_both_caller_spans() {
+    // CR 601.2f: ONE shared parser serves two caller spans — the keyword-grant
+    // consumer hands over the subject up to the grant verb (so its residue runs to
+    // end-of-text), while the cost-modifier consumer hands over the whole static
+    // line (so its residue runs into its own `costs …` production). Each case below
+    // is named by the residue it must consume, with the leading separator space
+    // `scan_preceded` leaves behind.
+    fn supported(lower: &str) -> (TargetFilter, u32) {
+        match super::grammar::parse_nth_qualified_spell_filter(lower) {
+            super::grammar::NthQualifiedSpell::Supported {
+                filter, ordinal, ..
+            } => (filter, ordinal),
+            _ => panic!("`{lower}` must answer Supported"),
+        }
+    }
+
+    // (1) Grant span, Rain of Riches — residue " that mana from a treasure was
+    // spent to cast".
+    let (filter, ordinal) =
+        supported("the first spell you cast each turn that mana from a treasure was spent to cast");
+    assert_eq!(ordinal, 1);
+    let TargetFilter::Typed(tf) = &filter else {
+        panic!("expected a Typed filter, got {filter:?}");
+    };
+    assert_eq!(
+        tf.properties.len(),
+        1,
+        "expected one lowered clause, got {:?}",
+        tf.properties
+    );
+    assert_treasure_source_prop(&tf.properties[0]);
+
+    // (2) Grant span, TARDIS Bay — residue " with mana value 2 or greater".
+    let (filter, ordinal) = supported(
+        "the first spell you cast during each of your turns with mana value 2 or greater",
+    );
+    assert_eq!(ordinal, 1);
+    let TargetFilter::Typed(tf) = &filter else {
+        panic!("expected a Typed filter, got {filter:?}");
+    };
+    assert!(
+        tf.properties.contains(&FilterProp::Cmc {
+            comparator: Comparator::GE,
+            value: QuantityExpr::Fixed { value: 2 },
+        }),
+        "expected the delegated mana-value property, got {:?}",
+        tf.properties
+    );
+
+    // (3) Cost span, the bare-reducer form (Highspire class) — residue
+    // " costs {1} less to cast." closes on the bare cost-verb boundary, and the
+    // whole filter stays the consumer's.
+    let (filter, ordinal) =
+        supported("the second spell you cast each turn costs {1} less to cast.");
+    assert_eq!(ordinal, 2);
+    assert_eq!(
+        filter,
+        TargetFilter::Typed(TypedFilter::card()),
+        "the bare-verb boundary must leave the filter unqualified"
+    );
+
+    // (4) Cost span, the target-clause form (Head of the Class — the foreclosure
+    // witness) — residue " that targets a creature costs {w}{b} less to cast. this
+    // effect reduces only the amount of colored mana you pay.". The region is
+    // bounded by the consumer's production, so the clause it owns is NOT claimed
+    // here: a boundary that trims at region entry loses the `" that target"` anchor
+    // and deletes this whole static.
+    let (filter, ordinal) = supported(
+        "the first spell you cast during each of your turns that targets a creature costs {w}{b} less to cast. this effect reduces only the amount of colored mana you pay.",
+    );
+    assert_eq!(ordinal, 1);
+    assert_eq!(
+        filter,
+        TargetFilter::Typed(TypedFilter::card()),
+        "the target clause has exactly one claimant — the cost consumer — so the shared parser must not lower it"
+    );
+}
+
+#[test]
+fn nth_qualified_spell_unrepresentable_region_declined() {
+    // CR 601.2f + CR 611.2f: a post-timing region that no shared clause authority
+    // lowers must answer UnsupportedQualifier, so neither consumer can emit a
+    // partially constrained filter (charter decision 5). Synthetic rows, labelled:
+    // the printed corpus has no such region (measured — the class's three members
+    // are Rain of Riches, TARDIS Bay and Head of the Class); nearest printed cards
+    // Rain of Riches / TARDIS Bay.
+    for lower in [
+        // A clause no shared authority recognizes, on the grant span.
+        "the first spell you cast each turn that somehow qualifies",
+        // A post-timing TARGET clause on a grant: it has exactly one claimant (the
+        // cost-consumer's own target authority) and no printed grant instance, so
+        // the region declines it rather than lowering a second `Targets`.
+        "the first spell you cast during each of your turns that targets a creature",
+        // The subject-bearing payment form: its residue (" that spell") no region
+        // clause consumes and no cost predicate begins.
+        "the first spell you cast each turn that mana from a treasure was spent to cast that spell",
+    ] {
+        assert!(
+            matches!(
+                super::grammar::parse_nth_qualified_spell_filter(lower),
+                super::grammar::NthQualifiedSpell::UnsupportedQualifier
+            ),
+            "`{lower}` must answer UnsupportedQualifier"
+        );
+    }
+
+    // Paired positive reach guard: the same fixture family's representable clause
+    // answers Supported, so the negatives above are about the region, not about the
+    // ordinal/timing/caster scaffolding being unrecognized.
+    assert!(
+        matches!(
+            super::grammar::parse_nth_qualified_spell_filter(
+                "the first spell you cast each turn that mana from a treasure was spent to cast"
+            ),
+            super::grammar::NthQualifiedSpell::Supported { .. }
+        ),
+        "the representable Treasure clause must answer Supported"
     );
 }
 
@@ -28128,36 +28490,6 @@ fn nth_qualified_spell_filter_second_spell_gates_on_one_prior_cast() {
     ));
     // The second spell ⇒ one qualifying spell already cast this turn.
     assert_eq!(rhs, QuantityExpr::Fixed { value: 1 });
-}
-
-#[test]
-fn nth_qualified_spell_subject_residue_rejected() {
-    // CR 601.2f: a subject with non-empty post-timing residue is NOT fully
-    // consumed; a clean "...each turn" subject is.
-    assert!(
-        !super::grammar::nth_qualified_spell_subject_fully_consumed(
-            "the first spell you cast each turn that mana from a treasure was spent to cast"
-        ),
-        "Treasure residue must report not-fully-consumed"
-    );
-    assert!(
-        !super::grammar::nth_qualified_spell_subject_fully_consumed(
-            "the first spell you cast during each of your turns with mana value 2 or greater"
-        ),
-        "post-timing MV residue must report not-fully-consumed"
-    );
-    assert!(
-        super::grammar::nth_qualified_spell_subject_fully_consumed(
-            "the first spell you cast each turn"
-        ),
-        "clean subject must report fully-consumed"
-    );
-    assert!(
-        super::grammar::nth_qualified_spell_subject_fully_consumed(
-            "the first spell you cast from exile each turn"
-        ),
-        "clean from-exile subject must report fully-consumed"
-    );
 }
 
 #[test]
@@ -42576,4 +42908,520 @@ fn repaired_grammar_neighbours_parse_to_their_meaning_or_an_explicit_gap() {
             "{name} must stay an explicit gap: {json}"
         );
     }
+}
+
+// CR 109.2: a cost modifier's "that targets a <type>" qualifier uses a bare type
+// description — no zone, and none of the words "card"/"spell"/"source"/"scheme" —
+// so it means a permanent of that type ON THE BATTLEFIELD. Without the scope the
+// engine accepted a spell that targeted a creature CARD in a graveyard (Reanimate)
+// as "a spell that targets a creature" and it consumed Head of the Class's slot.
+//
+// Three printed members of the class are asserted on the filter the cost pipeline
+// actually receives (Head of the Class, Killian, Ink Duelist, Strong Back), plus
+// the shaper's positive and negative boundaries.
+//
+// SCOPE, measured rather than claimed. Regenerating `card-data.json` with the
+// parser on each side of this change and diffing the coverage parse signatures
+// at head `7711e457e` reports EIGHT cards over ten signatures — the two seams
+// this shaper feeds (`parse_cost_modifier_target_filter` for cast costs,
+// `cost_mod::split_ability_target_restriction` for activation costs):
+//
+//   Head of the Class · Killian, Ink Duelist · Strong Back · The Destined
+//     — cast-cost seam; Strong Back also on the activation seam
+//   Esior, Wardwing Familiar · Kasmina, Enigmatic Mentor
+//     — cast-cost seam, raise direction
+//   Kopala, Warden of Waves — BOTH seams (cast and activate lines)
+//   Professor Hojo — activation seam
+//
+// That count is only visible once `coverage::static_details` exports the
+// qualifier fields (`spell_filter`, `targets`, `activator`, `exemption`,
+// `frequency`): the same parser delta diffed through the pre-change export
+// reports ONE card, Head of the Class, and only because its gate is mirrored
+// into a `conditional` that the exporter already rendered. The other seven were
+// invisible, which is why earlier scope estimates for this change disagreed.
+//
+// Every name above was confirmed against Scryfall by exact name. In particular
+// "The Destined" IS a real card — "Spells you control that target a creature you
+// control cost {2} less to cast." — so an earlier version of this comment that
+// called it a parse-side-only data point was wrong and is corrected here.
+//
+// Two of the ten cards this PR changes parse SEMANTICS for are not cost modifiers
+// at all and so do not appear in this class: Rain of Riches and TARDIS Bay, whose
+// `affects` and `SpreadsCastThisTurn` gate change with the post-timing qualifier.
+// The full semantic set is those two plus the eight above.
+#[test]
+fn cost_modifier_bare_type_target_qualifier_carries_battlefield_scope() {
+    use crate::parser::oracle_target::scope_type_phrase_to_the_battlefield;
+
+    /// The inner `Targets` filter of a `ModifyCost` static's `spell_filter`.
+    fn qualifier(line: &str) -> TargetFilter {
+        let def = parse_static_line(line).unwrap_or_else(|| panic!("line must parse: {line}"));
+        let StaticMode::ModifyCost { spell_filter, .. } = def.mode else {
+            panic!(
+                "expected a ModifyCost static for {line}, got {:?}",
+                def.mode
+            );
+        };
+        let Some(TargetFilter::Typed(tf)) = spell_filter else {
+            panic!("expected the qualifier's Typed gate for {line}, got {spell_filter:?}");
+        };
+        let mut quantifiers = tf.properties.into_iter().filter_map(|prop| match prop {
+            FilterProp::Targets { filter } => Some(*filter),
+            _ => None,
+        });
+        let filter = quantifiers
+            .next()
+            .unwrap_or_else(|| panic!("expected a Targets qualifier for {line}"));
+        assert!(
+            quantifiers.next().is_none(),
+            "expected exactly one Targets qualifier for {line}"
+        );
+        filter
+    }
+
+    // Head of the Class (Scryfall ysos/21), verbatim: "The first spell you cast
+    // during each of your turns that targets a creature costs {W}{B} less to cast."
+    // The whole inner filter, so nothing else drifts with it.
+    assert_eq!(
+        qualifier(
+            "The first spell you cast during each of your turns that targets a creature costs {W}{B} less to cast."
+        ),
+        TargetFilter::Typed(
+            TypedFilter::creature().properties(vec![FilterProp::InZone {
+                zone: Zone::Battlefield
+            }])
+        ),
+        "CR 109.2: a bare 'a creature' qualifier means a battlefield permanent"
+    );
+
+    // Killian, Ink Duelist (Scryfall stx/197), verbatim: "Spells you cast that
+    // target a creature cost {2} less to cast." Same bare-type qualifier by a path
+    // with no "first spell" ordinal, so the scope cannot be riding the ordinal seam.
+    assert_eq!(
+        qualifier("Spells you cast that target a creature cost {2} less to cast."),
+        TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::InZone {
+            zone: Zone::Battlefield
+        }])),
+        "CR 109.2: the scope is a property of the bare-type qualifier, not of one card"
+    );
+
+    // Strong Back (Scryfall pip/83), verbatim: "Aura spells you cast that target
+    // enchanted creature cost {3} less to cast." — a third card in the class,
+    // through a different subject ("Aura spells you cast") and a different type
+    // phrase ("enchanted creature"). Asserted structurally: whichever shape the
+    // phrase lowers to, it must carry the scope.
+    let strong_back =
+        qualifier("Aura spells you cast that target enchanted creature cost {3} less to cast.");
+    let TargetFilter::Typed(strong_back) = strong_back else {
+        panic!("expected a Typed qualifier for Strong Back, got {strong_back:?}");
+    };
+    assert!(
+        strong_back.properties.contains(&FilterProp::InZone {
+            zone: Zone::Battlefield
+        }),
+        "CR 109.2: 'target enchanted creature' is a bare type description and must \
+         carry the battlefield scope, got {strong_back:?}"
+    );
+
+    // The controller axis rides alongside the scope rather than replacing it.
+    // Asserted on the shared shaper: the local card data has no Scryfall-verifiable
+    // card for "a creature you control" in this class, so this leg is a unit check
+    // of the shaper's boundary, not a card claim.
+    let (controlled, remainder) = parse_type_phrase_folding("creature you control");
+    assert!(remainder.is_empty(), "sanity: the phrase must fully parse");
+    assert_eq!(
+        scope_type_phrase_to_the_battlefield("creature you control", controlled),
+        TargetFilter::Typed(
+            TypedFilter::creature()
+                .controller(ControllerRef::You)
+                .properties(vec![FilterProp::InZone {
+                    zone: Zone::Battlefield
+                }])
+        ),
+        "CR 109.2: 'a creature you control' is still a bare type description"
+    );
+
+    // The ACTIVATION-side arm: the same bare-type qualifier on an
+    // activated-ability cost modifier — Professor Hojo (Scryfall fic/69, one of
+    // its two printings, both in Final Fantasy Commander),
+    // verbatim: "The first activated ability you activate during your turn that
+    // targets a creature you control costs {2} less to activate." This line
+    // reaches its filter through `split_ability_target_restriction`, not through
+    // `parse_cost_modifier_target_filter`, so it is asserted on its own: the two
+    // seams share the shaper and must agree, or an ability activated with a
+    // graveyard card as its target consumes the discount a battlefield target
+    // should have taken.
+    let hojo = parse_static_line(
+        "The first activated ability you activate during your turn that targets a creature you control costs {2} less to activate.",
+    )
+    .expect("Professor Hojo's line must parse");
+    let StaticMode::ReduceAbilityCost { targets, .. } = hojo.mode else {
+        panic!(
+            "expected the once-per-turn activation reducer, got {:?}",
+            hojo.mode
+        );
+    };
+    assert_eq!(
+        targets,
+        Some(TargetFilter::Typed(
+            TypedFilter::creature()
+                .controller(ControllerRef::You)
+                .properties(vec![FilterProp::InZone {
+                    zone: Zone::Battlefield
+                }])
+        )),
+        "CR 109.2: an activated ability's bare 'a creature you control' qualifier means a \
+         battlefield permanent"
+    );
+
+    // NEGATIVE, on the shared shaper: a qualifier that names its own zone or uses
+    // "card"/"spell" keeps exactly what it had. CR 109.2a ("creature card from a
+    // graveyard" — Reanimate) and CR 109.2b ("creature spell") are the two printed
+    // shapes; both must come back untouched, or the fix would break the very cards
+    // it must leave alone.
+    for (phrase, expected) in [
+        (
+            "creature card from a graveyard",
+            TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::InZone {
+                zone: Zone::Graveyard,
+            }])),
+        ),
+        (
+            "creature card in your graveyard",
+            TargetFilter::Typed(
+                TypedFilter::creature()
+                    .controller(ControllerRef::You)
+                    .properties(vec![FilterProp::InZone {
+                        zone: Zone::Graveyard,
+                    }]),
+            ),
+        ),
+        (
+            "creature spell",
+            TargetFilter::Typed(TypedFilter::creature()),
+        ),
+    ] {
+        let (parsed, remainder) = parse_type_phrase_folding(phrase);
+        assert!(
+            remainder.is_empty(),
+            "the negative leg must parse its whole phrase: {phrase:?} left {remainder:?}"
+        );
+        assert_eq!(
+            scope_type_phrase_to_the_battlefield(phrase, parsed.clone()),
+            expected,
+            "CR 109.2a/109.2b: {phrase:?} names its own zone and must not gain the battlefield scope"
+        );
+    }
+}
+
+// CR 109.2 + CR 115.9b: an ACTIVATED-ABILITY cost modifier's "… that targets
+// <phrase>" qualifier names the object a qualifying activation must have
+// announced as a target. A bare type description — no zone, and none of the
+// words "card"/"spell"/"source"/"scheme" — means a permanent of that type ON THE
+// BATTLEFIELD. The controller axis spelled inside the phrase ("you control",
+// "an opponent controls", or no restriction at all) narrows WHICH battlefield
+// permanents qualify; it neither replaces the scope nor widens it past the
+// battlefield.
+//
+// Asserted on the grammar rather than on one card: each of the three controller
+// spellings is driven through BOTH printed shapes of the modifier — the
+// untagged "… abilities you activate that target <X> cost {N} less to activate"
+// form and the once-per-turn "The first activated ability you activate during
+// your turn that targets <X> costs {N} less to activate" form (Professor Hojo,
+// Scryfall fic/69) — because both reach the filter through the one seam,
+// `cost_mod::split_ability_target_restriction`, and must agree.
+#[test]
+fn activated_ability_cost_modifier_target_qualifier_scopes_every_controller_axis() {
+    /// The `targets` gate of an activated-ability cost modifier — the field the
+    /// coverage signature export surfaces as `targets`.
+    fn activation_targets(line: &str) -> TargetFilter {
+        let def = parse_static_line(line).unwrap_or_else(|| panic!("line must parse: {line}"));
+        let StaticMode::ReduceAbilityCost { targets, .. } = def.mode else {
+            panic!(
+                "expected an activated-ability cost modifier for {line}, got {:?}",
+                def.mode
+            );
+        };
+        targets.unwrap_or_else(|| panic!("expected the target qualifier for {line}"))
+    }
+
+    let battlefield = FilterProp::InZone {
+        zone: Zone::Battlefield,
+    };
+
+    // "a creature you control" — Professor Hojo's own phrase.
+    let you_control = TargetFilter::Typed(
+        TypedFilter::creature()
+            .controller(ControllerRef::You)
+            .properties(vec![battlefield.clone()]),
+    );
+    for line in [
+        "Equip abilities you activate that target a creature you control cost {1} less to activate.",
+        "The first activated ability you activate during your turn that targets a creature you control costs {2} less to activate.",
+    ] {
+        assert_eq!(
+            activation_targets(line),
+            you_control,
+            "CR 109.2: 'a creature you control' is a bare type description, so it means a \
+             battlefield permanent — {line}"
+        );
+    }
+
+    // "a creature an opponent controls" — the same bare type description with the
+    // opposing controller. The controller axis narrows the scope, it does not
+    // lift the target off the battlefield.
+    let opponent_control = TargetFilter::Typed(
+        TypedFilter::creature()
+            .controller(ControllerRef::Opponent)
+            .properties(vec![battlefield.clone()]),
+    );
+    for line in [
+        "Equip abilities you activate that target a creature an opponent controls cost {1} less to activate.",
+        "The first activated ability you activate during your turn that targets a creature an opponent controls costs {2} less to activate.",
+    ] {
+        assert_eq!(
+            activation_targets(line),
+            opponent_control,
+            "CR 109.2: 'a creature an opponent controls' is still a bare type description — {line}"
+        );
+    }
+
+    // Unrestricted control — "a creature" places no controller restriction on the
+    // target, so the battlefield scope is the only property the qualifier adds.
+    let unrestricted = TargetFilter::Typed(TypedFilter::creature().properties(vec![battlefield]));
+    for line in [
+        "Equip abilities you activate that target a creature cost {1} less to activate.",
+        "The first activated ability you activate during your turn that targets a creature costs {2} less to activate.",
+    ] {
+        assert_eq!(
+            activation_targets(line),
+            unrestricted,
+            "CR 109.2: an unrestricted 'a creature' qualifier means a battlefield permanent — {line}"
+        );
+    }
+}
+
+// The qualifier axes of an activated-ability cost modifier are parse-significant
+// but invisible to the `ReduceAbilityCost(<sign><keyword>,<amount>)` Display
+// label, which is why the coverage signature export emits them as
+// `targets`/`activator`/`exemption`/`frequency`. Pinned here so a silent change to
+// any of them moves the coverage parse-diff instead of hiding behind the label.
+//
+// Professor Hojo (Scryfall fic/69; set "Final Fantasy Commander", collector 69),
+// verbatim: "The first activated ability you activate during your turn that
+// targets a creature you control costs {2} less to activate." The second
+// sentence of the card ("Whenever one or more creatures you control become the
+// target of an activated ability, draw a card. This ability triggers only once
+// each turn.") is a separate triggered ability and is deliberately not this
+// line.
+//
+// The "of an artifact" leg proves the SOURCE qualifier and the TARGET qualifier
+// stay in their own slots when both are present.
+#[test]
+fn activated_ability_cost_modifier_qualifier_axes_stay_in_their_slots() {
+    let hojo = parse_static_line(
+        "The first activated ability you activate during your turn that targets a creature you control costs {2} less to activate.",
+    )
+    .expect("Professor Hojo's line must parse");
+
+    let StaticMode::ReduceAbilityCost {
+        mode,
+        keyword,
+        amount,
+        targets,
+        activator,
+        exemption,
+        frequency,
+        ..
+    } = hojo.mode
+    else {
+        panic!(
+            "expected an activated-ability cost modifier, got {:?}",
+            hojo.mode
+        );
+    };
+
+    assert_eq!(mode, CostModifyMode::Reduce, "CR 118.7: the line reduces");
+    assert_eq!(
+        keyword, "activated",
+        "the modifier covers every activated ability, not a tagged class"
+    );
+    assert_eq!(amount, 2, "CR 118.7a: two generic");
+    assert_eq!(
+        exemption,
+        ActivationExemption::None,
+        "CR 605.1a: the line carves out no mana abilities"
+    );
+    assert_eq!(
+        activator,
+        Some(PlayerFilter::Controller),
+        "CR 602.2: 'abilities YOU activate' is the activator axis"
+    );
+    assert_eq!(
+        frequency,
+        Some(CastFrequency::OncePerTurn),
+        "CR 118.7 + CR 602.2b: 'the FIRST … during your turn' is the frequency axis"
+    );
+    assert_eq!(
+        hojo.condition,
+        Some(StaticCondition::DuringYourTurn),
+        "CR 500.5: 'during your turn' stays a condition on the static"
+    );
+    assert_eq!(
+        hojo.affected, None,
+        "the card scopes no ability sources, so `affected` stays empty"
+    );
+    assert_eq!(
+        targets,
+        Some(TargetFilter::Typed(
+            TypedFilter::creature()
+                .controller(ControllerRef::You)
+                .properties(vec![FilterProp::InZone {
+                    zone: Zone::Battlefield
+                }])
+        )),
+        "CR 109.2 + CR 115.9b: the target qualifier is the battlefield-scoped filter"
+    );
+
+    // Both qualifiers present at once: "of an artifact" scopes the SOURCES and
+    // "that targets a creature an opponent controls" scopes the TARGET. Neither
+    // may migrate into the other's slot, and the target keeps its scope.
+    let sourced = parse_static_line(
+        "The first activated ability of an artifact you activate each turn that targets a creature an opponent controls costs {1} less to activate.",
+    )
+    .expect("the sourced once-per-turn form must parse");
+    let StaticMode::ReduceAbilityCost { targets, .. } = sourced.mode else {
+        panic!(
+            "expected an activated-ability cost modifier, got {:?}",
+            sourced.mode
+        );
+    };
+    assert_eq!(
+        targets,
+        Some(TargetFilter::Typed(
+            TypedFilter::creature()
+                .controller(ControllerRef::Opponent)
+                .properties(vec![FilterProp::InZone {
+                    zone: Zone::Battlefield
+                }])
+        )),
+        "CR 109.2: the target qualifier still scopes to the battlefield when a source \
+         qualifier rides along"
+    );
+    let Some(TargetFilter::Typed(source)) = &sourced.affected else {
+        panic!(
+            "the 'of an artifact' subject must scope the sources: {:?}",
+            sourced.affected
+        );
+    };
+    assert!(
+        source
+            .type_filters
+            .iter()
+            .any(|f| matches!(f, TypeFilter::Artifact)),
+        "the source qualifier must stay on `affected`, not migrate into the target: {source:?}"
+    );
+}
+
+#[test]
+fn static_tardis_bay_parses_from_its_complete_printed_line() {
+    // CR 202.3 + CR 601.2f + CR 611.2f: the COMPLETE printed Oracle text of TARDIS
+    // Bay, reminder text included — the string card data actually feeds the parser —
+    // rather than the clause alone. A fixture that trims the reminder can pass while
+    // the real line fails, which is why this one keeps it.
+    let printed = "The first spell you cast during each of your turns with mana value 2 or \
+                   greater has cascade. (When you cast that spell, exile cards from the top of \
+                   your library until you exile a nonland card that costs less. You may cast it \
+                   without paying its mana cost. Put the exiled cards on the bottom in a random \
+                   order.)";
+    let def = parse_static_line(printed).expect("TARDIS Bay's complete printed line must parse");
+    assert_eq!(
+        def.mode,
+        StaticMode::CastWithKeyword {
+            keyword: Keyword::Cascade,
+        }
+    );
+    let Some(TargetFilter::Typed(tf)) = &def.affected else {
+        panic!("expected Typed affected, got {:?}", def.affected);
+    };
+    assert_eq!(tf.controller, Some(ControllerRef::You));
+    assert!(
+        tf.properties.iter().any(|property| matches!(
+            property,
+            FilterProp::Cmc {
+                comparator: Comparator::GE,
+                value: QuantityExpr::Fixed { value: 2 },
+            }
+        )),
+        "the complete printed line must still carry the mana-value qualifier, got {:?}",
+        tf.properties
+    );
+}
+
+#[test]
+fn static_ordinary_cost_modifier_carries_no_target_scope() {
+    // Control for the CR 109.2 shaper: a cost modifier whose Oracle text names no
+    // target phrase at all — the ordinary payment case — must come out with an
+    // UNSCOPED affected filter. This is what proves the battlefield shaper fires on
+    // the qualifier rather than on every cost modifier.
+    let def = parse_static_line("Instant and sorcery spells you cast cost {1} less to cast.")
+        .expect("an ordinary cost modifier must parse");
+    let StaticMode::ModifyCost { spell_filter, .. } = &def.mode else {
+        panic!("expected a cast-cost modifier, got {:?}", def.mode);
+    };
+    let Some(TargetFilter::Typed(tf)) = &def.affected else {
+        panic!("expected Typed affected, got {:?}", def.affected);
+    };
+    assert_eq!(tf.controller, Some(ControllerRef::You));
+    assert!(
+        !tf.properties.iter().any(|property| matches!(
+            property,
+            FilterProp::Targets { .. } | FilterProp::InZone { .. },
+        )),
+        "an ordinary cost modifier names no target, so no target scope may be added; got {:?}",
+        tf.properties
+    );
+
+    // CR 601.2f: the PRICING filter — the one the discount actually reads — must
+    // carry Baral's printed restriction ("Instant and sorcery spells…") and must
+    // NOT gain any target scope the Oracle text never asks for. Asserting only the
+    // affected filter would leave the value the price reads unchecked.
+    // A debug-string check would accept an intersection, an extra restriction, or a
+    // reordered shape; this asserts the TYPED filter, so any of those fails here.
+    let Some(pricing) = spell_filter.as_ref() else {
+        panic!("Baral's discount must carry a pricing filter");
+    };
+    let TargetFilter::Or { filters } = pricing else {
+        panic!("Baral's pricing filter must be a union of instant and sorcery, got {pricing:?}");
+    };
+    assert_eq!(
+        filters.len(),
+        2,
+        "Baral's pricing filter is exactly two members (instant, sorcery), got {filters:?}"
+    );
+    let mut kinds = Vec::new();
+    for filter in filters {
+        let TargetFilter::Typed(typed) = filter else {
+            panic!("each member of the union must be a typed filter, got {filter:?}");
+        };
+        assert!(
+            typed.properties.is_empty(),
+            "neither member of Baral's union may carry a property (no target or zone scope for \
+             an untargeted cost modifier), got {:?}",
+            typed.properties
+        );
+        assert_eq!(
+            typed.controller, None,
+            "the caster scope lives on the affected filter, not inside the pricing union; got \
+             {:?}",
+            typed.controller
+        );
+        kinds.push(format!("{:?}", typed.type_filters));
+    }
+    kinds.sort();
+    assert_eq!(
+        kinds,
+        vec!["[Instant]".to_string(), "[Sorcery]".to_string()],
+        "Baral prices exactly instant and sorcery spells, got {kinds:?}"
+    );
 }

@@ -265,6 +265,24 @@ fn doubling_cube_doubles_unrestricted_colorless() {
     }
     assert_eq!(count(&runner, ManaType::Colorless), 4, "reach: CCCC");
 
+    // CR 106.3 + CR 400.7: make the two producers' EPOCHS distinguishable in this
+    // fixture, so the pin assertions below discriminate on the epoch axis and not only
+    // on the source id. The Cube is dated to an epoch no other permanent in this fixture
+    // holds, so "pinned to the Cube's epoch" cannot be satisfied by a Temple epoch.
+    let temple_epoch = runner.state().objects[&temples[0]].incarnation;
+    let cube_epoch = temple_epoch + 1000;
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&cube)
+        .expect("the Cube row")
+        .incarnation = cube_epoch;
+    assert_ne!(cube, temples[0], "reach guard: two distinct producers");
+    assert_ne!(
+        cube_epoch, temple_epoch,
+        "reach guard: the two producers' epochs are distinguishable"
+    );
+
     let activation = cube_activation(&runner, cube);
     runner.act(activation).expect("Doubling Cube activates");
 
@@ -276,6 +294,127 @@ fn doubling_cube_doubles_unrestricted_colorless() {
     );
     assert_eq!(units.len(), 2, "{units:?}");
     assert!(units.iter().all(|unit| unit.restrictions.is_empty()));
+    // CR 106.3 + CR 113.7 + CR 400.7: the pool now holds two units from two DIFFERENT
+    // producers, and the code records each one's own provenance. Pinning both producer
+    // pairs separately is what makes this assertion discriminate — the previous shape
+    // read the epoch back off `unit.source_id`, so it passed whichever object the unit
+    // named and proved nothing about which producer was recorded.
+    //
+    //  * the unit the ability ADDED names the CUBE — CR 113.7: the source of an ability
+    //    is the object that generated it — dated to the epoch its activation announced;
+    //  * the unit that SURVIVED paying the {3} still names the TEMPLE that produced it,
+    //    with the epoch it was produced at: doubling adds mana, it does not restamp the
+    //    mana already in the pool.
+    let added: Vec<&ManaUnit> = units.iter().filter(|unit| unit.source_id == cube).collect();
+    let surviving: Vec<&ManaUnit> = units.iter().filter(|unit| unit.source_id != cube).collect();
+    assert_eq!(
+        (added.len(), surviving.len()),
+        (1, 1),
+        "reach guard: one added unit and one surviving pool unit: {units:?}"
+    );
+    assert_eq!(
+        (added[0].source_id, added[0].source_incarnation),
+        (cube, Some(cube_epoch)),
+        "the NEW unit is produced by the CUBE at the epoch its activation announced: \
+         {units:?}"
+    );
+    assert!(
+        temples.contains(&surviving[0].source_id),
+        "the surviving unit still names the TEMPLE that produced it: {units:?}"
+    );
+    assert_eq!(
+        surviving[0].source_incarnation,
+        Some(temple_epoch),
+        "the surviving unit keeps the epoch it was produced at: {units:?}"
+    );
+    assert_ne!(
+        (surviving[0].source_id, surviving[0].source_incarnation),
+        (cube, Some(cube_epoch)),
+        "the surviving unit is NOT restamped to the Cube: {units:?}"
+    );
+    assert_ne!(
+        (added[0].source_id, added[0].source_incarnation),
+        (surviving[0].source_id, Some(temple_epoch)),
+        "the new unit does NOT inherit the provenance of the mana it doubled: {units:?}"
+    );
+}
+
+/// CR 106.3 + CR 400.7: the doubled units survive a save/restore AND still pay a cost
+/// afterwards. A doubled unit without a pin is exactly the shape the restore admission
+/// refuses, so this leg is what proves the stamp above is load-bearing rather than
+/// decorative.
+#[test]
+fn doubled_mana_survives_restore_and_still_pays() {
+    let Board {
+        mut runner,
+        cube,
+        battlefield: mountains,
+        hand,
+    } = board(
+        &["Mountain", "Mountain", "Mountain", "Mountain"],
+        &["Lightning Bolt"],
+    );
+    let bolt = hand[0];
+    for &mountain in &mountains {
+        tap_land_for_mana(&mut runner, mountain, 0);
+    }
+    assert_eq!(count(&runner, ManaType::Red), 4, "reach: pool is RRRR");
+    let activation = cube_activation(&runner, cube);
+    runner.act(activation).expect("Doubling Cube activates");
+    let doubled = pool_units(&runner);
+    assert_eq!(count(&runner, ManaType::Red), 2, "R doubled: {doubled:?}");
+    assert!(
+        doubled.iter().all(|unit| unit.source_incarnation
+            == Some(runner.state().objects[&unit.source_id].incarnation)),
+        "reach-guard: every doubled unit is pinned before the save: {doubled:?}"
+    );
+    let before: Vec<Option<u64>> = doubled.iter().map(|unit| unit.source_incarnation).collect();
+
+    let restored = engine::types::game_state::PersistedGameState::capture(runner.state().clone())
+        .into_game_state()
+        .expect("CR 106.3: a pool whose doubled units are pinned is admitted");
+    let mut runner = GameRunner::from_state(restored);
+    let after = pool_units(&runner);
+    assert_eq!(
+        after.len(),
+        2,
+        "the restore kept the doubled units: {after:?}"
+    );
+    assert_eq!(
+        after
+            .iter()
+            .map(|unit| unit.source_incarnation)
+            .collect::<Vec<_>>(),
+        before,
+        "and their producing epochs survived admission unchanged: {after:?}"
+    );
+
+    // CR 601.2h: the restored units still pay a real cost. Auto payment spends the pinned
+    // red mana the restore admitted.
+    let card_id = runner.state().objects[&bolt].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: bolt,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("the restored cast is announced");
+    if matches!(
+        runner.state().waiting_for,
+        WaitingFor::TargetSelection { .. }
+    ) {
+        runner
+            .act(GameAction::ChooseTarget {
+                target: Some(TargetRef::Player(P1)),
+            })
+            .expect("P1 is a legal target");
+    }
+    assert!(
+        count(&runner, ManaType::Red) < 2,
+        "the restored doubled mana paid the spell: {:?}",
+        pool_units(&runner)
+    );
 }
 
 /// C4 — CR 605.3a: Doubling Cube can be activated while paying for a spell.

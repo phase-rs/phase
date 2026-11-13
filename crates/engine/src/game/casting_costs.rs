@@ -121,6 +121,31 @@ pub(crate) fn commit_copy_cast(
     let origin = copy
         .cast_from_zone
         .unwrap_or(crate::types::zones::Zone::Exile);
+    // CR 707.12 + CR 601.2c: a cast copy's declared targets are the ones its
+    // announcement walk announced, and that walk's result is the copy's own
+    // stack entry — written by `finalize_copy_walk` / `open_copy_target_selection`
+    // before this call. No copy-cast caller holds the list directly; the entry
+    // is the only authority.
+    let entry = state
+        .stack
+        .iter()
+        .find(|entry| entry.id == copy_id)
+        .ok_or_else(|| {
+            EngineError::InvalidAction(format!("cast copy {copy_id:?} has no stack entry"))
+        })?;
+    // The empty below is provable, not a default: on this route the entry's ability is
+    // written from the copy's own spell ability (`effects::cast_copy_of_card::cast_one_copy`,
+    // and `finalize_copy_walk` for a walked announcement), so an entry whose `ability()` is
+    // `None` is a copy of a card with no spell ability — a cast that declared nothing,
+    // because the same ability is what a target walk reads a slot from. A *missing* entry is
+    // refused above, because no walk could have declared anything for it.
+    let committed_target_facts = crate::game::casting::capture_target_facts(
+        state,
+        &entry
+            .ability()
+            .map(declared_targets_in_chain)
+            .unwrap_or_default(),
+    );
     events.push(GameEvent::SpellCast {
         card_id: copy.card_id,
         controller,
@@ -133,6 +158,7 @@ pub(crate) fn commit_copy_cast(
         &copy,
         origin,
         crate::types::game_state::CastingVariant::Normal,
+        &committed_target_facts,
     )
     .map_err(finalized_spell_cast_ledger_error)?;
     // CR 707.12: a cast copy is a new object created for this cast, not the
@@ -289,6 +315,82 @@ fn recorded_mana_spent_to_cast(state: &GameState, object_id: ObjectId) -> u32 {
         .get(&object_id)
         .expect("spell object must exist while its cast is being finalized")
         .mana_spent_to_cast_amount
+}
+
+/// CR 700.14 + CR 702.132a + CR 118.3a: the per-payer credits one finalized spell
+/// cast owes the Expend ledger.
+///
+/// The payment finalizers record the COMBINED payment on the spell: an Assist
+/// helper's units are mana spent to cast this spell (CR 702.132a has the helper pay
+/// "before you begin to pay the total cost", and CR 118.3a makes paying mana removing
+/// those units from a pool), so `mana_spent_to_cast_amount`, the color tally and the
+/// producer snapshots all count them — which is what a source-qualified predicate
+/// asks for (Rain of Riches' "mana from a Treasure was spent to cast").
+///
+/// Expend reads the same payment per PLAYER. CR 700.14 counts "the amount of mana
+/// that player spent this turn to cast spells": the helper's units are the helper's
+/// expenditure and the caster's are the caster's. Crediting the whole
+/// `combined_spent` to the caster would let three helper Treasures fire the CASTER's
+/// "Whenever you expend 4" (Wandertale Mentor) on mana the caster never spent, and
+/// would leave the helper's own tally short.
+///
+/// The split is the parked cast's own Assist CLAIM
+/// ([`crate::types::game_state::PendingCast::assist_contribution`]) — the typed
+/// statement of who paid how much that the payment finalizers splice into the spell's
+/// paid units, carried with the cast across every pause (a pre-payment pause, a
+/// replaced life payment, a delve or deferred-sacrifice cost move, the prepaid
+/// resume) and validated against the journal at the restore boundary. Reading the
+/// resolved-rules journal directly instead does NOT work at this point: the journal
+/// keys each spend by the spell's object incarnation
+/// (`ManaPaymentRecipient::Object`), and a resumed announcement re-creates the stack
+/// object, so by finalization the live spell and the journal's recipient name
+/// different incarnations of the same id and a payer-keyed query by recipient answers
+/// nothing. The caster is credited with the remainder of the combined payment, which
+/// is the whole of it for an unassisted cast.
+///
+/// Returns one credit per payer that spent something, the caster's first.
+fn expend_credits_for_cast(
+    caster: PlayerId,
+    object_id: ObjectId,
+    combined_spent: u32,
+    parked: Option<&PendingCast>,
+) -> Vec<(PlayerId, u32)> {
+    // CR 702.132a + CR 118.3a: the contribution names the cast it paid toward, so a
+    // claim captured for another cast is not this cast's split.
+    let contribution = parked
+        .and_then(PendingCast::assist_contribution)
+        .filter(|contribution| contribution.source_id == object_id);
+    let Some(contribution) = contribution else {
+        return (combined_spent > 0)
+            .then_some((caster, combined_spent))
+            .into_iter()
+            .collect();
+    };
+    // CR 118.3a: the units the helper's spend REMOVED are the helper's expenditure —
+    // the same units the finalizer spliced into this spell's paid units, so the split
+    // and the combined amount describe one payment. The amount the claim states and
+    // the units it carries are the same payment twice; the restore boundary refuses a
+    // save where they disagree, and the payment's own splice refuses them on the live
+    // path, so this is an invariant rather than a check.
+    debug_assert!(
+        contribution.is_backed_by_its_units(),
+        "an Assist contribution's units must number the generic mana it paid: {contribution:?}"
+    );
+    let helper_spent = contribution.units.len() as u32;
+    let mut credits = Vec::with_capacity(2);
+    // CR 118.3a + CR 601.2h: the combined amount IS this cast's whole payment, so the
+    // caster's own share is what is left after the helper's.
+    let caster_spent = combined_spent.checked_sub(helper_spent).expect(
+        "the helper's units are part of the spell's combined payment, so they cannot \
+         exceed it",
+    );
+    if caster_spent > 0 {
+        credits.push((caster, caster_spent));
+    }
+    if helper_spent > 0 {
+        credits.push((contribution.helper, helper_spent));
+    }
+    credits
 }
 
 fn stamp_controller_controlled_as_cast(
@@ -3436,6 +3538,7 @@ fn finish_cost_object_moves(
             cascade_cast_transformed,
             resolution_success_waiting_for,
             prepaid_actual_mana_spent,
+            committed_target_facts,
         } => {
             let returned_creature = chosen
                 .first()
@@ -3469,6 +3572,7 @@ fn finish_cost_object_moves(
                     resolution_success_waiting_for: resolution_success_waiting_for.map(|wf| *wf),
                     cast_this_way_etb_counter: None,
                     cast_this_way_enters_mods: Default::default(),
+                    committed_target_facts,
                 }),
                 Some(actual_mana_spent),
                 ReturnedCreatureCostMove::Delivered,
@@ -4248,7 +4352,50 @@ pub(super) fn pay_delve_after_distribution(
     pending: &mut PendingCast,
     events: &mut Vec<GameEvent>,
 ) -> Result<Option<WaitingFor>, EngineError> {
-    let spent = recorded_mana_spent_to_cast(state, pending.object_id);
+    // CR 601.2c + CR 400.7: the delve exile below moves cards out of the graveyard
+    // as part of the total cost (CR 601.2h). A declared target can BE one of those
+    // cards, so the facts are latched here — before the exile — on the cast's own
+    // carrier, because this root rebuilds `FinalizePrePaymentChecks` from scratch
+    // and would otherwise recapture by raw id after the move.
+    if pending.committed_target_facts.is_none() {
+        pending.committed_target_facts = Some(super::casting::capture_target_facts(
+            state,
+            &declared_targets_in_chain(&pending.ability),
+        ));
+    }
+    // CR 601.2h + CR 700.14 + CR 118.3a: validate the copy AT CONSUMPTION. The restore
+    // boundary cannot decide which parks to validate from anything the save cannot drop, so
+    // the check that matters also runs here, while the cast is still parked and the journal
+    // is live. It goes through the SAME authority the boundary uses
+    // (`GameState::prove_prepaid_spell_copy`) rather than re-deriving one fact from it: the
+    // amount, the color tally, the producer snapshots and the payer split are proven
+    // together, so a save that leaves one of them honest and forges another is still caught.
+    //
+    // A park that STATES its amount outranks the copy — that value is the one the boundary
+    // validated — so only the fallback needs proving here. A save cannot erase its way past
+    // a check that runs after it is loaded.
+    if pending.prepaid_actual_mana_spent.is_none() {
+        let proven = state
+            .prove_prepaid_spell_copy(pending, None, player)
+            .map_err(|error| EngineError::InvalidAction(error.to_string()))?;
+        // CR 601.2h + CR 700.14: WRITE THE PROVEN AMOUNT BACK. Proving it is not enough:
+        // `pay_delve_at_commit` stamps it on a CLONE, and when the delve move list is empty
+        // or settles inline `move_cost_objects` returns `None`, so the caller finishes with
+        // the ORIGINAL pending — whose amount is still `None` after an erasure. The finalizer
+        // then takes its `is_none()` branch, pays `NoCost`, clears the copy, and the cast is
+        // recorded with 0 mana spent while the journal holds the payment. A printed X-divided
+        // spell at X=0 reaches this park precisely because `extract_distribution_total`
+        // returns `None` for total 0.
+        //
+        // A ZERO proof stays `None`: a park the journal proves spent nothing is not a prepaid
+        // continuation, and marking it one would make an unpaid cast skip its payment.
+        if proven > 0 {
+            pending.prepaid_actual_mana_spent = Some(proven as u32);
+        }
+    }
+    let spent = pending
+        .prepaid_actual_mana_spent
+        .unwrap_or_else(|| recorded_mana_spent_to_cast(state, pending.object_id));
     let completion = PendingCostMoveCompletion::FinalizeDelvedCast {
         phyrexian_choices: None,
         pre_payment_checks: None,
@@ -8596,6 +8743,14 @@ pub(super) fn push_ability_entry(
 ///
 /// This function sits between targeting and payment in the casting pipeline:
 /// `CastSpell → [ModeChoice] → [TargetSelection] → [AdditionalCostChoice] → pay_and_push_with_lock → Stack`
+///
+/// CR 115.1 + CR 601.2c + CR 400.7: `lock` is the caller's cost-determination
+/// state. It is NOT where the announced-target latch is taken any more: this
+/// authority is an entry point every cast route reaches, so the latch is taken
+/// once inside it ([`check_additional_cost_or_pay_with_kept_cost`]) from the
+/// declared targets it was handed. A caller therefore passes
+/// [`CostLockInput::default`] unless it is re-entering with state it already
+/// carries.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn check_additional_cost_or_pay(
     state: &mut GameState,
@@ -8610,6 +8765,7 @@ pub(super) fn check_additional_cost_or_pay(
     cast_timing_permission: Option<CastTimingPermission>,
     origin_zone: Zone,
     payment_mode: CastPaymentMode,
+    lock: CostLockInput,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
     check_additional_cost_or_pay_with_distribute(
@@ -8626,7 +8782,7 @@ pub(super) fn check_additional_cost_or_pay(
         None,
         origin_zone,
         payment_mode,
-        CostLockInput::default(),
+        lock,
         events,
     )
 }
@@ -8645,6 +8801,19 @@ pub(super) fn finish_pending_cast_cost_or_pay(
             &declared_targets_in_chain(&ability),
             player,
         );
+    }
+    // CR 115.1 + CR 601.2c + CR 400.7: this is the shared target-declaration →
+    // payment boundary — every route that finishes announcing targets for a spell
+    // funnels through here, and no cost has been paid yet (CR 601.2h). Latch what
+    // was announced now, while the targets are still the objects the caster
+    // chose: an additional cost that moves one of them (the ordinary
+    // return-to-hand cost returning the land it also targets) makes the same
+    // storage id a new object whose printed baseline the zone change restores,
+    // so a capture taken later would describe the moved card instead of the
+    // announced target. A cast whose targets are still deferred has not declared
+    // anything yet and latches on the pass that follows its declaration.
+    if pending.activation_ability_index.is_none() && !pending.deferred_target_selection {
+        super::casting::latch_committed_target_facts(state, &ability, &mut pending);
     }
     pending.ability = Box::new(ability);
     pending.cost = cost;
@@ -9412,6 +9581,14 @@ pub(super) fn check_additional_cost_or_pay_with_distribute(
 /// sacrifice selection a cast already made before its deferred target
 /// declaration. Every pending cast it rebuilds keeps both, so the sacrifice is
 /// made once and a kept reduction (in `lock`) is locked into the total once.
+///
+/// This is also where the announced-target latch is taken (CR 115.1 +
+/// CR 601.2c + CR 400.7), and it is taken HERE rather than at any of the routes
+/// into it because this function is the one place every cast route passes on its
+/// way from declaration to payment: the interactive declaration boundary
+/// (`finish_pending_cast_cost_or_pay`), the automatic-announcement branches in
+/// `casting`, the deferred-cost re-entries, and any future route, without each
+/// one owing the call.
 #[allow(clippy::too_many_arguments)]
 fn check_additional_cost_or_pay_with_kept_cost(
     state: &mut GameState,
@@ -9432,6 +9609,21 @@ fn check_additional_cost_or_pay_with_kept_cost(
     keyword_queue_decided: bool,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
+    // CR 115.1 + CR 601.2c + CR 400.7: latch the targets this cast announced
+    // while they are still the objects the caster chose — no cost has been paid
+    // on this entry (CR 601.2h). The gate is the declaration itself rather than a
+    // per-route flag: an ability with no declared target has either not reached
+    // CR 601.2c yet (a deferred declaration pays its costs first, and latches when
+    // it comes back through here with targets) or declares nothing at all, and
+    // both are honestly "no facts owed" until a declaration exists. First capture
+    // wins, so a re-entry carrying the latch in `lock` never re-reads an object a
+    // paid cost has already moved.
+    let declared = declared_targets_in_chain(&ability);
+    if !declared.is_empty() {
+        lock.committed_target_facts
+            .get_or_insert_with(|| super::casting::capture_target_facts(state, &declared));
+    }
+
     if casting_variant == CastingVariant::Normal
         && lock.alternative_cost_election
             == crate::types::game_state::SpellAlternativeCostElection::Undecided
@@ -13202,6 +13394,13 @@ pub(super) fn can_pay_jumpstart_additional_cost(
 /// exploded parameters has to be carried here, or the probe silently drops its
 /// contribution from the locked total. Build it with
 /// [`CostLockInput::from_pending`] whenever a real `PendingCast` is in hand.
+///
+/// This is also the pipeline's one carrier for a `PendingCast` fact that the
+/// rebuild must not lose even though no total depends on it — see
+/// [`Self::committed_target_facts`]. Every rebuild site in the payment pipeline
+/// funnels through [`Self::apply_to`], so a fact placed here survives the whole
+/// exploded-parameter chain by construction rather than by remembering to add a
+/// parameter at each hop.
 #[derive(Debug, Clone, Default)]
 pub(super) struct CostLockInput {
     /// CR 601.2b + CR 601.2f: the mana components of additional costs already
@@ -13222,18 +13421,38 @@ pub(super) struct CostLockInput {
     /// re-analyze", which is what keeps the resume from prompting forever.
     pub election: Option<CostReductionElection>,
     pub alternative_cost_election: crate::types::game_state::SpellAlternativeCostElection,
+    /// CR 115.1 + CR 601.2c + CR 400.7: the announced-target latch
+    /// (`PendingCast::committed_target_facts`), taken by the additional-cost
+    /// authority (`check_additional_cost_or_pay_with_kept_cost`) and carried
+    /// across every rebuild so the CR 601.2i history write records the targets
+    /// the caster announced rather than the objects that later share their
+    /// storage ids. It is `None` on a [`CostLockInput::default`] carrier — the
+    /// production route for a cast that has not declared its targets yet (a
+    /// deferred declaration pays its costs first), whose declaration fills it
+    /// when the cast comes back through that authority.
+    pub committed_target_facts: Option<Vec<crate::types::game_state::ActivationTargetFact>>,
+    /// CR 601.2h + CR 700.14: the amount this cast has ALREADY paid, when its mana ran
+    /// before the pipeline rebuilds it. `None` is the ordinary unpaid cast. Carried here
+    /// because the rebuild is the one place a paid cast can silently become an unpaid one:
+    /// the finalizer's `is_none()` branch pays `NoCost`, clears the spell copy, and records
+    /// a real payment as 0 mana spent — so the paid facts and CR 700.14's Expend ledger
+    /// would both be wrong for a cast that spent mana.
+    pub prepaid_actual_mana_spent: Option<u32>,
 }
 
 impl CostLockInput {
     /// Carry a live cast's cost-determination state into the seam. Use this in
     /// preference to building the struct field-by-field: it is the single place
-    /// a newly added `PendingCast` cost input has to be wired up.
+    /// a newly added `PendingCast` field this carrier must preserve has to be
+    /// wired up.
     pub(super) fn from_pending(pending: &PendingCast) -> Self {
         Self {
             declared_mana_additions: pending.declared_mana_additions.clone(),
             accepted: pending.accepted_cost_reductions.clone(),
             election: pending.cost_reduction_election.clone(),
             alternative_cost_election: pending.alternative_cost_election,
+            committed_target_facts: pending.committed_target_facts.clone(),
+            prepaid_actual_mana_spent: pending.prepaid_actual_mana_spent,
         }
     }
 
@@ -13241,7 +13460,8 @@ impl CostLockInput {
     /// builds from exploded fields, so the cast that is stashed in
     /// `state.pending_cast` can still recompute its own total (CR 601.2f) —
     /// the `{X}` re-derivation in `apply_post_x_cost_modifiers` reads exactly
-    /// these fields.
+    /// these fields — and still reach the CR 601.2i history write with the
+    /// targets it announced.
     fn apply_to(&self, pending: &mut PendingCast) {
         pending
             .declared_mana_additions
@@ -13249,6 +13469,15 @@ impl CostLockInput {
         pending.accepted_cost_reductions.clone_from(&self.accepted);
         pending.cost_reduction_election.clone_from(&self.election);
         pending.alternative_cost_election = self.alternative_cost_election;
+        pending
+            .committed_target_facts
+            .clone_from(&self.committed_target_facts);
+        // CR 601.2h: a cast that already paid must not reach the finalizer as unpaid. The
+        // CARRIER wins: its value was taken from the parked cast, which is the one the restore
+        // boundary validated, so it must outrank anything the rebuild already carries.
+        pending.prepaid_actual_mana_spent = self
+            .prepaid_actual_mana_spent
+            .or(pending.prepaid_actual_mana_spent);
     }
 }
 
@@ -13569,8 +13798,36 @@ fn finalize_cast_pre_payment_checks(
     casting_variant: CastingVariant,
     casting_permission_index: Option<CastingPermissionIndex>,
     cast_timing_permission: Option<CastTimingPermission>,
+    committed_target_facts: Option<Vec<crate::types::game_state::ActivationTargetFact>>,
     events: &mut Vec<GameEvent>,
 ) -> Result<FinalizePrePaymentChecks, EngineError> {
+    // CR 115.1 + CR 601.2c + CR 400.7: the declared-target facts for the CR 601.2i
+    // write. `committed_target_facts` is the latch the shared declaration→payment
+    // boundary already took (`finish_pending_cast_cost_or_pay`) and that the
+    // payment pipeline carried here — it is the authority whenever it exists, and
+    // it MUST be, because on a resumed continuation this frame runs after CR 601.2h
+    // has already moved the cost's objects. The capture below is only for a cast
+    // that reached payment without passing that boundary; it is the pre-payment
+    // moment for every route that takes it. `FinalizePrePaymentChecks` is then the
+    // carrier every parked payment continuation re-enters with, so the write reads
+    // announcement-time facts even when the cast suspends on an additional-cost
+    // move that removes a target (Bone Splinters sacrificing the creature it also
+    // targets). Re-reading by raw id after payment would describe the target's new
+    // incarnation under CR 400.7: the returned Dryad Arbor keeps its printed
+    // "Land Creature" type line in hand, while an animated Mishra's Factory
+    // returned the same way reverts to its printed "Land" and a sacrificed one is
+    // a graveyard Land — and a sacrificed Grizzly Bears stays a graveyard
+    // Creature. None of those later readings is the CR 601.2c announcement-time
+    // reading these records exist for: the cost-axis predicates are evaluated at
+    // CR 601.2f, before the total cost is paid. CR 115.9b is a different question
+    // with a different answer — a current-state read that ignores a target which
+    // has left the zone it was expected in — and it is answered by the live
+    // reader (`filter::stack_entry_targets_satisfy`) over a spell still on the
+    // stack, not by this record.
+    let committed_target_facts = Some(committed_target_facts.unwrap_or_else(|| {
+        super::casting::capture_target_facts(state, &declared_targets_in_chain(ability))
+    }));
+
     // CR 614.1c + CR 122.1 + CR 205.1b + CR 613.1d: Snapshot the exact
     // cast-this-way ETB riders before resulting-MV evaluation consumes the
     // during-resolution permission. Legacy pending casts without an index keep
@@ -13673,6 +13930,7 @@ fn finalize_cast_pre_payment_checks(
                     resolution_success_waiting_for: None,
                     cast_this_way_etb_counter,
                     cast_this_way_enters_mods,
+                    committed_target_facts,
                 });
             }
         };
@@ -13717,6 +13975,7 @@ fn finalize_cast_pre_payment_checks(
         resolution_success_waiting_for,
         cast_this_way_etb_counter,
         cast_this_way_enters_mods,
+        committed_target_facts,
     })
 }
 
@@ -13856,6 +14115,7 @@ fn finalize_cast_with_phyrexian_choices_inner(
         resolution_success_waiting_for,
         cast_this_way_etb_counter,
         cast_this_way_enters_mods,
+        committed_target_facts,
     } = match pre_payment_checks {
         Some(checks) => checks,
         None => finalize_cast_pre_payment_checks(
@@ -13868,6 +14128,10 @@ fn finalize_cast_with_phyrexian_choices_inner(
             casting_variant,
             casting_permission_index,
             cast_timing_permission,
+            // CR 115.1 + CR 601.2c + CR 400.7: the resume root is where the
+            // announced-target latch lives on this path; hand it to the checks so
+            // they never re-derive the targets from a post-payment raw-id lookup.
+            deferred_life_resume_pending.and_then(|pending| pending.committed_target_facts.clone()),
             events,
         )?,
     };
@@ -13933,6 +14197,35 @@ fn finalize_cast_with_phyrexian_choices_inner(
     if let Some(obj) = state.objects.get_mut(&object_id) {
         obj.fused_split_spell = casting_variant == CastingVariant::Fuse;
     }
+
+    // CR 601.2c + CR 400.7: `committed_target_facts` was latched with the
+    // pre-payment checks above — once, before any cost was paid — and every
+    // parked payment continuation re-enters this function carrying it. A root
+    // that rebuilds the checks from scratch (`pay_delve_after_distribution`)
+    // parks the latch on the cast's own `PendingCast`, which wins here because it
+    // is the earlier capture. There is deliberately no capture at this point: it
+    // is after CR 601.2h on every resumed path, where a raw-id lookup would
+    // describe the target's new incarnation rather than the one the caster
+    // announced (CR 115.9, CR 115.9b).
+    // CR 601.2c + CR 400.7: the latch is an `Option` because a parked cast written
+    // before it existed has no answer. Restore admission refuses such a save
+    // (`UnknownPendingTargetFacts`), so a playable state always resolves here; a
+    // cast this build captured states `Some`, including `Some(vec![])` for one
+    // that declared nothing.
+    let committed_target_facts = deferred_life_resume_pending
+        .and_then(|pending| pending.committed_target_facts.clone())
+        .or(committed_target_facts)
+        .unwrap_or_else(|| {
+            // Unreachable in a playable state: `prepare_for_restore` refuses every
+            // parked carrier whose facts are unknown. Failing loudly here (debug and
+            // test builds) is what stops an uncovered carrier from silently writing a
+            // CR 601.2i record that claims the cast declared nothing.
+            debug_assert!(
+                false,
+                "a parked cast reached the history write without announced-target facts"
+            );
+            Vec::new()
+        });
 
     if prepaid_actual_mana_spent.is_none() {
         let resume_at_resolution_depth = state.resolution_stack.len();
@@ -14003,6 +14296,7 @@ fn finalize_cast_with_phyrexian_choices_inner(
                     resolution_success_waiting_for,
                     cast_this_way_etb_counter,
                     cast_this_way_enters_mods,
+                    committed_target_facts: Some(committed_target_facts),
                 }),
             },
             None,
@@ -14025,6 +14319,7 @@ fn finalize_cast_with_phyrexian_choices_inner(
                 resolution_success_waiting_for: resolution_success_waiting_for.clone(),
                 cast_this_way_etb_counter: cast_this_way_etb_counter.clone(),
                 cast_this_way_enters_mods: cast_this_way_enters_mods.clone(),
+                committed_target_facts: Some(committed_target_facts.clone()),
             })),
         };
         if let Some(waiting_for) = pay_delve_at_commit(
@@ -14069,6 +14364,9 @@ fn finalize_cast_with_phyrexian_choices_inner(
                 cascade_cast_transformed,
                 resolution_success_waiting_for: resolution_success_waiting_for.map(Box::new),
                 prepaid_actual_mana_spent,
+                // The latch is a known answer here: this frame captured it (or
+                // carried it) before the Sneak/Web-slinging return move parked.
+                committed_target_facts: Some(committed_target_facts),
             },
             None,
             cost_event_start,
@@ -14826,6 +15124,12 @@ fn finalize_cast_with_phyrexian_choices_inner(
         &obj,
         source_zone,
         casting_variant,
+        // CR 115.1 + CR 601.2c: `committed_target_facts` was latched with the
+        // pre-payment checks and arrived here unchanged through every parked
+        // payment continuation; a placeholder cast (no ability) necessarily
+        // declares none, which is what `is_placeholder`'s
+        // `ability.targets.is_empty()` conjunct already encodes.
+        &committed_target_facts,
     )
     .map_err(finalized_spell_cast_ledger_error)?;
     stamp_cast_occurrence_on_stack_spell(state, object_id, occurrence, cast_card)?;
@@ -14863,17 +15167,25 @@ fn finalize_cast_with_phyrexian_choices_inner(
     super::casting::consume_pending_next_spell_modifiers(state, player, object_id);
 
     // CR 700.14: Track cumulative mana spent on spells this turn for Expend triggers.
-    // Uses actual mana deducted from pool (accounts for cost reduction, convoke, etc.).
-    if actual_mana_spent > 0 {
+    // Uses actual mana deducted from pool (accounts for cost reduction, convoke, etc.),
+    // attributed to the player who spent it: the spell keeps the COMBINED payment for
+    // its own spell-wide facts (Rain of Riches' source-qualified predicate), while an
+    // Assist helper's units are credited to the helper rather than to the caster.
+    for (payer, amount_spent) in expend_credits_for_cast(
+        player,
+        object_id,
+        actual_mana_spent,
+        deferred_life_resume_pending,
+    ) {
         let cumulative = state
             .mana_spent_on_spells_this_turn
-            .entry(player)
+            .entry(payer)
             .or_insert(0);
-        *cumulative += actual_mana_spent;
+        *cumulative += amount_spent;
         let new_cumulative = *cumulative;
         events.push(GameEvent::ManaExpended {
-            player_id: player,
-            amount_spent: actual_mana_spent,
+            player_id: payer,
+            amount_spent,
             new_cumulative,
         });
     }
@@ -16407,6 +16719,16 @@ fn auto_tap_mana_sources_inner(
                     true,
                     events,
                 );
+                // CR 605.3b: the intrinsic mana ability has RESOLVED — after the
+                // production, and whether or not any mana came out of it. The record
+                // is written by the same authority that settles every other activated
+                // mana node (`GameState::settle_mana_activation`, called by
+                // `mana_abilities::produce_mana_from_ability`), not inferred from the
+                // pips: this fallback produces through `mana_payment::produce_mana`,
+                // which has no settlement of its own, so leaving the node unrecorded
+                // made `node_settled` answer "unfinished" for a finished activation
+                // and a later parked activation could claim its node.
+                state.settle_mana_activation(node);
                 // CR 106.12 + CR 106.12a: a basic land's intrinsic mana ability
                 // always includes `{T}` in its cost, so this auto-tap fallback
                 // taps the land for mana. Emit one `TappedForMana` per resolution
@@ -18005,6 +18327,14 @@ pub(super) fn apply_committed_assist(
         if mana_payment::has_unspent_mana_continuous_effects(state) {
             state.layers_dirty.mark_full();
         }
+        // CR 702.132a + CR 118.3a + CR 106.3: the units that spend removed are mana
+        // spent to cast THIS spell, so they are captured here — at the one boundary
+        // that knows which units the helper actually paid with — and the final
+        // recording adds them to the caster's. The generic AMOUNT alone cannot stand
+        // in for them: a Treasure the helper sacrificed contributes a specific unit
+        // whose producer (`mana_spent_source_snapshots`) and color
+        // (`colors_spent_to_cast`) a source-qualified cast predicate reads.
+        pending.assist_contributed_units = spent;
     }
     // CR 702.132a + CR 118.10: A committed Assist contribution pays this
     // cast's generic portion once. Persist that fact before any later caster
@@ -18150,6 +18480,15 @@ fn finalize_mana_payment_with_resume(
         // helper resources begin changing only inside this final payment step.
         apply_committed_assist(state, &mut pending, Some(&mana_resume), events)?;
         pending_for_restore = pending.clone();
+        // CR 702.132a + CR 118.3a: the units the helper spent are part of THIS spell's
+        // payment, and the payment below records them. `pending_cast` is owned here, so
+        // the contribution claim it captured at the spend boundary — helper, paid amount
+        // and exact units, together — is handed to the finalizers on the same transient
+        // channel the caster's pin hints use, re-established from the restored root on
+        // every re-entry so a pause between the helper's spend and the recording loses
+        // nothing. The claim is typed so the finalizer can REFUSE one that does not
+        // describe the payment it asserts rather than splice whatever is there.
+        state.active_assist_contribution = pending.assist_contribution().map(Box::new);
 
         if let Some(ability_index) = pending.activation_ability_index {
             super::casting::require_locked_activation_cost(
@@ -18234,6 +18573,11 @@ fn finalize_mana_payment_with_resume(
                 pending.casting_variant,
                 pending.casting_permission_index,
                 pending.cast_timing_permission,
+                // CR 115.1 + CR 601.2c + CR 400.7: the latch the declaration
+                // boundary already took rides this pending; reusing it is what
+                // keeps a cost that moves a target (the returned land) from
+                // rewriting the announced facts.
+                pending.committed_target_facts.clone(),
                 events,
             )?)
         };
@@ -18392,6 +18736,33 @@ fn finalize_mana_payment_with_resume(
             pending_resumed.origin_zone = pending.origin_zone;
             pending_resumed.convoked_creatures = pending.convoked_creatures.clone();
             pending_resumed.delved_cards = pending.delved_cards.clone();
+            // CR 115.1 + CR 601.2c + CR 400.7: this rebuild is the last stop before
+            // the distribution resume reaches the CR 601.2i write, and it happens
+            // after the total cost was paid — so the announced-target latch must
+            // ride along here too, or a paid cost that moved a target would be
+            // re-read from the moved object.
+            pending_resumed.committed_target_facts = pending.committed_target_facts.clone();
+            // NOT COPIED: `assist_state` / `assist_contributed_units`. The shared authority's
+            // split check reads `pending.assist_contribution()`, so an Assist-paid park would
+            // fail the split with "no helper" and refuse an honest save. Unreachable today —
+            // no printed card combines Assist with a divided-X effect — but a future card
+            // that does would turn this rebuild into a false refusal; copy the contribution
+            // here at the same time.
+            // CR 601.2h + CR 700.14: the total cost is ALREADY PAID here — X had to be known
+            // before the mana could be spent — but `PendingCast::new` states no amount and
+            // this park copies neither `prepaid_actual_mana_spent` nor
+            // `prepaid_finalization` onto the rebuilt cast. That made the park look unpaid
+            // to the restore boundary, which then skipped it, and the distribution resume
+            // read the amount off the spell COPY (`pay_delve_after_distribution` ->
+            // `recorded_mana_spent_to_cast`) and wrote it into the cast that
+            // `resume_prepaid_spell_finalization` consumes for CR 700.14's Expend ledger.
+            // Carrying the amount here makes the park state what it settled, so the
+            // boundary validates it against the journal instead of trusting the copy.
+            pending_resumed.prepaid_actual_mana_spent = Some(
+                pending
+                    .prepaid_actual_mana_spent
+                    .unwrap_or_else(|| recorded_mana_spent_to_cast(state, pending.object_id)),
+            );
 
             // CR 601.2d: "divided evenly, rounded down" — EvenSplitDamage bypasses
             // interactive distribution. Remainder is intentionally lost per Oracle text.
@@ -18470,6 +18841,7 @@ fn finalize_mana_payment_with_resume(
     })();
     // CR 118.3a: the transient is self-contained — cleared on Ok and Err alike.
     state.active_payment_pins.clear();
+    state.active_assist_contribution = None;
     state.active_casting_permission_index = None;
     state.active_graveyard_permission_latch = None;
     state.active_spend_only_on_x_count = None;
@@ -18591,6 +18963,15 @@ pub fn finalize_mana_payment_with_phyrexian_choices(
         // helper resources begin changing only inside this final payment step.
         apply_committed_assist(state, &mut pending, Some(&mana_resume), events)?;
         pending_for_restore = pending.clone();
+        // CR 702.132a + CR 118.3a: the units the helper spent are part of THIS spell's
+        // payment, and the payment below records them. `pending_cast` is owned here, so
+        // the contribution claim it captured at the spend boundary — helper, paid amount
+        // and exact units, together — is handed to the finalizers on the same transient
+        // channel the caster's pin hints use, re-established from the restored root on
+        // every re-entry so a pause between the helper's spend and the recording loses
+        // nothing. The claim is typed so the finalizer can REFUSE one that does not
+        // describe the payment it asserts rather than splice whatever is there.
+        state.active_assist_contribution = pending.assist_contribution().map(Box::new);
 
         if let Some(ability_index) = pending.activation_ability_index {
             super::casting::require_locked_activation_cost(
@@ -18692,6 +19073,11 @@ pub fn finalize_mana_payment_with_phyrexian_choices(
                 pending.casting_variant,
                 pending.casting_permission_index,
                 pending.cast_timing_permission,
+                // CR 115.1 + CR 601.2c + CR 400.7: the latch the declaration
+                // boundary already took rides this pending; reusing it is what
+                // keeps a cost that moves a target (the returned land) from
+                // rewriting the announced facts.
+                pending.committed_target_facts.clone(),
                 events,
             )?)
         };
@@ -18845,6 +19231,33 @@ pub fn finalize_mana_payment_with_phyrexian_choices(
             pending_resumed.origin_zone = pending.origin_zone;
             pending_resumed.convoked_creatures = pending.convoked_creatures.clone();
             pending_resumed.delved_cards = pending.delved_cards.clone();
+            // CR 115.1 + CR 601.2c + CR 400.7: this rebuild is the last stop before
+            // the distribution resume reaches the CR 601.2i write, and it happens
+            // after the total cost was paid — so the announced-target latch must
+            // ride along here too, or a paid cost that moved a target would be
+            // re-read from the moved object.
+            pending_resumed.committed_target_facts = pending.committed_target_facts.clone();
+            // NOT COPIED: `assist_state` / `assist_contributed_units`. The shared authority's
+            // split check reads `pending.assist_contribution()`, so an Assist-paid park would
+            // fail the split with "no helper" and refuse an honest save. Unreachable today —
+            // no printed card combines Assist with a divided-X effect — but a future card
+            // that does would turn this rebuild into a false refusal; copy the contribution
+            // here at the same time.
+            // CR 601.2h + CR 700.14: the total cost is ALREADY PAID here — X had to be known
+            // before the mana could be spent — but `PendingCast::new` states no amount and
+            // this park copies neither `prepaid_actual_mana_spent` nor
+            // `prepaid_finalization` onto the rebuilt cast. That made the park look unpaid
+            // to the restore boundary, which then skipped it, and the distribution resume
+            // read the amount off the spell COPY (`pay_delve_after_distribution` ->
+            // `recorded_mana_spent_to_cast`) and wrote it into the cast that
+            // `resume_prepaid_spell_finalization` consumes for CR 700.14's Expend ledger.
+            // Carrying the amount here makes the park state what it settled, so the
+            // boundary validates it against the journal instead of trusting the copy.
+            pending_resumed.prepaid_actual_mana_spent = Some(
+                pending
+                    .prepaid_actual_mana_spent
+                    .unwrap_or_else(|| recorded_mana_spent_to_cast(state, pending.object_id)),
+            );
 
             if unit == DistributionUnit::EvenSplitDamage && !targets.is_empty() {
                 let num = targets.len() as u32;
@@ -18922,6 +19335,7 @@ pub fn finalize_mana_payment_with_phyrexian_choices(
     })();
     // CR 118.3a: the transient is self-contained — cleared on Ok and Err alike.
     state.active_payment_pins.clear();
+    state.active_assist_contribution = None;
     state.active_casting_permission_index = None;
     state.active_graveyard_permission_latch = None;
     state.active_spend_only_on_x_count = None;
@@ -19530,6 +19944,82 @@ mod tests {
         let mut shards = vec![ManaCostShard::X];
         shards.extend_from_slice(extra);
         ManaCost::Cost { shards, generic: 0 }
+    }
+
+    /// CR 305.6 + CR 605.3b: an intrinsic basic-land activation — the "{T}: Add …" a
+    /// basic land type carries without a printed ability — ends SETTLED, and the node
+    /// says so through its own record.
+    ///
+    /// Two routes reach that activation and both must record the same fact: the
+    /// ability-option route (settled by `produce_mana_from_ability`) and the
+    /// subtype-only fallback below, which produces through
+    /// `mana_payment::produce_mana` and has no settlement of its own — so it records
+    /// it with the same authority, `GameState::settle_mana_activation`, after the
+    /// production and whether or not any mana came out of it (CR 605.2).
+    ///
+    /// REVERT SCOPE: this witness reads the property, not the route. The board a test
+    /// can build through the public harness reaches the activation through the
+    /// ability option, so the assertion also holds with the fallback's settlement
+    /// removed; it pins the invariant both routes owe rather than distinguishing
+    /// them.
+    #[test]
+    fn intrinsic_basic_land_auto_tap_ends_settled() {
+        use crate::game::scenario::{GameRunner, GameScenario};
+        use crate::types::mana::ManaColor;
+        use crate::types::phase::Phase;
+        use crate::types::resolved_commands::{RulesExecutionNodeKind, SettlementNode};
+
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let forest = scenario.add_basic_land(P0, ManaColor::Green);
+        let spell = {
+            let mut builder = scenario.add_spell_to_hand(P0, "Intrinsic Tap Witness", true);
+            builder.with_mana_cost(ManaCost::Cost {
+                shards: vec![ManaCostShard::Green],
+                generic: 0,
+            });
+            builder.id()
+        };
+        let mut state = scenario.build().state().clone();
+        // CR 305.6: the subtype-only shape the intrinsic fallback exists for — the land
+        // carries its "{T}: Add {G}." as an intrinsic, with no printed mana ability.
+        {
+            let object = state.objects.get_mut(&forest).unwrap();
+            Arc::make_mut(&mut object.abilities).clear();
+            Arc::make_mut(&mut object.base_abilities).clear();
+        }
+        let mut runner = GameRunner::from_state(state);
+        runner.cast(spell).commit();
+
+        assert!(
+            runner.state().objects[&forest].tapped,
+            "reach-guard: paying {{G}} auto-tapped the Forest through the intrinsic fallback"
+        );
+        let source = ObjectIncarnationRef::of(forest, runner.state().objects[&forest].incarnation);
+        let nodes: Vec<&SettlementNode> = runner
+            .state()
+            .resolved_rules_journal
+            .nodes()
+            .iter()
+            .filter(|node| {
+                matches!(
+                    &node.kind,
+                    RulesExecutionNodeKind::ActivatedMana { source: named } if *named == source
+                )
+            })
+            .collect();
+        assert_eq!(
+            nodes.len(),
+            1,
+            "reach-guard: the auto-tap opened exactly one activated-mana node for the land's epoch"
+        );
+        assert_eq!(
+            nodes[0].settled,
+            Some(true),
+            "CR 605.3b: the intrinsic activation has RESOLVED, and its node says so — recorded by \
+             the same authority that settles every other activated mana node, not inferred from \
+             the pips it produced"
+        );
     }
 
     /// CR 107.3a + CR 602.1a: "contains {X}" means the `{X}` mana symbol, read
@@ -20833,6 +21323,7 @@ mod tests {
             activation_ability_index: Some(0),
             pending_loyalty_activation_player: None,
             target_constraints: Vec::new(),
+            committed_target_facts: None,
             crime_candidate: false,
             casting_variant: CastingVariant::Normal,
             casting_permission_index: None,
@@ -20857,6 +21348,7 @@ mod tests {
             delved_cards: Vec::new(),
             deferred_sacrificed_permanents: Vec::new(),
             pinned_pool_units: Vec::new(),
+            assist_contributed_units: Vec::new(),
             cancel_restore_prepared_source: None,
             payment_mode: CastPaymentMode::Auto,
             assist_state: AssistState::NotOffered,
@@ -23637,6 +24129,7 @@ mod tests {
                 restrictions: Vec::new(),
                 grants: vec![],
                 expiry: None,
+                source_incarnation: None,
             });
         }
 
@@ -23705,6 +24198,7 @@ mod tests {
             restrictions: Vec::new(),
             grants: vec![],
             expiry: None,
+            source_incarnation: None,
         });
 
         let mut events = Vec::new();
@@ -26901,6 +27395,7 @@ mod tests {
                 restrictions: Vec::new(),
                 grants: vec![],
                 expiry: None,
+                source_incarnation: None,
             });
             push_announcement_stack_entry(&mut state, hit);
 
@@ -27346,6 +27841,7 @@ mod tests {
             activation_ability_index: None,
             pending_loyalty_activation_player: None,
             target_constraints: Vec::new(),
+            committed_target_facts: None,
             crime_candidate: false,
             casting_variant: CastingVariant::Normal,
             casting_permission_index: None,
@@ -27370,6 +27866,7 @@ mod tests {
             delved_cards: Vec::new(),
             deferred_sacrificed_permanents: Vec::new(),
             pinned_pool_units: Vec::new(),
+            assist_contributed_units: Vec::new(),
             cancel_restore_prepared_source: None,
             payment_mode: CastPaymentMode::Auto,
             assist_state: AssistState::NotOffered,
@@ -27494,6 +27991,7 @@ mod tests {
             activation_ability_index: None,
             pending_loyalty_activation_player: None,
             target_constraints: Vec::new(),
+            committed_target_facts: None,
             crime_candidate: false,
             casting_variant: CastingVariant::Normal,
             casting_permission_index: None,
@@ -27518,6 +28016,7 @@ mod tests {
             delved_cards: Vec::new(),
             deferred_sacrificed_permanents: Vec::new(),
             pinned_pool_units: Vec::new(),
+            assist_contributed_units: Vec::new(),
             cancel_restore_prepared_source: None,
             payment_mode: CastPaymentMode::Auto,
             assist_state: AssistState::NotOffered,
@@ -27611,6 +28110,7 @@ mod tests {
             activation_ability_index: None,
             pending_loyalty_activation_player: None,
             target_constraints: Vec::new(),
+            committed_target_facts: None,
             crime_candidate: false,
             casting_variant: CastingVariant::Normal,
             casting_permission_index: None,
@@ -27635,6 +28135,7 @@ mod tests {
             delved_cards: Vec::new(),
             deferred_sacrificed_permanents: Vec::new(),
             pinned_pool_units: Vec::new(),
+            assist_contributed_units: Vec::new(),
             cancel_restore_prepared_source: None,
             payment_mode: CastPaymentMode::Auto,
             assist_state: AssistState::NotOffered,
@@ -27717,6 +28218,7 @@ mod tests {
             activation_ability_index: None,
             pending_loyalty_activation_player: None,
             target_constraints: Vec::new(),
+            committed_target_facts: None,
             crime_candidate: false,
             casting_variant: CastingVariant::Normal,
             casting_permission_index: None,
@@ -27741,6 +28243,7 @@ mod tests {
             delved_cards: Vec::new(),
             deferred_sacrificed_permanents: Vec::new(),
             pinned_pool_units: Vec::new(),
+            assist_contributed_units: Vec::new(),
             cancel_restore_prepared_source: None,
             payment_mode: CastPaymentMode::Auto,
             assist_state: AssistState::NotOffered,
@@ -27856,6 +28359,7 @@ mod tests {
             activation_ability_index: None,
             pending_loyalty_activation_player: None,
             target_constraints: Vec::new(),
+            committed_target_facts: None,
             crime_candidate: false,
             casting_variant: CastingVariant::Normal,
             casting_permission_index: None,
@@ -27880,6 +28384,7 @@ mod tests {
             delved_cards: Vec::new(),
             deferred_sacrificed_permanents: Vec::new(),
             pinned_pool_units: Vec::new(),
+            assist_contributed_units: Vec::new(),
             cancel_restore_prepared_source: None,
             payment_mode: CastPaymentMode::Auto,
             assist_state: AssistState::NotOffered,
@@ -28718,6 +29223,7 @@ it for each time it was kicked.\n{T}: Add {C} for each charge counter on this ar
                 restrictions: Vec::new(),
                 grants: vec![],
                 expiry: None,
+                source_incarnation: None,
             });
         }
     }
@@ -28740,6 +29246,7 @@ it for each time it was kicked.\n{T}: Add {C} for each charge counter on this ar
                 restrictions: Vec::new(),
                 grants: vec![],
                 expiry: None,
+                source_incarnation: None,
             });
         }
     }
@@ -28909,6 +29416,7 @@ library in a random order.";
                 restrictions: Vec::new(),
                 grants: vec![],
                 expiry: None,
+                source_incarnation: None,
             });
         }
     }

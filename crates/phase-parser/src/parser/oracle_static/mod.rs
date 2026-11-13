@@ -40,7 +40,7 @@ mod prelude {
         distribute_controller_to_or, parse_block_exception_phrase, parse_block_filter_phrase,
         parse_combat_status_prefix, parse_counter_suffix, parse_filter_phrase_union,
         parse_mana_value_suffix, parse_target, parse_that_clause_suffix, parse_type_phrase_folding,
-        scope_target_spell_phrase, BlockFilterPhrase,
+        scope_target_spell_phrase, scope_type_phrase_to_the_battlefield, BlockFilterPhrase,
     };
     pub(super) use super::super::oracle_util::{
         has_unconsumed_conditional, infer_core_type_for_subtype, parse_comparator_prefix,

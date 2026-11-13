@@ -358,45 +358,41 @@ pub(crate) fn parse_spells_have_keyword(tp: &TextPair<'_>, text: &str) -> Option
         NthQualifiedSpell::NotApplicable => {}
         // The shape is present but the qualifier/timing isn't representable. Fall
         // through (NOT a `return None`) so the existing gateless static is
-        // preserved for not-yet-representable qualifiers — no regression.
+        // preserved for not-yet-representable qualifiers — no regression. The
+        // frontier is a post-timing *target* clause on a grant ("… that targets a
+        // creature has cascade"): it has exactly one claimant, the cost-modifier
+        // consumer's own target-clause authority, and no printed instance, so the
+        // shared region declines it rather than lowering a second `Targets`.
         NthQualifiedSpell::UnsupportedQualifier => {}
         NthQualifiedSpell::Supported {
             filter,
             timing,
             ordinal,
         } => {
-            // CR 601.2f: trailing-residue guard. `parse_nth_qualified_spell_filter`
-            // discards any text after the timing phrase; if that region is
-            // non-empty an unrepresentable qualifier was dropped (Rain of Riches'
-            // "that mana from a Treasure was spent to cast"; TARDIS Bay's
-            // post-timing "with mana value 2 or greater"). Decline rather than emit
-            // a residue-blind gate — fall through to the existing gateless static.
-            if nth_qualified_spell_subject_fully_consumed(subject) {
-                // CR 601.2a: scope `ControllerRef::You` to every leaf (And/Not
-                // recursion) so an opponent's qualifying spell never qualifies.
-                let affected =
-                    apply_spell_keyword_subject_constraints(filter.clone(), None, None, Vec::new());
-                // CR 611.2f: `SpellsCastThisTurn(filter) == 0` first-spell gate,
-                // plus `DuringYourTurn` for the controller-turn timing (a clean
-                // "during each of your turns" subject with no post-timing residue;
-                // TARDIS Bay itself declines above because its MV qualifier follows
-                // the timing). When a leading "during your turn," scope was already
-                // stripped, combine both rather than dropping either.
-                let nth_qualified = nth_qualified_spell_condition(&filter, &timing, ordinal);
-                let combined_condition = match condition.clone() {
-                    Some(leading) => StaticCondition::And {
-                        conditions: vec![leading, nth_qualified],
-                    },
-                    None => nth_qualified,
-                };
-                return Some(
-                    StaticDefinition::new(StaticMode::CastWithKeyword { keyword })
-                        .affected(affected)
-                        .condition(combined_condition)
-                        .description(text.to_string())
-                        .active_zones(vec![Zone::Battlefield]),
-                );
-            }
+            // CR 601.2a: scope `ControllerRef::You` to every leaf (And/Not
+            // recursion) so an opponent's qualifying spell never qualifies.
+            let affected =
+                apply_spell_keyword_subject_constraints(filter.clone(), None, None, Vec::new());
+            // CR 611.2f: `SpellsCastThisTurn(filter) == 0` first-spell gate, plus
+            // `DuringYourTurn` for the controller-turn timing; the shared parser
+            // has already consumed any post-timing qualifier (TARDIS Bay's "with
+            // mana value 2 or greater" lowers into `filter` above). When a leading
+            // "during your turn," scope was already stripped, combine both rather
+            // than dropping either.
+            let nth_qualified = nth_qualified_spell_condition(&filter, &timing, ordinal);
+            let combined_condition = match condition.clone() {
+                Some(leading) => StaticCondition::And {
+                    conditions: vec![leading, nth_qualified],
+                },
+                None => nth_qualified,
+            };
+            return Some(
+                StaticDefinition::new(StaticMode::CastWithKeyword { keyword })
+                    .affected(affected)
+                    .condition(combined_condition)
+                    .description(text.to_string())
+                    .active_zones(vec![Zone::Battlefield]),
+            );
         }
     }
 

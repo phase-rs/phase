@@ -1,0 +1,7 @@
+{
+  "surfaces": [
+    "full",
+    "wire"
+  ],
+  "reason": "CR 601.2c + CR 109.2 + CR 109.2a: a committed target fact always states the zone its target was announced in, and silence is now UNKNOWN rather than the battlefield. ActivationTargetFact::Object.zone changes from a battlefield-defaulted Zone to AnnouncedTargetZone (Known(Zone) | Unknown): a current-format save writes the zone even when it is the battlefield, so a stated battlefield and an unstated zone are no longer the same bytes, and the shared restore chokepoint refuses a save whose completed or pending activation record leaves the zone unstated (PersistedRestoreError::UnknownActivationTargetZone). A v-old peer reading a new payload decodes the explicit zone unchanged, but a peer without the field falls back to the battlefield for a target that may have been announced in a graveyard, and mixed-version peers cannot agree on which legacy saves are playable while this build refuses an unknown announcement zone."
+}

@@ -7680,6 +7680,7 @@ fn cast_spell_moves_card_from_hand_to_stack_and_returns_priority() {
             restrictions: Vec::new(),
             grants: vec![],
             expiry: None,
+            source_incarnation: None,
         });
     }
 
@@ -7755,6 +7756,7 @@ fn both_pass_with_spell_on_stack_resolves_spell() {
             restrictions: Vec::new(),
             grants: vec![],
             expiry: None,
+            source_incarnation: None,
         });
     }
 
@@ -7855,6 +7857,7 @@ fn brainstorm_resolves_draw_then_put_two_cards_on_top() {
         restrictions: Vec::new(),
         grants: vec![],
         expiry: None,
+        source_incarnation: None,
     });
 
     apply_as_current(
@@ -8766,6 +8769,7 @@ fn fizzle_target_removed_before_resolution() {
         restrictions: Vec::new(),
         grants: vec![],
         expiry: None,
+        source_incarnation: None,
     });
 
     // Cast bolt — multiple valid targets (creature + 2 players) requires selection
@@ -8825,6 +8829,7 @@ fn add_mana(state: &mut GameState, player: PlayerId, color: ManaType, count: usi
             restrictions: Vec::new(),
             grants: vec![],
             expiry: None,
+            source_incarnation: None,
         });
     }
 }
@@ -9334,6 +9339,7 @@ fn test_mana_ability_during_mana_payment_stays_in_mana_payment() {
         activation_ability_index: None,
         pending_loyalty_activation_player: None,
         target_constraints: vec![],
+        committed_target_facts: None,
         crime_candidate: false,
         casting_variant: crate::types::game_state::CastingVariant::Normal,
         casting_permission_index: None,
@@ -9358,6 +9364,7 @@ fn test_mana_ability_during_mana_payment_stays_in_mana_payment() {
         delved_cards: Vec::new(),
         deferred_sacrificed_permanents: Vec::new(),
         pinned_pool_units: Vec::new(),
+        assist_contributed_units: Vec::new(),
         cancel_restore_prepared_source: None,
         payment_mode: crate::types::game_state::CastPaymentMode::Auto,
         assist_state: AssistState::NotOffered,
@@ -9784,6 +9791,7 @@ fn taps_for_mana_multiplier_fires_once_on_color_choice_mana_payment_resume() {
         activation_ability_index: None,
         pending_loyalty_activation_player: None,
         target_constraints: vec![],
+        committed_target_facts: None,
         crime_candidate: false,
         casting_variant: crate::types::game_state::CastingVariant::Normal,
         casting_permission_index: None,
@@ -9808,6 +9816,7 @@ fn taps_for_mana_multiplier_fires_once_on_color_choice_mana_payment_resume() {
         delved_cards: Vec::new(),
         deferred_sacrificed_permanents: Vec::new(),
         pinned_pool_units: Vec::new(),
+        assist_contributed_units: Vec::new(),
         cancel_restore_prepared_source: None,
         payment_mode: crate::types::game_state::CastPaymentMode::Auto,
         assist_state: AssistState::NotOffered,
@@ -10833,6 +10842,7 @@ fn untap_during_mana_payment_returns_mana_payment() {
         restrictions: Vec::new(),
         grants: vec![],
         expiry: None,
+        source_incarnation: None,
     });
 
     // Create a forest on the battlefield to tap during ManaPayment

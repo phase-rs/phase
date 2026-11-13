@@ -294,6 +294,12 @@ pub(crate) fn handle_select_modes(
         pending_sel.casting_variant = pending.casting_variant;
         pending_sel.casting_permission_index = pending.casting_permission_index;
         pending_sel.origin_zone = pending.origin_zone;
+        // CR 601.2h: the payment step the caster elected when announcing must
+        // survive the slot walk — `CastPaymentMode::Manual` parks at
+        // `WaitingFor::ManaPayment` after the targets are declared, exactly as it
+        // does for a non-modal cast (and as the deferred-X path above keeps it).
+        // Dropping it here silently re-runs the payment as `Auto`.
+        pending_sel.payment_mode = pending.payment_mode;
         pending_sel.additional_cost_flow = pending.additional_cost_flow;
         pending_sel.deferred_target_selection = pending.deferred_target_selection;
         pending_sel.chosen_modes = sorted_indices.clone();
@@ -334,6 +340,13 @@ pub(crate) fn handle_select_modes(
 /// `ChooseTarget` completion paths — the client drives the latter. The
 /// target-declaration events already emitted are staged at the end of the
 /// action by `announcement_triggers`.
+///
+/// CR 115.1 + CR 601.2c + CR 400.7: the pending this installs on
+/// `state.pending_cast` has already declared its targets, so it takes the
+/// announced-target latch here. Resuming the park re-enters the payment
+/// pipeline from the installed pending rather than from the interactive
+/// declaration boundary, and "declared ⇒ latched" is what lets restore
+/// admission treat a missing latch as lost facts instead of a legitimate state.
 fn maybe_pause_for_cast_distribution(
     state: &mut GameState,
     player: PlayerId,
@@ -353,6 +366,9 @@ fn maybe_pause_for_cast_distribution(
     }
     let mut pending_dist = pending.clone();
     pending_dist.ability = Box::new(ability.clone());
+    if pending_dist.activation_ability_index.is_none() {
+        super::casting::latch_committed_target_facts(state, ability, &mut pending_dist);
+    }
     state.pending_cast = Some(Box::new(pending_dist));
     Ok(Some(WaitingFor::DistributeAmong {
         player,

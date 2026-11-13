@@ -3742,6 +3742,7 @@ mod tests {
             restrictions: Vec::new(),
             grants: vec![],
             expiry: None,
+            source_incarnation: None,
         });
         // Creature card in opponent's graveyard.
         let creature_id = create_object(

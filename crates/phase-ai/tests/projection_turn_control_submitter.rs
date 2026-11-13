@@ -38,8 +38,10 @@ fn gunzip_fixture(gz: &[u8]) -> String {
     flate2::read::GzDecoder::new(gz)
         .read_to_string(&mut json)
         .expect("fixture .json.gz must inflate to UTF-8 JSON");
-    // Committed pre-onset capture; onset-independent test (see record_captured_onsets).
-    engine::types::game_state::record_captured_onsets_json(&json)
+    // Committed capture predating the onset record AND the announced-target
+    // latch; onset-independent test (see `record_captured_onsets` and
+    // `legacy_capture_fixture::record_captured_target_facts`).
+    engine::types::legacy_capture_fixture::record_captured_provenance_json(&json)
 }
 
 /// Turn-4 two-player capture, already committed and loaded by

@@ -6626,6 +6626,33 @@ pub(crate) fn parse_mana_from_source_spent_to_cast(input: &str) -> OracleResult<
     Ok((rest, source_filter))
 }
 
+/// CR 106.3 + CR 601.2h: the SUBJECT-LESS source-qualified payment clause —
+/// "mana from <source-filter> [that] was spent to cast", with no anaphor after
+/// the verb. Rain of Riches' relative clause modifies the qualifying *spell* in
+/// the main clause, so the printed payment clause carries no subject at all;
+/// `parse_mana_from_source_spent_to_cast` requires one after the verb and
+/// therefore cannot admit it.
+///
+/// Shares `parse_mana_source_filter` with its subject-bearing sibling, so both
+/// forms recognize the same source phrases.
+///
+/// A subject-bearing clause ("… was spent to cast that spell") matches this
+/// sibling's prefix and leaves ` that spell`, which no region clause consumes
+/// and no cost predicate begins, so the region answers `UnsupportedQualifier` —
+/// the subject-bearing form's filter is still produced only by
+/// `parse_mana_from_source_spent_to_cast` (via `parse_mana_spent_to_cast_ref`
+/// and the two `oracle_nom/condition.rs` siblings), never here. The verb set
+/// also deliberately omits the trailing space that entry point requires, which
+/// is what admits the printed end-of-text form.
+pub(crate) fn parse_mana_from_source_spent_to_cast_subjectless(
+    input: &str,
+) -> OracleResult<'_, TargetFilter> {
+    let (rest, _) = tag("mana from ").parse(input)?;
+    let (rest, source_filter) = parse_mana_source_filter(rest)?;
+    let (rest, _) = alt((tag(" that was spent to cast"), tag(" was spent to cast"))).parse(rest)?;
+    Ok((rest, source_filter))
+}
+
 /// CR 106.3 + CR 601.2h: the name-independent head of "using mana produced by
 /// <source>", the clause that says which source's mana paid for a spell.
 pub(crate) fn parse_using_mana_produced_by_head(input: &str) -> OracleResult<'_, &str> {

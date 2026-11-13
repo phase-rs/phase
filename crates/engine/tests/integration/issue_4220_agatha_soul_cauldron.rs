@@ -248,6 +248,7 @@ fn fund_green(state: &mut GameState, count: u32) {
             restrictions: Vec::new(),
             grants: vec![],
             expiry: None,
+            source_incarnation: None,
         });
     }
 }

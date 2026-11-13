@@ -291,7 +291,13 @@ fn filter_prop_deps(prop: &FilterProp) -> RetargetDeps {
         FilterProp::Not { prop } => filter_prop_deps(prop),
         FilterProp::DifferentNameFrom { filter }
         | FilterProp::TargetsOnly { filter }
-        | FilterProp::Targets { filter } => retarget_dependencies(filter),
+        | FilterProp::Targets { filter }
+        // CR 106.3 + CR 601.2h: the payment-time source filter nests its own
+        // `TargetFilter`, so a target position named inside it is a retarget
+        // dependency for the same reason the sibling nested filters are.
+        | FilterProp::ManaSpentFromSource { source_filter: filter } => {
+            retarget_dependencies(filter)
+        }
         FilterProp::DistinctFrom { reference } => retarget_dependencies(reference),
         // CR 115.7e: a shared-quality or same-name read against another
         // object is not modeled precisely; it routes to the validator-checked

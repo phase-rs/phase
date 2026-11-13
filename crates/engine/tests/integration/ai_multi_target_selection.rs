@@ -54,6 +54,7 @@ fn mana_ability_resume() -> CostResume {
             source_id: ObjectId(900),
             ability_index: None,
             rules_execution_node: None,
+            activated_mana_occurrence: None,
             ability_snapshot: None,
             announced_source_incarnation: None,
             color_override: None,

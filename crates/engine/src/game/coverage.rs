@@ -45,7 +45,9 @@ use crate::types::keywords::{Keyword, ProtectionTarget};
 use crate::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaSpellGrant};
 use crate::types::phase::Phase;
 use crate::types::replacements::ReplacementEvent;
-use crate::types::statics::{CostModifyMode, CostReductionReach, StaticMode};
+use crate::types::statics::{
+    ActivationExemption, CastFrequency, CostModifyMode, CostReductionReach, StaticMode,
+};
 use crate::types::triggers::{ControlChangeSide, TriggerMode};
 use crate::types::zones::{EtbTapState, Zone};
 use nom::branch::alt;
@@ -1319,6 +1321,11 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
             FilterProp::HasXInManaCost => parts.push("with {X} in cost".into()),
             FilterProp::HasAdventure => parts.push("with an Adventure".into()),
             FilterProp::WasKicked => parts.push("kicked".into()),
+            // CR 106.3 + CR 601.2h: the payment-time source filter, rendered
+            // through the shared `fmt_target` recursion.
+            FilterProp::ManaSpentFromSource { source_filter } => {
+                parts.push(format!("cast with mana from {}", fmt_target(source_filter)))
+            }
             FilterProp::HasXInActivationCost => parts.push("with {X} in activation cost".into()),
             FilterProp::HasManaAbility => parts.push("with a mana ability".into()),
             FilterProp::HasNoAbilities => parts.push("with no abilities".into()),
@@ -5633,6 +5640,67 @@ fn static_details(stat: &StaticDefinition) -> Vec<(String, String)> {
     };
     if let Some(dynamic_count) = dynamic_count {
         d.push(("dynamic_count".into(), fmt_quantity_ref(dynamic_count)));
+    }
+    // CR 601.2f + CR 115.9b: the CAST-side cost modifier's `spell_filter` is the
+    // analogue of `ReduceAbilityCost::targets` — it holds the "… that targets a
+    // creature …" gate as a `FilterProp::Targets` property — and is likewise
+    // invisible to the `ReduceCost`/`RaiseCost` Display label. Left out, the same
+    // CR 109.2 battlefield scope that reaches a `ModifyCost` qualifier
+    // (Killian, Ink Duelist; Esior; Kasmina; The Destined) would be neither
+    // confirmable nor deniable in the parse-diff.
+    if let StaticMode::ModifyCost {
+        spell_filter: Some(spell_filter),
+        ..
+    } = &stat.mode
+    {
+        d.push(("spell_filter".into(), fmt_target(spell_filter)));
+    }
+    // CR 115.9b + CR 602.2b: an activated-ability cost modifier's *target*
+    // qualifier ("… that targets a creature you control …") gates which
+    // activations the adjustment applies to and is parse-significant, yet it is
+    // invisible to the `ReduceAbilityCost(<sign><keyword>,<amount>)` Display
+    // label. Left out of the signature, a change to it — including the CR 109.2
+    // battlefield scope a bare type description now carries — would surface as a
+    // false "no card-parse changes detected" in the coverage parse-diff.
+    //
+    // The variant's remaining activation qualifiers are emitted with it for the
+    // same reason: `activator` is the CR 602.2 "abilities **you** activate"
+    // axis, `exemption` the CR 605.1a mana-ability carve-out, and `frequency`
+    // the CR 118.7 once-per-turn limit. Every one of them can move while the
+    // Display label and `affects` stay byte-identical.
+    if let StaticMode::ReduceAbilityCost {
+        targets,
+        activator,
+        exemption,
+        frequency,
+        ..
+    } = &stat.mode
+    {
+        if let Some(targets) = targets {
+            d.push(("targets".into(), fmt_target(targets)));
+        }
+        if let Some(activator) = activator {
+            d.push(("activator".into(), fmt_player_filter(activator)));
+        }
+        if !matches!(exemption, ActivationExemption::None) {
+            d.push(("exemption".into(), exemption.to_string()));
+        }
+        if let Some(frequency) = frequency {
+            // Exhaustive rather than `Debug`: a new `CastFrequency` variant must
+            // fail to compile here instead of silently changing every affected
+            // signature's spelling.
+            d.push((
+                "frequency".into(),
+                match frequency {
+                    CastFrequency::Unlimited => "unlimited",
+                    CastFrequency::OncePerTurn => "once per turn",
+                    CastFrequency::OncePerTurnPerPermanentType => {
+                        "once per turn per permanent type"
+                    }
+                }
+                .into(),
+            ));
+        }
     }
     // Composable modifications (GrantTrigger / GrantAbility) are emitted as
     // children, so list only the simple ones here as a joined pill.
@@ -16321,6 +16389,136 @@ mod tests {
         );
     }
 
+    /// CR 115.9b + CR 602.2b + CR 109.2: an activated-ability cost modifier's
+    /// target qualifier ("… that targets a creature you control …") is
+    /// parse-significant and invisible to the `ReduceAbilityCost(…,N)` Display
+    /// label, so it must reach the signature through `static_details`. Before
+    /// this export, the CR 109.2 battlefield scope that
+    /// `cost_mod::split_ability_target_restriction` began appending to that
+    /// qualifier changed nothing the export looked at — Professor Hojo's class
+    /// could be neither confirmed nor denied in a parse-diff.
+    ///
+    /// Discriminating by construction, one axis per assertion: the scoped and
+    /// unscoped filters render differently, the two controller axes render
+    /// differently, and each of `activator`/`exemption`/`frequency` is present
+    /// when set and absent when unset.
+    #[test]
+    fn reduce_ability_cost_qualifiers_are_surfaced_in_static_details() {
+        fn reducer(
+            targets: Option<TargetFilter>,
+            activator: Option<PlayerFilter>,
+            exemption: ActivationExemption,
+            frequency: Option<CastFrequency>,
+        ) -> StaticDefinition {
+            StaticDefinition::new(StaticMode::ReduceAbilityCost {
+                mode: CostModifyMode::Reduce,
+                keyword: "activated".to_string(),
+                amount: 2,
+                minimum_mana: None,
+                dynamic_count: None,
+                exemption,
+                activator,
+                targets,
+                frequency,
+            })
+        }
+
+        fn detail(details: &[(String, String)], key: &str) -> Option<String> {
+            details
+                .iter()
+                .find(|(k, _)| k == key)
+                .map(|(_, v)| v.clone())
+        }
+
+        let battlefield = || FilterProp::InZone {
+            zone: Zone::Battlefield,
+        };
+        let you_control = || {
+            TargetFilter::Typed(
+                TypedFilter::creature()
+                    .controller(ControllerRef::You)
+                    .properties(vec![battlefield()]),
+            )
+        };
+        let opponent_control = || {
+            TargetFilter::Typed(
+                TypedFilter::creature()
+                    .controller(ControllerRef::Opponent)
+                    .properties(vec![battlefield()]),
+            )
+        };
+
+        // CR 109.2: the scope the parser appends is the exact delta the
+        // parse-diff has to see. Unscoped vs scoped differ ONLY in that property.
+        let unscoped = super::static_details(&reducer(
+            Some(TargetFilter::Typed(
+                TypedFilter::creature().controller(ControllerRef::You),
+            )),
+            None,
+            ActivationExemption::None,
+            None,
+        ));
+        let scoped = super::static_details(&reducer(
+            Some(you_control()),
+            None,
+            ActivationExemption::None,
+            None,
+        ));
+        assert_ne!(
+            detail(&unscoped, "targets"),
+            detail(&scoped, "targets"),
+            "CR 109.2: appending the battlefield scope must move the exported `targets` \
+             field, or the parse-diff reports a false 'no card-parse changes detected'"
+        );
+
+        // The controller axis is its own difference: same type, same scope.
+        let opponent = super::static_details(&reducer(
+            Some(opponent_control()),
+            None,
+            ActivationExemption::None,
+            None,
+        ));
+        assert_ne!(
+            detail(&scoped, "targets"),
+            detail(&opponent, "targets"),
+            "a 'you control' qualifier and an 'an opponent controls' qualifier must not \
+             render identically"
+        );
+
+        // Every qualifier absent → no field emitted, so an unchanged card's
+        // signature stays byte-identical.
+        let bare = super::static_details(&reducer(None, None, ActivationExemption::None, None));
+        for key in ["targets", "activator", "exemption", "frequency"] {
+            assert!(
+                detail(&bare, key).is_none(),
+                "an unqualified reducer must not emit `{key}`"
+            );
+        }
+
+        // Every qualifier set → each is surfaced with its own spelling.
+        let full = super::static_details(&reducer(
+            Some(you_control()),
+            Some(PlayerFilter::Controller),
+            ActivationExemption::ManaAbilities,
+            Some(CastFrequency::OncePerTurn),
+        ));
+        assert_eq!(
+            detail(&full, "activator").as_deref(),
+            Some("you"),
+            "CR 602.2: the activator axis must name the activator"
+        );
+        assert_eq!(
+            detail(&full, "exemption").as_deref(),
+            Some("mana"),
+            "CR 605.1a: the mana-ability exemption must be surfaced"
+        );
+        assert_eq!(
+            detail(&full, "frequency").as_deref(),
+            Some("once per turn"),
+            "CR 118.7: the once-per-turn limit must be surfaced"
+        );
+    }
+
     /// Regression for PR #8012 (Bombur, Gentle Dreamer) — maintainer review
     /// rounds 2 and 3: `extract_cant_untap_condition` falls back to
     /// `Not(Unrecognized{..})` for an anaphor-scoped `unless` tail with no
@@ -16505,6 +16703,34 @@ mod tests {
             gaps.iter().any(|gap| gap.contains("you pay {1}")),
             "card_face_gaps must name the deferred payment clause, got {gaps:?}"
         );
+    }
+
+    /// CR 106.3 + CR 601.2h: the display arm for the payment-time source filter
+    /// renders through the shared `fmt_target` recursion — no second mechanism, and
+    /// no lowercasing (`fmt_type_filter` returns a subtype verbatim) and no article.
+    #[test]
+    fn fmt_typed_filter_renders_mana_spent_from_source() {
+        use crate::types::ability::{FilterProp, TargetFilter, TypeFilter, TypedFilter};
+
+        let tf = TypedFilter::default().properties(vec![FilterProp::ManaSpentFromSource {
+            source_filter: Box::new(TargetFilter::Typed(TypedFilter {
+                type_filters: vec![TypeFilter::Subtype("Treasure".to_string())],
+                controller: None,
+                properties: vec![],
+            })),
+        }]);
+        assert_eq!(super::fmt_typed_filter(&tf), "cast with mana from Treasure");
+
+        // Sibling check: the same recursion renders the existing nested-filter
+        // property, so the new arm is not a second mechanism.
+        let sibling = TypedFilter::default().properties(vec![FilterProp::Targets {
+            filter: Box::new(TargetFilter::Typed(TypedFilter {
+                type_filters: vec![TypeFilter::Subtype("Treasure".to_string())],
+                controller: None,
+                properties: vec![],
+            })),
+        }]);
+        assert_eq!(super::fmt_typed_filter(&sibling), "targets Treasure");
     }
 
     /// CR 113.3b / CR 113.3c + CR 109.4: the ability-kind and controller axes

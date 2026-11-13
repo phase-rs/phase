@@ -7441,9 +7441,15 @@ pub enum FilterProp {
     TargetsOnly {
         filter: Box<TargetFilter>,
     },
-    /// CR 115.9b: Matches stack entries that have at least one target satisfying the filter.
-    /// Used for "that targets ~", "that targets you", etc. (.any() semantics).
-    /// Contrast with TargetsOnly (CR 115.9c) which requires ALL targets to match (.all()).
+    /// CR 115.9 + CR 601.2c: Matches an object that has at least one declared target
+    /// satisfying the filter (.any() semantics). Read from a live stack entry's targets
+    /// in `filter::stack_entry_targets_satisfy` (CR 115.9b, the targets' current state)
+    /// and from a spell-cast record's committed targets in
+    /// `filter::spell_record_matches_property` (CR 115.9 selection-time, latched per
+    /// CR 400.7; CR 115.9b's current-state reading governs the live reader alone).
+    /// An empty declared list never matches on either path.
+    /// Contrast with TargetsOnly (CR 115.9c), which requires ALL targets to match
+    /// (.all()) and remains fail-closed on a spell-cast record.
     Targets {
         filter: Box<TargetFilter>,
     },
@@ -7467,6 +7473,26 @@ pub enum FilterProp {
     /// (Vine Gecko). Live evaluation reads `pending_cast` / `GameObject.kickers_paid`;
     /// turn-history evaluation reads `SpellCastRecord.was_kicked`.
     WasKicked,
+    /// CR 106.3 + CR 601.2h + CR 400.7d: matches a spell cast with at least one
+    /// mana whose producing source satisfied `source_filter` at the moment that
+    /// mana was paid. Mana remembers its source (CR 106.3), the payment is when
+    /// the fact becomes true (CR 601.2h), and a permanent may later reference what
+    /// mana was spent to cast it (CR 400.7d) — which is why the fact is latched at
+    /// payment rather than re-read from whatever object `source_id` denotes later
+    /// (CR 400.7). CR 604.7: a static ability cannot perform that reference as an
+    /// LKI lookup of its own, so the source-qualified payment is carried as a
+    /// cast-time fact by the object and by the cast record; CR 113.7a governs
+    /// activated and triggered abilities and is not the authority here.
+    ///
+    /// Live evaluation reads `GameObject::mana_spent_source_snapshots`; turn- and
+    /// game-history evaluation reads `SpellCastRecord::mana_spent_source_snapshots`.
+    /// Matching is existential (CR 106.3: one source per unit; several units or
+    /// several qualifying sources still answer one boolean). An empty snapshot set
+    /// — an old save, or a spell evaluated before payment — cannot prove the
+    /// payment and answers false.
+    ManaSpentFromSource {
+        source_filter: Box<TargetFilter>,
+    },
     /// CR 605.1: Matches objects that have at least one ability classified as a
     /// mana ability by the engine's authoritative mana-ability classifier.
     /// Used for library filters such as "artifact card with a mana ability".
@@ -7591,7 +7617,10 @@ impl FilterProp {
             | FilterProp::SharesQuality { .. }
             | FilterProp::Targets { .. }
             | FilterProp::TargetsOnly { .. }
-            | FilterProp::CanEnchant { .. } => false,
+            | FilterProp::CanEnchant { .. }
+            // CR 106.3 + CR 601.2h: the payload describes a mana SOURCE, not a
+            // restriction on the outer population, so it is not traversed.
+            | FilterProp::ManaSpentFromSource { .. } => false,
             // Player-axis sub-structure: a controller quality
             // (`ControllerMatches`) or a historical action scoped by a player
             // recipient (`DealtDamageThisTurn`) is never object-set
@@ -8777,11 +8806,11 @@ pub fn filter_contains(filter: &TargetFilter, leaf: &dyn Fn(&TargetFilter) -> bo
         // rechecks, so it is a real nested filter. The `None` case ("a source of
         // your choice", unqualified) is a leaf.
         TargetFilter::ChosenDamageSource { filter } => filter.as_deref().is_some_and(recurse),
-        // `Typed` is NOT a leaf: six of its `FilterProp`s box a `TargetFilter`
+        // `Typed` is NOT a leaf: seven of its `FilterProp`s box a `TargetFilter`
         // (`CanEnchant`, `DifferentNameFrom`, `DistinctFrom`, `SharesQuality`,
-        // `Targets`, `TargetsOnly`), `Not`/`AnyOf` recurse through more props, and
-        // `ControllerMatches` crosses into `PlayerFilter`, which boxes filters of
-        // its own.
+        // `Targets`, `TargetsOnly`, `ManaSpentFromSource`), `Not`/`AnyOf` recurse
+        // through more props, and `ControllerMatches` crosses into `PlayerFilter`,
+        // which boxes filters of its own.
         TargetFilter::Typed(typed) => typed
             .properties
             .iter()
@@ -8866,6 +8895,10 @@ pub fn filter_prop_contains(prop: &FilterProp, leaf: &dyn Fn(&TargetFilter) -> b
         FilterProp::SharesQuality { reference, .. } => reference.as_deref().is_some_and(recurse),
         // CR 115.9b/9c: the stack entry's target-side filters.
         FilterProp::Targets { filter } | FilterProp::TargetsOnly { filter } => recurse(filter),
+        // CR 106.3 + CR 601.2h: the payment-time source filter nests its own
+        // `TargetFilter`, so a leaf reference inside it is found by the same
+        // traversal the siblings above use.
+        FilterProp::ManaSpentFromSource { source_filter } => recurse(source_filter),
         // CR 608.2c: prop-level combinators.
         FilterProp::Not { prop } => filter_prop_contains(prop, leaf),
         FilterProp::AnyOf { props } => props.iter().any(|p| filter_prop_contains(p, leaf)),
@@ -9162,6 +9195,11 @@ pub fn filter_prop_grammar_any(
                 .is_some_and(|inner| filter_grammar_any(inner, visit)),
             FilterProp::Targets { filter } | FilterProp::TargetsOnly { filter } => {
                 filter_grammar_any(filter, visit)
+            }
+            // CR 106.3 + CR 601.2h: the payment-time source filter is part of the
+            // filter grammar and can itself name a typed quality.
+            FilterProp::ManaSpentFromSource { source_filter } => {
+                filter_grammar_any(source_filter, visit)
             }
             // The filter-matched host is part of the filter grammar: its inner
             // filter can itself name a target, event subject or typed quality.
@@ -9789,6 +9827,17 @@ pub fn rewrite_filter_prop<C>(
                 slot_context,
             )
         }
+        // CR 106.3 + CR 601.2h: rewrite through the nested payment-source filter
+        // exactly as the sibling nested filters above.
+        FilterProp::ManaSpentFromSource { source_filter } => rewrite_filter_props(
+            source_filter,
+            rewrite_node,
+            rewrite,
+            post_property,
+            complete,
+            object_information_available,
+            slot_context,
+        ),
         FilterProp::Not { prop } => rewrite_filter_prop(
             prop,
             rewrite_node,
@@ -12119,6 +12168,11 @@ fn filter_prop_has_unsupported_selected_ref(prop: &FilterProp, nested: bool) -> 
         }
         FilterProp::Targets { filter } | FilterProp::TargetsOnly { filter } => {
             target_filter_has_unsupported_selected_ref(filter, true)
+        }
+        // CR 106.3 + CR 601.2h: conservative reference scan of the nested
+        // payment-source filter, like `Targets`/`CanEnchant` above.
+        FilterProp::ManaSpentFromSource { source_filter } => {
+            target_filter_has_unsupported_selected_ref(source_filter, true)
         }
         FilterProp::DifferentNameFrom { filter } => {
             target_filter_has_unsupported_selected_ref(filter, true)
@@ -26840,6 +26894,37 @@ pub fn fight_declared_slot_filters<'a>(
         .filter(|filter| !filter.is_context_ref())
 }
 
+/// CR 115.1a / CR 115.1c / CR 115.1d / CR 115.1e + CR 601.2c: the filters that
+/// `Effect::Attach`'s two operands contribute to announcement, in DECLARED order.
+///
+/// "Attach target Equipment to target creature" (Magnetic Theft) declares TWO
+/// slots with two DIFFERENT filters: the ATTACHMENT is announced first and the
+/// HOST second, exactly as `collect_target_slots_inner`'s Attach arm pushes them
+/// (`collect_attach_attachment_target_slots` then the host). Both conjuncts are
+/// the live declaration's own gates, so a slot count read from this iterator can
+/// never disagree with the announcement it describes:
+///
+/// 1. the attachment claims a slot only when
+///    [`attach_attachment_claims_announcement_slot`] holds — a DESCRIBED operand
+///    (`AttachSelection::AtResolution`, CR 608.2d) is chosen while the effect
+///    resolves and claims nothing, and
+/// 2. the host claims one only when [`attach_host_filter_needs_target_slot`]
+///    holds (a context anaphor resolves without a slot).
+///
+/// No `is_context_ref` filter is layered on top: both gates already exclude
+/// context references, and re-filtering could only DIVERGE from the live
+/// declaration, misaligning every position after the dropped one.
+pub fn attach_declared_slot_filters<'a>(
+    attachment: &'a TargetFilter,
+    target: &'a TargetFilter,
+    selection: &AttachSelection,
+) -> impl Iterator<Item = &'a TargetFilter> {
+    attach_attachment_claims_announcement_slot(attachment, selection)
+        .then_some(attachment)
+        .into_iter()
+        .chain(attach_host_filter_needs_target_slot(target).then_some(target))
+}
+
 /// CR 115.1a + CR 601.2c: the effect's announced roles, without resolved-node
 /// metadata. Shares the role matcher used by `node_has_stack_target_declaration`;
 /// callers inspect descendants and clause-level unless-payers separately.
@@ -26891,9 +26976,7 @@ pub fn effect_stack_target_declaration_matching(
         selection,
     } = effect
     {
-        return (attach_attachment_claims_announcement_slot(attachment, selection)
-            && predicate(attachment))
-            || (attach_host_filter_needs_target_slot(target) && predicate(target));
+        return attach_declared_slot_filters(attachment, target, selection).any(predicate);
     }
     if let Effect::EachDealsDamageEqualToPower { recipient, .. } = effect {
         return predicate(recipient);
@@ -28233,6 +28316,11 @@ fn filter_prop_recipient_read(prop: &FilterProp) -> RecipientRead {
         | FilterProp::DistinctFrom { .. }
         | FilterProp::Targets { .. }
         | FilterProp::TargetsOnly { .. }
+        // CR 106.3 + CR 601.2h: the nested payment-source filter names a mana
+        // source, not the outer recipient, so its payload is not walked here
+        // either — `parse_mana_source_filter` yields a type phrase with no
+        // recipient-bearing prop.
+        | FilterProp::ManaSpentFromSource { .. }
         // CR 701.3a: the filter-matched host axis resolves its host set from the
         // resolving ability's parent targets, the creation snapshot, or the
         // trigger event — never the per-object recipient of the enclosing

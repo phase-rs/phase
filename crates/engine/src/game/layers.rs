@@ -4931,7 +4931,7 @@ pub(crate) fn mark_layers_full_if_top_of_library_static_live(state: &mut GameSta
 //      must break the build, not fall silently into a `false` wildcard.
 //   2. Universal payload-routing. Any variant carrying a nested `TargetFilter`,
 //      `PlayerFilter`, `QuantityRef`, or `QuantityExpr` routes that payload
-//      through the corresponding walk (the six TargetFilter-bearing
+//      through the corresponding walk (the seven TargetFilter-bearing
 //      `FilterProp`s, `CardTypeSetSource::Objects`, `PlayerFilter` recursion,
 //      etc.) — all of which the zone template drops into its wildcard. Only
 //      payload-free leaves are classified `false` directly.
@@ -5202,7 +5202,7 @@ fn player_filter_reads_life(pf: &PlayerFilter) -> bool {
 
 /// CR 119: Does a single `FilterProp` read the life family? EXHAUSTIVE over
 /// `FilterProp`, with NO wildcard — the divergence from `target_filter_reads_zone`
-/// that closes the six TargetFilter-bearing props the zone template drops into
+/// that closes the seven TargetFilter-bearing props the zone template drops into
 /// its `_ => false`. Every prop carrying a nested filter / player / quantity
 /// routes it; the `AnyOf` / `Not` combinators recurse.
 fn filter_prop_reads_life(prop: &FilterProp) -> bool {
@@ -5217,13 +5217,16 @@ fn filter_prop_reads_life(prop: &FilterProp) -> bool {
         FilterProp::DealtDamageThisTurn { recipient, .. } => {
             recipient.as_ref().is_some_and(player_filter_reads_life)
         }
-        // The six TargetFilter-bearing props all route their nested filter
-        // (deref coercion → &TargetFilter). Field names differ; unified here.
+        // The six props that share a plain `Box<TargetFilter>` field all route
+        // their nested filter (deref coercion → &TargetFilter). Field names
+        // differ; unified here. `SharesQuality` (Option-wrapped) and
+        // `AttachedTo::Host` (nested in `AttachmentReferent`) route below.
         FilterProp::CanEnchant { target: f }
         | FilterProp::DifferentNameFrom { filter: f }
         | FilterProp::DistinctFrom { reference: f }
         | FilterProp::TargetsOnly { filter: f }
-        | FilterProp::Targets { filter: f } => target_filter_reads_life_total(f),
+        | FilterProp::Targets { filter: f }
+        | FilterProp::ManaSpentFromSource { source_filter: f } => target_filter_reads_life_total(f),
         // CR 701.3a: the filter-matched host axis nests its own `TargetFilter`,
         // so a life-reading host predicate is routed the same way.
         FilterProp::AttachedTo {
@@ -15622,6 +15625,7 @@ mod tests {
                 restrictions: Vec::new(),
                 grants: Vec::new(),
                 expiry: None,
+                source_incarnation: None,
             });
         }
     }
@@ -32075,7 +32079,7 @@ mod tests {
             comparator: Comparator::GE,
             count: Box::new(QuantityExpr::Fixed { value: 1 }),
         }));
-        // A TargetFilter-bearing FilterProp routes (one of the six the zone
+        // A TargetFilter-bearing FilterProp routes (one of the seven the zone
         // template's wildcard drops).
         assert!(target_filter_reads_life_total(&TargetFilter::Typed(
             TypedFilter::creature().properties(vec![FilterProp::Targets {

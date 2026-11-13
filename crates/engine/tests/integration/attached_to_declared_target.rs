@@ -35,13 +35,16 @@ use engine::game::visibility::filter_state_for_viewer;
 use engine::game::zone_pipeline::{move_object_for_test, ZoneMoveRequest};
 use engine::parser::oracle::parse_oracle_text;
 use engine::types::ability::{
-    AbilityDefinition, AbilityKind, AttachmentReferent, Effect, FilterProp, QuantityExpr,
-    QuantityRef, TapStateChange, TargetFilter, TargetRef, TypedFilter,
+    AbilityDefinition, AbilityKind, AttachmentReferent, Effect, EffectScope, FilterProp,
+    QuantityExpr, QuantityRef, TapStateChange, TargetFilter, TargetRef, TypeFilter, TypedFilter,
 };
 use engine::types::actions::GameAction;
 use engine::types::events::GameEvent;
 use engine::types::game_state::CastPaymentMode;
-use engine::types::game_state::{PersistedGameState, PersistedRestoreFinalization, WaitingFor};
+use engine::types::game_state::{
+    ActivationTargetFact, AnnouncedTargetFactConflict, PersistedGameState, PersistedRestoreError,
+    PersistedRestoreFinalization, WaitingFor,
+};
 use engine::types::identifiers::ObjectId;
 use engine::types::interaction::{
     InteractionOpportunityResponse, InteractionPreviewRequest, InteractionPreviewStatus,
@@ -1033,6 +1036,492 @@ fn fiery_annihilation_rider_applies_to_any_death_this_turn_and_expires() {
         Zone::Graveyard,
         "the rider expired with the turn"
     );
+}
+
+// ---------------------------------------------------------------------------
+// The announced-target latch across a save/restore (CR 601.2c, CR 701.3a)
+// ---------------------------------------------------------------------------
+
+/// P1's 2/7 `victim` carries Equipment A, P1's `other` carries nothing; P0 holds
+/// Fiery Annihilation at a payable {1} and one Mountain. Manual payment is what
+/// parks the cast AFTER CR 601.2c has declared `[victim, Equipment A]` and
+/// BEFORE CR 601.2h pays — the window a save/restore has to survive.
+fn payable_fiery_board() -> (GameRunner, ObjectId, ObjectId, ObjectId, ObjectId) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let victim = scenario.add_creature(P1, "Victim", 2, 7).id();
+    let other = scenario.add_creature(P1, "Other", 2, 7).id();
+    let eq_a = equipment(&mut scenario, P1, "Equipment A");
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Fiery Annihilation", true, FIERY_ANNIHILATION)
+        .with_mana_cost(ManaCost::generic(1))
+        .id();
+    scenario.add_basic_land(P0, engine::types::mana::ManaColor::Red);
+    let mut runner = scenario.build();
+    attach::attach_to(runner.state_mut(), eq_a, victim);
+    (runner, spell, victim, eq_a, other)
+}
+
+/// CR 601.2c + CR 601.2h: cast `spell` naming `targets` in declaration order
+/// with manual payment, and assert the cast is parked waiting for that payment.
+fn park_cast_at_mana_payment(runner: &mut GameRunner, spell: ObjectId, targets: &[ObjectId]) {
+    let card_id = runner.state().objects[&spell].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: spell,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Manual,
+        })
+        .expect("cast");
+    for (slot, target) in targets.iter().enumerate() {
+        assert!(
+            matches!(
+                runner.state().waiting_for,
+                WaitingFor::TargetSelection { .. }
+            ),
+            "reach guard: slot {slot} must be open, got {:?}",
+            runner.state().waiting_for
+        );
+        runner
+            .act(GameAction::ChooseTarget {
+                target: Some(TargetRef::Object(*target)),
+            })
+            .unwrap_or_else(|e| panic!("slot {slot}: {target:?} must be admitted: {e:?}"));
+    }
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::ManaPayment { .. }),
+        "reach guard: parked for manual payment, got {:?}",
+        runner.state().waiting_for
+    );
+}
+
+/// [`restore`] that reports the refusal instead of panicking on it.
+fn try_restore(json: &str) -> Result<GameRunner, PersistedRestoreError> {
+    let state = serde_json::from_str::<PersistedGameState>(json)
+        .expect("persisted state decodes")
+        .prepare_for_restore(PersistedRestoreFinalization::DeferUntilRehydrated)?;
+    Ok(GameRunner::from_state(
+        state
+            .finalize_after_rehydration(|_| Ok(()))
+            .expect("restored state is publishable"),
+    ))
+}
+
+/// CR 601.2c + CR 701.3a + CR 608.2h: Fiery Annihilation's Equipment slot is
+/// narrowed to Equipment attached to the announced creature, so the announced
+/// cast carries a legal `[creature, Equipment]` declaration. A save taken
+/// while that cast waits for manual payment must restore unchanged and resume
+/// with the SAME two announced targets — the announcement is a recorded fact,
+/// and a fact the save does not state must not read as a failed predicate.
+#[test]
+fn fiery_annihilation_announced_equipment_target_survives_a_save_at_manual_payment() {
+    let (mut runner, spell, victim, eq_a, _other) = payable_fiery_board();
+    park_cast_at_mana_payment(&mut runner, spell, &[victim, eq_a]);
+
+    let save = persisted(&runner).to_string();
+    let mut restored = try_restore(&save).expect("the unchanged save restores");
+    assert!(
+        matches!(restored.state().waiting_for, WaitingFor::ManaPayment { .. }),
+        "the restored cast resumes at its own payment: {:?}",
+        restored.state().waiting_for
+    );
+    // The announcement survived: both declared slots still name the objects the
+    // caster chose, in declaration order.
+    let pending = restored
+        .state()
+        .pending_cast
+        .as_deref()
+        .expect("the restored cast is still parked");
+    let announced = engine::game::ability_utils::declared_targets_in_chain(&pending.ability);
+    assert_eq!(
+        announced,
+        vec![TargetRef::Object(victim), TargetRef::Object(eq_a)],
+        "the Equipment is still its announced target"
+    );
+    restored.act(GameAction::PassPriority).expect("pay");
+    restored.advance_until_stack_empty();
+    let state = restored.state();
+    assert_eq!(
+        state.objects[&eq_a].zone,
+        Zone::Exile,
+        "the announced Equipment target resolved"
+    );
+    assert_eq!(
+        state.objects[&victim].damage_marked, 5,
+        "the first sentence resolved through the restored cast too"
+    );
+}
+
+/// CR 601.2c + CR 115.1 + CR 701.3a: the discriminating twin. The untouched save
+/// above is admitted; the SAME save with the Equipment fact's recorded host
+/// repointed at a creature the declaration never named is refused, because the
+/// declaring slot requires the target to be attached to the announced creature.
+/// The unrecorded-fact allowance is therefore not a blanket acceptance: only an
+/// axis the payload does not state goes unchecked.
+#[test]
+fn fiery_annihilation_save_whose_recorded_host_contradicts_the_slot_is_refused() {
+    let (mut runner, spell, victim, eq_a, other) = payable_fiery_board();
+    park_cast_at_mana_payment(&mut runner, spell, &[victim, eq_a]);
+    try_restore(&persisted(&runner).to_string()).expect("the untouched save is admitted");
+
+    let mut forged = runner.state().clone();
+    let pending = forged
+        .pending_cast
+        .as_deref_mut()
+        .expect("the cast is parked");
+    let facts = pending
+        .committed_target_facts
+        .as_mut()
+        .expect("the latch is written");
+    let mut rewrote = false;
+    for fact in facts.iter_mut() {
+        if let ActivationTargetFact::Object {
+            id, attached_to, ..
+        } = fact
+        {
+            if *id == eq_a {
+                // Reach guard: the capture recorded the host the caster saw, so
+                // the refusal below is attributable to the forgery and not to a
+                // relation that was never captured.
+                assert_eq!(
+                    *attached_to,
+                    Some(AttachTarget::Object(victim)),
+                    "reach guard: the latch records the host the caster saw"
+                );
+                *attached_to = Some(AttachTarget::Object(other));
+                rewrote = true;
+            }
+        }
+    }
+    assert!(
+        rewrote,
+        "reach guard: the latch carries the Equipment's fact"
+    );
+    let json = serde_json::to_string(&PersistedGameState::capture(forged)).expect("serializes");
+    let refused = match try_restore(&json) {
+        Ok(_) => panic!("a recorded host the declaration never chose must be refused"),
+        Err(error) => error,
+    };
+    assert_eq!(
+        refused,
+        PersistedRestoreError::ContradictoryAnnouncedTargetFacts {
+            spell_object_id: spell,
+            reason: AnnouncedTargetFactConflict::SnapshotContradictsDeclaredFilter {
+                target: TargetRef::Object(eq_a),
+            },
+        }
+    );
+}
+
+/// The announced-target fact that names `target`, as its adjacently tagged
+/// payload (`{"type": "Object", "data": {...}}`). A `GameObject` carries
+/// `attached_to` but no `id` of its own and no `lki`; an `LKISnapshot` carries
+/// neither, so the triple identifies the fact.
+fn announced_fact(
+    value: &mut serde_json::Value,
+    target: ObjectId,
+) -> Option<&mut serde_json::Map<String, serde_json::Value>> {
+    match value {
+        serde_json::Value::Object(map) => {
+            let is_fact = map.get("type").and_then(serde_json::Value::as_str) == Some("Object")
+                && map
+                    .get("data")
+                    .and_then(serde_json::Value::as_object)
+                    .is_some_and(|data| {
+                        data.contains_key("lki")
+                            && data.contains_key("attached_to")
+                            && data.get("id").and_then(serde_json::Value::as_u64) == Some(target.0)
+                    });
+            if is_fact {
+                return Some(map);
+            }
+            map.values_mut()
+                .find_map(|child| announced_fact(child, target))
+        }
+        serde_json::Value::Array(items) => items
+            .iter_mut()
+            .find_map(|item| announced_fact(item, target)),
+        serde_json::Value::Null
+        | serde_json::Value::Bool(_)
+        | serde_json::Value::Number(_)
+        | serde_json::Value::String(_) => None,
+    }
+}
+
+/// CR 601.2c + CR 301.5a: a save written before the announced-target fact carried
+/// `attached_to` states no host relation at all. The announce-time `zone` and
+/// `token` fields have the same fixture pattern in
+/// `deterministic_game_state_serde` ("silence is a different value from a stated
+/// battlefield" / "... from a stated `false`"): the absent key decodes to
+/// UNRECORDED, and an axis a payload never stated is not a failed predicate.
+/// Removing exactly that key from an admitted, honest save must therefore leave
+/// the save admitted and the cast resumable.
+#[test]
+fn fiery_annihilation_save_from_before_the_host_was_recorded_still_restores() {
+    let (mut runner, spell, victim, eq_a, _other) = payable_fiery_board();
+    park_cast_at_mana_payment(&mut runner, spell, &[victim, eq_a]);
+
+    // (1) The honest save STATES the relation, and the same fact with the key
+    // removed decodes to `None` — silence, never a stated unattachment.
+    let mut save = persisted(&runner);
+    let honest_fact = {
+        let fact = announced_fact(&mut save, eq_a).expect("the honest save carries the fact");
+        serde_json::Value::Object(fact.clone())
+    };
+    let honest: ActivationTargetFact =
+        serde_json::from_value(honest_fact.clone()).expect("the fact decodes");
+    let ActivationTargetFact::Object { attached_to, .. } = &honest else {
+        panic!("the announced target is an object fact");
+    };
+    assert_eq!(
+        *attached_to,
+        Some(AttachTarget::Object(victim)),
+        "reach guard: this build states the announced Equipment's host, so removing \
+         the key below produces the pre-field shape rather than a no-op"
+    );
+    let mut stripped = honest_fact;
+    assert!(
+        stripped["data"]
+            .as_object_mut()
+            .expect("the fact carries its payload")
+            .remove("attached_to")
+            .is_some(),
+        "reach guard: the key really was present"
+    );
+    let pre_field: ActivationTargetFact =
+        serde_json::from_value(stripped).expect("a payload predating the field parses");
+    let ActivationTargetFact::Object { attached_to, .. } = &pre_field else {
+        panic!("the announced target is an object fact");
+    };
+    assert_eq!(
+        *attached_to, None,
+        "CR 601.2c: a payload predating the field states no relation; it is not a \
+         stated unattachment"
+    );
+    assert_ne!(
+        *attached_to,
+        Some(AttachTarget::Object(victim)),
+        "silence is a different value from a stated host"
+    );
+
+    // (2) The pre-field save itself restores unchanged and resumes with the same
+    // two announced targets.
+    assert!(
+        announced_fact(&mut save, eq_a).expect("the fact is still in the save")["data"]
+            .as_object_mut()
+            .expect("the fact carries its payload")
+            .remove("attached_to")
+            .is_some(),
+        "reach guard: the save still stated the host"
+    );
+    let mut restored = try_restore(&save.to_string())
+        .expect("a payload written before the field existed is admitted");
+    assert!(
+        matches!(restored.state().waiting_for, WaitingFor::ManaPayment { .. }),
+        "the restored cast resumes at its own payment: {:?}",
+        restored.state().waiting_for
+    );
+    let pending = restored
+        .state()
+        .pending_cast
+        .as_deref()
+        .expect("the restored cast is still parked");
+    assert_eq!(
+        engine::game::ability_utils::declared_targets_in_chain(&pending.ability),
+        vec![TargetRef::Object(victim), TargetRef::Object(eq_a)],
+        "the announcement survived the pre-field payload"
+    );
+    restored.act(GameAction::PassPriority).expect("pay");
+    restored.advance_until_stack_empty();
+    let state = restored.state();
+    assert_eq!(
+        state.objects[&eq_a].zone,
+        Zone::Exile,
+        "the announced Equipment target resolved"
+    );
+    assert_eq!(
+        state.objects[&victim].damage_marked, 5,
+        "the first sentence resolved through the restored cast too"
+    );
+}
+
+/// CR 601.2c + CR 115.1: the restore guard's declared-slot view must be indexed in
+/// the STATIC declared-slot space, because
+/// `AttachmentReferent::DeclaredTarget { slot }` is authored there (the
+/// announcement walk maps `selected_slots` position for position, and a declined
+/// optional slot keeps its `None` hole). The guard's entry list is COMPACTED — a
+/// declined slot pushes no target and leaves no hole — so a declined slot BEFORE
+/// the referent shifts every later entry by one and resolves the referent to the
+/// wrong object. The honest save below is exactly that shape: an optional artifact
+/// slot nobody chose, then the creature, then the Equipment attached to it.
+///
+/// No card in the checked-in fixture has this shape (an optional slot that can be
+/// declined before a slot whose filter reads an earlier declared slot, with its
+/// dependent target still legal), and the parser deliberately keeps the gap when
+/// the antecedent would be ambiguous, so the chain is composed from production
+/// effect constructors rather than parsed from Oracle text. Nothing here
+/// fabricates card text.
+///
+/// SCOPE: what this witness pins is that the SAVE is admitted and the cast
+/// resumes. It does not assert that the dependent slot later resolves its
+/// referent, because the live reader makes the same assumption this guard used to
+/// make — `targeting::declared_slot_referent` looks the referent up by index in
+/// `declared_target_entries_in_chain`, the compacted numbering — so with a
+/// declined slot ahead of it the reference binds nothing at resolution time
+/// either. That is a pre-existing limit of a shape no printed card has, and
+/// changing it is not this fix's job; refusing the honest save on top of it was
+/// the defect.
+#[test]
+fn declined_optional_slot_before_an_attachment_referent_still_restores() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let creature = scenario.add_creature(P1, "Victim", 2, 7).id();
+    let gear = equipment(&mut scenario, P1, "Equipment A");
+    let trinket = scenario.add_artifact_from_oracle(P1, "Trinket", "").id();
+    let spell = scenario
+        .add_spell_to_hand(P0, "Declined Slot Probe", true)
+        .with_mana_cost(ManaCost::generic(1))
+        .with_ability_definition(declined_slot_probe())
+        .id();
+    scenario.add_basic_land(P0, engine::types::mana::ManaColor::Red);
+    let mut runner = scenario.build();
+    attach::attach_to(runner.state_mut(), gear, creature);
+
+    let card_id = runner.state().objects[&spell].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: spell,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Manual,
+        })
+        .expect("cast");
+    // CR 601.2c: the optional artifact slot is DECLINED, then the two object
+    // targets are announced in declaration order.
+    runner
+        .act(GameAction::ChooseTarget { target: None })
+        .expect("declining an optional slot is legal");
+    runner
+        .act(GameAction::ChooseTarget {
+            target: Some(TargetRef::Object(creature)),
+        })
+        .expect("the creature is a legal target");
+    runner
+        .act(GameAction::ChooseTarget {
+            target: Some(TargetRef::Object(gear)),
+        })
+        .expect("the attached Equipment is a legal target");
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::ManaPayment { .. }),
+        "reach guard: parked for manual payment, got {:?}",
+        runner.state().waiting_for
+    );
+
+    // Reach guards: the declined slot is a hole in the STATIC space only. The
+    // chain states three slots and two announced targets, so the entry list
+    // cannot address static slot 1 without a view in the static space.
+    let pending = runner
+        .state()
+        .pending_cast
+        .as_deref()
+        .expect("the cast is parked");
+    assert_eq!(
+        engine::game::ability_utils::declared_targets_in_chain(&pending.ability),
+        vec![TargetRef::Object(creature), TargetRef::Object(gear)],
+        "the announcement names the creature and its Equipment"
+    );
+    assert_eq!(
+        engine::game::ability_utils::build_target_slots(runner.state(), &pending.ability)
+            .expect("the chain's slots rebuild")
+            .len(),
+        3,
+        "reach guard: the declined optional slot is still a declared slot"
+    );
+
+    let save = persisted(&runner).to_string();
+    let mut restored = try_restore(&save).expect("the honest save restores");
+    assert!(
+        matches!(restored.state().waiting_for, WaitingFor::ManaPayment { .. }),
+        "the restored cast resumes at its own payment: {:?}",
+        restored.state().waiting_for
+    );
+    let pending = restored
+        .state()
+        .pending_cast
+        .as_deref()
+        .expect("the restored cast is still parked");
+    assert_eq!(
+        engine::game::ability_utils::declared_targets_in_chain(&pending.ability),
+        vec![TargetRef::Object(creature), TargetRef::Object(gear)],
+        "the announcement survived the save"
+    );
+    restored.act(GameAction::PassPriority).expect("pay");
+    restored.advance_until_stack_empty();
+    let state = restored.state();
+    assert!(
+        state.objects[&creature].tapped,
+        "the resumed cast resolved its creature slot"
+    );
+    assert_eq!(
+        state.objects[&trinket].zone,
+        Zone::Battlefield,
+        "the declined slot announced nothing and did nothing"
+    );
+    assert_eq!(
+        state.objects[&spell].zone,
+        Zone::Graveyard,
+        "the resumed cast finished resolving"
+    );
+    assert!(state.stack.is_empty(), "nothing is left on the stack");
+}
+
+/// The probe chain: three static declared slots — an OPTIONAL first slot over
+/// artifacts, a required creature slot, and an Equipment slot whose filter reads
+/// declared slot 1 (the creature).
+fn declined_slot_probe() -> AbilityDefinition {
+    let tap = |filter: TargetFilter| Effect::SetTapState {
+        target: filter,
+        scope: EffectScope::Single,
+        state: TapStateChange::Tap,
+    };
+    let attached = TargetFilter::Typed(
+        TypedFilter::new(TypeFilter::Artifact)
+            .subtype("Equipment".to_string())
+            .properties(vec![FilterProp::AttachedTo {
+                to: AttachmentReferent::DeclaredTarget { slot: 1 },
+            }]),
+    );
+    let exile = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::ChangeZone {
+            library_shuffle: Default::default(),
+            origin: Some(Zone::Battlefield),
+            destination: Zone::Exile,
+            target: attached,
+            owner_library: false,
+            enter_transformed: false,
+            enters_under: None,
+            enter_tapped: engine::types::zones::EtbTapState::Unspecified,
+            enters_attacking: false,
+            up_to: false,
+            enter_with_counters: vec![],
+            conditional_enter_with_counters: vec![],
+            face_down_profile: None,
+            enters_modified_if: None,
+        },
+    );
+    let creature = AbilityDefinition::new(
+        AbilityKind::Spell,
+        tap(TargetFilter::Typed(TypedFilter::creature())),
+    )
+    .sub_ability(exile);
+    AbilityDefinition::new(
+        AbilityKind::Spell,
+        tap(TargetFilter::Typed(TypedFilter::new(TypeFilter::Artifact))),
+    )
+    .sub_ability(creature)
+    .optional_targeting()
 }
 
 // ---------------------------------------------------------------------------

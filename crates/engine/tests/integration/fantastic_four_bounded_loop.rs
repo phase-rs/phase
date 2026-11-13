@@ -2735,7 +2735,11 @@ fn c1_every_ring_clear_site_also_clears_the_loop_answer_journal() {
     const WINDOW_METHODS: [&str; 4] = [
         "pub(crate) fn clear_loop_detect_window(",
         "pub(crate) fn record_shrinking_beat(",
-        "pub(crate) fn normalize_for_loop(",
+        // CR 106.3 + CR 732.2a: the normalization's BODY, which is where the ring clear
+        // is. `normalize_for_loop` is now a three-line delegate to it (the `Kept` half),
+        // so it clears no ring itself and is deliberately not a window method here: the
+        // census stays exact about which function performs the clear.
+        "pub(crate) fn normalize_for_loop_with(",
         "pub(crate) fn loop_detect_live_sample(",
     ];
     const KEEPS_JOURNAL: &str = "pub(crate) fn record_shrinking_beat(";
