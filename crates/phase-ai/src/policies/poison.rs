@@ -92,7 +92,7 @@ struct PoisonPool {
 enum Delivery {
     /// The engine read the delivery, or the estimate is short of lethal and needs no read.
     Counted,
-    /// The engine could not read the delivery, so its estimate is pressure, never lethal.
+    /// The engine could not read the delivery, so its estimate stops one counter short of lethal.
     Unread,
 }
 
