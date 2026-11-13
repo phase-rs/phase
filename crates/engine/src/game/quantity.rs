@@ -4389,7 +4389,7 @@ fn reduce_property_values(values: impl Iterator<Item = i32>, function: Aggregate
 /// exile") rather than the generic objects in a zone. A conjunction is card-only
 /// when any conjunct is, a union only when every branch is, a complement takes
 /// its inner filter's population.
-fn filter_names_cards(filter: &TargetFilter) -> bool {
+pub(crate) fn filter_names_cards(filter: &TargetFilter) -> bool {
     match filter {
         TargetFilter::Typed(typed) => typed
             .type_filters

@@ -1,0 +1,7 @@
+{
+  "surfaces": [
+    "full",
+    "wire"
+  ],
+  "reason": "PendingPlayerScopeTail gains the optional zone_changed_this_way ledger channel: a paused player-scope clause carries every seat's moved objects to its detached 'this way' tail. An older peer would drop the channel and resolve the tail against only the last seat's moves."
+}
