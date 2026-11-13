@@ -126,6 +126,89 @@ pub struct ConfirmedPeriod {
     /// the replay that certified the period did.
     #[serde(default, skip_serializing_if = "Outcomes::is_refused")]
     outcomes: Outcomes,
+    /// CR 732.2a + CR 732.2b: what committed answers to the offer have already performed, read
+    /// beside the offer's own records so a resubmitted answer performs nothing. Never serialized:
+    /// `state_revision`, which keys them, is not either.
+    #[serde(skip)]
+    pub(crate) receipts: AnswerReceipts,
+}
+
+/// CR 732.2a + CR 732.2b: the performances committed answers to one offer made.
+#[derive(Debug, Clone, Default, Eq)]
+pub(crate) struct AnswerReceipts {
+    /// The `state_revision` they were taken at, carried only to a revision of the same position.
+    /// CR 104.3a: the board can change while the window is open, and at any other revision they
+    /// say nothing.
+    revision: u64,
+    /// Declarations the offer did not publish, each performed from the offer frame to its count.
+    declared: Vec<PerformedReach>,
+    /// CR 732.2b: each place a responder named and the take's verdict there, true when it left
+    /// them no game choice other than passing.
+    shortened: Vec<(PlayerId, u32, bool)>,
+}
+
+/// CR 732.2a: a receipt memoises a take over the position it was taken on and is no part of that
+/// position, so, like `LifeTotalReading`, it never makes two otherwise equal states differ.
+impl PartialEq for AnswerReceipts {
+    fn eq(&self, _other: &Self) -> bool {
+        true
+    }
+}
+
+impl AnswerReceipts {
+    fn at(&self, revision: u64) -> Option<&Self> {
+        (self.revision == revision).then_some(self)
+    }
+
+    fn at_mut(&mut self, revision: u64) -> &mut Self {
+        if self.revision != revision {
+            *self = Self {
+                revision,
+                ..Self::default()
+            };
+        }
+        self
+    }
+
+    /// Whether receipts were taken at `revision`.
+    pub(crate) fn held_at(&self, revision: u64) -> bool {
+        self.at(revision)
+            .is_some_and(|r| !r.declared.is_empty() || !r.shortened.is_empty())
+    }
+
+    /// Moves the receipts taken at `from` to `to`, a later revision of the same position.
+    pub(crate) fn carry(&mut self, from: u64, to: u64) {
+        if self.revision == from {
+            self.revision = to;
+        }
+    }
+
+    pub(crate) fn record_declared(&mut self, revision: u64, record: PerformedReach) {
+        self.at_mut(revision).declared.push(record);
+    }
+
+    pub(crate) fn shorten_refused(
+        &self,
+        revision: u64,
+        seat: PlayerId,
+        place: u32,
+    ) -> Option<bool> {
+        self.at(revision)?
+            .shortened
+            .iter()
+            .find(|&&(s, p, _)| (s, p) == (seat, place))
+            .map(|&(_, _, refused)| refused)
+    }
+
+    pub(crate) fn record_shortened(
+        &mut self,
+        revision: u64,
+        seat: PlayerId,
+        place: u32,
+        refused: bool,
+    ) {
+        self.at_mut(revision).shortened.push((seat, place, refused));
+    }
 }
 
 /// CR 732.2a: one declaration performed forward from an offer frame, repetition by repetition.
@@ -224,6 +307,25 @@ impl ConfirmedPeriod {
 
     pub(crate) fn growth(&self) -> CoveredGrowth {
         self.growth
+    }
+
+    /// CR 732.2a: how far `decisions` reaches performed from the offer frame, when the offer or a
+    /// committed answer at `revision` already performed it.
+    pub(crate) fn declared_reach(
+        &self,
+        decisions: &[PinnedDecision],
+        revision: u64,
+    ) -> Option<u32> {
+        self.performed
+            .iter()
+            .chain(
+                self.receipts
+                    .at(revision)
+                    .into_iter()
+                    .flat_map(|r| &r.declared),
+            )
+            .find(|record| record.decisions == decisions)
+            .map(|record| record.reach)
     }
 
     pub fn choices(&self) -> &[PinnedDecision] {
@@ -2883,6 +2985,7 @@ pub(crate) fn confirm(frame: &GameState, span: NamedSpan) -> Result<Confirmation
             performed: performed_reaches,
             recorded,
             outcomes: Outcomes::Refused,
+            receipts: AnswerReceipts::default(),
         },
         frames: Box::new([s_n1, replay]),
         delta,
@@ -2917,6 +3020,7 @@ fn counted_confirmation(
             performed: Vec::new(),
             recorded: None,
             outcomes: Outcomes::Refused,
+            receipts: AnswerReceipts::default(),
         },
         delta: ResourceVector::period(&pair[0], &pair[1]),
         frames: pair,
@@ -3011,6 +3115,7 @@ pub(crate) fn mandatory_period_holds(
         performed: Vec::new(),
         recorded: None,
         outcomes: Outcomes::Admitted,
+        receipts: AnswerReceipts::default(),
     })
 }
 

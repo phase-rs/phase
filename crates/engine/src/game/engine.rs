@@ -1512,6 +1512,10 @@ fn apply_action_boundary_core(
     // immediately preceding action. Drop it before a new outer action starts;
     // the active search itself remains the sole authority during the prompt.
     state.clear_completed_hidden_search_audiences();
+    // CR 732.2b: before the snapshot, so a refused answer keeps the verdict its take reached.
+    if !authorize_actor || check_actor_authorization(state, authenticated_actor, &action).is_ok() {
+        record_answer_receipt(state, &action);
+    }
     // Taken once per action, so every field a replayed cycle grows must be a structurally shared
     // container.
     let boundary_snapshot = std::sync::Arc::new(state.clone());
@@ -2411,6 +2415,10 @@ fn finish_action_boundary_with_lifecycle(
     finalize_rules_state(state);
     super::un_actions::announce_pending_tells(state);
     super::un_actions::refresh_menu(state);
+    // `PartialEq` compares every store a standing preference writes, not every store an action can.
+    if is_actor_scoped_preference {
+        carry_answer_receipts(&boundary_snapshot, state);
+    }
     result.waiting_for = state.waiting_for.clone();
     if matches!(mode, PublicFinalizeMode::Immediate) {
         finalize_display_state(state);
@@ -6957,10 +6965,7 @@ pub(crate) fn performance_conforms(
         period.recorded_answers(),
         state,
     ) && period
-        .performed
-        .iter()
-        .find(|record| record.decisions == declared.decisions)
-        .map(|record| record.reach)
+        .declared_reach(&declared.decisions, state.state_revision)
         .or_else(|| match evidence {
             ShortcutEvidence::Measured => None,
             ShortcutEvidence::Performed => Some(
@@ -6975,6 +6980,129 @@ pub(crate) fn performance_conforms(
             ),
         })
         .is_none_or(|reach| reach >= *n)
+}
+
+/// CR 732.2a + CR 732.2b: performs a loop-shortcut answer's take once, before the answer is
+/// decided, and keeps its verdict on the pending window, where the decision, the commit and any
+/// resubmission read it. A declaration is performed only when the offer carries performances.
+pub(crate) fn record_answer_receipt(state: &mut GameState, action: &GameAction) {
+    // Every refusal the commit makes ahead of its performance runs first, at `Measured`, which
+    // performs nothing: the count cap, the offer's capacity, the owner firewall and the pins.
+    if !matches!(
+        shortcut_step(state, action, ShortcutEvidence::Measured),
+        Some(Ok(step)) if step != ShortcutStep::HandsBack
+    ) {
+        return;
+    }
+    let revision = state.state_revision;
+    match (action, &state.waiting_for) {
+        (
+            GameAction::DeclareShortcut {
+                count: crate::analysis::decision_template::IterationCount::Fixed(n),
+                template,
+            },
+            _,
+        ) => {
+            let Some(offer) = LoopShortcutOffer::of(&state.waiting_for) else {
+                return;
+            };
+            let Some(declared) = template
+                .as_ref()
+                .or_else(|| offer.schema.suggestion(offer.declaration))
+            else {
+                return;
+            };
+            if offer.period.performed.is_empty()
+                || offer
+                    .period
+                    .declared_reach(&declared.decisions, revision)
+                    .is_some()
+            {
+                return;
+            }
+            let record = super::period_confirm::perform_declared_on(
+                state,
+                offer.period,
+                offer.proposer,
+                declared,
+                *n,
+            );
+            if let Some(receipts) = answer_receipts(&mut state.waiting_for) {
+                receipts.record_declared(revision, record);
+            }
+        }
+        (
+            GameAction::RespondToShortcut {
+                response:
+                    crate::analysis::loop_check::ShortcutResponse::Shorten {
+                        at_iteration: place,
+                    },
+            },
+            WaitingFor::RespondToShortcut {
+                player, proposal, ..
+            },
+        ) => {
+            let (seat, place) = (*player, *place);
+            let refused =
+                match shorten_refusal(state, proposal, seat, place, ShortcutEvidence::Performed) {
+                    None => false,
+                    Some(ShortenRefusal::NoDifferentChoice) => true,
+                    Some(
+                        ShortenRefusal::Unperformable(_)
+                        | ShortenRefusal::OutsideProposal
+                        | ShortenRefusal::Undrivable,
+                    ) => return,
+                };
+            if let Some(receipts) = answer_receipts(&mut state.waiting_for) {
+                receipts.record_shortened(revision, seat, place, refused);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// The receipts of the loop-shortcut window `waiting_for` holds open, if any.
+fn answer_receipts(
+    waiting_for: &mut WaitingFor,
+) -> Option<&mut super::period_confirm::AnswerReceipts> {
+    match waiting_for {
+        WaitingFor::LoopShortcut { period, .. } => Some(&mut period.receipts),
+        WaitingFor::RespondToShortcut { proposal, .. } => Some(&mut proposal.period.receipts),
+        _ => None,
+    }
+}
+
+/// CR 732.2b: a take's verdict is a fact of the position it was taken on, so the receipts taken
+/// at `before` carry to `state` when the action between them left that position unchanged.
+fn carry_answer_receipts(before: &GameState, state: &mut GameState) {
+    let (from, to) = (before.state_revision, state.state_revision);
+    if answer_receipts(&mut state.waiting_for).is_some_and(|receipts| receipts.held_at(from))
+        && same_position(before, state)
+    {
+        if let Some(receipts) = answer_receipts(&mut state.waiting_for) {
+            receipts.carry(from, to);
+        }
+    }
+}
+
+/// Whether `after` equals `before` under `GameState`'s `PartialEq`, apart from the revision, which
+/// the stamp carries, and the display marks, which only public-state finalization reads, and the
+/// order of each hand (CR 402.3: "A player may arrange their hand in any convenient fashion").
+fn same_position(before: &GameState, after: &GameState) -> bool {
+    let mut before = before.clone();
+    before.state_revision = after.state_revision;
+    before.public_state_dirty = after.public_state_dirty.clone();
+    for (held, now) in before.players.iter_mut().zip(after.players.iter()) {
+        let sorted = |hand: &im::Vector<ObjectId>| {
+            let mut ids: Vec<u64> = hand.iter().map(|id| id.0).collect();
+            ids.sort_unstable();
+            ids
+        };
+        if sorted(&held.hand) == sorted(&now.hand) {
+            held.hand = now.hand.clone();
+        }
+    }
+    before == *after
 }
 
 /// What committing a loop-shortcut answer does next.
@@ -7010,14 +7138,17 @@ pub(crate) fn shortcut_step(
                 proposal,
             },
             GameAction::RespondToShortcut { response },
-        ) => Some(respond_step(
-            state,
-            *player,
-            remaining_players,
-            proposal,
-            *response,
-            evidence,
-        )),
+        ) => Some(
+            respond_step(
+                state,
+                *player,
+                remaining_players,
+                proposal,
+                *response,
+                evidence,
+            )
+            .map_err(refused_shorten),
+        ),
         _ => None,
     }
 }
@@ -7386,7 +7517,7 @@ impl ShortenRefusal {
 /// will make a game choice that's different than what's been proposed". A place is refused as
 /// naming no different choice only when the take there arms CR 732.2c's latch for `seat` and `seat`
 /// has no meaningful priority action; a place the take never reaches is admitted. Only the take
-/// decides that, so `Measured` evidence never refuses a place as naming no different choice.
+/// decides that, so `Measured` evidence reads it from the window's receipt or admits the place.
 pub fn shorten_refusal(
     state: &GameState,
     proposal: &crate::analysis::loop_check::ShortcutProposal,
@@ -7404,6 +7535,14 @@ pub fn shorten_refusal(
     // would substitute a decline for it.
     if !shortcut_count_is_drivable(state, proposal, place) {
         return Some(ShortenRefusal::Undrivable);
+    }
+    if let Some(refused) =
+        proposal
+            .period
+            .receipts
+            .shorten_refused(state.state_revision, seat, place)
+    {
+        return refused.then_some(ShortenRefusal::NoDifferentChoice);
     }
     match evidence {
         ShortcutEvidence::Measured => None,
@@ -7451,13 +7590,10 @@ fn respond_step(
     proposal: &crate::analysis::loop_check::ShortcutProposal,
     response: crate::analysis::loop_check::ShortcutResponse,
     evidence: ShortcutEvidence,
-) -> Result<ShortcutStep, EngineError> {
+) -> Result<ShortcutStep, (u32, ShortenRefusal)> {
     if let crate::analysis::loop_check::ShortcutResponse::Shorten { at_iteration } = response {
         if let Some(refusal) = shorten_refusal(state, proposal, player, at_iteration, evidence) {
-            return Err(EngineError::InvalidAction(format!(
-                "Shortcut place {at_iteration}: {}",
-                refusal.reason()
-            )));
+            return Err((at_iteration, refusal));
         }
     }
     // CR 800.4a: never advance the offer onto a player who has left the game. A queued opponent
@@ -7490,6 +7626,10 @@ fn respond_step(
     })
 }
 
+fn refused_shorten((place, refusal): (u32, ShortenRefusal)) -> EngineError {
+    EngineError::InvalidAction(format!("Shortcut place {place}: {}", refusal.reason()))
+}
+
 /// CR 732.2b/c: one opponent answered the shortcut offer. Mirrors the
 /// `OpponentMayChoice`/`UnlessPayment` APNAP fan-out (drain-one-advance via
 /// `remaining_players`). Both answers advance the same poll, and the last of them takes the
@@ -7513,7 +7653,8 @@ fn handle_respond_to_shortcut(
         &proposal,
         response,
         ShortcutEvidence::Performed,
-    )?;
+    )
+    .map_err(refused_shorten)?;
     let mut result = ActionResult::applied(std::mem::take(events), state.waiting_for.clone());
     if let crate::analysis::loop_check::ShortcutResponse::Shorten { at_iteration } = response {
         // CR 732.2b: "This place becomes the new ending point of the proposed sequence." The

@@ -3599,6 +3599,7 @@ mod recorded_niv_table {
         assert_eq!(preview.status, InteractionPreviewStatus::Confirmable);
 
         let entry = serde_json::to_value(&*state).expect("the state serializes");
+        let entry_position = state.clone();
         let before = play_trace_counters();
         let submitted = submit_interaction(
             state,
@@ -3620,6 +3621,10 @@ mod recorded_niv_table {
             entry,
             "the refused commit writes nothing"
         );
+        assert!(
+            *state == entry_position,
+            "a receipt is not part of the position"
+        );
         assert!(matches!(state.waiting_for, WaitingFor::LoopShortcut { .. }));
         assert!(
             state
@@ -3629,6 +3634,24 @@ mod recorded_niv_table {
             "the proposer's interaction slot is still open"
         );
 
+        let before = play_trace_counters();
+        let resubmitted = submit_interaction(
+            state,
+            P0,
+            InteractionSubmission {
+                interaction_id: interaction_id.clone(),
+                response: fixed(14),
+            },
+        )
+        .map(drop)
+        .map_err(|error| error.code);
+        assert_eq!(
+            resubmitted,
+            Err(InteractionReasonCode::ConstraintUnsatisfied)
+        );
+        assert_eq!(play_trace_counters().since(before).probe_entries, 0);
+
+        let before = play_trace_counters();
         submit_interaction(
             state,
             P0,
@@ -3638,6 +3661,11 @@ mod recorded_niv_table {
             },
         )
         .expect("the proposer answers again with the count its performance reaches");
+        assert_eq!(
+            play_trace_counters().since(before).probe_entries,
+            0,
+            "the performance of 14 already reached 13"
+        );
         assert!(matches!(
             state.waiting_for,
             WaitingFor::RespondToShortcut { .. }
@@ -3767,5 +3795,227 @@ mod recorded_niv_table {
             "{:?}",
             runner.state().waiting_for
         );
+    }
+
+    /// Submits the declaration aiming every ping at P2 for `iterations` through the ingress and
+    /// returns its answer with the probe entries it cost.
+    fn submit_at_p2(
+        state: &mut GameState,
+        iterations: u32,
+    ) -> (
+        Result<(), engine::types::interaction::InteractionReasonCode>,
+        u64,
+    ) {
+        use engine::game::interaction::submit_interaction;
+        use engine::types::interaction::{
+            InteractionResponse, InteractionShortcutDecision, InteractionSubmission,
+        };
+        let (interaction_id, pins) = shortcut_interaction(state, |_| vec![(P2, None)]);
+        let before = play_trace_counters();
+        let submitted = submit_interaction(
+            state,
+            P0,
+            InteractionSubmission {
+                interaction_id,
+                response: InteractionResponse::Shortcut {
+                    decision: InteractionShortcutDecision::Fixed { iterations },
+                    pins,
+                },
+            },
+        )
+        .map(drop)
+        .map_err(|error| error.code);
+        (submitted, play_trace_counters().since(before).probe_entries)
+    }
+
+    fn offer_open(state: &GameState) -> bool {
+        matches!(state.waiting_for, WaitingFor::LoopShortcut { .. })
+    }
+
+    /// CR 732.2a + CR 402.3: P0's reversed hand or P2's emptied stop list changes nothing the
+    /// performance reads, so the refused 14 stands at no cost; a real stop changes what the drive
+    /// auto-submits, so 14 is performed again.
+    #[test]
+    fn a_declared_receipt_survives_a_preference_that_changes_nothing() {
+        use engine::types::interaction::InteractionReasonCode::ConstraintUnsatisfied;
+        let refused_once = || {
+            let mut state = offered(&TABLE, &[], 0, false)?.state().clone();
+            let (refused, cost) = submit_at_p2(&mut state, 14);
+            assert_eq!(refused, Err(ConstraintUnsatisfied));
+            assert!(cost > 0, "reach: the submission performs the declaration");
+            Some(state)
+        };
+        for reorder in [true, false] {
+            let Some(mut state) = refused_once() else {
+                return;
+            };
+            if reorder {
+                let hand: Vec<ObjectId> = state.players[0].hand.iter().copied().collect();
+                assert!(hand.len() >= 2, "reach: a hand whose order can change");
+                let reversed: Vec<ObjectId> = hand.iter().rev().copied().collect();
+                engine::game::engine::apply(
+                    &mut state,
+                    P0,
+                    GameAction::ReorderHand { order: reversed },
+                )
+                .expect("P0 reorders its hand");
+                assert_ne!(
+                    state.players[0].hand.iter().copied().collect::<Vec<_>>(),
+                    hand
+                );
+            } else {
+                engine::game::engine::apply(
+                    &mut state,
+                    P2,
+                    GameAction::SetPhaseStops { stops: vec![] },
+                )
+                .expect("P2 empties its stops");
+            }
+            assert_eq!(
+                submit_at_p2(&mut state, 14),
+                (Err(ConstraintUnsatisfied), 0),
+                "reorder={reorder}"
+            );
+            assert!(offer_open(&state));
+        }
+
+        let Some(mut state) = refused_once() else {
+            return;
+        };
+        engine::game::engine::apply(
+            &mut state,
+            P2,
+            GameAction::SetPhaseStops {
+                stops: vec![engine::types::phase::PhaseStop {
+                    phase: Phase::End,
+                    scope: engine::types::phase::PhaseStopScope::AllTurns,
+                }],
+            },
+        )
+        .expect("P2 sets a stop");
+        let (_, cost) = submit_at_p2(&mut state, 14);
+        assert!(cost > 0, "a real stop performs the declaration again");
+    }
+
+    /// CR 732.2a: a declaration the offer never performed is performed once when submitted, as
+    /// often through either ingress entry as when applied directly.
+    #[test]
+    fn an_unrecorded_declaration_is_performed_once_when_submitted() {
+        use engine::game::interaction::submit_interaction_with_rejection;
+        use engine::types::interaction::{
+            InteractionResponse, InteractionShortcutDecision, InteractionSubmission,
+        };
+        let Some(mut direct) = offered(&TABLE, &[], 0, false) else {
+            return;
+        };
+        let base = direct.state().clone();
+
+        let before = play_trace_counters();
+        act(
+            &mut direct,
+            GameAction::DeclareShortcut {
+                count: IterationCount::Fixed(13),
+                template: Some(every_ping_at(&suggestion(&base), P2, 13)),
+            },
+        );
+        let direct_cost = play_trace_counters().since(before).probe_entries;
+        assert!(direct_cost > 0);
+        assert!(matches!(
+            direct.state().waiting_for,
+            WaitingFor::RespondToShortcut { .. }
+        ));
+
+        let mut wire = base.clone();
+        assert_eq!(submit_at_p2(&mut wire, 13), (Ok(()), direct_cost));
+        assert!(matches!(
+            wire.waiting_for,
+            WaitingFor::RespondToShortcut { .. }
+        ));
+
+        let mut wire = base;
+        let (interaction_id, pins) = shortcut_interaction(&mut wire, |_| vec![(P2, None)]);
+        let before = play_trace_counters();
+        submit_interaction_with_rejection(
+            &mut wire,
+            P0,
+            InteractionSubmission {
+                interaction_id,
+                response: InteractionResponse::Shortcut {
+                    decision: InteractionShortcutDecision::Fixed { iterations: 13 },
+                    pins,
+                },
+            },
+        )
+        .expect("the declaration is dispatched");
+        assert_eq!(
+            play_trace_counters().since(before).probe_entries,
+            direct_cost
+        );
+        assert!(matches!(
+            wire.waiting_for,
+            WaitingFor::RespondToShortcut { .. }
+        ));
+    }
+
+    /// CR 104.3a + CR 800.4a: P3's concession takes its life and objects out of the game while the
+    /// offer stays open, so the performance of 14 taken before it says nothing and 14 is performed
+    /// again, once.
+    #[test]
+    fn a_declared_receipt_dies_with_a_concession() {
+        use engine::types::interaction::InteractionReasonCode::ConstraintUnsatisfied;
+        let Some(runner) = offered(&TABLE, &[], 0, false) else {
+            return;
+        };
+        let mut state = runner.state().clone();
+        let (refused, cost) = submit_at_p2(&mut state, 14);
+        assert_eq!(refused, Err(ConstraintUnsatisfied));
+        assert!(cost > 0, "reach: the submission performs the declaration");
+        engine::game::engine::apply(&mut state, P3, GameAction::Concede { player_id: P3 })
+            .expect("P3 concedes");
+        assert!(offer_open(&state), "the offer survives P3");
+        let (refused, cost) = submit_at_p2(&mut state, 14);
+        assert_eq!(refused, Err(ConstraintUnsatisfied));
+        assert!(cost > 0, "the new board is performed again");
+        assert_eq!(
+            submit_at_p2(&mut state, 14),
+            (Err(ConstraintUnsatisfied), 0)
+        );
+    }
+
+    /// CR 732.2a: a count past the offer's capacity or the count cap is handed back before the
+    /// declaration is performed, so it performs nothing.
+    #[test]
+    fn a_declaration_the_commit_refuses_first_performs_nothing() {
+        let Some(runner) = offered(&TABLE, &[], 0, false) else {
+            return;
+        };
+        let base = runner.state().clone();
+        let WaitingFor::LoopShortcut { schema, .. } = &base.waiting_for else {
+            panic!("an offer");
+        };
+        let declared = suggestion(&base);
+        let declare = |n: u32| {
+            let mut state = base.clone();
+            let before = play_trace_counters();
+            let applied = engine::game::engine::apply(
+                &mut state,
+                P0,
+                GameAction::DeclareShortcut {
+                    count: IterationCount::Fixed(n),
+                    template: Some(every_ping_at(&declared, P2, n)),
+                },
+            );
+            assert!(applied.is_ok(), "n={n}: {applied:?}");
+            assert!(
+                matches!(state.waiting_for, WaitingFor::Priority { player } if player == P0),
+                "n={n}: handed back, got {:?}",
+                state.waiting_for
+            );
+            play_trace_counters().since(before).probe_entries
+        };
+        assert!(declare(14) > 0, "reach: 14 is performed and falls short");
+        for n in [schema.deliverable_capacity + 1, u32::MAX] {
+            assert_eq!(declare(n), 0, "n={n}");
+        }
     }
 }

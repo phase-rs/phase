@@ -79,15 +79,15 @@
 // resource, locally, on engine-source edits. It is NOT checked in GitHub CI, and CI
 // enrollment is policy-blocked (`.agents/pr-review-policy.toml` `[hard_stops]` lists
 // `.github/workflows/**`). A green block in a merged commit is not a CI-verified block.
-// PROBE-PIN:BEGIN manifest=probe-pin/engine-census.toml digest=sha256:61bf13b16543cd94
+// PROBE-PIN:BEGIN manifest=probe-pin/engine-census.toml digest=sha256:037e1250ce3d1ea6
 // instrument rustc = rustc 1.97.0-nightly (0febdbab2 2026-04-18)
 // | probe | mutation | expect | verdict | firing assertion (anchor) | provenance |
 // |---|---|---|---|---|---|
 // | P0_control | (none) | pass | pass | (control; no mounts) | — |
-// | P1_production_site_removed | scenario.rs ×1 | fail | fail | left: (27, 23) / right: (28, 23) / THE TEST HALF HAS BEEN ADJUDICATED NINE TIMES | crates/engine/tests/integration/loop_shortcut_offer_writer_census.rs |
-// | P2_test_site_removed | projection.rs ×1 | fail | fail | left: (28, 22) / right: (28, 23) | crates/engine/tests/integration/loop_shortcut_offer_writer_census.rs |
-// | P3_walk_reaches_phase_ai_and_skips_comments | lib.rs ×1 | fail | fail | left: (29, 23) / right: (28, 23) | crates/engine/tests/integration/loop_shortcut_offer_writer_census.rs |
-// | P4_counting_is_per_line | lib.rs ×1 | fail | fail | left: (30, 23) / right: (28, 23) | crates/engine/tests/integration/loop_shortcut_offer_writer_census.rs |
+// | P1_production_site_removed | scenario.rs ×1 | fail | fail | left: (28, 23) / right: (29, 23) / THE TEST HALF HAS BEEN ADJUDICATED NINE TIMES | crates/engine/tests/integration/loop_shortcut_offer_writer_census.rs |
+// | P2_test_site_removed | projection.rs ×1 | fail | fail | left: (29, 22) / right: (29, 23) | crates/engine/tests/integration/loop_shortcut_offer_writer_census.rs |
+// | P3_walk_reaches_phase_ai_and_skips_comments | lib.rs ×1 | fail | fail | left: (30, 23) / right: (29, 23) | crates/engine/tests/integration/loop_shortcut_offer_writer_census.rs |
+// | P4_counting_is_per_line | lib.rs ×1 | fail | fail | left: (31, 23) / right: (29, 23) | crates/engine/tests/integration/loop_shortcut_offer_writer_census.rs |
 // | P5_relocation_preserves_the_count | scenario.rs ×1, interaction.rs ×1 | fail | fail | the COUNT can be preserved by a move that relocates a writer / ("engine/src/game/interaction.rs", 6) | crates/engine/tests/integration/loop_shortcut_offer_writer_census.rs |
 // | P6_second_validate_pins_consumer | scenario.rs ×1 | fail | fail | expected `validate_pins(` to appear in production exactly twice | crates/engine/tests/integration/loop_shortcut_offer_writer_census.rs |
 // | P7_coverage_half_unpaired | decision_template.rs ×1 | fail | fail | validating pin VALUES without also running | crates/engine/tests/integration/loop_shortcut_offer_writer_census.rs |
@@ -300,7 +300,9 @@ fn census(needle: &str) -> Vec<Hit> {
 /// loop-shortcut offer holds no suspended ability chain to check, and the walk
 /// mints no offer and reads none of its fields. An eighth benign read, the Time Sieve
 /// row in `analysis/corpus_tests.rs` (test code the census scans as production),
-/// reads the schema of an offer the runner already minted and mints none.
+/// reads the schema of an offer the runner already minted and mints none. A ninth benign
+/// site, `engine::answer_receipts` in `game/engine.rs`, reaches the receipts of an offer that is
+/// already open: it mints no offer, certifies nothing, and cannot run unless the offer is open.
 ///
 /// R8 CONJUNCT 2, same test — pin VALUE-legality has exactly ONE production
 /// consumer (`analysis::decision_template::declaration_conforms`), that consumer
@@ -333,7 +335,7 @@ fn the_loop_shortcut_offer_writer_surface_is_pinned_and_every_declare_site_valid
 
     assert_eq!(
         (production.len(), in_test.len()),
-        (28, 23),
+        (29, 23),
         "CR 732.2a OFFER-WRITER SURFACE CHANGED (not re-measured — this number is an \
          INVARIANCE pin over the whole 5d U-series).\n\
          The two CERTIFICATION-PATH writers are `reconcile_loop_shortcut` (the recorded road's \
@@ -365,7 +367,7 @@ fn the_loop_shortcut_offer_writer_surface_is_pinned_and_every_declare_site_valid
             ("engine/src/analysis/corpus.rs".to_string(), 1),
             ("engine/src/analysis/corpus_tests.rs".to_string(), 1),
             ("engine/src/game/derived_views.rs".to_string(), 1),
-            ("engine/src/game/engine.rs".to_string(), 4),
+            ("engine/src/game/engine.rs".to_string(), 5),
             ("engine/src/game/interaction.rs".to_string(), 5),
             ("engine/src/game/play_trace.rs".to_string(), 1),
             ("engine/src/game/scenario.rs".to_string(), 1),

@@ -13196,3 +13196,382 @@ fn a_departure_vito_with_alternating_aims_charges_only_resolved_announcements() 
     );
     take_wins_and_one_more_is_refused(&state, 7);
 }
+
+// ─────────────── a performed shortcut answer is performed once ───────────────
+
+/// Casts `kickoff`, drives to the offer, declares its offered count and accepts for P1, so the
+/// window waits on P2, the last responder.
+fn answered_to_p2(mut runner: GameRunner, kickoff: ObjectId) -> GameRunner {
+    let _ = runner.cast(kickoff).resolve();
+    let (_events, wf) = drive_collect(&mut runner, 500);
+    assert!(
+        matches!(wf, WaitingFor::LoopShortcut { .. }),
+        "reach: the offer fires, got {wf:?}"
+    );
+    runner
+        .act(GameAction::DeclareShortcut {
+            count: offered(runner.state()).1,
+            template: None,
+        })
+        .expect("P0 declares");
+    runner
+        .act(GameAction::RespondToShortcut {
+            response: ShortcutResponse::Accept,
+        })
+        .expect("P1 accepts");
+    assert!(
+        p2_answers(runner.state()),
+        "reach: P2 answers, got {:?}",
+        runner.state().waiting_for
+    );
+    runner
+}
+
+/// [`setup_3p_optional_cascade`] at P2's window.
+fn cascade_at_p2_window() -> GameRunner {
+    let (runner, kickoff) = setup_3p_optional_cascade(LoopDetectionMode::Interactive);
+    answered_to_p2(runner, kickoff)
+}
+
+fn p2_answers(state: &GameState) -> bool {
+    matches!(state.waiting_for, WaitingFor::RespondToShortcut { player, .. } if player == P2)
+}
+
+fn shorten_at(place: u32) -> GameAction {
+    GameAction::RespondToShortcut {
+        response: ShortcutResponse::Shorten {
+            at_iteration: place,
+        },
+    }
+}
+
+fn names_no_different_choice<T: std::fmt::Debug>(result: &Result<T, EngineError>) -> bool {
+    matches!(result, Err(EngineError::InvalidAction(message))
+        if message.contains(ShortenRefusal::NoDifferentChoice.reason()))
+}
+
+/// What `f` returns and the play-trace probe entries it costs.
+fn with_entries<T>(f: impl FnOnce() -> T) -> (T, u64) {
+    let before = engine::game::perf_counters::play_trace_counters();
+    let out = f();
+    (
+        out,
+        engine::game::perf_counters::play_trace_counters()
+            .since(before)
+            .probe_entries,
+    )
+}
+
+/// P2's Shorten at `place`, submitted through the interaction ingress of a bound `state`.
+fn submit_shorten(
+    state: &mut GameState,
+    place: u32,
+) -> Result<(), engine::types::interaction::InteractionReasonCode> {
+    use engine::types::interaction::{
+        InteractionOpportunityResponse, InteractionResponse, InteractionResponseSpec,
+        InteractionShortcutReply, InteractionSubmission,
+    };
+    let filtered = engine::game::visibility::filter_state_for_viewer(state, P2);
+    let interaction_id = engine::game::interaction::derive_viewer_interaction(state, &filtered, P2)
+        .opportunities
+        .into_iter()
+        .find(|opportunity| {
+            matches!(
+                &opportunity.response,
+                InteractionOpportunityResponse::Schema {
+                    spec: InteractionResponseSpec::ShortcutReply { .. },
+                    ..
+                }
+            )
+        })
+        .map(|opportunity| opportunity.interaction_id)
+        .expect("reach: P2's window publishes a shortcut-reply opportunity");
+    engine::game::interaction::submit_interaction(
+        state,
+        P2,
+        InteractionSubmission {
+            interaction_id,
+            response: InteractionResponse::ShortcutReply {
+                reply: InteractionShortcutReply::Shorten {
+                    at_iteration: place,
+                },
+            },
+        },
+    )
+    .map(drop)
+    .map_err(|error| error.code)
+}
+
+fn bind(state: &mut GameState) {
+    engine::game::interaction::bind_interaction_authority(
+        state,
+        engine::types::interaction::InteractionSessionId("receipts".to_string()),
+    )
+    .expect("an interaction authority");
+}
+
+/// CR 732.2b: only the take to place 1 decides that P2 is left with nothing but passing there, so
+/// it runs once; the same Shorten again reads that verdict, legality stops issuing it, and P2's
+/// Accept still takes the shortcut.
+#[test]
+fn a_refused_shorten_is_performed_once() {
+    let mut runner = cascade_at_p2_window();
+    let shorten = shorten_at(engine::ai_support::AI_SHORTEN_PLACE);
+    let entry = serde_json::to_value(runner.state()).expect("the state serializes");
+    let entry_position = runner.state().clone();
+    let (first, cost) = with_entries(|| runner.act(shorten.clone()));
+    assert!(names_no_different_choice(&first), "{first:?}");
+    assert!(cost > 0, "reach: the first refusal performs the take");
+    assert_eq!(
+        serde_json::to_value(runner.state()).expect("the state serializes"),
+        entry,
+        "the refusal writes nothing a viewer reads"
+    );
+    assert!(
+        *runner.state() == entry_position,
+        "a receipt is not part of the position"
+    );
+    assert!(p2_answers(runner.state()));
+
+    let before = take_cost_snapshot();
+    let (second, cost) = with_entries(|| runner.act(shorten.clone()));
+    assert!(names_no_different_choice(&second), "{second:?}");
+    assert_eq!(cost, 0, "the refusal is read, not performed again");
+    assert_eq!(take_cost_snapshot().since(before).drive_snapshots, 0);
+
+    let accept = GameAction::RespondToShortcut {
+        response: ShortcutResponse::Accept,
+    };
+    assert_eq!(
+        engine::ai_support::legal_actions(runner.state()),
+        std::slice::from_ref(&accept)
+    );
+    runner.act(accept).expect("P2 accepts");
+    assert_eq!(
+        runner.state().waiting_for,
+        WaitingFor::GameOver { winner: Some(P0) }
+    );
+}
+
+/// CR 104.3a + CR 800.4a: P0's concession takes its drain out of the game while P2's window stays
+/// open, so the refusal taken before it says nothing and the take to place 1 is admitted, as it is
+/// without the earlier refusal.
+#[test]
+fn a_shorten_receipt_dies_with_a_concession() {
+    for refuse_first in [true, false] {
+        let mut runner = cascade_at_p2_window();
+        if refuse_first {
+            let (first, cost) = with_entries(|| runner.act(shorten_at(1)));
+            assert!(names_no_different_choice(&first), "{first:?}");
+            assert!(cost > 0, "reach: the refusal performs the take");
+        }
+        runner
+            .act(GameAction::Concede { player_id: P0 })
+            .expect("P0 concedes");
+        assert!(p2_answers(runner.state()), "the window survives P0");
+        runner
+            .act(shorten_at(1))
+            .unwrap_or_else(|e| panic!("refuse_first={refuse_first}: {e:?}"));
+    }
+}
+
+/// CR 732.2b + CR 402.3: an emptied stop list (P2's or P1's) or P2's hand order changes nothing
+/// the take reads, so the refusal stands at no cost; a real stop changes what the drive
+/// auto-submits, so the take runs again.
+#[test]
+fn a_shorten_receipt_survives_a_preference_that_changes_nothing() {
+    let refused_once = || {
+        let mut runner = cascade_at_p2_window();
+        let (first, cost) = with_entries(|| apply(runner.state_mut(), P2, shorten_at(1)));
+        assert!(names_no_different_choice(&first), "{first:?}");
+        assert!(cost > 0, "reach: the refusal performs the take");
+        runner
+    };
+    let prefer = |state: &mut GameState, seat: PlayerId, preference: GameAction| {
+        let revision = state.state_revision;
+        apply(state, seat, preference).expect("the preference applies");
+        assert_ne!(
+            state.state_revision, revision,
+            "reach: the preference ran through the boundary"
+        );
+    };
+    for (seat, reorder) in [(P2, false), (P1, false), (P2, true)] {
+        let mut runner = refused_once();
+        let state = runner.state_mut();
+        let preference = if reorder {
+            GameAction::ReorderHand {
+                order: state.players[2].hand.iter().copied().collect(),
+            }
+        } else {
+            GameAction::SetPhaseStops { stops: vec![] }
+        };
+        prefer(state, seat, preference);
+        let (again, cost) = with_entries(|| apply(state, P2, shorten_at(1)));
+        assert!(names_no_different_choice(&again), "{again:?}");
+        assert_eq!(cost, 0, "seat={seat:?} reorder={reorder}");
+        assert!(p2_answers(state));
+    }
+
+    let mut runner = refused_once();
+    let state = runner.state_mut();
+    prefer(
+        state,
+        P2,
+        GameAction::SetPhaseStops {
+            stops: vec![engine::types::phase::PhaseStop {
+                phase: Phase::End,
+                scope: engine::types::phase::PhaseStopScope::AllTurns,
+            }],
+        },
+    );
+    let (_, cost) = with_entries(|| apply(state, P2, shorten_at(1)));
+    assert!(cost > 0, "a real stop runs the take again");
+}
+
+/// A refused Shorten submitted again through the ingress reads the receipt its first submission
+/// left, so it performs nothing.
+#[test]
+fn a_refused_shorten_submitted_again_performs_nothing() {
+    use engine::types::interaction::InteractionReasonCode;
+    let mut runner = cascade_at_p2_window();
+    let state = runner.state_mut();
+    bind(state);
+    let (first, cost) = with_entries(|| submit_shorten(state, 1));
+    assert_eq!(first, Err(InteractionReasonCode::ReducerRejected));
+    assert!(cost > 0, "reach: the first submission performs the take");
+    let (second, cost) = with_entries(|| submit_shorten(state, 1));
+    assert_eq!(second, Err(InteractionReasonCode::ReducerRejected));
+    assert_eq!(cost, 0);
+    assert!(p2_answers(state));
+}
+
+/// CR 732.2b + CR 732.2c: at P2's life 5 holding Gut Shot, the take refuses place 3 and admits
+/// place 4. A refused place submitted again costs nothing, and the admitted place submitted
+/// through the ingress costs what applying it directly costs: one take to decide, one to take it.
+#[test]
+fn an_admitted_shorten_takes_its_place_once() {
+    use engine::types::interaction::InteractionReasonCode;
+    let db = crate::support::shared_card_db().expect("the committed card fixture loads");
+    let (mut scenario, wine, _priest) = priest_drain_scenario(&[20, 20, 5]);
+    scenario.add_basic_land(P1, ManaColor::Red);
+    scenario.add_bolt_to_hand(P1);
+    scenario.add_real_card(P2, "Gut Shot", Zone::Hand, db);
+    let mut runner = scenario.build();
+    runner.state_mut().loop_detection = LoopDetectionMode::Interactive;
+    let window = answered_to_p2(runner, wine).state().clone();
+
+    let mut direct = window.clone();
+    let before = take_cost_snapshot();
+    let (applied, direct_cost) = with_entries(|| apply(&mut direct, P2, shorten_at(4)));
+    applied.expect("place 4 is admitted");
+    assert!(direct_cost > 0);
+    assert_eq!(take_cost_snapshot().since(before).drive_snapshots, 2);
+
+    let mut state = window;
+    bind(&mut state);
+    let (refused, cost) = with_entries(|| submit_shorten(&mut state, 3));
+    assert_eq!(refused, Err(InteractionReasonCode::ReducerRejected));
+    assert!(cost > 0, "reach: the refusal performs the take");
+    let (refused, cost) = with_entries(|| submit_shorten(&mut state, 3));
+    assert_eq!(refused, Err(InteractionReasonCode::ReducerRejected));
+    assert_eq!(cost, 0);
+    let before = take_cost_snapshot();
+    let (admitted, cost) = with_entries(|| submit_shorten(&mut state, 4));
+    assert_eq!(admitted, Ok(()));
+    assert_eq!(cost, direct_cost);
+    assert_eq!(take_cost_snapshot().since(before).drive_snapshots, 2);
+}
+
+/// CR 732.2a: the drain offer carries no performance to measure a declaration against, so neither
+/// its published count submitted through the ingress nor a declared template performs anything.
+#[test]
+fn a_published_declaration_submits_without_a_performance() {
+    use engine::types::interaction::{
+        InteractionOpportunityResponse, InteractionResponse, InteractionResponseSpec,
+        InteractionShortcutDecision, InteractionSubmission,
+    };
+    let (mut runner, kickoff) = setup_3p_optional_cascade(LoopDetectionMode::Interactive);
+    let _ = runner.cast(kickoff).resolve();
+    let (_events, wf) = drive_collect(&mut runner, 500);
+    assert!(
+        matches!(wf, WaitingFor::LoopShortcut { .. }),
+        "reach: the offer fires, got {wf:?}"
+    );
+    let (offer, count) = (runner.state().clone(), offered(runner.state()).1);
+    let state = runner.state_mut();
+    bind(state);
+    let filtered = engine::game::visibility::filter_state_for_viewer(state, P0);
+    let interaction_id = engine::game::interaction::derive_viewer_interaction(state, &filtered, P0)
+        .opportunities
+        .into_iter()
+        .find(|opportunity| {
+            matches!(
+                &opportunity.response,
+                InteractionOpportunityResponse::Schema {
+                    spec: InteractionResponseSpec::Shortcut { .. },
+                    ..
+                }
+            )
+        })
+        .map(|opportunity| opportunity.interaction_id)
+        .expect("reach: the offer publishes a shortcut opportunity");
+    let (submitted, cost) = with_entries(|| {
+        engine::game::interaction::submit_interaction(
+            state,
+            P0,
+            InteractionSubmission {
+                interaction_id,
+                response: InteractionResponse::Shortcut {
+                    decision: InteractionShortcutDecision::AcceptSuggested,
+                    pins: vec![],
+                },
+            },
+        )
+        .map(drop)
+        .map_err(|error| error.code)
+    });
+    assert_eq!(submitted, Ok(()));
+    assert_eq!(cost, 0);
+    assert!(
+        matches!(state.waiting_for, WaitingFor::RespondToShortcut { player, .. } if player == P1)
+    );
+
+    let mut declared = offer;
+    let template = DecisionTemplate {
+        owner: P0,
+        decisions: vec![],
+        replay: ReplayMode::Scheduled {
+            count: count.clone(),
+        },
+        key: DecisionGroupKey::from_sources(&[], DecisionKind::LoopChoice),
+    };
+    let (applied, cost) = with_entries(|| {
+        apply(
+            &mut declared,
+            P0,
+            GameAction::DeclareShortcut {
+                count,
+                template: Some(template),
+            },
+        )
+    });
+    assert!(applied.is_ok(), "{applied:?}");
+    assert!(
+        matches!(declared.waiting_for, WaitingFor::RespondToShortcut { player, .. } if player == P1),
+        "reach: the declared template commits, got {:?}",
+        declared.waiting_for
+    );
+    assert_eq!(cost, 0);
+}
+
+/// CR 732.2b: an answer from a seat the window does not wait on is refused before any take.
+#[test]
+fn a_seat_that_may_not_answer_performs_nothing() {
+    let mut runner = cascade_at_p2_window();
+    let state = runner.state_mut();
+    let (refused, cost) = with_entries(|| apply(state, P1, shorten_at(1)));
+    assert!(refused.is_err());
+    assert_eq!(cost, 0);
+    let (_, cost) = with_entries(|| apply(state, P2, shorten_at(1)));
+    assert!(cost > 0, "reach: P2's own Shorten performs the take");
+}

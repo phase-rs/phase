@@ -24793,6 +24793,7 @@ one on the bottom of your library.";
             let mut refused = state.clone();
             assert!(apply(&mut refused, P1, shorten_at(1)).is_err());
             assert_eq!(refused.waiting_for, state.waiting_for);
+            assert_eq!(contract_actions(&refused, P1), vec![accept()]);
             apply(&mut state, P1, accept()).expect("the Accept takes the shortcut");
             assert!(state.players[1].is_eliminated);
         }

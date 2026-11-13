@@ -12047,6 +12047,20 @@ pub fn resolve_interaction_response(
     actor: PlayerId,
     submission: &InteractionSubmission,
 ) -> Result<GameAction, InteractionSubmitError> {
+    resolve_with_evidence(
+        state,
+        actor,
+        submission,
+        crate::game::engine::ShortcutEvidence::Performed,
+    )
+}
+
+fn resolve_with_evidence(
+    state: &GameState,
+    actor: PlayerId,
+    submission: &InteractionSubmission,
+    evidence: crate::game::engine::ShortcutEvidence,
+) -> Result<GameAction, InteractionSubmitError> {
     bound_interaction_submission(submission)?;
     slot_for_submission(state, actor, &submission.interaction_id)?;
     let filtered = visibility::filter_state_for_viewer(state, actor);
@@ -12055,9 +12069,29 @@ pub fn resolve_interaction_response(
         &filtered,
         &submission.interaction_id,
         &submission.response,
-        crate::game::engine::ShortcutEvidence::Performed,
+        evidence,
     )?;
     Ok(action)
+}
+
+/// CR 732.2a: a submitted shortcut declaration is performed once, before the ingress decides it,
+/// and the receipt that performance leaves is what the ingress and the reducer read.
+fn record_submitted_answer(
+    state: &mut GameState,
+    actor: PlayerId,
+    submission: &InteractionSubmission,
+) {
+    if !matches!(submission.response, InteractionResponse::Shortcut { .. }) {
+        return;
+    }
+    if let Ok(action) = resolve_with_evidence(
+        state,
+        actor,
+        submission,
+        crate::game::engine::ShortcutEvidence::Measured,
+    ) {
+        crate::game::engine::record_answer_receipt(state, &action);
+    }
 }
 
 /// Hidden engine-only submission entry point. The opaque interaction and choice
@@ -12069,6 +12103,7 @@ pub fn submit_interaction(
     actor: PlayerId,
     submission: InteractionSubmission,
 ) -> Result<AppliedInteraction, InteractionSubmitError> {
+    record_submitted_answer(state, actor, &submission);
     let action = resolve_interaction_response(state, actor, &submission)?;
     // Re-read the slot rather than threading it out of `resolve_*`: keeping that
     // function's return to the action alone is what makes it usable as a public
@@ -12091,6 +12126,7 @@ pub fn submit_interaction_with_rejection(
     actor: PlayerId,
     submission: InteractionSubmission,
 ) -> Result<AppliedInteraction, ActionRejection> {
+    record_submitted_answer(state, actor, &submission);
     let action = resolve_interaction_response(state, actor, &submission)
         .map_err(|error| action_rejection_for_interaction_reason(error.code))?;
     let semantic_owner = PlayerId(
