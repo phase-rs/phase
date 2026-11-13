@@ -332,8 +332,8 @@ fn savage_summoning_next_creature_spell_does_not_gain_the_flash_keyword() {
     assert_upkeep_cast_snapshot_flash(&mut runner, bears, false);
 }
 
-// CR 601.3b: an unconditional as-though-flash permission authorizes the cast even when the
-// spell's own target-dependent flash option ("if it targets a commander") does not.
+// CR 601.3: Leyline's unconditional as-though-flash permission alone allows the cast, so Timely
+// Ward's own "if it targets a commander" option (CR 601.3b) does not limit its targets.
 #[test]
 fn leyline_of_anticipation_lets_timely_ward_target_a_noncommander_in_the_upkeep() {
     let (mut runner, (ward, bears)) = upkeep(|scenario, db| {
@@ -366,6 +366,88 @@ fn leyline_of_anticipation_lets_timely_ward_target_a_noncommander_in_the_upkeep(
             targets: vec![TargetRef::Object(bears)],
         })
         .expect("a non-commander target keeps Leyline's permission");
+    assert!(on_stack(&runner, ward));
+}
+
+// CR 601.3: Azula's unconditional as-though-flash permission alone allows casting a card exiled
+// with it, so Timely Ward's own "if it targets a commander" option (CR 601.3b) does not limit
+// its targets.
+#[test]
+fn azula_lets_an_exiled_timely_ward_target_a_noncommander_in_the_upkeep() {
+    let db = load_db().expect("the committed integration card fixture loads");
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PostCombatMain);
+    let azula = scenario.add_real_card(P0, "Azula, Cunning Usurper", Zone::Hand, db);
+    let bears = scenario.add_real_card(P0, "Grizzly Bears", Zone::Battlefield, db);
+    scenario.add_real_card(P1, "Grizzly Bears", Zone::Battlefield, db);
+    let ward = scenario.add_real_card(P1, "Timely Ward", Zone::Graveyard, db);
+    for player in [P0, P1] {
+        scenario.with_library_top(player, &["Library A", "Library B"]);
+    }
+    let mut mana = vec![ManaUnit::new(ManaType::Black, ObjectId(9_900), false, vec![]); 4];
+    mana.push(ManaUnit::new(
+        ManaType::Blue,
+        ObjectId(9_901),
+        false,
+        vec![],
+    ));
+    scenario.with_mana_pool(P0, mana);
+    let mut runner = scenario.build();
+
+    assert!(cast(&mut runner, azula), "P0 casts Azula");
+    runner.advance_until_stack_empty();
+    assert_eq!(
+        runner.state().objects[&ward].zone,
+        Zone::Exile,
+        "Azula's enters trigger exiles Timely Ward; waiting for {:?}",
+        runner.state().waiting_for
+    );
+    // Through P0's end step and P1's turn to P0's next upkeep.
+    for _ in 0..2 {
+        runner.advance_to_phase(Phase::End);
+        runner.advance_to_phase(Phase::Upkeep);
+    }
+    assert_eq!(
+        (runner.state().active_player, runner.state().phase),
+        (P0, Phase::Upkeep)
+    );
+    for _ in 0..3 {
+        runner.state_mut().players[P0.0 as usize]
+            .mana_pool
+            .add(ManaUnit::new(
+                ManaType::White,
+                ObjectId(9_902),
+                false,
+                vec![],
+            ));
+    }
+
+    assert!(
+        engine::ai_support::legal_actions(runner.state())
+            .iter()
+            .any(|action| matches!(
+                action,
+                GameAction::CastSpell { object_id, .. } if *object_id == ward
+            )),
+        "Timely Ward exiled with Azula is a legal cast in P0's upkeep"
+    );
+    assert!(
+        cast(&mut runner, ward),
+        "Azula lets P0 announce Timely Ward"
+    );
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::TargetSelection { .. }
+        ),
+        "{:?}",
+        runner.state().waiting_for
+    );
+    runner
+        .act(GameAction::SelectTargets {
+            targets: vec![TargetRef::Object(bears)],
+        })
+        .expect("a non-commander target keeps Azula's permission");
     assert!(on_stack(&runner, ward));
 }
 
