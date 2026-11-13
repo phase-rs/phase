@@ -2902,16 +2902,14 @@ pub(super) fn matching_counter_removed_occurrences(
     if !match_counter_removed(event, trigger, source_context, state) {
         return Vec::new();
     }
-    let occurrences = if trigger
+    if trigger
         .counter_filter
         .as_ref()
         .is_some_and(|filter| filter.threshold.is_some())
     {
-        1
-    } else {
-        (*count).max(1)
-    };
-    (0..occurrences)
+        return vec![event.clone()];
+    }
+    (0..(*count).max(1))
         .map(|_| GameEvent::CounterRemoved {
             object_id: *object_id,
             counter_type: counter_type.clone(),
