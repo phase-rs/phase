@@ -59,11 +59,22 @@ fn instruction_boundary(
     ability: &ResolvedAbility,
     population: impl FnOnce(&GameState) -> Vec<ObjectId>,
 ) -> (InstructionBoundary, Vec<ObjectId>) {
+    // CR 702.26b: a phased-out permanent can't be affected, so it is never a member.
+    let eligible = |state: &GameState| {
+        let mut members = population(state);
+        members.retain(|id| {
+            !state
+                .objects
+                .get(id)
+                .is_some_and(|obj| obj.is_phased_out_permanent())
+        });
+        members
+    };
     match carried_boundary(state, ability) {
-        Some(boundary) => (boundary, population(state)),
+        Some(boundary) => (boundary, eligible(state)),
         None => {
             crate::game::layers::flush_layers(state);
-            let members = population(state);
+            let members = eligible(state);
             let capture = capture_control_change_instruction(state, members.iter().copied());
             (InstructionBoundary::Own(capture), members)
         }
@@ -525,7 +536,8 @@ pub fn resolve_give(
 /// CR 611.2c: the objects whose controller this effect changes, fixed when the
 /// control-change continuous effect begins.
 ///
-/// SINGLE AUTHORITY: `resolve_give` hands control over exactly this list, and
+/// SINGLE AUTHORITY: `resolve_give` hands control over this list less any
+/// phased-out permanent (CR 702.26b), and
 /// `effects::affected_objects_from_events` publishes exactly this list as the
 /// chain tracked set. The `ControllerChanged` event is deliberately NOT the
 /// authority: `resolve_give` emits it only when the controller actually changed,

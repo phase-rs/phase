@@ -499,6 +499,7 @@ mod perpetual_modify_pt_historical_restore;
 mod perpetual_trigger_subject_binding;
 mod peter_parker_modal_back_face_cast;
 mod phantom_general_token_anthem;
+mod phased_out_permanent_gains_no_control;
 mod phyrexian_fleshgorger_ward;
 mod phyrexian_processor_entry_payment;
 mod physical_contest;

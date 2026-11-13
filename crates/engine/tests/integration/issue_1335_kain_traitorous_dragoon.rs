@@ -543,3 +543,80 @@ fn kain_stolen_before_trigger_resolves_still_pays_rider() {
         (2, 2, 18),
     );
 }
+
+const SLIP_OUT_THE_BACK_ORACLE: &str = "Put a +1/+1 counter on target creature. It phases out. \
+(Treat it and anything attached to it as though they don't exist until its controller's next turn.)";
+
+#[test]
+fn kain_phased_out_before_trigger_resolves_pays_no_rider() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_library_top(P0, &["Card A", "Card B", "Card C", "Card D"]);
+    let kain = scenario
+        .add_creature_from_oracle(P0, "Kain, Traitorous Dragoon", 2, 4, KAIN_ORACLE)
+        .id();
+    let slip = scenario
+        .add_spell_to_hand_from_oracle(P0, "Slip Out the Back", true, SLIP_OUT_THE_BACK_ORACLE)
+        .id();
+    let mut runner = scenario.build();
+
+    run_combat(&mut runner, vec![kain], vec![]);
+    let p0_hand_before = runner.state().players[P0.0 as usize].hand.len();
+    let out = runner.cast(slip).target_objects(&[kain]).resolve();
+
+    assert!(
+        out.events().iter().any(|event| matches!(
+            event,
+            GameEvent::EffectResolved { kind: EffectKind::GiveControl, source_id, .. }
+                if *source_id == kain
+        )),
+        "Kain's trigger must resolve its GiveControl"
+    );
+    let obj = &runner.state().objects[&kain];
+    assert!(obj.is_phased_out() && obj.zone == Zone::Battlefield);
+    assert_eq!(
+        obj.counters
+            .get(&engine::types::counter::CounterType::Plus1Plus1)
+            .copied(),
+        Some(1)
+    );
+    assert!(
+        !runner
+            .state()
+            .transient_continuous_effects
+            .iter()
+            .any(|effect| {
+                effect.affected == TargetFilter::SpecificObject { id: kain }
+                    && effect.modifications.iter().any(|m| {
+                        matches!(
+                            m,
+                            engine::types::ability::ContinuousModification::ChangeController
+                        )
+                    })
+            }),
+        "no control effect may apply to phased-out Kain"
+    );
+    let p0_hand_after = runner.state().players[P0.0 as usize].hand.len();
+    let p0_treasures = runner
+        .state()
+        .objects
+        .values()
+        .filter(|obj| {
+            obj.zone == Zone::Battlefield
+                && obj.controller == P0
+                && obj
+                    .card_types
+                    .subtypes
+                    .iter()
+                    .any(|st| st.eq_ignore_ascii_case("Treasure"))
+        })
+        .count();
+    assert_eq!(
+        (
+            p0_hand_after + 1 - p0_hand_before,
+            p0_treasures,
+            runner.state().players[P0.0 as usize].life,
+        ),
+        (0, 0, 20),
+    );
+}
