@@ -1104,7 +1104,9 @@ fn essence_burn_transform_keeps_die_exile() {
 #[test]
 fn essence_burn_flip_keeps_die_exile() {
     use engine::types::events::GameEvent;
-    for (companions, granted, should_flip) in [(8, true, true), (7, true, false), (8, false, true)]
+    // CR 608.2c: Eggwatcher creates the Snake before checking its threshold;
+    // six companion Slugs leave the negative control below ten creatures.
+    for (companions, granted, should_flip) in [(8, true, true), (6, true, false), (8, false, true)]
     {
         let mut s = lifetime_board();
         let host = real(&mut s, P0, "Orochi Eggwatcher", Zone::Battlefield);

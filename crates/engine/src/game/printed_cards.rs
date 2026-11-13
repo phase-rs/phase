@@ -118,6 +118,10 @@ fn printed_colors_from_face(card_face: &CardFace) -> Vec<ManaColor> {
 }
 
 pub fn apply_card_face_to_object(obj: &mut GameObject, card_face: &CardFace) {
+    // CR 400.7 + CR 614.3: refreshing printed characteristics does not move
+    // this object to a new zone, so preserve its installed resolution
+    // replacements with their duration and consumption state intact.
+    let carried_live_replacements = obj.replacement_definitions.clone();
     // CR 716.2b: capture the pre-call init flag so we can distinguish
     // first-time face application from re-application by
     // `rehydrate_game_from_card_db`. Used below to gate `class_level` seeding.
@@ -166,8 +170,13 @@ pub fn apply_card_face_to_object(obj: &mut GameObject, card_face: &CardFace) {
     for replacement in &mut replacements {
         replacement.fix_legacy_parse_time_consumed_flag();
     }
+    obj.base_replacement_definitions = Arc::new(replacements);
+    obj.replacement_definitions =
+        crate::game::game_object::reseed_replacements_carrying_resolution_effects(
+            &carried_live_replacements,
+            &obj.base_replacement_definitions,
+        );
     obj.abilities = Arc::new(abilities.clone());
-    obj.replacement_definitions = replacements.clone().into();
     obj.static_definitions = card_face.static_abilities.clone().into();
     // CR 702.148a-b: Carry the cleave-cost ability set onto the object so the
     // casting flow can swap it in when the spell is cast for its cleave cost.
@@ -198,7 +207,6 @@ pub fn apply_card_face_to_object(obj: &mut GameObject, card_face: &CardFace) {
         obj.install_trigger_base_definitions(trigger_definitions)
             .expect("trigger base-set generation must not overflow");
     }
-    obj.base_replacement_definitions = Arc::new(replacements);
     obj.base_static_definitions = Arc::new(card_face.static_abilities.clone());
     obj.base_color = color;
     obj.base_characteristics_initialized = true;
