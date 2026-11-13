@@ -1180,7 +1180,16 @@ pub(super) fn try_parse_remove_counter(lower: &str, ctx: &mut ParseContext) -> O
     // control", "each of two creatures", "target permanent", "up to one ...")
     // keeps today's single-scope reading, byte-identical.
     let source = classify_removal_source(target_text);
-    if source == RemovalSource::Chosen || contains_target_word(target_text) {
+    let names_target = contains_target_word(target_text);
+    // CR 115.1 + CR 115.10a: a population that names a target inside it ("each
+    // creature target player controls") is a mass removal whose population is
+    // bound by a chosen target. Neither scope models that: the single scope would
+    // remove from one object, and the mass scope declares no target slot. Refuse
+    // it, so the clause stays an honest `Effect::unimplemented`.
+    if source == RemovalSource::Mass && names_target {
+        return None;
+    }
+    if source == RemovalSource::Chosen || names_target {
         let target = resolve_remove_counter_from_target(target_text, ctx);
         return Some(Effect::RemoveCounter {
             counter_type,
@@ -1667,15 +1676,21 @@ fn counter_recipient_is_resolvable(target: &TargetFilter) -> bool {
 /// only, so a zone-qualified recipient ("each creature in your graveyard")
 /// resolves to nothing there. Refuse it at the parser so the clause stays an
 /// honest `Effect::unimplemented` instead of lowering to an effect that silently
-/// does nothing. `None` means the filter imposes no zone constraint — the
-/// battlefield default — and is admissible. The resolver's gate carries the same
-/// conjunct as an independent second guard; widening this to a zone-aware
-/// enumeration must move BOTH.
+/// does nothing. Every zone the filter names must be the battlefield; naming
+/// none is the battlefield default and is admissible. The mass counter removal
+/// gate (`mass_removal_is_admissible`) applies the same test, since its resolver
+/// (`effects::resolved_battlefield_population_ids`) also enumerates only the
+/// battlefield. The multiplication resolver's gate carries the same
+/// conjunct as an independent second guard; the mass removal resolver relies on
+/// this parser gate alone. Widening this to a zone-aware enumeration must move
+/// every consumer.
 fn recipient_zone_is_battlefield(target: &TargetFilter) -> bool {
-    matches!(
-        target.extract_in_zone(),
-        None | Some(crate::types::zones::Zone::Battlefield)
-    )
+    // Every zone the filter names, not only the first `InZone` it finds: an
+    // `InAnyZone` set or a later disjunct can name another zone.
+    target
+        .population_zones()
+        .iter()
+        .all(|zone| *zone == crate::types::zones::Zone::Battlefield)
 }
 
 /// CR 115.10a + CR 608.2d + CR 701.10e: the single admissibility test both
@@ -5192,6 +5207,10 @@ mod tests {
                 matches!(*refused_def.effect, Effect::Unimplemented { .. }),
                 "{refused}: honest Unimplemented, got {refused_def:#?}"
             );
+            assert_gap_names_clause(
+                std::slice::from_ref(&*refused_def.effect),
+                refused.trim_end_matches('.'),
+            );
 
             let admitted_def = super::super::parse_effect_chain(
                 admitted,
@@ -5217,6 +5236,110 @@ mod tests {
             panic!("expected RemoveCounter, got {other:#?}");
         };
         assert!(filter.properties.contains(&FilterProp::Another));
+    }
+
+    /// The unimplemented gap a refused clause lowers to carries that clause's own
+    /// text, so the assertion is bound to the refusal and not to some other gap.
+    fn assert_gap_names_clause(effects: &[Effect], clause: &str) {
+        let clause = clause.to_lowercase();
+        assert!(
+            effects.iter().any(|effect| effect
+                .unimplemented_description()
+                .is_some_and(|text| text.to_lowercase().contains(&clause))),
+            "no Unimplemented gap carries {clause:?}: {effects:#?}"
+        );
+    }
+
+    /// CR 115.1 + CR 115.10a: a mass population with a target inside it ("each
+    /// creature target player controls") is neither a single removal nor a
+    /// target-free mass removal, so it is refused. The paired "you control" form
+    /// reaches the same branch and is admitted.
+    #[test]
+    fn mass_population_naming_a_target_is_refused() {
+        let text = "remove all counters from each creature target player controls";
+        let recipient = "each creature target player controls";
+        assert_eq!(
+            classify_removal_source(recipient),
+            RemovalSource::Mass,
+            "REACH-GUARD: the recipient classifies as a population"
+        );
+        assert!(contains_target_word(recipient), "REACH-GUARD");
+        assert!(remove_counter(text).is_none(), "{:?}", remove_counter(text));
+
+        let refused = super::super::parse_effect_chain(
+            "Remove all counters from each creature target player controls.",
+            crate::types::ability::AbilityKind::Spell,
+        );
+        assert!(
+            parsed_effects_of_kind(&refused, "RemoveCounter").is_empty(),
+            "{refused:#?}"
+        );
+        assert_gap_names_clause(
+            &parsed_effects_of_kind(&refused, "Unimplemented"),
+            "remove all counters from each creature target player controls",
+        );
+
+        let admitted = remove_counter("remove all counters from each creature you control")
+            .expect("the paired population parses");
+        assert_eq!(scope_of(&admitted), EffectScope::All);
+    }
+
+    /// CR 400.1: the mass gate checks every zone the population names. A
+    /// population over two non-battlefield zones reaches the gate (enumerable,
+    /// consumed whole) and is refused; the battlefield form is admitted.
+    #[test]
+    fn mass_population_naming_other_zones_is_refused() {
+        let recipient = "all creature cards in your graveyard or in your hand";
+        let (target, remainder) =
+            resolve_counter_target_with_remainder(recipient, &mut default_ctx());
+        assert!(
+            target.names_enumerable_population() && remainder.trim().is_empty(),
+            "REACH-GUARD: the population reaches the zone conjunct: {target:?} / {remainder:?}"
+        );
+        assert!(
+            target
+                .population_zones()
+                .iter()
+                .any(|zone| *zone != crate::types::zones::Zone::Battlefield),
+            "{target:?}"
+        );
+        // The single-zone reader sees no zone here (the zones sit in an
+        // `InAnyZone` set), so a gate built on it would have admitted the phrase.
+        assert_eq!(target.extract_in_zone(), None, "{target:?}");
+        assert!(!recipient_zone_is_battlefield(&target), "{target:?}");
+        let text = format!("remove all counters from {recipient}");
+        assert!(
+            remove_counter(&text).is_none(),
+            "{:?}",
+            remove_counter(&text)
+        );
+
+        // A filter whose first zone is the battlefield and whose `InAnyZone`
+        // adds another is refused too: no single zone stands for the set.
+        let mixed = TargetFilter::Typed(TypedFilter::creature().properties(vec![
+            FilterProp::InZone {
+                zone: crate::types::zones::Zone::Battlefield,
+            },
+            FilterProp::InAnyZone {
+                zones: vec![
+                    crate::types::zones::Zone::Battlefield,
+                    crate::types::zones::Zone::Graveyard,
+                ],
+            },
+        ]));
+        assert!(!recipient_zone_is_battlefield(&mixed));
+        assert!(!mass_removal_is_admissible(
+            &mixed,
+            "",
+            None,
+            &QuantityExpr::Fixed { value: -1 }
+        ));
+        assert!(recipient_zone_is_battlefield(&TargetFilter::Typed(
+            TypedFilter::creature()
+        )));
+        let admitted = remove_counter("remove all counters from all creatures")
+            .expect("the battlefield population parses");
+        assert_eq!(scope_of(&admitted), EffectScope::All);
     }
 
     /// N2: Sensational Spider-Man's "up to three ... from among all permanents"
@@ -5364,25 +5487,25 @@ mod tests {
     #[test]
     fn printed_exile_population_removals_are_refused() {
         use crate::parser::oracle::parse_oracle_text;
-        for (name, oracle, types) in [
+        for (name, oracle, types, clause) in [
             (
                 "Dust of Moments",
                 "Choose one \u{2014}\n\u{2022} Remove two time counters from each permanent and each suspended card.\n\u{2022} Put two time counters on each permanent with a time counter on it and each suspended card.",
                 vec!["Instant".to_string()],
+                "remove two time counters from each permanent and each suspended card",
             ),
             (
                 "Talon Gates",
                 "Any time you could cast a sorcery, you may exile a nonland card from your hand with X time counters on it, where X is its mana value. If the exiled card doesn't have suspend, it gains suspend. (At the beginning of its owner's upkeep, they remove a time counter. When the last is removed, the player may cast it without paying its mana cost. If it's a creature, it has haste.)\nWhenever chaos ensues, remove two time counters from each suspended card you own.",
                 vec!["Plane".to_string()],
+                "remove two time counters from each suspended card you own",
             ),
         ] {
             let parsed = parse_oracle_text(oracle, name, &[], &types, &[]);
             let removals = parsed_effects_of_kind(&parsed, "RemoveCounter");
             assert!(removals.is_empty(), "{name}: {removals:#?}");
-            assert!(
-                !parsed_effects_of_kind(&parsed, "Unimplemented").is_empty(),
-                "{name}: the refused clause stays an honest gap: {parsed:#?}"
-            );
+            // The refused clause itself is the honest gap, not another clause.
+            assert_gap_names_clause(&parsed_effects_of_kind(&parsed, "Unimplemented"), clause);
         }
     }
 

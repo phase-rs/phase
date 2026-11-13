@@ -104,9 +104,9 @@ use crate::types::ability::FilterProp;
 use crate::types::ability::{
     AbilityCondition, AbilityDefinition, AttachCardinality, AttachSelection, AttachmentReferent,
     AttackSubject, AttackedYouScope, CardTypeSetSource, CombatRelationSubject,
-    ContinuousModification, ControllerRef, Duration, Effect, GuessSubject, KeeperConstraint,
-    LibraryInstructionActor, ModalChoice, MultiTargetSpec, NameStickerSet, ObjectProperty,
-    ObjectScope, PlayerFilter, PlayerScope, PtValue, QuantityExpr, QuantityRef,
+    ContinuousModification, ControllerRef, Duration, Effect, EffectScope, GuessSubject,
+    KeeperConstraint, LibraryInstructionActor, ModalChoice, MultiTargetSpec, NameStickerSet,
+    ObjectProperty, ObjectScope, PlayerFilter, PlayerScope, PtValue, QuantityExpr, QuantityRef,
     ReciprocalZoneChoiceRole, RepeatContinuation, ReplacementDefinition, ResolvedAbility,
     StaticCondition, StaticDefinition, TargetFilter, TokenAttackDestination, TriggerCondition,
     TriggerDefinition, TurnJournalKind, TypeFilter, TypedFilter, ZoneChoiceCandidateSource,
@@ -5269,16 +5269,33 @@ fn rw_effect(
             (p, sc)
         }
         // CR 122.1: both scopes write the counters of the objects `target` names
-        // (one chosen object, or the population for scope:All), exactly like the
-        // PutCounter / PutCounterAll pair above.
+        // (one chosen object, or the population for scope:All). Unlike the
+        // PutCounter / PutCounterAll pair above, scope:All also records its
+        // population reads below.
         Effect::RemoveCounter {
             counter_type: _,
             count,
             target,
-            scope: _,
+            scope,
         } => {
             let (mut p, sc) = obj(StateKind::ObjectCounters, target);
             p.merge(rw_quantity_expr(count));
+            match scope {
+                EffectScope::Single => {}
+                // CR 608.2h + CR 609.3: a mass removal's population is every
+                // battlefield object the filter matches when it resolves (a live
+                // membership census), and what it removes from each is bounded by
+                // the counters that object has then. Both are reads a sibling's
+                // counter write feeds — the filter can test counters ("each artifact
+                // with two or more charge counters on it"). The covered axes are
+                // membership, counters and P/T (counters change P/T, CR 613.4c, as
+                // for a present-tense `TargetMatchesFilter`); other mutable filter
+                // predicates (e.g. tapped state) are not recorded here.
+                EffectScope::All => {
+                    p.merge(board_value_aggregate_read(target, StateKind::ObjectCounters));
+                    p.merge(board_value_aggregate_read(target, StateKind::ObjectPt));
+                }
+            }
             (p, sc)
         }
         Effect::MultiplyCounter {
@@ -9396,6 +9413,52 @@ mod tests {
             qcheck(counters_src(), 1),
         );
         assert!(conflicts(&rerooted, &se()));
+    }
+
+    /// CR 608.2h + CR 609.3: a mass counter removal (`scope: All`) reads its
+    /// population live — membership and each member's counters — so a same-event
+    /// sibling that also puts a counter on its own source feeds it. The single
+    /// scope keeps its write-only profile, and a source-independent mass removal
+    /// stays on the identical-function fast path.
+    #[test]
+    fn mass_counter_removal_records_population_reads() {
+        let charge = CounterType::Generic("charge".to_string());
+        let artifacts_with_two_charge =
+            TargetFilter::Typed(TypedFilter::new(TypeFilter::Artifact).properties(vec![
+                FilterProp::Counters {
+                    counters: crate::types::counter::CounterMatch::OfType(charge.clone()),
+                    comparator: Comparator::GE,
+                    count: qfix(2),
+                },
+            ]));
+        let removal = |scope| Effect::RemoveCounter {
+            counter_type: Some(charge.clone()),
+            count: qfix(1),
+            target: artifacts_with_two_charge.clone(),
+            scope,
+        };
+        let put_on_source = Effect::PutCounter {
+            count: qfix(1),
+            target: TargetFilter::SelfRef,
+            counter_type: charge.clone(),
+        };
+
+        let mass = ability_rw_profile(&ra(removal(EffectScope::All)));
+        assert!(mass.reads_board.object_counters, "{mass:?}");
+        assert!(mass.reads_board.set_membership, "{mass:?}");
+        assert!(mass.reads_board.object_pt, "{mass:?}");
+        let single = ability_rw_profile(&ra(removal(EffectScope::Single)));
+        assert!(
+            single.reads_board.is_empty(),
+            "the single scope's profile is unchanged: {single:?}"
+        );
+
+        // CodeRabbit's trace (A=2, B=1 charge): removing from each artifact with
+        // two or more, then charging its own source, ends differently by order.
+        let mass_then_charge = ra(removal(EffectScope::All)).sub_ability(ra(put_on_source));
+        assert!(conflicts(&mass_then_charge, &se_phase()));
+        // The bare mass removal is one shared function of the board.
+        assert!(!conflicts(&ra(removal(EffectScope::All)), &se_phase()));
     }
 
     // ===================== (vi) event-object disjointness =====================

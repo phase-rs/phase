@@ -46659,6 +46659,148 @@ pub mod tests {
         }
     }
 
+    fn charge_counter() -> CounterType {
+        CounterType::Generic("charge".to_string())
+    }
+
+    /// "Remove a charge counter from each artifact with two or more charge
+    /// counters on it" (a mass removal, `EffectScope::All`), optionally followed
+    /// by "then put a charge counter on this artifact".
+    fn mass_charge_removal(then_charge_source: bool) -> ResolvedAbility {
+        let removal = ResolvedAbility::new(
+            Effect::RemoveCounter {
+                counter_type: Some(charge_counter()),
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Typed(TypedFilter::new(TypeFilter::Artifact).properties(
+                    vec![FilterProp::Counters {
+                        counters: crate::types::counter::CounterMatch::OfType(charge_counter()),
+                        comparator: Comparator::GE,
+                        count: QuantityExpr::Fixed { value: 2 },
+                    }],
+                )),
+                scope: crate::types::ability::EffectScope::All,
+            },
+            Vec::new(),
+            ObjectId(0),
+            PlayerId(0),
+        );
+        if !then_charge_source {
+            return removal;
+        }
+        removal.sub_ability(ResolvedAbility::new(
+            Effect::PutCounter {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::SelfRef,
+                counter_type: charge_counter(),
+            },
+            Vec::new(),
+            ObjectId(0),
+            PlayerId(0),
+        ))
+    }
+
+    /// Two artifacts on one upkeep event, A with two charge counters and B with
+    /// one, each the source of an identical trigger built by `ability`.
+    fn mass_charge_removal_group(
+        ability: fn() -> ResolvedAbility,
+    ) -> (GameState, Vec<PendingTriggerContext>) {
+        let mut state = setup();
+        let event = Some(GameEvent::PhaseChanged {
+            phase: crate::types::phase::Phase::Upkeep,
+        });
+        let group = vec![
+            pr625_no_input_trigger(
+                &mut state,
+                PlayerId(0),
+                "Artifact A",
+                ability(),
+                event.clone(),
+            ),
+            pr625_no_input_trigger(&mut state, PlayerId(0), "Artifact B", ability(), event),
+        ];
+        for (ctx, count) in group.iter().zip([2, 1]) {
+            let object = state.objects.get_mut(&ctx.pending.source_id).unwrap();
+            object.card_types.core_types.push(CoreType::Artifact);
+            object.counters.insert(charge_counter(), count);
+        }
+        (state, group)
+    }
+
+    /// Resolve the group's abilities in the given member order (each bound to its
+    /// own source) and read back `(A, B)` charge counters.
+    fn resolve_in_order(
+        mut state: GameState,
+        group: &[PendingTriggerContext],
+        order: [usize; 2],
+    ) -> (u32, u32) {
+        for index in order {
+            let pending = &group[index].pending;
+            let mut ability = (*pending.ability).clone();
+            ability.source_id = pending.source_id;
+            if let Some(sub) = ability.sub_ability.as_mut() {
+                sub.source_id = pending.source_id;
+            }
+            let mut events = Vec::new();
+            crate::game::effects::resolve_ability_chain(&mut state, &ability, &mut events, 0)
+                .expect("the mass removal resolves");
+        }
+        let charge_of = |index: usize| {
+            state.objects[&group[index].pending.source_id]
+                .counters
+                .get(&charge_counter())
+                .copied()
+                .unwrap_or(0)
+        };
+        (charge_of(0), charge_of(1))
+    }
+
+    /// CR 603.3b + CR 608.2h: two identical same-event triggers from different
+    /// sources, each removing a charge counter from each artifact with two or
+    /// more and then charging its own source, end differently by order (A=2 and
+    /// B=1 at the start). The mass removal's population reads are what make the
+    /// group prompt; before they were recorded it auto-ordered.
+    #[test]
+    fn same_event_mass_counter_removal_feeding_its_population_prompts() {
+        let (state, group) = mass_charge_removal_group(|| mass_charge_removal(true));
+        // Premise: the two orders really diverge.
+        assert_ne!(
+            resolve_in_order(state.clone(), &group, [0, 1]),
+            resolve_in_order(state.clone(), &group, [1, 0]),
+            "REACH-GUARD: the order must be observable for this group"
+        );
+        let mut state = state;
+        assert!(
+            !group_is_order_independent(&state, &group),
+            "an order-dependent mass removal group must not auto-order"
+        );
+        match begin_trigger_ordering(&mut state, group) {
+            TriggerOrderingDisposition::PromptForChoice(_) => {}
+            TriggerOrderingDisposition::NoChoiceNeeded(_) => {
+                panic!("the order-dependent mass removal group must prompt")
+            }
+        }
+    }
+
+    /// Control: the bare mass removal writes nothing that depends on its source,
+    /// so the identical same-event pair is one function applied twice and stays
+    /// auto-ordered.
+    #[test]
+    fn same_event_source_independent_mass_counter_removal_auto_orders() {
+        let (state, group) = mass_charge_removal_group(|| mass_charge_removal(false));
+        assert_eq!(
+            resolve_in_order(state.clone(), &group, [0, 1]),
+            resolve_in_order(state.clone(), &group, [1, 0]),
+        );
+        let mut state = state;
+        assert!(group_is_order_independent(&state, &group));
+        match begin_trigger_ordering(&mut state, group) {
+            TriggerOrderingDisposition::NoChoiceNeeded(_) => {}
+            TriggerOrderingDisposition::PromptForChoice(_) => {
+                panic!("the source-independent mass removal group must auto-order")
+            }
+        }
+    }
+
     /// Issue #610 — Kratos, Stoic Father. A YouAttack trigger carrying a
     /// `valid_card` attacker-type filter (`Subtype "God"`) must fire iff at least
     /// one *God* attacks (CR 508.1 + CR 506.2 + CR 603.2c). Drives the real

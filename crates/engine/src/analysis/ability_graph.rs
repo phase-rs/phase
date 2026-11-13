@@ -751,7 +751,14 @@ fn effect_projection(effect: &Effect) -> Projection {
             // CR 122.1: removing counters consumes the counter resource (negative).
             Some(ct) => {
                 let class = CounterClass::from_counter_type(ct);
-                let (a, _) = count_seed(count);
+                let a = match count {
+                    // "Remove all [kind] counters" carries the `Fixed{-1}` sentinel,
+                    // not an amount: it removes however many are there, so it is
+                    // recorded as one unit of consumption. Negating the sentinel
+                    // would record it as production.
+                    QuantityExpr::Fixed { value: -1 } => 1,
+                    _ => count_seed(count).0,
+                };
                 b.add_counter(
                     class,
                     default_object_class(class),
@@ -2529,6 +2536,62 @@ mod tests {
             panic!("modeled")
         };
         assert_eq!(vector.counters.get(&P1P1), Some(&-3));
+    }
+
+    /// CR 122.1: "remove all fate counters from all permanents" (Oblivion Stone)
+    /// consumes fate counters. The `Fixed{-1}` "remove all" sentinel is one unit
+    /// of consumption, never production; a finite mass removal keeps its own
+    /// negative amount, and a dynamic count stays one unit of consumption.
+    #[test]
+    fn remove_all_counters_sentinel_is_consumption() {
+        use crate::types::ability::EffectScope;
+        let fate = CounterType::Generic("fate".to_string());
+        let removal = |counter_type: CounterType, count: QuantityExpr, scope: EffectScope| {
+            Effect::RemoveCounter {
+                counter_type: Some(counter_type),
+                count,
+                target: default_target_filter_any(),
+                scope,
+            }
+        };
+        let fate_key = (
+            CounterClass::from_counter_type(&fate),
+            default_object_class(CounterClass::from_counter_type(&fate)),
+        );
+        for scope in [EffectScope::All, EffectScope::Single] {
+            let Projection::Modeled {
+                vector, produces, ..
+            } = effect_projection(&removal(fate.clone(), fixed(-1), scope))
+            else {
+                panic!("modeled")
+            };
+            assert_eq!(vector.counters.get(&fate_key), Some(&-1), "{scope:?}");
+            assert!(
+                !produces.contains(&AxisKey::Counter(fate_key.0, fate_key.1)),
+                "{scope:?}: removing every fate counter produces none: {produces:?}"
+            );
+        }
+
+        // "Remove two loyalty counters from each planeswalker" (Pestilent Haze).
+        let Projection::Modeled { vector, .. } =
+            effect_projection(&removal(CounterType::Loyalty, fixed(2), EffectScope::All))
+        else {
+            panic!("modeled")
+        };
+        let loyalty_key = (CounterClass::Loyalty, ObjectClass::Planeswalker);
+        assert_eq!(vector.counters.get(&loyalty_key), Some(&-2));
+
+        // A dynamic count stays one unit of consumption.
+        let Projection::Modeled { vector, .. } = effect_projection(&removal(
+            CounterType::Plus1Plus1,
+            QuantityExpr::Ref {
+                qty: crate::types::ability::QuantityRef::EventContextAmount,
+            },
+            EffectScope::Single,
+        )) else {
+            panic!("modeled")
+        };
+        assert_eq!(vector.counters.get(&P1P1), Some(&-1));
     }
 
     #[test]

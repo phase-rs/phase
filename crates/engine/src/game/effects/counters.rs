@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 
 use crate::game::engine_replacement::CopyEntryResumption;
 use crate::game::game_object::GameObject;
@@ -2539,10 +2539,13 @@ pub(super) fn nontargeted_counter_population_ids(
         || !target.names_enumerable_population()
         // CR 400.1: this enumeration is the BATTLEFIELD only (see ZONE SCOPE
         // above), so a zone-qualified recipient must not be answered with a
-        // battlefield population. `None` = no zone constraint = the battlefield
-        // default. `counter.rs`'s `recipient_zone_is_battlefield` is the parser
-        // half of this guard.
-        || !matches!(target.extract_in_zone(), None | Some(Zone::Battlefield))
+        // battlefield population. Every zone the filter names must be the
+        // battlefield; naming none is the battlefield default. `counter.rs`'s
+        // `recipient_zone_is_battlefield` is the parser half of this guard.
+        || !target
+            .population_zones()
+            .iter()
+            .all(|zone| *zone == Zone::Battlefield)
     {
         return None;
     }
@@ -3535,10 +3538,11 @@ pub fn resolve_remove(
         }
     }
 
-    let (counter_type, raw_count) = match &ability.effect {
+    let (counter_type, raw_count, scope) = match &ability.effect {
         Effect::RemoveCounter {
             counter_type,
             count,
+            scope,
             ..
         } => {
             // CR 122.1: Resolve the count against game state so dynamic amounts
@@ -3548,27 +3552,33 @@ pub fn resolve_remove(
             // and is keyed off `< 0` below, exactly as before.
             let resolved =
                 crate::game::quantity::resolve_quantity_with_targets(state, count, ability);
-            (counter_type.clone(), resolved)
+            (counter_type.clone(), resolved, *scope)
         }
-        _ => (Some(CounterType::Plus1Plus1), 1),
+        _ => (Some(CounterType::Plus1Plus1), 1, EffectScope::Single),
     };
 
     let targets = counter_removal_targets(state, ability);
-    let mut remaining = Vec::new();
+    let mut remaining = VecDeque::new();
     for obj_id in targets {
         // Build the list of (counter_type, count) pairs to remove.
         let removals: Vec<(CounterType, u32)> = if let Some(counter_type) = &counter_type {
-            // CR 122.1: count == -1 means "remove all" — resolve to the actual counter count.
-            let counter_num = if raw_count < 0 {
-                state
-                    .objects
-                    .get(&obj_id)
-                    .and_then(|obj| obj.counters.get(counter_type).copied())
-                    .unwrap_or(0)
+            let available = counter_count(state, obj_id, counter_type);
+            if available == 0 && scope == EffectScope::All {
+                // CR 609.3: removing a counter from an object that has none of
+                // that kind is impossible, so a mass removal ("remove a -1/-1
+                // counter from each creature you control") queues a row only for
+                // the members that have one, not for every member of the
+                // population. A single chosen object keeps its row unchanged.
+                Vec::new()
             } else {
-                raw_count as u32
-            };
-            vec![(counter_type.clone(), counter_num)]
+                // CR 122.1: count == -1 means "remove all" — resolve to the actual counter count.
+                let counter_num = if raw_count < 0 {
+                    available
+                } else {
+                    raw_count as u32
+                };
+                vec![(counter_type.clone(), counter_num)]
+            }
         } else {
             // Remove all counter types. count == -1 means remove all of each type;
             // positive count means remove up to that many total (player's choice — for now, remove
@@ -3809,7 +3819,7 @@ pub(crate) fn validate_and_queue_counter_removal(
             "counter removal request exceeds the most counters the effect may remove".to_string(),
         ));
     }
-    let remaining: Vec<PendingCounterRemoval> = selections
+    let remaining: VecDeque<PendingCounterRemoval> = selections
         .iter()
         .map(|s| PendingCounterRemoval {
             object_id: source_id,
@@ -3869,26 +3879,26 @@ pub(crate) fn settled_in_flight_counter_removal(
 /// counter removed this way" rider reading `QuantityRef::PreviousEffectAmount`,
 /// picks up the removed count.
 pub(crate) fn drain_pending_counter_removals(state: &mut GameState, events: &mut Vec<GameEvent>) {
-    while let Some(mut queue) = state.active_counter_removals().cloned() {
+    // The queue is advanced in place on its own frame: each step pops one entry
+    // from the front, so a wide mass removal drains in linear time.
+    loop {
+        let Some(queue) = state.active_counter_removals_mut() else {
+            return;
+        };
         if let Some(in_flight) = queue.in_flight.take() {
-            queue.applied_total = queue
-                .applied_total
-                .saturating_add(settled_in_flight_counter_removal(state, &in_flight));
-            state
-                .replace_active_counter_removals(queue)
+            let settled = settled_in_flight_counter_removal(state, &in_flight);
+            let queue = state
+                .active_counter_removals_mut()
                 .expect("settled counter-removal must retain its active frame");
+            queue.applied_total = queue.applied_total.saturating_add(settled);
             continue;
         }
-        let Some(PendingCounterRemoval {
-            object_id,
-            counter_type,
-            count,
-        }) = queue.remaining.first().cloned()
-        else {
+        let Some(removal) = queue.remaining.pop_front() else {
             // CR 608.2h: ordering invariant — stamp the actual removed total before the
             // terminating EffectResolved (and thus before the continuation drains).
-            publish_counter_removal_total(state, queue.applied_total);
-            state
+            let applied_total = queue.applied_total;
+            publish_counter_removal_total(state, applied_total);
+            let queue = state
                 .take_active_counter_removals()
                 .expect("settled counter-removals queue must own the active frame")
                 .expect("settled counter-removals frame must exist");
@@ -3899,18 +3909,16 @@ pub(crate) fn drain_pending_counter_removals(state: &mut GameState, events: &mut
             });
             continue;
         };
-        queue.remaining.remove(0);
-        queue.in_flight = Some(begin_in_flight_counter_removal(
-            state,
-            PendingCounterRemoval {
-                object_id,
-                counter_type: counter_type.clone(),
-                count,
-            },
-        ));
+        let (object_id, counter_type, count) = (
+            removal.object_id,
+            removal.counter_type.clone(),
+            removal.count,
+        );
+        let in_flight = begin_in_flight_counter_removal(state, removal);
         state
-            .replace_active_counter_removals(queue)
-            .expect("re-parked counter-removals queue must own the active frame");
+            .active_counter_removals_mut()
+            .expect("re-parked counter-removals queue must own the active frame")
+            .in_flight = Some(in_flight);
         // CR 614.1: single-authority remove pipeline (applies prevention /
         // modification replacements; keeps obj.loyalty / obj.defense in lockstep).
         remove_counter_with_replacement(state, object_id, counter_type, count, events);
@@ -7347,6 +7355,163 @@ mod tests {
         assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
         assert_eq!(state.last_effect_count, Some(2));
         assert!(state.objects[&source_id].counters.is_empty());
+    }
+
+    /// Heartmender's mass removal ("remove a -1/-1 counter from each creature you
+    /// control", scope `All`) over a board of `creatures` creatures, of which the
+    /// ones at `with_counter` carry one -1/-1 counter each. Returns the state, the
+    /// creature ids and the resolved ability, with one optional counter-removal
+    /// replacement installed so every proposed removal pauses for a choice.
+    fn heartmender_mass_removal_board(
+        creatures: usize,
+        with_counter: &[usize],
+    ) -> (GameState, Vec<ObjectId>, ResolvedAbility) {
+        let mut state = GameState::new_two_player(42);
+        let ids: Vec<ObjectId> = (0..creatures)
+            .map(|index| {
+                let id = create_object(
+                    &mut state,
+                    CardId(1000 + index as u64),
+                    PlayerId(0),
+                    format!("Creature {index}"),
+                    Zone::Battlefield,
+                );
+                mark_creature(&mut state, id);
+                id
+            })
+            .collect();
+        for &index in with_counter {
+            state
+                .objects
+                .get_mut(&ids[index])
+                .unwrap()
+                .counters
+                .insert(CounterType::Minus1Minus1, 1);
+        }
+        install_counter_removal_optional_replacement(&mut state);
+        let ability = ResolvedAbility::new(
+            Effect::RemoveCounter {
+                counter_type: Some(CounterType::Minus1Minus1),
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
+                scope: EffectScope::All,
+            },
+            vec![],
+            ids[0],
+            PlayerId(0),
+        );
+        (state, ids, ability)
+    }
+
+    /// CR 609.3 + CR 614.1: a finite typed mass removal queues a row only for
+    /// the permanents that have a counter of that kind. On a wide board where one
+    /// creature has a -1/-1 counter, the paused removal is the only row: nothing
+    /// for the creatures without one is left queued behind it.
+    #[test]
+    fn mass_removal_on_wide_board_queues_one_row_for_the_one_marked_creature() {
+        let (mut state, ids, ability) = heartmender_mass_removal_board(12, &[7]);
+        let mut events = Vec::new();
+        resolve_remove(&mut state, &ability, &mut events).expect("mass removal resolves");
+
+        assert!(
+            matches!(state.waiting_for, WaitingFor::ReplacementChoice { .. }),
+            "REACH-GUARD: the marked creature's removal pauses for its replacement"
+        );
+        let queue = state
+            .active_counter_removals()
+            .expect("the mass removal owns its prompt");
+        assert_eq!(
+            queue.in_flight.as_ref().map(|f| f.removal.object_id),
+            Some(ids[7]),
+            "the paused row is the marked creature's"
+        );
+        assert!(
+            queue.remaining.is_empty(),
+            "no row is queued for the eleven creatures without a -1/-1 counter: {:?}",
+            queue.remaining
+        );
+        assert_eq!(queue.total, 1);
+
+        apply_as_current(&mut state, GameAction::ChooseReplacement { index: 0 })
+            .expect("the replacement choice resumes the queue");
+        assert!(state.active_counter_removals().is_none());
+        assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+        assert_eq!(state.last_effect_count, Some(1));
+        assert!(ids.iter().all(|id| !state.objects[id]
+            .counters
+            .contains_key(&CounterType::Minus1Minus1)));
+    }
+
+    /// CR 614.1 + CR 608.2h: a mass removal that pauses for a replacement on one
+    /// permanent resumes with the next permanent's removal, across a save/restore
+    /// of the paused queue, and settles each removal's actual count in order.
+    #[test]
+    fn mass_removal_pauses_and_resumes_across_objects() {
+        let (mut state, ids, ability) = heartmender_mass_removal_board(5, &[1, 3]);
+        let mut events = Vec::new();
+        resolve_remove(&mut state, &ability, &mut events).expect("mass removal resolves");
+
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::ReplacementChoice { .. }
+        ));
+        let queue = state
+            .active_counter_removals()
+            .expect("the mass removal owns its first prompt");
+        assert_eq!(
+            queue.in_flight.as_ref().map(|f| f.removal.object_id),
+            Some(ids[1])
+        );
+        assert_eq!(
+            queue
+                .remaining
+                .iter()
+                .map(|removal| removal.object_id)
+                .collect::<Vec<_>>(),
+            vec![ids[3]],
+            "only the second marked creature waits behind the paused row"
+        );
+
+        let saved = serde_json::to_value(ResolutionStateWire::from_game_state(state))
+            .expect("the paused mass removal serializes");
+        let restored: ResolutionStateWire =
+            serde_json::from_value(saved).expect("the paused mass removal restores");
+        let mut state = restored.into_game_state();
+
+        apply_as_current(&mut state, GameAction::ChooseReplacement { index: 0 })
+            .expect("the first replacement choice resumes the queue");
+        assert!(
+            matches!(state.waiting_for, WaitingFor::ReplacementChoice { .. }),
+            "the second creature's removal pauses for its own replacement"
+        );
+        let queue = state
+            .active_counter_removals()
+            .expect("the re-parked queue owns the second prompt");
+        assert_eq!(
+            queue.in_flight.as_ref().map(|f| f.removal.object_id),
+            Some(ids[3])
+        );
+        assert!(queue.remaining.is_empty());
+        assert_eq!(queue.applied_total, 1, "the first removal settled");
+        assert!(!state.objects[&ids[1]]
+            .counters
+            .contains_key(&CounterType::Minus1Minus1));
+        assert_eq!(
+            state.objects[&ids[3]]
+                .counters
+                .get(&CounterType::Minus1Minus1),
+            Some(&1),
+            "the second removal has not happened yet"
+        );
+
+        apply_as_current(&mut state, GameAction::ChooseReplacement { index: 0 })
+            .expect("the second replacement choice finishes the queue");
+        assert!(state.active_counter_removals().is_none());
+        assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+        assert_eq!(state.last_effect_count, Some(2));
+        assert!(ids.iter().all(|id| !state.objects[id]
+            .counters
+            .contains_key(&CounterType::Minus1Minus1)));
     }
 
     /// CR 122.1 + CR 614.1 + CR 608.2h: a v1 save parked an accepted
