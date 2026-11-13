@@ -7209,7 +7209,8 @@ pub fn analyze_coverage(card_db: &CardDatabase) -> CoverageSummary {
         .map(|format| (format.as_key().to_string(), (0, 0)))
         .collect();
 
-    for (key, face) in card_db.face_iter() {
+    // `cards` and every first-three example list inherit this order.
+    for (key, face) in card_db.face_iter_in_scan_order() {
         let coverage = compute_card_face_coverage_for_report(
             face,
             &trigger_registry,
@@ -7398,7 +7399,11 @@ pub fn analyze_coverage(card_db: &CardDatabase) -> CoverageSummary {
                             example_cards,
                         })
                         .collect();
-                    patterns.sort_by_key(|p| std::cmp::Reverse(p.count));
+                    patterns.sort_by(|a, b| {
+                        b.count
+                            .cmp(&a.count)
+                            .then_with(|| a.pattern.cmp(&b.pattern))
+                    });
                     patterns.truncate(20);
                     patterns
                 };
@@ -7421,7 +7426,11 @@ pub fn analyze_coverage(card_db: &CardDatabase) -> CoverageSummary {
                             shared_cards,
                         })
                         .collect();
-                    co.sort_by_key(|c| std::cmp::Reverse(c.shared_cards));
+                    co.sort_by(|a, b| {
+                        b.shared_cards
+                            .cmp(&a.shared_cards)
+                            .then_with(|| a.handler.cmp(&b.handler))
+                    });
                     co.truncate(10);
                     co
                 };
@@ -7478,8 +7487,13 @@ pub fn analyze_coverage(card_db: &CardDatabase) -> CoverageSummary {
             }
         }
 
-        two_gap.sort_by_key(|b| std::cmp::Reverse(b.unlocked_cards));
-        three_gap.sort_by_key(|b| std::cmp::Reverse(b.unlocked_cards));
+        let by_unlocked_then_handlers = |a: &GapBundle, b: &GapBundle| {
+            b.unlocked_cards
+                .cmp(&a.unlocked_cards)
+                .then_with(|| a.handlers.cmp(&b.handlers))
+        };
+        two_gap.sort_by(by_unlocked_then_handlers);
+        three_gap.sort_by(by_unlocked_then_handlers);
 
         two_gap.truncate(30);
         three_gap.truncate(20);
@@ -9520,7 +9534,7 @@ pub fn audit_resolver_features(card_db: &CardDatabase) -> ResolverAuditSummary {
     let mut flagged_cards = Vec::new();
     let mut total_audited = 0;
 
-    for (key, face) in card_db.face_iter() {
+    for (key, face) in card_db.face_iter_in_scan_order() {
         // Only audit cards the existing coverage considers "Fully Supported"
         if !is_card_supported(face, &trigger_registry, &static_registry) {
             continue;
@@ -9543,11 +9557,12 @@ pub fn audit_resolver_features(card_db: &CardDatabase) -> ResolverAuditSummary {
         }
 
         // Flag unhandled features
-        let unhandled: Vec<String> = features
+        let mut unhandled: Vec<String> = features
             .iter()
             .filter(|(_, s)| **s == FeatureSupport::Unhandled)
             .map(|(f, _)| f.clone())
             .collect();
+        unhandled.sort();
 
         if !unhandled.is_empty() {
             flagged_cards.push(ResolverAuditCard {
@@ -9567,7 +9582,11 @@ pub fn audit_resolver_features(card_db: &CardDatabase) -> ResolverAuditSummary {
             example_cards: examples.clone(),
         })
         .collect();
-    all_features.sort_by_key(|f| std::cmp::Reverse(f.card_count));
+    all_features.sort_by(|a, b| {
+        b.card_count
+            .cmp(&a.card_count)
+            .then_with(|| a.feature.cmp(&b.feature))
+    });
 
     let unhandled_features: Vec<FeatureUsage> = all_features
         .iter()
@@ -9575,7 +9594,12 @@ pub fn audit_resolver_features(card_db: &CardDatabase) -> ResolverAuditSummary {
         .cloned()
         .collect();
 
-    flagged_cards.sort_by_key(|c| std::cmp::Reverse(c.unhandled_features.len()));
+    flagged_cards.sort_by(|a, b| {
+        b.unhandled_features
+            .len()
+            .cmp(&a.unhandled_features.len())
+            .then_with(|| a.card_name.cmp(&b.card_name))
+    });
 
     ResolverAuditSummary {
         total_supported_audited: total_audited,
@@ -11754,7 +11778,7 @@ pub struct SemanticAuditCard {
 pub struct SemanticAuditSummary {
     pub total_supported_audited: usize,
     pub cards_with_findings: usize,
-    pub finding_counts: HashMap<String, usize>,
+    pub finding_counts: BTreeMap<String, usize>,
     pub flagged_cards: Vec<SemanticAuditCard>,
 }
 
@@ -11767,7 +11791,7 @@ pub fn audit_semantic(card_db: &CardDatabase) -> SemanticAuditSummary {
     let static_registry = build_static_registry();
 
     let mut flagged_cards = Vec::new();
-    let mut finding_counts: HashMap<String, usize> = HashMap::new();
+    let mut finding_counts: BTreeMap<String, usize> = BTreeMap::new();
     let mut total_audited = 0;
 
     for (key, face) in card_db.face_iter() {
@@ -11796,7 +11820,12 @@ pub fn audit_semantic(card_db: &CardDatabase) -> SemanticAuditSummary {
         }
     }
 
-    flagged_cards.sort_by_key(|c| std::cmp::Reverse(c.findings.len()));
+    flagged_cards.sort_by(|a, b| {
+        b.findings
+            .len()
+            .cmp(&a.findings.len())
+            .then_with(|| a.card_name.cmp(&b.card_name))
+    });
 
     SemanticAuditSummary {
         total_supported_audited: total_audited,
@@ -14540,7 +14569,7 @@ pub fn format_semantic_audit_markdown(summary: &SemanticAuditSummary) -> String 
     }
 
     let mut patterns: Vec<_> = pattern_freq.into_iter().collect();
-    patterns.sort_by_key(|(_, (count, _))| std::cmp::Reverse(*count));
+    patterns.sort_by(|a, b| b.1 .0.cmp(&a.1 .0).then_with(|| a.0.cmp(&b.0)));
 
     md.push_str("| Pattern | Count | Example Cards |\n|---------|-------|---------------|\n");
     for (pattern, (count, examples)) in patterns.iter().take(20) {
@@ -22788,11 +22817,10 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
     /// V1 (ii). The audit's cross-card fold keeps one card's `Unhandled` verdict
     /// for a key another card mints `Handled` (Tunnel Tipster vs Zimone, both on
     /// `quantity_ref:BattlefieldEntriesThisTurn`), in both fold orders. The fold
-    /// walks `CardDatabase::face_iter`, a `HashMap` whose order differs per
-    /// instance, so the test rebuilds the database until it has seen each face
-    /// first.
-    /// REVERT-PROBE: keep the first-seen verdict → the Zimone-first order reads
-    /// `handled == true`.
+    /// walks scan order, which sorts by oracle id first, so swapping the two
+    /// faces' oracle ids puts each face first in one database.
+    /// REVERT-PROBE: keep the first-seen verdict → the Zimone-first database
+    /// reads `handled == true`.
     #[test]
     fn resolver_audit_fold_keeps_unhandled_across_cards() {
         let database = |faces: Vec<CardFace>| {
@@ -22813,32 +22841,46 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
                 .find(|usage| usage.feature == ledger_key())
         };
 
-        let mut first_faces_seen = std::collections::HashSet::new();
-        for _ in 0..64 {
-            let db = database(vec![tunnel_tipster_face(), zimone_face()]);
-            assert_eq!(db.face_iter().count(), 2, "one fold entry per face");
-            let first_face = db
-                .face_iter()
-                .next()
-                .map(|(key, _)| key.to_string())
-                .expect("the database holds both faces");
+        let with_oracle_id = |mut face: CardFace, id: &str| {
+            face.scryfall_oracle_id = Some(id.to_string());
+            face
+        };
+        let low = "00000000-0000-0000-0000-000000000001";
+        let high = "00000000-0000-0000-0000-000000000002";
+        for (leader, faces) in [
+            (
+                "Tunnel Tipster",
+                vec![
+                    with_oracle_id(tunnel_tipster_face(), low),
+                    with_oracle_id(zimone_face(), high),
+                ],
+            ),
+            (
+                "Zimone, All-Questioning",
+                vec![
+                    with_oracle_id(tunnel_tipster_face(), high),
+                    with_oracle_id(zimone_face(), low),
+                ],
+            ),
+        ] {
+            let db = database(faces);
+            assert_eq!(
+                db.faces_in_scan_order().next().map(|f| f.name.as_str()),
+                Some(leader)
+            );
             let both = ledger_usage(&db).expect("both faces mint the ledger key");
             assert_eq!(both.card_count, 2, "reach: both faces reached the fold");
+            assert_eq!(
+                both.example_cards.first().map(String::as_str),
+                Some(leader.to_lowercase().as_str()),
+                "the fold walks scan order"
+            );
             assert!(
                 !both.handled,
-                "{first_face} first: Tunnel Tipster's Unhandled verdict must survive \
+                "{leader} first: Tunnel Tipster's Unhandled verdict must survive \
                  Zimone's Handled one"
             );
-            first_faces_seen.insert(first_face);
-            if first_faces_seen.len() == 2 {
-                break;
-            }
         }
-        assert_eq!(
-            first_faces_seen.len(),
-            2,
-            "both fold orders must be exercised: {first_faces_seen:?}"
-        );
 
         let zimone_alone =
             ledger_usage(&database(vec![zimone_face()])).expect("Zimone mints the ledger key");

@@ -65,10 +65,10 @@ fn build_warning_drilldown(
     limit: usize,
     full: bool,
 ) -> WarningDrilldown {
-    let coverage_by_name: HashMap<String, &CardCoverageResult> = summary
+    let coverage_by_key: HashMap<&str, &CardCoverageResult> = summary
         .cards
         .iter()
-        .map(|card| (card.card_name.to_ascii_lowercase(), card))
+        .filter_map(|card| Some((card.card_face_key.as_deref()?, card)))
         .collect();
     let mut cards = Vec::new();
 
@@ -104,9 +104,7 @@ fn build_warning_drilldown(
             continue;
         }
 
-        let coverage = coverage_by_name
-            .get(&face.name.to_ascii_lowercase())
-            .copied();
+        let coverage = coverage_by_key.get(key).copied();
         cards.push(WarningDrilldownCard {
             name: face.name.clone(),
             key: key.to_string(),
@@ -143,6 +141,7 @@ fn build_warning_drilldown(
                     .cmp(&right.gap_count.unwrap_or(usize::MAX))
             })
             .then_with(|| left.name.cmp(&right.name))
+            .then_with(|| left.key.cmp(&right.key))
     });
 
     let matched_cards = cards.len();
