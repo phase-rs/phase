@@ -2939,6 +2939,10 @@ fn drain_active_repeat_for(state: &mut GameState, events: &mut Vec<GameEvent>) {
             // (DistinctCounterKindsAmong loop) applies to this iteration.
             let member = tracked_members.get(iteration).copied();
             let kind = iterated_counter_kinds.get(iteration).cloned();
+            // Every resumed occurrence follows one that completed.
+            if member.is_none() && kind.is_none() {
+                settle_entries_before_repeat_occurrence(state, events, &ability);
+            }
             let iter_effective: &ResolvedAbility = if member.is_some() || kind.is_some() {
                 iter_ability = (*ability).clone();
                 if let Some(member) = member {
@@ -5260,6 +5264,17 @@ fn settle_entries_before_instruction(
     {
         return;
     }
+    settle_entries_at_boundary(state, events, next, completed);
+}
+
+/// The instruction boundary proper (everything after B0): `next` begins an instruction, or the
+/// next occurrence of a repeated one, so the entries recorded so far are a completed entry event.
+fn settle_entries_at_boundary(
+    state: &mut GameState,
+    events: &[GameEvent],
+    next: &ResolvedAbility,
+    completed: Option<&ResolvedAbility>,
+) {
     // CR 614.12a: an entry may still be in progress while a resolution choice or a parked
     // replacement is pending (G1).
     if waits_for_resolution_choice(&state.waiting_for) || state.pending_replacement.is_some() {
@@ -5298,6 +5313,21 @@ fn settle_entries_before_instruction(
             events,
             completed_through,
         );
+    }
+}
+
+/// CR 608.2c + CR 603.6a: a plain counted repeat ("Populate X times", "Investigate X times") is X
+/// successive instances of its instruction, each its own entry event, so the next occurrence is an
+/// instruction boundary: the entries of the one before it are observed and collected before it
+/// runs. A member- or kind-driven loop ("for each …") is one instruction applied across its
+/// members and is not split here.
+fn settle_entries_before_repeat_occurrence(
+    state: &mut GameState,
+    events: &[GameEvent],
+    occurrence: &ResolvedAbility,
+) {
+    if effect_enters_battlefield(&occurrence.effect) {
+        settle_entries_at_boundary(state, events, occurrence, None);
     }
 }
 
@@ -24013,6 +24043,9 @@ fn resolve_chain_body(
                     );
                     progress = ResolutionProgress::Waiting;
                     break;
+                }
+                if iteration > 0 && !member_driven && !kind_driven {
+                    settle_entries_before_repeat_occurrence(state, events, effective);
                 }
                 // Snapshot per-iteration ability with parent-target rebinding when
                 // applicable. CR 109.5: the rebind is SINGLE-slot — every reachable

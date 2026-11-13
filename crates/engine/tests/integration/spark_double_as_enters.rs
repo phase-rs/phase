@@ -3338,15 +3338,154 @@ mod feldon_tokens {
         }
     }
 
+    const FULL_FLOWERING: &str = "Populate X times. (To populate, create a token that's a copy of a creature token you control. Do this X times.)";
+    const PHYREXIAN_METAMORPH: &str = "You may have this creature enter as a copy of any artifact or creature on the battlefield, except it's an artifact in addition to its other types.";
+    const SERRATED_ARROWS: &str = "This artifact enters with three arrowhead counters on it.\nAt the beginning of your upkeep, if there are no arrowhead counters on this artifact, sacrifice it.\n{T}, Remove an arrowhead counter from this artifact: Put a -1/-1 counter on target creature.";
+    const TEMPERED_STEEL: &str = "Artifact creatures you control get +2/+2.";
+    const WINDING_CONSTRICTOR: &str = "If one or more counters would be put on an artifact or creature you control, that many plus one of each of those kinds of counters are put on that permanent instead.\nIf you would get one or more counters, you get that many plus one of each of those kinds of counters instead.";
+    const VORINCLEX: &str = "Trample, haste\nIf you would put one or more counters on a permanent or player, put twice that many of each of those kinds of counters on that permanent or player instead.\nIf an opponent would put one or more counters on a permanent or player, they put half that many of each of those kinds of counters on that permanent or player instead, rounded down.";
+
+    /// Full Flowering at X=2 populates an uncopied Phyrexian Metamorph token (kept alive by
+    /// Tempered Steel) twice. The first copy enters as Serrated Arrows and stops on the CR 616.1
+    /// order of its arrowhead counters (Winding Constrictor, Vorinclex); the Metamorph is still
+    /// the only creature token, so the second populate copies it again, and that copy enters as
+    /// Altar of the Brood. Returns (copy offers, counter orders, cards the opponent milled).
+    /// The game is optionally saved and restored at every prompt.
+    fn full_flowering_metamorph_mills(persist: bool) -> (usize, usize, usize) {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PostCombatMain);
+        scenario.with_library_top(P0, &["Plains", "Island", "Swamp", "Mountain"]);
+        scenario.with_library_top(
+            P1,
+            &["Plains", "Island", "Swamp", "Mountain", "Forest", "Plains"],
+        );
+        scenario.with_mana_pool(
+            P0,
+            (0..5)
+                .map(|_| ManaUnit::new(ManaType::Green, ObjectId(0), false, vec![]))
+                .collect(),
+        );
+        scenario.add_enchantment_from_oracle(P0, "Tempered Steel", TEMPERED_STEEL);
+        let constrictor = scenario
+            .add_creature_from_oracle(P0, "Winding Constrictor", 2, 3, WINDING_CONSTRICTOR)
+            .id();
+        scenario
+            .add_creature_from_oracle(P0, "Vorinclex, Monstrous Raider", 6, 6, VORINCLEX)
+            .as_legendary();
+        let altar = scenario
+            .add_artifact_from_oracle(P0, "Altar of the Brood", ALTAR_OF_THE_BROOD)
+            .id();
+        let arrows = scenario
+            .add_artifact_from_oracle(P0, "Serrated Arrows", SERRATED_ARROWS)
+            .id();
+        let metamorph = scenario
+            .add_creature_from_oracle(P0, "Phyrexian Metamorph", 0, 0, PHYREXIAN_METAMORPH)
+            .as_artifact_creature()
+            .with_subtypes(vec!["Phyrexian", "Shapeshifter"])
+            .id();
+        let mut spell =
+            scenario.add_spell_to_hand_from_oracle(P0, "Full Flowering", false, FULL_FLOWERING);
+        spell.with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::X, ManaCostShard::X, ManaCostShard::Green],
+            generic: 0,
+        });
+        let spell = spell.id();
+        let mut runner = scenario.build();
+        // Board setup: the Metamorph is a token that copied nothing as it entered.
+        runner
+            .state_mut()
+            .objects
+            .get_mut(&metamorph)
+            .unwrap()
+            .is_token = true;
+        let library = runner.state().players[1].library.len();
+        runner.cast(spell).x(2).resolve();
+        let (mut offers, mut orders) = (0, 0);
+        for _ in 0..40 {
+            if persist && !matches!(runner.state().waiting_for, WaitingFor::Priority { .. }) {
+                runner = restore(runner);
+            }
+            match &runner.state().waiting_for {
+                WaitingFor::ReplacementChoice { candidates, .. } => {
+                    if let Some(index) = candidates
+                        .iter()
+                        .position(|candidate| candidate.source_id == constrictor)
+                    {
+                        orders += 1;
+                        runner.act(GameAction::ChooseReplacement { index }).unwrap();
+                    } else {
+                        // The first copy enters as Serrated Arrows, the second as the Altar.
+                        let donor = if offers == 0 { arrows } else { altar };
+                        offers += 1;
+                        choose_copy(&mut runner, donor);
+                    }
+                }
+                WaitingFor::OrderTriggers { triggers, .. } => {
+                    let order = (0..triggers.len()).collect();
+                    runner.act(GameAction::OrderTriggers { order }).unwrap();
+                }
+                WaitingFor::Priority { .. } if runner.state().stack.is_empty() => break,
+                WaitingFor::Priority { .. } => {
+                    runner.act(GameAction::PassPriority).unwrap();
+                }
+                other => panic!("unexpected prompt: {other:?}"),
+            }
+        }
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { .. }
+        ));
+        assert!(runner.state().deferred_triggers.is_empty());
+        let named = |name: &str| {
+            runner
+                .state()
+                .objects
+                .values()
+                .filter(|object| {
+                    object.is_token && object.zone == Zone::Battlefield && object.name == name
+                })
+                .count()
+        };
+        assert_eq!(named("Serrated Arrows"), 1);
+        assert_eq!(named("Altar of the Brood"), 1);
+        (
+            offers,
+            orders,
+            library - runner.state().players[1].library.len(),
+        )
+    }
+
+    /// CR 608.2c + CR 603.6a: "Populate X times" is X successive populate instructions (Full
+    /// Flowering's ruling: "The tokens enter the battlefield one at a time"). The Altar of the
+    /// Brood that was already there sees both tokens enter: two mills. The Altar token entered
+    /// after the Serrated Arrows token, so it does not see that entry, although the Arrows entry
+    /// was still waiting when the second populate began.
+    #[test]
+    fn counted_repeat_occurrences_are_successive_entry_events() {
+        for persist in [false, true] {
+            let (offers, orders, milled) = full_flowering_metamorph_mills(persist);
+            assert_eq!(
+                offers, 2,
+                "one copy offer per populate (restore: {persist})"
+            );
+            assert_eq!(
+                orders, 1,
+                "the Arrows' counters are ordered (restore: {persist})"
+            );
+            assert_eq!(milled, 2, "the resident Altar, twice (restore: {persist})");
+        }
+    }
+
     /// Edgar Markov's Coffin's upkeep trigger under Metallic Mimic (Vampire), Doubling Season and
     /// Hardened Scales, with Where Ancients Tread. Returns the number of replacement-order prompts
-    /// the chain stopped on, whether the chain ended anywhere but empty at priority (a Where
-    /// Ancients Tread trigger), and the finished game.
+    /// the chain stopped on, the number of Where Ancients Tread triggers (each resolved, 5 damage
+    /// to the opponent), and the finished game. A `persist` run saves and restores at each
+    /// order prompt, before it is answered.
     /// With `anthem` a Glorious Anthem is also in play, so the Vampires enter as 5/5s.
     fn coffin_vampires_trigger_count(
         anthem: bool,
         persist: bool,
-    ) -> (usize, bool, GameRunner, ObjectId) {
+    ) -> (usize, usize, GameRunner, ObjectId) {
         let db = crate::support::shared_card_db().expect("integration card database");
         let mut scenario = GameScenario::new();
         scenario.at_phase(Phase::End);
@@ -3404,14 +3543,41 @@ mod feldon_tokens {
                 .iter()
                 .position(|candidate| candidate.source_id == season)
                 .expect("Doubling Season is among the replacements to order");
-            runner.act(GameAction::ChooseReplacement { index }).unwrap();
             if persist {
                 runner = restore(runner);
             }
+            runner.act(GameAction::ChooseReplacement { index }).unwrap();
         }
-        let triggered = !matches!(runner.state().waiting_for, WaitingFor::Priority { .. })
-            || !runner.state().stack.is_empty();
-        (prompts, triggered, runner, coffin)
+        // Count Where Ancients Tread's triggers: each asks for its target, then for its "may".
+        let mut triggers = 0;
+        for _ in 0..12 {
+            match &runner.state().waiting_for {
+                WaitingFor::TriggerTargetSelection { .. } => {
+                    triggers += 1;
+                    runner
+                        .act(GameAction::ChooseTarget {
+                            target: Some(TargetRef::Player(P1)),
+                        })
+                        .unwrap();
+                }
+                WaitingFor::OptionalEffectChoice { .. } => {
+                    runner
+                        .act(GameAction::DecideOptionalEffect { accept: true })
+                        .unwrap();
+                }
+                WaitingFor::OrderTriggers { triggers, .. } => {
+                    let order = (0..triggers.len()).collect();
+                    runner.act(GameAction::OrderTriggers { order }).unwrap();
+                }
+                WaitingFor::Priority { .. } if runner.state().stack.is_empty() => break,
+                WaitingFor::Priority { .. } => {
+                    runner.act(GameAction::PassPriority).unwrap();
+                }
+                other => panic!("unexpected prompt: {other:?}"),
+            }
+        }
+        assert!(runner.state().stack.is_empty());
+        (prompts, triggers, runner, coffin)
     }
 
     /// CR 603.6a + CR 603.10 + CR 608.2c: the Coffin's token instruction completes before its
@@ -3422,25 +3588,27 @@ mod feldon_tokens {
     #[test]
     fn a_phase_triggers_later_instruction_does_not_change_what_its_entries_match() {
         for persist in [false, true] {
-            let (prompts, triggered, _, _) = coffin_vampires_trigger_count(true, persist);
+            let life = 20;
+            let (prompts, triggers, runner, _) = coffin_vampires_trigger_count(true, persist);
             assert_eq!(
                 prompts, 2,
                 "one order prompt per Vampire (restore: {persist})"
             );
-            assert!(
-                triggered,
-                "positive control: 5/5 entrants trigger Where Ancients Tread (restore: {persist})"
+            assert_eq!(
+                triggers, 2,
+                "positive control: both 5/5 entrants trigger Where Ancients Tread (restore: {persist})"
             );
-            let (prompts, triggered, runner, coffin) =
-                coffin_vampires_trigger_count(false, persist);
+            assert_eq!(runner.life(P1), life - 10, "restore: {persist}");
+            let (prompts, triggers, runner, coffin) = coffin_vampires_trigger_count(false, persist);
             assert_eq!(
                 prompts, 2,
                 "one order prompt per Vampire (restore: {persist})"
             );
-            assert!(
-                !triggered,
+            assert_eq!(
+                triggers, 0,
                 "the Vampires entered as 4/4s (restore: {persist})"
             );
+            assert_eq!(runner.life(P1), life, "restore: {persist}");
             // Reach guards: the Coffin did transform, so the final board does read 5/5.
             assert_eq!(runner.state().objects[&coffin].name, "Edgar, Charmed Groom");
             let powers: Vec<_> = runner
