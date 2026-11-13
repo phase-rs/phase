@@ -430,9 +430,24 @@ pub(crate) fn settle_resolution_object_choice_after_departure(
     if let Some(outcome) = batch_or_drain_observer_triggers(state, events, base, end, false) {
         adopt_departure_choice_outcome(state, events, outcome);
     }
-    // The departure's own delayed scan covers these events as well (CR 603.7);
-    // `delayed_trigger_fires_for_a_death_in_instructions_resumed_by_a_concession`
-    // pins that.
+    // CR 603.7: and the delayed triggers watching those events ("When that
+    // creature dies this turn"), through the occurrence-aware delayed collector.
+    // The departure's own delayed scan ran before this settlement, and when the
+    // resumed instructions pause again (a replacement-order prompt during
+    // "Destroy all creatures") the later answer runs on a new event buffer.
+    let mut consumed = Vec::new();
+    let delayed_input = super::engine_priority::unclaimed_delayed_trigger_input(
+        state,
+        events,
+        base,
+        &mut consumed,
+        None,
+    );
+    super::triggers::collect_unclaimed_delayed_triggers_into_deferred(
+        state,
+        events,
+        &delayed_input,
+    );
     Ok(DepartureSettlement::Settled)
 }
 

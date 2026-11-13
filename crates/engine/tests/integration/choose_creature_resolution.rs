@@ -2645,3 +2645,158 @@ fn delayed_trigger_fires_for_a_death_in_instructions_resumed_by_a_concession() {
     );
     assert_resolution_settled(&runner, "Final Showdown after the concession");
 }
+
+const DISCIPLINED_DUELIST: &str = "Double strike\nThis creature enters with a shield counter on it. (If it would be dealt damage or destroyed, remove a shield counter from it instead.)";
+const HYENA_UMBRA: &str = "Enchant creature\nEnchanted creature gets +1/+1 and has first strike.\nUmbra armor (If enchanted creature would be destroyed, instead remove all damage from it and destroy this Aura.)";
+
+/// CR 603.7 + CR 616.1: as above, but the instructions the concession resumes pause
+/// again. P2 also controls a Disciplined Duelist with its shield counter, enchanted
+/// with Hyena Umbra, so "Destroy all creatures" destroys the damaged creature and
+/// then asks P2 which replacement applies. The delayed trigger for the first death
+/// must survive that second pause, also across a save and restore taken there.
+#[test]
+fn delayed_trigger_survives_a_second_pause_in_instructions_resumed_by_a_concession() {
+    for restore_at_second_pause in [false, true] {
+        let mut scenario = GameScenario::new_n_player(3, 7);
+        scenario.at_phase(Phase::PreCombatMain);
+        let own = scenario.add_creature(P0, "Own creature", 1, 1).id();
+        let borrowed = scenario
+            .add_creature(P1, "Borrowed creature", 3, 3)
+            .controlled_by(P0)
+            .id();
+        let bitten = scenario.add_creature(P2, "P2 creature", 2, 3).id();
+        let duelist = scenario
+            .add_creature_from_oracle(P2, "Disciplined Duelist", 2, 1, DISCIPLINED_DUELIST)
+            .id();
+        scenario.with_counter(duelist, CounterType::Shield, 1);
+        let umbra = scenario
+            .add_enchantment_from_oracle(P2, "Hyena Umbra", HYENA_UMBRA)
+            .with_subtypes(vec!["Aura"])
+            .id();
+        for _ in 0..7 {
+            scenario.add_basic_land(P0, ManaColor::White);
+        }
+        scenario.add_basic_land(P0, ManaColor::Green);
+        scenario.add_basic_land(P0, ManaColor::Green);
+        let tendrils = scenario
+            .add_spell_to_hand_from_oracle(P0, "Devouring Tendrils", false, DEVOURING_TENDRILS)
+            .with_mana_cost(parse_mtgjson_mana_cost("{1}{G}"))
+            .id();
+        let showdown = scenario
+            .add_spell_to_hand_from_oracle(P0, "Final Showdown", true, FINAL_SHOWDOWN)
+            .with_mana_cost(parse_mtgjson_mana_cost("{W}"))
+            .id();
+        let mut runner = scenario.build();
+        runner
+            .state_mut()
+            .objects
+            .get_mut(&umbra)
+            .unwrap()
+            .attached_to = Some(AttachTarget::Object(duelist));
+        runner
+            .state_mut()
+            .objects
+            .get_mut(&duelist)
+            .unwrap()
+            .attachments
+            .push(umbra);
+        runner.state_mut().layers_dirty.mark_full();
+        let life = |runner: &GameRunner| runner.state().players[0].life;
+        let starting_life = life(&runner);
+
+        let card_id = runner.state().objects[&tendrils].card_id;
+        runner
+            .act(GameAction::CastSpell {
+                object_id: tendrils,
+                card_id,
+                targets: vec![],
+                payment_mode: CastPaymentMode::Auto,
+            })
+            .unwrap();
+        for target in [own, bitten] {
+            runner
+                .act(GameAction::ChooseTarget {
+                    target: Some(TargetRef::Object(target)),
+                })
+                .unwrap();
+        }
+        runner.advance_until_stack_empty();
+        assert_eq!(runner.state().objects[&bitten].zone, Zone::Battlefield);
+        assert_eq!(
+            runner.state().objects[&umbra].attached_to,
+            Some(AttachTarget::Object(duelist)),
+            "reach guard: the Aura is still attached"
+        );
+
+        let card_id = runner.state().objects[&showdown].card_id;
+        runner
+            .act(GameAction::CastSpell {
+                object_id: showdown,
+                card_id,
+                targets: vec![],
+                payment_mode: CastPaymentMode::Auto,
+            })
+            .unwrap();
+        runner
+            .act(GameAction::SelectModes {
+                indices: vec![1, 2],
+            })
+            .unwrap();
+        pass_priority_to_prompt(&mut runner, "Final Showdown's creature choice");
+        let WaitingFor::ChooseFromZoneChoice { cards, .. } = &runner.state().waiting_for else {
+            panic!(
+                "reach guard: the creature choice is open: {:?}",
+                runner.state().waiting_for
+            );
+        };
+        assert_eq!(id_set(cards), id_set(&[own, borrowed]));
+
+        runner.act(GameAction::Concede { player_id: P1 }).unwrap();
+        assert_eq!(
+            runner.state().objects[&bitten].zone,
+            Zone::Graveyard,
+            "reach guard: the damaged creature died before the second pause"
+        );
+        let WaitingFor::ReplacementChoice { player, .. } = &runner.state().waiting_for else {
+            panic!(
+                "reach guard: the replacement-order prompt is the second pause: {:?}",
+                runner.state().waiting_for
+            );
+        };
+        assert_eq!(*player, P2);
+        assert_eq!(life(&runner), starting_life);
+        if restore_at_second_pause {
+            let json = serde_json::to_string(&PersistedGameState::capture(runner.state().clone()))
+                .expect("state serializes");
+            let state = serde_json::from_str::<PersistedGameState>(&json)
+                .expect("persisted state decodes")
+                .prepare_for_restore(PersistedRestoreFinalization::DeferUntilRehydrated)
+                .expect("persisted state is admissible")
+                .finalize_after_rehydration(|_| Ok(()))
+                .expect("restored state is publishable");
+            runner = GameRunner::from_state(state);
+        }
+        runner
+            .act(GameAction::ChooseReplacement { index: 0 })
+            .unwrap();
+        for _ in 0..12 {
+            if life(&runner) != starting_life && runner.state().stack.is_empty() {
+                break;
+            }
+            if runner.act(GameAction::PassPriority).is_err() {
+                break;
+            }
+        }
+        assert_eq!(
+            runner.state().objects[&duelist].zone,
+            Zone::Battlefield,
+            "the Duelist survives through whichever replacement was applied"
+        );
+        assert_eq!(
+            life(&runner),
+            starting_life + 2,
+            "the delayed trigger fired exactly once (restore = {restore_at_second_pause})"
+        );
+        assert_resolution_settled(&runner, "Final Showdown after the concession");
+    }
+}
