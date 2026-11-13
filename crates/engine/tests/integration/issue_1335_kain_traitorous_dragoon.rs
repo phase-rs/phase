@@ -9,7 +9,9 @@
 use engine::game::scenario::{GameScenario, P0, P1};
 use engine::parser::oracle::parse_oracle_text;
 use engine::types::ability::{DamageKindFilter, Effect, EffectKind, TargetFilter, TargetRef};
+use engine::types::actions::GameAction;
 use engine::types::events::GameEvent;
+use engine::types::game_state::WaitingFor;
 use engine::types::phase::Phase;
 use engine::types::triggers::TriggerMode;
 use engine::types::zones::Zone;
@@ -20,6 +22,10 @@ const KAIN_ORACLE: &str = "Jump — During your turn, Kain has flying.\n\
 Whenever Kain deals combat damage to a player, that player gains control of Kain. \
 If they do, you draw that many cards, create that many tapped Treasure tokens, \
 then lose that much life.";
+
+const RAY_OF_COMMAND_ORACLE: &str = "Untap target creature an opponent controls and gain control \
+of it until end of turn. That creature gains haste until end of turn. When you lose control of \
+the creature, tap it.";
 
 fn effect_chain_contains<F>(ability: &engine::types::ability::AbilityDefinition, pred: F) -> bool
 where
@@ -463,5 +469,77 @@ fn kain_destroyed_before_trigger_resolves_pays_no_rider() {
             runner.state().players[P0.0 as usize].life,
         ),
         (0, 0, 20),
+    );
+}
+
+/// CR 118.12 + CR 613.1b: Kain stolen in response still gets a new control effect for that
+/// player, so the "if they do" rider pays out.
+#[test]
+fn kain_stolen_before_trigger_resolves_still_pays_rider() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_library_top(P0, &["Card A", "Card B", "Card C", "Card D"]);
+    let kain = scenario
+        .add_creature_from_oracle(P0, "Kain, Traitorous Dragoon", 2, 4, KAIN_ORACLE)
+        .id();
+    let ray = scenario
+        .add_spell_to_hand_from_oracle(P1, "Ray of Command", true, RAY_OF_COMMAND_ORACLE)
+        .id();
+    let mut runner = scenario.build();
+
+    run_combat(&mut runner, vec![kain], vec![]);
+    let p0_hand_before = runner.state().players[P0.0 as usize].hand.len();
+    runner.act(GameAction::PassPriority).expect("P0 passes");
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { player: P1 }
+    ));
+    let out = runner.cast(ray).target_objects(&[kain]).resolve();
+
+    assert!(
+        out.events().iter().any(|event| matches!(
+            event,
+            GameEvent::EffectResolved { kind: EffectKind::GiveControl, source_id, .. }
+                if *source_id == kain
+        )),
+        "Kain's trigger must resolve its GiveControl"
+    );
+    assert_eq!(
+        out.events()
+            .iter()
+            .filter(|event| matches!(
+                event,
+                GameEvent::ControllerChanged { object_id, .. } if *object_id == kain
+            ))
+            .count(),
+        1,
+        "only Ray of Command moves Kain's controller"
+    );
+    assert_eq!(runner.state().objects[&ray].zone, Zone::Graveyard);
+    assert_eq!(runner.state().objects[&kain].controller, P1);
+
+    let p0_hand_after = runner.state().players[P0.0 as usize].hand.len();
+    let p0_treasures = runner
+        .state()
+        .objects
+        .values()
+        .filter(|obj| {
+            obj.zone == Zone::Battlefield
+                && obj.controller == P0
+                && obj
+                    .card_types
+                    .subtypes
+                    .iter()
+                    .any(|st| st.eq_ignore_ascii_case("Treasure"))
+        })
+        .count();
+    // (cards drawn, Treasures created, P0 life)
+    assert_eq!(
+        (
+            p0_hand_after - p0_hand_before,
+            p0_treasures,
+            runner.state().players[P0.0 as usize].life,
+        ),
+        (2, 2, 18),
     );
 }

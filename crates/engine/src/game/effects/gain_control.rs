@@ -479,6 +479,7 @@ pub fn resolve_give(
         give_control_object_targets(state, ability, target)
     });
 
+    let mut installed_subject = None;
     for obj_id in object_ids {
         if !state.objects.contains_key(&obj_id) {
             return Err(EffectError::ObjectNotFound(obj_id));
@@ -500,10 +501,13 @@ pub fn resolve_give(
         if installed.is_none() {
             continue;
         }
+        // CR 118.12 + CR 613.1b: an installed control effect is the instruction performed, even for a recipient who already controls the object.
+        if installed_subject.is_none() {
+            installed_subject = state.capture_event_object_snapshot(obj_id);
+        }
         mark_echo_due_for_new_controller(state, obj_id);
 
-        // CR 110.2: Record the handoff for downstream "if they do" riders and
-        // `ControllerChanged` triggers (mirrors `resolve_all`).
+        // CR 603.2: publish the handoff for `ControllerChanged` triggers (mirrors `resolve_all`).
         if let Some(member) = member {
             publish_controller_changed(state, events, member, recipient_id);
         }
@@ -512,7 +516,7 @@ pub fn resolve_give(
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::GiveControl,
         source_id: ability.source_id,
-        subject: None,
+        subject: installed_subject.map(Box::new),
     });
 
     Ok(())
