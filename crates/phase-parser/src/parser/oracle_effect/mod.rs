@@ -25745,6 +25745,10 @@ fn try_split_compound_subject(text: &str) -> Option<(TargetFilter, &str, TargetF
 /// Parse "shuffle X and Y into their owners' libraries" as a compound ChangeZone chain.
 /// Returns a ParsedEffectClause with a ChangeZone for the first subject and a sub_ability
 /// for the second subject, both with owner_library: true.
+///
+/// CR 608.2f: the two ChangeZone nodes preserve the prospective-owner shuffle
+/// settlement, but this lowering does not claim simultaneous co-departure
+/// grouping for the two legs; that pre-existing boundary is a follow-up.
 fn try_parse_compound_shuffle(text: &str, ctx: &mut ParseContext) -> Option<ParsedEffectClause> {
     let lower = text.to_lowercase();
     tag::<_, _, OracleError<'_>>("shuffle ")
