@@ -31,7 +31,7 @@ use crate::types::ability::{
     Effect, EffectOutcomeSignal, EffectScope, FilterProp, LibraryPosition, PlayerFilter,
     PlayerScope, QuantityExpr, QuantityRef, RepeatContinuation, ReturnResultId, SharedQuality,
     SharedQualityRelation, SiblingCondition, StaticCondition, SubAbilityLink, TapStateChange,
-    TargetFilter, TypedFilter,
+    TargetFilter, TypeFilter, TypedFilter,
 };
 use crate::types::game_state_kinds::TargetSelectionConstraint;
 use crate::types::zones::Zone;
@@ -4822,7 +4822,49 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
     // `refuse_unenforced_aggregate_resolution_selection`.
     super::lower::refuse_unenforced_aggregate_resolution_selection(&mut result);
 
+    // CR 115.1c + CR 608.2d: "Target opponent chooses a permanent they control
+    // and returns it..." needs a resolution-time choice by the announced
+    // opponent. The generic target parser produces a TargetOnly permanent plus
+    // Bounce; refuse the whole shape until that lowering lands (Teferi,
+    // Temporal Pilgrim -12 follow-up), so no object target is announced.
+    refuse_unsupported_target_opponent_choice(&mut result);
+
     result
+}
+
+fn refuse_unsupported_target_opponent_choice(def: &mut AbilityDefinition) {
+    let is_target_opponent_permanent = matches!(
+        &*def.effect,
+        Effect::TargetOnly {
+            target: TargetFilter::Typed(filter),
+        } if filter.controller == Some(ControllerRef::TargetOpponent)
+            && filter.type_filters.contains(&TypeFilter::Permanent)
+    );
+    let bounces_parent = def.sub_ability.as_deref().is_some_and(|sub| {
+        matches!(
+            &*sub.effect,
+            Effect::Bounce {
+                target: TargetFilter::ParentTarget,
+                ..
+            }
+        )
+    });
+    if is_target_opponent_permanent && bounces_parent {
+        let description = def
+            .description
+            .clone()
+            .unwrap_or_else(|| "unsupported target-opponent permanent choice".to_string());
+        *def.effect =
+            Effect::unimplemented("target-opponent permanent choice", description.as_str());
+        def.sub_ability = None;
+        return;
+    }
+    if let Some(sub) = def.sub_ability.as_deref_mut() {
+        refuse_unsupported_target_opponent_choice(sub);
+    }
+    if let Some(otherwise) = def.else_ability.as_deref_mut() {
+        refuse_unsupported_target_opponent_choice(otherwise);
+    }
 }
 
 /// CR 608.2c: validate the structural "repeat this process" directives of an
