@@ -2303,8 +2303,7 @@ mod tests {
         let bears = scenario.add_real_card(p0, "Grizzly Bears", Zone::Graveyard, db);
         let animate = scenario.add_real_card(p0, "Animate Dead", Zone::Hand, db);
         let dragon = scenario.add_real_card(p0, "Worldgorger Dragon", Zone::Hand, db);
-        // Its entry searches and shuffles P0's library each cycle: the loop's progress axis,
-        // as in the corpus's Wood Elves board.
+        // Gains P0 one life as each creature returns: the loop's progress axis.
         scenario.add_real_card(p0, "Soul Warden", Zone::Battlefield, db);
         // Not in the test card fixture: built from its printed Oracle text and its printed 1/1.
         let sniper = scenario
