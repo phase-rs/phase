@@ -222,7 +222,7 @@ describe("SetupBufferBudget", () => {
   const large = (type: string) => `{"type":"${type}","data":{"padding":"${"x".repeat(SETUP_BUFFER_MAX_TEXT_BYTES / 2)}"}}`;
 
   it.each([
-    ["game", "GameStarted"], ["draft", "GameStarted"], ["draft", "DraftStateUpdate"], ["draft", "DraftJoined"],
+    ["game", "GameStarted"], ["game", "StateUpdate"], ["draft", "GameStarted"], ["draft", "DraftStateUpdate"], ["draft", "DraftJoined"],
   ] as const)("does not charge the %s surface's first %s, wherever it sits behind a prefix", (surface, type) => {
     const budget = new SetupBufferBudget(surface);
     expect(budget.admit('{"type":"SessionAttached","data":{}}')).toBe(true);
@@ -236,7 +236,11 @@ describe("SetupBufferBudget", () => {
     const repeated = new SetupBufferBudget("game");
     expect(repeated.admit(large("GameStarted"))).toBe(true);
     expect(repeated.admit(large("GameStarted"))).toBe(false);
-    expect(new SetupBufferBudget("game").admit(large("StateUpdate"))).toBe(false);
+    expect(new SetupBufferBudget("game").admit(large("PlayerSlotsUpdate"))).toBe(false);
+    // A waived answer still counts as the tag's first frame.
+    const waived = new SetupBufferBudget("game");
+    waived.waive(large("GameStarted"));
+    expect(waived.admit(large("GameStarted"))).toBe(false);
     expect(new SetupBufferBudget("game").admit(large("DraftStateUpdate"))).toBe(false);
   });
 });

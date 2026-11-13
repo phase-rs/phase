@@ -1286,6 +1286,7 @@ export class ServerDraftAdapter implements EngineAdapter {
           // (which may be a large Full), it is not charged to the backlog.
           noteSetupAnswer();
           noteSetupAnswer = null;
+          bufferBudget.waive(event.data);
           return;
         }
         // The positive bootstrap or the server's `DraftActionRejected` answer

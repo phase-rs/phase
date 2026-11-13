@@ -7529,7 +7529,7 @@ describe("WebSocketAdapter — acquired socket ownership", () => {
     );
 
     it.each(["inside the transport's setup send", "after the send, with the receipt still held"] as const)(
-      "completes an initial join on the server-ordered batch SessionAttached, PlayerSlotsUpdate, large GameStarted delivered %s",
+      "completes an initial join on the synthetic batch SessionAttached, PlayerSlotsUpdate, large GameStarted delivered %s",
       async (timing) => {
         MockWebSocket.last = null;
         const adapter = new WebSocketAdapter(
@@ -7542,7 +7542,9 @@ describe("WebSocketAdapter — acquired socket ownership", () => {
         const candidate = latestSocket();
         const started = JSON.stringify(codecGameStarted(6, 6, { state: largeReconnectState(6) }));
         expect(started.length).toBeGreaterThan(8_388_608);
-        // The order a full Join is answered in (phase-server main.rs:9784-9803).
+        // Synthetic transport-boundary batch: an attachment prefix, then a large
+        // GameStarted. (A waiting-room join's real bootstrap is a StateUpdate;
+        // see the next test.)
         const deliverBatch = () => {
           candidate.dispatchSynthetic("message", JSON.stringify({
             type: "SessionAttached",
@@ -7576,6 +7578,77 @@ describe("WebSocketAdapter — acquired socket ownership", () => {
         expect(candidate.close).toHaveBeenCalledOnce();
       },
     );
+
+    it("keeps a waiting-room join's large StateUpdate bootstrap delivered behind its attachment prefix inside the setup send, then starts", async () => {
+      MockWebSocket.last = null;
+      const adapter = new WebSocketAdapter(
+        "wss://localhost:9374/ws", "join", { main_deck: [], sideboard: [] }, "GAME01",
+        undefined, undefined, undefined,
+        { stateCodecSessionProvider: () => Promise.resolve(null) },
+      );
+      const init = observe(adapter.initialize());
+      await vi.waitFor(() => expect(MockWebSocket.last).not.toBeNull());
+      const candidate = latestSocket();
+      const waiting = JSON.stringify(codecStateUpdate(3, 3, {}, { state: largeReconnectState(3) }));
+      expect(waiting.length).toBeGreaterThan(8_388_608);
+      // The waiting-room order (phase-server main.rs:9737-9803): SessionAttached,
+      // PlayerSlotsUpdate, then the StateUpdate bootstrap.
+      candidate.sendReceipt = vi.fn(() => {
+        candidate.dispatchSynthetic("message", JSON.stringify({
+          type: "SessionAttached",
+          data: {
+            game_code: "GAME01", player_id: 0, player_token: "codec-token",
+            full_key: REPLY_OWNERSHIP_FULL_KEY,
+          },
+        }));
+        candidate.dispatchSynthetic("message", JSON.stringify({ type: "PlayerSlotsUpdate", data: { slots: [] } }));
+        candidate.dispatchSynthetic("message", waiting);
+        return new Promise<void>(() => undefined);
+      });
+      try {
+        candidate.dispatchSynthetic("message", CODEC_SESSION_HELLO);
+        await vi.waitFor(() => expect(candidate.sendReceipt).toHaveBeenCalledOnce());
+        await vi.advanceTimersByTimeAsync(0);
+        // The attachment survived its large waiting snapshot.
+        expect(candidate.close).not.toHaveBeenCalled();
+        expect(init.value()).not.toMatchObject({ code: expect.anything() });
+        // The room fills: the start completes the join on the same socket.
+        candidate.dispatchSynthetic("message", JSON.stringify(codecGameStarted(6, 6)));
+        await vi.waitFor(() => expect(init.value()).toEqual({ resolvedWith: undefined }));
+        expect((await adapter.getSnapshot()).state.turn_number).toBe(6);
+        candidate.dispatchSynthetic("message", JSON.stringify(codecStateUpdate(7, 7)));
+        await vi.waitFor(async () => expect((await adapter.getSnapshot()).state.turn_number).toBe(7));
+        expect(candidate.close).not.toHaveBeenCalled();
+      } finally {
+        adapter.dispose();
+      }
+    });
+
+    it("cuts off an initial spectate that is sent a second large bootstrap of the same tag inside the setup send", async () => {
+      MockWebSocket.last = null;
+      const adapter = new WebSocketAdapter(
+        "wss://localhost:9374/ws", "spectate", { main_deck: [], sideboard: [] }, "GAME01",
+        undefined, undefined, undefined,
+        { stateCodecSessionProvider: () => Promise.resolve(null) },
+      );
+      const init = observe(adapter.initialize());
+      await vi.waitFor(() => expect(MockWebSocket.last).not.toBeNull());
+      const candidate = latestSocket();
+      const started = JSON.stringify(codecGameStarted(6, 6, { state: largeReconnectState(6) }));
+      // Synthetic: the first is the waived answer, the repeat is backlog.
+      candidate.sendReceipt = vi.fn(() => {
+        candidate.dispatchSynthetic("message", started);
+        candidate.dispatchSynthetic("message", started);
+        return new Promise<void>(() => undefined);
+      });
+      try {
+        candidate.dispatchSynthetic("message", CODEC_SESSION_HELLO);
+        await vi.waitFor(() => expect(init.value()).toMatchObject({ code: "WS_CLOSED" }));
+        expect(candidate.close).toHaveBeenCalled();
+      } finally {
+        adapter.dispose();
+      }
+    });
 
     it("completes an initial spectate on a large bootstrap delivered inside the transport's setup send", async () => {
       MockWebSocket.last = null;

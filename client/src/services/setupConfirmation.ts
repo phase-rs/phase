@@ -67,13 +67,15 @@ export const SETUP_BUFFER_MAX_TEXT_BYTES = 16 * 1024 * 1024;
 
 /**
  * The frames that carry an attachment's state bootstrap, by surface. The server
- * may send one behind a prefix of small frames (a full Join is answered with
- * `SessionAttached`, `PlayerSlotsUpdate`, then `GameStarted`:
- * `crates/phase-server/src/main.rs:9784-9803`), so it is recognized by its tag
- * wherever it sits in the buffer, not by being the first answer.
+ * may send one behind a prefix of small frames: a Join into a waiting room is
+ * answered with `SessionAttached`, `PlayerSlotsUpdate`, then a `StateUpdate`
+ * bootstrap (`crates/phase-server/src/main.rs:9737-9803`), and one that fills
+ * the room with `GameStarted` (`broadcast_game_started`, `:9844-9852`). So the
+ * bootstrap is recognized by its tag wherever it sits in the buffer, not by
+ * being the first answer.
  */
 const BOOTSTRAP_FRAMES: Record<"game" | "draft", ReadonlySet<string>> = {
-  game: new Set(["GameStarted"]),
+  game: new Set(["GameStarted", "StateUpdate"]),
   draft: new Set(["GameStarted", "DraftStateUpdate", "DraftJoined"]),
 };
 
@@ -91,6 +93,17 @@ export class SetupBufferBudget {
   private readonly bootstrapsSeen = new Set<string>();
 
   constructor(private readonly surface: "game" | "draft") {}
+
+  /**
+   * Records a frame whose charge the adapter waives (the answer that settles an
+   * unconfirmed attachment's receipt wait), so a later frame of the same
+   * bootstrap tag is a repeat and is charged.
+   */
+  waive(data: unknown): void {
+    if (typeof data !== "string") return;
+    const type = frameType(data);
+    if (BOOTSTRAP_FRAMES[this.surface].has(type)) this.bootstrapsSeen.add(type);
+  }
 
   /** Charges one backlog frame; false once the buffer's budget is exhausted. */
   admit(data: unknown): boolean {

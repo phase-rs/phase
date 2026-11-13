@@ -2623,6 +2623,7 @@ export class WebSocketAdapter implements EngineAdapter {
           // (which may be a large Full), it is not charged to the backlog.
           noteSetupAnswer();
           noteSetupAnswer = null;
+          bufferBudget.waive(event.data);
           return;
         }
         // Only the positive bootstrap adopts; a refusal ends the interval.
