@@ -3873,6 +3873,92 @@ fn a_payer_departing_at_their_own_substitutes_later_choice_leaves_the_game() {
         .expect("the game goes on for the living players");
 }
 
+/// CR 104.3a + CR 800.4a: the payer concedes while another player is at a
+/// later choice of the substitute for one of the payment's draws. P1's Notion
+/// Thief takes the first of P0's two upkeep draws, P1 accepts Abundance for it,
+/// and P0 concedes while P1 is at Abundance's land-or-nonland choice. The
+/// payment leaves with its controller; P1's choice is still P1's to answer,
+/// nothing is drawn for P0, and the game goes on.
+#[test]
+fn a_payer_departing_at_another_players_later_choice_leaves_it_to_its_chooser() {
+    let (mut runner, vortex, ()) = three_player_vortex_board(1, |scenario| {
+        scenario.with_library_top(P1, &STAGED_LIBRARY[..6]);
+        scenario.add_creature_from_oracle(P1, "Notion Thief", 3, 1, NOTION_THIEF_ORACLE);
+        scenario.add_enchantment_from_oracle(P1, "Abundance", ABUNDANCE_ORACLE);
+    });
+    advance_through_upkeep(&mut runner);
+    runner
+        .act(GameAction::PayUnlessCost { pay: true })
+        .expect("choosing the draw cost is legal");
+    engine::game::engine::apply(
+        runner.state_mut(),
+        P1,
+        GameAction::ChooseReplacement {
+            index: APPLY_REPLACEMENT,
+        },
+    )
+    .expect("P1 accepts Abundance");
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::NamedChoice { player: P1, .. }
+        ),
+        "reach guard: Abundance asks P1 for land or nonland: {:?}",
+        runner.state().waiting_for
+    );
+
+    let departure = concede_with_events(&mut runner, P0);
+    assert!(
+        departure.iter().any(|event| matches!(
+            event,
+            GameEvent::PlayerEliminated { player_id } if *player_id == P0
+        )),
+        "CR 104.3a: the departure is published"
+    );
+    assert!(
+        runner.state().pending_cost_move_resume.is_none(),
+        "the departed controller's payment is retired"
+    );
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::NamedChoice { player: P1, .. }
+        ),
+        "P1's choice is still P1's to answer: {:?}",
+        runner.state().waiting_for
+    );
+    let answered = engine::game::engine::apply(
+        runner.state_mut(),
+        P1,
+        GameAction::ChooseOption {
+            choice: "Land".to_string(),
+        },
+    )
+    .expect("P1 answers Abundance");
+    assert!(
+        !answered.events.iter().any(
+            |event| matches!(event, GameEvent::CardDrawn { player_id, .. } if *player_id == P0)
+        ),
+        "nothing is drawn for the departed player"
+    );
+    assert_eq!(upkeep_resolutions(&answered.events, vortex), 0);
+    let mut state = runner.state().clone();
+    for _ in 0..4 {
+        let WaitingFor::Priority { player } = state.waiting_for else {
+            break;
+        };
+        assert_ne!(player, P0, "a departed player never has priority");
+        engine::game::engine::apply(&mut state, player, GameAction::PassPriority)
+            .expect("the game goes on");
+    }
+    let saved = serde_json::to_string(&PersistedGameState::Raw(Box::new(runner.state().clone())))
+        .expect("the board after the answer serializes");
+    serde_json::from_str::<PersistedGameState>(&saved)
+        .expect("the save decodes")
+        .into_game_state()
+        .expect("nothing of the departed payment is left behind");
+}
+
 /// Arranges `player`'s library so that choosing "Land" for Abundance reveals
 /// two nonland cards before a land, which asks for the misses' bottom order.
 fn stage_two_misses_before_a_land(runner: &mut GameRunner, player: PlayerId) {
