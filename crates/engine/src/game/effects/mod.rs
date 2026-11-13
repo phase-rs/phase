@@ -27021,10 +27021,24 @@ fn ability_definition_chain_refs_parent_target(definition: &AbilityDefinition) -
             .is_some_and(ability_definition_chain_refs_parent_target)
 }
 
+/// CR 608.2c + CR 603.7c: a zone move whose named performer is a parent
+/// reference ("that player returns those cards …" with the performer bound to
+/// the parent target or its controller/owner) depends on the parent referent
+/// even when the moved population does not, so a detached continuation (a
+/// delayed trigger) snapshots the parent targets for it.
+fn zone_move_actor_refs_parent_target(effect: &Effect) -> bool {
+    match effect {
+        Effect::ChangeZone { actor, .. } | Effect::ChangeZoneAll { actor, .. } => actor
+            .player_filter()
+            .is_some_and(crate::types::ability::filter_refs_parent_target),
+        _ => false,
+    }
+}
+
 /// Executable definition payloads preserve their original source, so their
 /// recursive dependency scan remains limited to ParentTarget anaphora.
 fn effect_chain_refs_parent_target(effect: &Effect) -> bool {
-    if effect_refs_parent_target(effect) {
+    if effect_refs_parent_target(effect) || zone_move_actor_refs_parent_target(effect) {
         return true;
     }
     let mut references_parent = false;
@@ -52428,6 +52442,52 @@ mod tests {
                 last_created,
             ));
         }
+    }
+
+    /// CR 603.7c + CR 608.2c: a zone move whose only parent reference is its
+    /// performer still counts as referencing the parent target, so a delayed
+    /// trigger snapshots the parent referent for it. Synthetic: no printed
+    /// delayed payload names a subject today.
+    /// Revert-probe: drop `zone_move_actor_refs_parent_target` from
+    /// `effect_chain_refs_parent_target` ⇒ the named row reads `false`.
+    #[test]
+    fn zone_move_actor_parent_reference_is_a_parent_target_dependency() {
+        let mass = |actor| {
+            ResolvedAbility::new(
+                Effect::ChangeZoneAll {
+                    actor,
+                    origin: Some(Zone::Battlefield),
+                    destination: Zone::Exile,
+                    target: TargetFilter::TrackedSet {
+                        id: crate::types::identifiers::TrackedSetId(0),
+                    },
+                    enters_under: None,
+                    enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                    enters_attacking: false,
+                    enter_with_counters: vec![],
+                    face_down_profile: None,
+                    library_position: None,
+                    library_shuffle: Default::default(),
+                    random_order: false,
+                },
+                vec![],
+                ObjectId(900),
+                PlayerId(0),
+            )
+        };
+        assert!(ability_refs_parent_target(&mass(
+            LibraryInstructionActor::Player {
+                player: TargetFilter::ParentTargetController,
+            }
+        )));
+        assert!(!ability_refs_parent_target(&mass(
+            LibraryInstructionActor::Player {
+                player: TargetFilter::TriggeringPlayer,
+            }
+        )));
+        assert!(!ability_refs_parent_target(&mass(
+            LibraryInstructionActor::Controller
+        )));
     }
 
     /// CR 608.2c: `ChangeZone.actor` and `ChangeZoneAll.actor` name the player
