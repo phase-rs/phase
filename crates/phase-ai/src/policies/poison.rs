@@ -38,13 +38,14 @@
 //! ## Performance
 //!
 //! `verdict()` runs per candidate per search node. Every predicate here is
-//! card-local (`obj.abilities` / `obj.keywords`) or a plain `u32` field read on
-//! `Player.poison_counters`; the combat branch is linear in the candidate's own
-//! attack list. No board-wide sweep, no affordability call, no
-//! `find_legal_targets` — nothing this policy touches is on the documented
-//! inner-loop landmine list.
+//! card-local (`obj.abilities` / `obj.keywords`) or a
+//! `players::poison_loss_measure` call per live opponent; the combat branch is
+//! linear in the candidate's own attack list. No board-wide sweep, no
+//! affordability call, no `find_legal_targets` — nothing this policy touches
+//! is on the documented inner-loop landmine list.
 
 use engine::game::combat::AttackTarget;
+use engine::game::players::{self, PoisonLossMeasure, PoisonLossScope};
 use engine::types::ability::AbilityDefinition;
 use engine::types::actions::GameAction;
 use engine::types::game_state::GameState;
@@ -53,8 +54,7 @@ use engine::types::player::PlayerId;
 
 use crate::ability_chain::AbilityScope;
 use crate::features::poison::{
-    gives_opponents_poison_parts, poison_yield_parts, proliferates_parts, LETHAL_POISON,
-    POISON_CLOCK_FLOOR,
+    gives_opponents_poison_parts, poison_yield_parts, proliferates_parts, POISON_CLOCK_FLOOR,
 };
 use crate::features::DeckFeatures;
 
@@ -75,9 +75,12 @@ enum PoisonContribution {
     /// poisoned opponent.
     Proliferate,
     /// CR 508.1: an attack declaration whose poison sources are pointed at a
-    /// live opponent. `current` is that defender's poison total now, `added`
-    /// what the declared attackers convert if the damage connects.
-    CombatDamage { current: u32, added: u32 },
+    /// live opponent. `measure` is that defender's poison-loss measure now,
+    /// `added` what the declared attackers convert if the damage connects.
+    CombatDamage {
+        measure: PoisonLossMeasure,
+        added: u32,
+    },
     /// Nothing to do with the poison clock.
     None,
 }
@@ -148,18 +151,18 @@ where
 /// player**, so an attack aimed at a planeswalker or a battle adds nothing on
 /// this axis. Poison is summed per defending player — several
 /// infect creatures attacking the same seat share one clock — and the seat
-/// closest to CR 104.3d's ten is the one scored.
+/// closest to its poison-loss threshold is the one scored.
 fn combat_contribution(
     ctx: &PolicyContext<'_>,
     attacks: &[(ObjectId, AttackTarget)],
 ) -> PoisonContribution {
-    // (defending seat, its poison now, poison this declaration would add).
-    let mut per_defender: Vec<(PlayerId, u32, u32)> = Vec::new();
+    // (defending seat, its poison-loss measure, poison this declaration would add).
+    let mut per_defender: Vec<(PlayerId, PoisonLossMeasure, u32)> = Vec::new();
     for (attacker_id, target) in attacks {
         let AttackTarget::Player(defender) = target else {
             continue;
         };
-        let Some(current) = live_opponent_poison(ctx.state, ctx.ai_player, *defender) else {
+        let Some(measure) = live_opponent_poison(ctx.state, ctx.ai_player, *defender) else {
             continue;
         };
         let Some(attacker) = ctx.state.objects.get(attacker_id) else {
@@ -173,53 +176,76 @@ fn combat_contribution(
         if yielded == 0 {
             continue;
         }
-        match per_defender.iter_mut().find(|(seat, ..)| seat == defender) {
+        let shares_clock = |seat: &PlayerId| {
+            seat == defender
+                || (measure.scope == PoisonLossScope::Team
+                    && players::teammates(ctx.state, *defender).contains(seat))
+        };
+        // CR 810.10: teammates who share poison counters share one clock.
+        match per_defender
+            .iter_mut()
+            .find(|(seat, ..)| shares_clock(seat))
+        {
             Some((_, _, added)) => *added = added.saturating_add(yielded),
-            None => per_defender.push((*defender, current, yielded)),
+            None => per_defender.push((*defender, measure, yielded)),
         }
     }
 
     per_defender
         .into_iter()
-        .max_by_key(|(_, current, added)| current.saturating_add(*added))
-        .map_or(PoisonContribution::None, |(_, current, added)| {
-            PoisonContribution::CombatDamage { current, added }
+        .min_by_key(|(_, measure, added)| headroom(*measure).saturating_sub(*added))
+        .map_or(PoisonContribution::None, |(_, measure, added)| {
+            PoisonContribution::CombatDamage { measure, added }
         })
 }
 
-/// CR 104.3d: the highest poison total among the AI's LIVE opponents.
-///
-/// CR 800.4: a multiplayer game continues after a player leaves, and the
-/// eliminated seat stays in `GameState.players` — so a dead player's counters
-/// must not be read as pressure the AI is still applying.
-pub(crate) fn most_poisoned_opponent(state: &GameState, ai_player: PlayerId) -> u32 {
-    state
-        .players
-        .iter()
-        .filter(|player| player.id != ai_player && !player.is_eliminated)
-        .map(|player| player.poison_counters)
-        .max()
-        .unwrap_or(0)
+/// Counters still needed before this measure is lethal.
+fn headroom(measure: PoisonLossMeasure) -> u32 {
+    measure.threshold.saturating_sub(measure.count)
 }
 
-/// CR 104.3d + CR 800.4: this seat's poison total, or `None` when it is not a
-/// live opponent of `ai_player`.
+/// CR 102.3 + CR 704.5c / CR 704.6b: the poison-loss measure of each live
+/// opponent of `ai_player`.
+pub(crate) fn opponent_poison_losses(
+    state: &GameState,
+    ai_player: PlayerId,
+) -> impl Iterator<Item = PoisonLossMeasure> + '_ {
+    players::opponents(state, ai_player)
+        .into_iter()
+        .filter_map(move |id| state.players.iter().find(|p| p.id == id))
+        .filter_map(|player| players::poison_loss_measure(state, player))
+}
+
+/// CR 102.3 + CR 704.5c / CR 704.6b: the live opponent's measure with the
+/// fewest counters left to lethal.
+pub(crate) fn closest_opponent_poison_loss(
+    state: &GameState,
+    ai_player: PlayerId,
+) -> Option<PoisonLossMeasure> {
+    opponent_poison_losses(state, ai_player).min_by_key(|measure| headroom(*measure))
+}
+
+/// CR 102.3 + CR 800.4: this seat's poison-loss measure, or `None` when it is
+/// not a live opponent of `ai_player` or no poison-loss rule applies to it.
 pub(crate) fn live_opponent_poison(
     state: &GameState,
     ai_player: PlayerId,
     seat: PlayerId,
-) -> Option<u32> {
-    state
-        .players
-        .iter()
-        .find(|player| player.id == seat && player.id != ai_player && !player.is_eliminated)
-        .map(|player| player.poison_counters)
+) -> Option<PoisonLossMeasure> {
+    if !(players::is_opponent(state, ai_player, seat) && players::is_alive(state, seat)) {
+        return None;
+    }
+    let player = state.players.iter().find(|player| player.id == seat)?;
+    players::poison_loss_measure(state, player)
 }
 
-/// CR 104.3d: would `added` more poison counters put this player at ten or
-/// more, losing them the game the next time a player would receive priority?
-pub(crate) fn reaches_lethal(current_poison: u32, added: u32) -> bool {
-    current_poison.saturating_add(added) >= LETHAL_POISON
+/// CR 704.5c / CR 704.6b: would `added` more counters reach the measure's threshold?
+pub(crate) fn reaches_lethal(measure: PoisonLossMeasure, added: u32) -> bool {
+    PoisonLossMeasure {
+        count: measure.count.saturating_add(added),
+        ..measure
+    }
+    .is_lethal()
 }
 
 impl TacticalPolicy for PoisonClockPolicy {
@@ -260,31 +286,35 @@ impl TacticalPolicy for PoisonClockPolicy {
             // is a `QuantityExpr` that need not be statically known. A resolving
             // spell's counter is guaranteed, so its lethal case may reach the
             // critical band (`CRITICAL_MAX` ceiling).
-            PoisonContribution::DirectPoison => score_clock(
-                scalar,
-                most_poisoned_opponent(ctx.state, ctx.ai_player),
-                1,
-                CRITICAL_MAX,
-            ),
+            PoisonContribution::DirectPoison => {
+                match closest_opponent_poison_loss(ctx.state, ctx.ai_player) {
+                    Some(measure) => score_clock(scalar, measure, 1, CRITICAL_MAX),
+                    None => {
+                        PolicyVerdict::neutral(PolicyReason::new("poison_clock_no_poison_loss"))
+                    }
+                }
+            }
             PoisonContribution::Proliferate => {
-                let highest = most_poisoned_opponent(ctx.state, ctx.ai_player);
                 // CR 701.34a: proliferate chooses among permanents and players
                 // that ALREADY have a counter. With no poisoned opponent it
                 // advances nothing, so it earns nothing on this axis.
-                if highest == 0 {
-                    return PolicyVerdict::neutral(PolicyReason::new(
+                match opponent_poison_losses(ctx.state, ctx.ai_player)
+                    .filter(|measure| measure.count > 0)
+                    .min_by_key(|measure| headroom(*measure))
+                {
+                    Some(measure) => score_clock(scalar, measure, 1, CRITICAL_MAX),
+                    None => PolicyVerdict::neutral(PolicyReason::new(
                         "poison_clock_no_counters_to_proliferate",
-                    ));
+                    )),
                 }
-                score_clock(scalar, highest, 1, CRITICAL_MAX)
             }
             // CR 509.1a: declared combat damage is not guaranteed — the attack
             // can be blocked or prevented — so even a would-be-lethal poison
             // swing is held below the critical band (`STRONG_MAX` ceiling) that
             // a guaranteed direct poison earns. A committed attacker is still a
             // strong play, just not a booked win.
-            PoisonContribution::CombatDamage { current, added } => {
-                score_clock(scalar, current, added, STRONG_MAX)
+            PoisonContribution::CombatDamage { measure, added } => {
+                score_clock(scalar, measure, added, STRONG_MAX)
             }
         }
     }
@@ -295,9 +325,9 @@ impl TacticalPolicy for PoisonClockPolicy {
 /// one tenth of a clock at 10/10, because it is the only way to reach ten.
 const MIN_CLOCK_PROGRESS: f64 = 0.25;
 
-/// Shared scoring for every branch: reaching CR 104.3d's ten is the top of the
-/// scale, otherwise scaled by how far the clock has run — the last counters are
-/// worth more than the first.
+/// Shared scoring for every branch: reaching the measure's threshold is the top
+/// of the scale, otherwise scaled by how far the clock has run — the last
+/// counters are worth more than the first.
 ///
 /// `ceiling` is the highest band this branch may reach: `CRITICAL_MAX` for a
 /// guaranteed counter (a resolving direct-poison spell), `STRONG_MAX` for a
@@ -306,22 +336,23 @@ const MIN_CLOCK_PROGRESS: f64 = 0.25;
 /// `PolicyVerdict::score`, which selects the band from the clamped value. The
 /// sub-lethal case is always held under `STRONG_MAX`, so an advancing-but-not-
 /// lethal clock never outranks a booked win.
-fn score_clock(scalar: f64, current: u32, added: u32, ceiling: f64) -> PolicyVerdict {
+fn score_clock(scalar: f64, measure: PoisonLossMeasure, added: u32, ceiling: f64) -> PolicyVerdict {
     let facts = |reason: PolicyReason| {
         reason
-            .with_fact("opponent_poison", i64::from(current))
+            .with_fact("opponent_poison", i64::from(measure.count))
             .with_fact("poison_added", i64::from(added))
+            .with_fact("poison_threshold", i64::from(measure.threshold))
     };
 
-    if reaches_lethal(current, added) {
+    if reaches_lethal(measure, added) {
         return PolicyVerdict::score(
             scalar.min(ceiling),
             facts(PolicyReason::new("poison_clock_lethal")),
         );
     }
 
-    let projected = current.saturating_add(added);
-    let progress = f64::from(projected) / f64::from(LETHAL_POISON);
+    let projected = measure.count.saturating_add(added);
+    let progress = f64::from(projected) / f64::from(measure.threshold);
     PolicyVerdict::score(
         scalar.min(STRONG_MAX) * progress.max(MIN_CLOCK_PROGRESS),
         facts(PolicyReason::new("poison_clock_pressure")),

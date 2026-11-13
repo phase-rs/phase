@@ -35,20 +35,19 @@
 //! scores high there while scoring ~0 here (no poison sources).
 
 use engine::game::DeckEntry;
-use engine::types::ability::{AbilityDefinition, ControllerRef, Effect, TargetFilter};
+use engine::types::ability::{
+    AbilityDefinition, ControllerRef, Effect, PlayerFilter, TargetFilter,
+};
 use engine::types::card_type::CoreType;
 use engine::types::keywords::Keyword;
 use engine::types::player::PlayerCounterKind;
 
-use crate::ability_chain::{collect_scoped_effects, AbilityScope};
+use crate::ability_chain::{collect_scoped_effects, collect_scoped_nodes, AbilityScope};
 use crate::features::commitment;
 
 /// Commitment at or above which the poison clock is a real plan for this deck
 /// rather than an incidental splash. Gates `PoisonClockPolicy::activation`.
 pub const POISON_CLOCK_FLOOR: f32 = 0.35;
-
-/// CR 104.3d: a player with ten or more poison counters loses the game.
-pub const LETHAL_POISON: u32 = 10;
 
 /// CR 104.3d + CR 122.1f: per-deck poison-clock classification.
 ///
@@ -198,25 +197,51 @@ pub(crate) fn poison_yield_parts(core_types: &[CoreType], keywords: &[Keyword], 
 /// CR 122.1f: an ability tree that gives poison counters to a player who can
 /// be an opponent, walked at `scope`.
 ///
-/// A `TargetFilter::Controller` / `SelfRef` scope is rejected — a card that
-/// poisons ITS OWN controller (a drawback clause, e.g. Phyrexian Vatmother) is
-/// not a poison payoff.
+/// Under a `player_scope` the resolver rebinds `Controller` to each scoped
+/// player, so "each opponent gets a poison counter" counts. An unscoped
+/// `Controller` / `SelfRef` recipient is a drawback, not a payoff (Phyrexian
+/// Vatmother).
 pub(crate) fn gives_opponents_poison_parts<'a>(
     abilities: impl IntoIterator<Item = &'a AbilityDefinition>,
     scope: AbilityScope,
 ) -> bool {
     abilities.into_iter().any(|ability| {
-        collect_scoped_effects(ability, scope).iter().any(|effect| {
+        collect_scoped_nodes(ability, scope).iter().any(|node| {
             matches!(
-                effect,
+                &*node.effect,
                 Effect::GivePlayerCounter {
                     counter_kind: PlayerCounterKind::Poison,
                     target,
                     ..
-                } if filter_can_hit_opponent(target)
+                } if recipients_can_include_opponent(target, node.player_scope.as_ref())
             )
         })
     })
+}
+
+fn recipients_can_include_opponent(target: &TargetFilter, scope: Option<&PlayerFilter>) -> bool {
+    match (target, scope) {
+        (TargetFilter::Controller, Some(scope)) => scope_reaches_only_opponents(scope),
+        _ => filter_can_hit_opponent(target),
+    }
+}
+
+/// CR 102.3 + CR 104.4a: whether a `player_scope` reaches only opponents of the
+/// controller; a scope that can include the controller is not credited, because
+/// the AI does not weigh poison it gives itself.
+fn scope_reaches_only_opponents(scope: &PlayerFilter) -> bool {
+    match scope {
+        PlayerFilter::Opponent
+        | PlayerFilter::OpponentLostLife
+        | PlayerFilter::OpponentGainedLife
+        | PlayerFilter::OpponentDealtDamage { .. }
+        | PlayerFilter::OpponentAttacked { .. }
+        | PlayerFilter::DefendingPlayer => true,
+        PlayerFilter::AnyOf { filters } => {
+            !filters.is_empty() && filters.iter().all(scope_reaches_only_opponents)
+        }
+        _ => false,
+    }
 }
 
 /// True when a `TargetFilter` can resolve to a player other than the ability's

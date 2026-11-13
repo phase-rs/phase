@@ -799,20 +799,23 @@ pub(crate) fn can_pay_ward_cost(
     ward: &WardCost,
     warded: &GameObject,
 ) -> bool {
-    // CR 104.3d: reject up front if the AGGREGATE poison this cost would
-    // ACTUALLY give (direct or across every Compound sub-cost, replacement-
-    // adjusted) reaches or crosses `LETHAL_POISON` — checked once, against
-    // the combined total, before any per-variant mechanical-affordability
-    // logic below. `None` means the replacement outcome couldn't be cleanly
-    // projected (a live choice or an unmodeled event rewrite) — conservatively
-    // decline rather than assume it's safe. The AI must never treat ending
+    // CR 704.5c / CR 704.6b: reject up front if the AGGREGATE poison this cost
+    // would ACTUALLY give (direct or across every Compound sub-cost,
+    // replacement-adjusted) reaches the AI's poison-loss threshold (team-shared
+    // in 2HG) — checked once, against the combined total, before any
+    // per-variant mechanical-affordability logic below. `None` means the
+    // replacement outcome couldn't be cleanly projected (a live choice or an
+    // unmodeled event rewrite) — conservatively decline rather than assume it's
+    // safe. The AI must never treat ending
     // its own game as an ordinary payable cost, for direct or compound Ward
     // alike.
     match total_poison_from_ward_cost(ctx, ward) {
         None => return false,
         Some(total_poison) if total_poison > 0 => {
-            let current = ctx.state.players[ctx.ai_player.0 as usize].poison_counters;
-            if current.saturating_add(total_poison) >= crate::features::poison::LETHAL_POISON {
+            let ai = &ctx.state.players[ctx.ai_player.0 as usize];
+            if players::poison_loss_measure(ctx.state, ai)
+                .is_some_and(|measure| super::poison::reaches_lethal(measure, total_poison))
+            {
                 return false;
             }
         }

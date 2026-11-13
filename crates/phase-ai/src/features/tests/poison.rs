@@ -148,6 +148,49 @@ fn self_poison_drawback_not_counted() {
     assert_eq!(feature.direct_count, 0);
 }
 
+/// CR 102.3 + CR 104.4a: a controller-recipient poison clause under a `player_scope` counts only
+/// when the scope reaches opponents alone.
+#[test]
+fn scoped_poison_counts_only_for_opponent_only_scopes() {
+    use engine::types::ability::PlayerFilter;
+    let cases = [
+        (Some(PlayerFilter::Opponent), true),
+        (Some(PlayerFilter::All), false),
+        (Some(PlayerFilter::Controller), false),
+        (
+            Some(PlayerFilter::AnyOf {
+                filters: vec![PlayerFilter::Controller, PlayerFilter::Opponent],
+            }),
+            false,
+        ),
+        (
+            Some(PlayerFilter::AnyOf {
+                filters: vec![PlayerFilter::Opponent, PlayerFilter::OpponentLostLife],
+            }),
+            true,
+        ),
+        (Some(PlayerFilter::AnyOf { filters: vec![] }), false),
+    ];
+    for (player_scope, credited) in cases {
+        // No printed card has the `Controller` / `AnyOf` scope shapes; nearest printed: Prologue to Phyresis.
+        let mut face = poison_spell("Scoped Poisoner", TargetFilter::Controller);
+        face.abilities[0].player_scope = player_scope.clone();
+        for scope in [AbilityScope::Potential, AbilityScope::Unconditional] {
+            assert_eq!(
+                gives_opponents_poison_parts(&face.abilities, scope),
+                credited,
+                "{player_scope:?} at {scope:?}"
+            );
+        }
+        let expected = if credited { 3 } else { 0 };
+        assert_eq!(
+            detect(&[entry(face, 3)]).direct_count,
+            expected,
+            "{player_scope:?}"
+        );
+    }
+}
+
 /// Counts scale per playset copy, not per unique face.
 #[test]
 fn counts_scale_by_copy_count() {

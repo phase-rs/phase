@@ -25,7 +25,7 @@ use engine::types::zones::Zone;
 
 use crate::config::AiConfig;
 use crate::context::AiContext;
-use crate::features::poison::{LETHAL_POISON, POISON_CLOCK_FLOOR};
+use crate::features::poison::POISON_CLOCK_FLOOR;
 use crate::features::DeckFeatures;
 use crate::policies::context::{PolicyContext, SearchDepth};
 use crate::policies::registry::{
@@ -34,6 +34,10 @@ use crate::policies::registry::{
 use crate::session::AiSession;
 
 use crate::policies::poison::*;
+use crate::test_support::shared_integration_card_db;
+use engine::game::players::{PoisonLossMeasure, PoisonLossScope};
+use engine::game::scenario::{GameRunner, GameScenario};
+use engine::game::scenario_db::GameScenarioDbExt;
 
 const AI: PlayerId = PlayerId(0);
 const OPPONENT: PlayerId = PlayerId(1);
@@ -184,19 +188,29 @@ fn score_of(verdict: PolicyVerdict) -> (f64, PolicyReason) {
 
 // ─── helper boundaries ──────────────────────────────────────────────────────
 
-/// CR 104.3d: ten or more poison counters loses the game, so the ninth
-/// counter is the lethal setup and the eighth is not.
+fn measure(count: u32, threshold: u32) -> PoisonLossMeasure {
+    PoisonLossMeasure {
+        scope: PoisonLossScope::Player,
+        count,
+        threshold,
+    }
+}
+
+/// CR 704.5c / CR 704.6b: reaching the measure's threshold is lethal, one short is not.
 #[test]
-fn reaches_lethal_matches_cr_104_3d_boundary() {
-    assert_eq!(LETHAL_POISON, 10);
-    assert!(reaches_lethal(9, 1), "9 + 1 == 10 is lethal");
-    assert!(!reaches_lethal(8, 1), "8 + 1 == 9 is not yet lethal");
-    assert!(reaches_lethal(4, 6), "a multi-counter swing can reach ten");
+fn reaches_lethal_matches_the_measure_threshold() {
+    assert!(reaches_lethal(measure(9, 10), 1));
+    assert!(!reaches_lethal(measure(8, 10), 1));
+    assert!(reaches_lethal(measure(4, 10), 6));
+    assert!(!reaches_lethal(measure(9, 10), 0));
+    assert!(!reaches_lethal(measure(9, 15), 1));
+    assert!(reaches_lethal(measure(14, 15), 1));
+    assert!(reaches_lethal(measure(4, 5), 1));
+    assert!(!reaches_lethal(measure(3, 5), 1));
     assert!(
-        !reaches_lethal(9, 0),
-        "nine with nothing added is not lethal"
+        reaches_lethal(measure(u32::MAX, 10), 1),
+        "saturating add must not wrap"
     );
-    assert!(reaches_lethal(u32::MAX, 1), "saturating add must not wrap");
 }
 
 #[test]
@@ -221,20 +235,26 @@ fn activation_opts_in_above_floor() {
 }
 
 #[test]
-fn most_poisoned_opponent_ignores_the_ai_itself() {
+fn closest_opponent_poison_loss_ignores_the_ai_itself() {
     let mut state = state_with_players(2);
     state.players[0].poison_counters = 7;
     state.players[1].poison_counters = 3;
     // The AI's own 7 poison must not be read as pressure it is applying.
-    assert_eq!(most_poisoned_opponent(&state, AI), 3);
-    assert_eq!(most_poisoned_opponent(&state, OPPONENT), 7);
+    assert_eq!(
+        closest_opponent_poison_loss(&state, AI).map(|m| m.count),
+        Some(3)
+    );
+    assert_eq!(
+        closest_opponent_poison_loss(&state, OPPONENT).map(|m| m.count),
+        Some(7)
+    );
 }
 
 /// CR 800.4: a multiplayer game continues after a player leaves, and the
 /// eliminated seat stays in
 /// `GameState.players`. Their counters must not produce phantom pressure.
 #[test]
-fn most_poisoned_opponent_ignores_eliminated_seats() {
+fn closest_opponent_poison_loss_ignores_eliminated_seats() {
     let mut state = state_with_players(4);
     state.players[1].poison_counters = 9;
     state.players[1].is_eliminated = true;
@@ -242,12 +262,15 @@ fn most_poisoned_opponent_ignores_eliminated_seats() {
     state.players[3].poison_counters = 0;
 
     assert_eq!(
-        most_poisoned_opponent(&state, AI),
-        2,
+        closest_opponent_poison_loss(&state, AI).map(|m| m.count),
+        Some(2),
         "a dead seat at 9 poison must not read as one counter from lethal"
     );
     assert_eq!(live_opponent_poison(&state, AI, PlayerId(1)), None);
-    assert_eq!(live_opponent_poison(&state, AI, PlayerId(2)), Some(2));
+    assert_eq!(
+        live_opponent_poison(&state, AI, PlayerId(2)).map(|m| m.count),
+        Some(2)
+    );
     assert_eq!(
         live_opponent_poison(&state, AI, AI),
         None,
@@ -318,7 +341,8 @@ fn verdict_scales_direct_poison_by_clock_progress() {
     };
 
     let mut previous = 0.0;
-    for existing in 0..LETHAL_POISON - 1 {
+    let lethal_poison = u32::from(FormatConfig::standard().poison_counter_threshold.unwrap());
+    for existing in 0..lethal_poison - 1 {
         let (delta, reason) = score_at(existing);
         assert_eq!(reason.kind, "poison_clock_pressure", "at {existing} poison");
         assert!(
@@ -336,7 +360,7 @@ fn verdict_scales_direct_poison_by_clock_progress() {
         previous = delta;
     }
 
-    let (lethal_delta, lethal_reason) = score_at(LETHAL_POISON - 1);
+    let (lethal_delta, lethal_reason) = score_at(lethal_poison - 1);
     assert_eq!(lethal_reason.kind, "poison_clock_lethal");
     assert!(
         lethal_delta > previous,
@@ -1071,4 +1095,310 @@ fn registry_routes_modal_spell_mode_choice_to_the_policy() {
     .expect("the non-poison spell-mode is still routed");
     assert_eq!(draw_reason.kind, "poison_clock_na");
     assert_eq!(draw_delta, 0.0);
+}
+
+// ─── configured poison-loss threshold (real cards) ──────────────────────────
+
+const PROLOGUE_TO_PHYRESIS: &str = "Each opponent gets a poison counter.\nDraw a card.";
+const LARGEPOX: &str = "Each player discards a card, then loses 1 life, then sacrifices an artifact, a creature, an enchantment, a land, a planeswalker, and a tribal permanent, then exiles a card from their graveyard, then puts the top card of their library into their graveyard, then removes a counter from a permanent they control, then gets a poison counter.";
+
+fn threshold(t: u8) -> FormatConfig {
+    FormatConfig {
+        poison_counter_threshold: Some(t),
+        ..FormatConfig::standard()
+    }
+}
+
+/// The row's cards are placed by `add`, then each `(seat, count)` in `poison` is seeded.
+fn board(
+    format: FormatConfig,
+    players: u8,
+    poison: &[(PlayerId, u32)],
+    add: impl FnOnce(&mut GameScenario) -> Vec<ObjectId>,
+) -> (GameRunner, Vec<ObjectId>) {
+    let mut scenario = GameScenario::new_with_format(format, players, 42);
+    let ids = add(&mut scenario);
+    let mut runner = scenario.build();
+    for &(seat, count) in poison {
+        runner.state_mut().players[seat.0 as usize].poison_counters = count;
+    }
+    (runner, ids)
+}
+
+fn glistener_elf(scenario: &mut GameScenario) -> ObjectId {
+    scenario.add_real_card(
+        AI,
+        "Glistener Elf",
+        Zone::Battlefield,
+        shared_integration_card_db(),
+    )
+}
+
+fn steady_progress(scenario: &mut GameScenario) -> ObjectId {
+    scenario.add_real_card(
+        AI,
+        "Steady Progress",
+        Zone::Hand,
+        shared_integration_card_db(),
+    )
+}
+
+fn prologue_to_phyresis(scenario: &mut GameScenario) -> ObjectId {
+    scenario
+        .add_spell_to_hand_from_oracle(AI, "Prologue to Phyresis", true, PROLOGUE_TO_PHYRESIS)
+        .id()
+}
+
+fn verdict_on(state: &GameState, candidate: &CandidateAction) -> (f64, PolicyReason) {
+    let config = config();
+    let context = ai_context(&config);
+    let decision = priority_decision();
+    score_of(PoisonClockPolicy.verdict(&ctx(state, candidate, &decision, &context, &config)))
+}
+
+/// Glistener Elf attacking `defender` on a board of `format` with `poison` seeded.
+fn elf_attack(
+    format: FormatConfig,
+    players: u8,
+    poison: &[(PlayerId, u32)],
+    defender: PlayerId,
+) -> (f64, PolicyReason) {
+    let (runner, ids) = board(format, players, poison, |s| vec![glistener_elf(s)]);
+    verdict_on(
+        runner.state(),
+        &attack_candidate(vec![(ids[0], AttackTarget::Player(defender))]),
+    )
+}
+
+fn cast_on(
+    format: FormatConfig,
+    players: u8,
+    poison: &[(PlayerId, u32)],
+    card: fn(&mut GameScenario) -> ObjectId,
+) -> (f64, PolicyReason) {
+    let (runner, ids) = board(format, players, poison, |s| vec![card(s)]);
+    verdict_on(runner.state(), &cast_candidate(ids[0]))
+}
+
+/// CR 704.5c: the configured threshold decides lethal; at 15 an opponent at 9
+/// is not one infect hit from losing.
+#[test]
+fn infect_attack_reads_a_raised_threshold() {
+    assert_eq!(
+        elf_attack(threshold(15), 2, &[(OPPONENT, 9)], OPPONENT)
+            .1
+            .kind,
+        "poison_clock_pressure"
+    );
+    assert_eq!(
+        elf_attack(threshold(15), 2, &[(OPPONENT, 14)], OPPONENT)
+            .1
+            .kind,
+        "poison_clock_lethal"
+    );
+}
+
+#[test]
+fn infect_attack_reads_a_lowered_threshold() {
+    let (delta, reason) = elf_attack(threshold(5), 2, &[(OPPONENT, 4)], OPPONENT);
+    assert_eq!(reason.kind, "poison_clock_lethal");
+    assert_eq!(
+        delta,
+        config()
+            .policy_penalties
+            .poison_clock_pressure
+            .min(crate::policies::registry::STRONG_MAX)
+    );
+    assert_eq!(
+        elf_attack(threshold(5), 2, &[(OPPONENT, 3)], OPPONENT)
+            .1
+            .kind,
+        "poison_clock_pressure"
+    );
+}
+
+#[test]
+fn infect_attack_keeps_the_default_threshold() {
+    let standard = FormatConfig::standard;
+    assert_eq!(
+        elf_attack(standard(), 2, &[(OPPONENT, 9)], OPPONENT).1.kind,
+        "poison_clock_lethal"
+    );
+    assert_eq!(
+        elf_attack(standard(), 2, &[(OPPONENT, 8)], OPPONENT).1.kind,
+        "poison_clock_pressure"
+    );
+}
+
+/// Progress is measured against the configured threshold, so 6 of 15 is less pressure than 6 of 10.
+#[test]
+fn clock_progress_divides_by_the_configured_threshold() {
+    let (at_15, reason_15) = elf_attack(threshold(15), 2, &[(OPPONENT, 5)], OPPONENT);
+    let (at_10, reason_10) = elf_attack(threshold(10), 2, &[(OPPONENT, 5)], OPPONENT);
+    assert_eq!(reason_15.kind, "poison_clock_pressure");
+    assert_eq!(reason_10.kind, "poison_clock_pressure");
+    assert!(at_15 < at_10, "{at_15} should be below {at_10}");
+}
+
+/// A seat no poison-loss rule applies to has no poison clock to advance.
+#[test]
+fn no_poison_loss_rule_means_no_clock() {
+    let unbounded = || FormatConfig {
+        poison_counter_threshold: None,
+        ..FormatConfig::standard()
+    };
+    assert_eq!(
+        elf_attack(unbounded(), 2, &[(OPPONENT, 9)], OPPONENT)
+            .1
+            .kind,
+        "poison_clock_na"
+    );
+    assert_eq!(
+        elf_attack(threshold(10), 2, &[(OPPONENT, 9)], OPPONENT)
+            .1
+            .kind,
+        "poison_clock_lethal"
+    );
+    assert_eq!(
+        cast_on(unbounded(), 2, &[(OPPONENT, 9)], prologue_to_phyresis)
+            .1
+            .kind,
+        "poison_clock_no_poison_loss"
+    );
+}
+
+/// CR 704.6b + CR 810.10: two infect hits on the two heads of one team add to
+/// one team total of fifteen.
+#[test]
+fn two_headed_giant_attack_reads_the_team_total() {
+    let two_hg = FormatConfig::two_headed_giant;
+    let poison = [(PlayerId(2), 6), (PlayerId(3), 7)];
+    let (runner, ids) = board(two_hg(), 4, &poison, |s| {
+        vec![glistener_elf(s), glistener_elf(s)]
+    });
+    let both = attack_candidate(vec![
+        (ids[0], AttackTarget::Player(PlayerId(2))),
+        (ids[1], AttackTarget::Player(PlayerId(3))),
+    ]);
+    assert_eq!(
+        verdict_on(runner.state(), &both).1.kind,
+        "poison_clock_lethal"
+    );
+    assert_eq!(
+        elf_attack(two_hg(), 4, &poison, PlayerId(2)).1.kind,
+        "poison_clock_pressure"
+    );
+}
+
+/// CR 102.3: the AI's teammate is not an opponent, so its team's poison is not
+/// pressure the AI applies.
+#[test]
+fn two_headed_giant_teammate_is_not_an_opponent() {
+    let two_hg = FormatConfig::two_headed_giant;
+    let poison = [(PlayerId(1), 14)];
+    assert_eq!(
+        cast_on(two_hg(), 4, &poison, prologue_to_phyresis).1.kind,
+        "poison_clock_pressure"
+    );
+    assert_eq!(
+        cast_on(two_hg(), 4, &poison, steady_progress).1.kind,
+        "poison_clock_no_counters_to_proliferate"
+    );
+}
+
+#[test]
+fn two_headed_giant_direct_poison_and_proliferate_read_the_team_total() {
+    let two_hg = FormatConfig::two_headed_giant;
+    let poison = [(PlayerId(2), 7), (PlayerId(3), 7)];
+    assert_eq!(
+        cast_on(two_hg(), 4, &poison, prologue_to_phyresis).1.kind,
+        "poison_clock_lethal"
+    );
+    assert_eq!(
+        cast_on(two_hg(), 4, &poison, steady_progress).1.kind,
+        "poison_clock_lethal"
+    );
+}
+
+#[test]
+fn direct_poison_and_proliferate_read_a_raised_threshold() {
+    let at_nine = [(OPPONENT, 9)];
+    assert_eq!(
+        cast_on(threshold(15), 2, &at_nine, prologue_to_phyresis)
+            .1
+            .kind,
+        "poison_clock_pressure"
+    );
+    assert_eq!(
+        cast_on(threshold(15), 2, &at_nine, steady_progress).1.kind,
+        "poison_clock_pressure"
+    );
+    assert_eq!(
+        cast_on(threshold(15), 2, &[(OPPONENT, 14)], prologue_to_phyresis)
+            .1
+            .kind,
+        "poison_clock_lethal"
+    );
+}
+
+/// CR 122.1f: "each opponent gets a poison counter" is direct poison.
+#[test]
+fn each_opponent_poison_spell_is_direct_poison() {
+    let standard = FormatConfig::standard;
+    assert_eq!(
+        cast_on(standard(), 2, &[(OPPONENT, 9)], prologue_to_phyresis)
+            .1
+            .kind,
+        "poison_clock_lethal"
+    );
+    assert_eq!(
+        cast_on(standard(), 2, &[(OPPONENT, 8)], prologue_to_phyresis)
+            .1
+            .kind,
+        "poison_clock_pressure"
+    );
+}
+
+/// CR 104.4a: Largepox poisons its caster too, and both players reaching the
+/// threshold at once is a draw, not a win.
+#[test]
+fn each_player_poison_spell_is_not_scored_as_lethal() {
+    let poison = [(AI, 9), (OPPONENT, 9)];
+    let (runner, ids) = board(threshold(10), 2, &poison, |s| {
+        vec![
+            s.add_spell_to_hand_from_oracle(AI, "Largepox", false, LARGEPOX)
+                .id(),
+            prologue_to_phyresis(s),
+        ]
+    });
+    let state = runner.state();
+    let largepox = state.objects.get(&ids[0]).unwrap();
+    assert!(
+        largepox.abilities.iter().any(|ability| {
+            crate::ability_chain::collect_scoped_nodes(
+                ability,
+                crate::ability_chain::AbilityScope::Unconditional,
+            )
+            .iter()
+            .any(|node| {
+                matches!(
+                    &*node.effect,
+                    Effect::GivePlayerCounter {
+                        counter_kind: PlayerCounterKind::Poison,
+                        target: TargetFilter::Controller,
+                        ..
+                    }
+                ) && node.player_scope == Some(engine::types::ability::PlayerFilter::All)
+            })
+        }),
+        "Largepox must parse to an each-player poison counter"
+    );
+    assert_eq!(
+        verdict_on(state, &cast_candidate(ids[0])).1.kind,
+        "poison_clock_na"
+    );
+    assert_eq!(
+        verdict_on(state, &cast_candidate(ids[1])).1.kind,
+        "poison_clock_lethal"
+    );
 }
