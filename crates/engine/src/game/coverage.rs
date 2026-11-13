@@ -7401,7 +7401,7 @@ fn rank_top_gap_handlers(freq: impl IntoIterator<Item = (String, usize)>) -> Vec
     ranked
 }
 
-/// Whether a coverage row's own face is legal in `format`; same-name faces differ in legality.
+/// Whether an `analyze_coverage` row's own face is legal in `format`; panics on a row without `card_face_key` (deserialized rows never carry it).
 pub fn face_is_legal_in(
     card: &CardCoverageResult,
     card_db: &CardDatabase,
