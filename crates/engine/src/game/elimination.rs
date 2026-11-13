@@ -913,7 +913,8 @@ pub(crate) fn eliminate_players(
 /// This is also the pregame-reconciliation seam for the prompts that precede
 /// mulligans: a departed companion chooser (CR 103.2b) is resumed at the walk
 /// cursor by `advance_companion_reveal`, and a departed agenda chooser (CR
-/// 103.2e) resumes at the agenda step.
+/// 103.2e) resumes at the agenda step. A departed CR 103.1 chooser passes the
+/// choice on (CR 800.4h), and a departed seat leaves the candidates.
 fn prune_mulligan_pending(state: &mut GameState, events: &mut Vec<GameEvent>) {
     let alive: HashSet<PlayerId> = state
         .prepaid_mulligan_bottoms
@@ -971,6 +972,22 @@ fn prune_mulligan_pending(state: &mut GameState, events: &mut Vec<GameEvent>) {
             // CR 103.2b precedes the CR 103.2e agenda step, so a departure here
             // resumes at the agenda step; the companion walk is already done.
             state.waiting_for = super::conspiracy::agenda_choices_or_mulligan(state, events);
+        }
+        // CR 800.4a + CR 103.1a: a departed seat is no longer a candidate to take
+        // the first turn. The candidates are re-derived from the living side
+        // representatives, so a shared-turn side whose representative left is
+        // still offered through a living member.
+        // CR 800.4h: a departed chooser's choice passes to the next player in turn order.
+        WaitingFor::ChooseStartingPlayer { player, .. } => {
+            let player = if players::is_alive(state, player) {
+                player
+            } else {
+                players::next_player_in_turn_order(state, player)
+            };
+            state.waiting_for = WaitingFor::ChooseStartingPlayer {
+                player,
+                candidates: super::topology::turn_representatives(state),
+            };
         }
         WaitingFor::OpeningHandBottomCards { pending, reason } => {
             let alive: Vec<_> = pending
