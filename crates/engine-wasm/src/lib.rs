@@ -4960,6 +4960,7 @@ mod restored_card_db_requirements_tests {
                 oracle_id: oracle_id.to_string(),
                 face_name: face.name.clone(),
             });
+            object.base_printed_ref = object.printed_ref.clone();
             printed_faces.insert(face.name.to_lowercase(), face);
         }
         let db = std::sync::Arc::new(
@@ -5018,6 +5019,22 @@ mod restored_card_db_requirements_tests {
             ),
             "reach: the checkpoint is parked on leg 2's Dredge choice"
         );
+        // Reach: on the checkpoint Humility mutes Hullbreacher, and the face
+        // refresh alone gives it its printed replacement back.
+        let mut refreshed = (*checkpoint.state).clone();
+        let functioning = |state: &GameState| {
+            state.objects[&hullbreacher]
+                .replacement_definitions
+                .iter_all()
+                .count()
+        };
+        assert_eq!(functioning(&refreshed), 0);
+        rehydrate_game_from_card_db_with_finalization(
+            &mut refreshed,
+            &db,
+            CardDbRehydrationFinalization::Defer,
+        );
+        assert_eq!(functioning(&refreshed), 1);
         let hand_before = state.players[0].hand.len();
 
         let json = serde_json::to_string(&PersistedGameState::Raw(Box::new(state.clone())))
