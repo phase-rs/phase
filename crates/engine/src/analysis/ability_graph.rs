@@ -757,7 +757,17 @@ fn effect_projection(effect: &Effect) -> Projection {
                     // recorded as one unit of consumption. Negating the sentinel
                     // would record it as production.
                     QuantityExpr::Fixed { value: -1 } => 1,
-                    _ => count_seed(count).0,
+                    QuantityExpr::Fixed { .. }
+                    | QuantityExpr::Ref { .. }
+                    | QuantityExpr::DivideRounded { .. }
+                    | QuantityExpr::Offset { .. }
+                    | QuantityExpr::ClampMin { .. }
+                    | QuantityExpr::Multiply { .. }
+                    | QuantityExpr::Sum { .. }
+                    | QuantityExpr::UpTo { .. }
+                    | QuantityExpr::Power { .. }
+                    | QuantityExpr::Difference { .. }
+                    | QuantityExpr::Max { .. } => count_seed(count).0,
                 };
                 b.add_counter(
                     class,

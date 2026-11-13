@@ -4376,6 +4376,30 @@ fn board_value_aggregate_read(filter: &TargetFilter, value: StateKind) -> RwProf
     p
 }
 
+/// CR 608.2h: the reads of every `QuantityExpr` threshold a filter's properties
+/// compare against (`FilterProp::Counters` / `Cmc` / `PtComparison`), wherever
+/// the filter grammar nests them — inside `AnyOf` / `Not` props and inside the
+/// `TargetFilter`s other props box, the same reach `member_bound_filter_prop`
+/// classifies. The walk is `filter_grammar_any`, whose exhaustive
+/// `filter_prop_grammar_any` is the authority on which props carry a quantity
+/// operand; this visitor only reads the operand of the props it routes there.
+fn filter_threshold_quantity_reads(filter: &TargetFilter) -> RwProfile {
+    let reads = std::cell::RefCell::new(RwProfile::empty());
+    crate::types::ability::filter_grammar_any(filter, &|node| {
+        if let crate::types::ability::FilterGrammarNode::Prop(
+            FilterProp::Counters { count: value, .. }
+            | FilterProp::Cmc { value, .. }
+            | FilterProp::PtComparison { value, .. },
+        ) = node
+        {
+            reads.borrow_mut().merge(rw_quantity_expr(value));
+        }
+        // Never stop early: every threshold in the filter contributes.
+        false
+    });
+    reads.into_inner()
+}
+
 /// Read an object characteristic at a given scope (§2 read-carrier closure):
 /// Source ⇒ `reads_src`; Recipient ⇒ nothing (read-modify-write); event objects
 /// ⇒ `reads_event_live`; other object scopes ⇒ `reads_board`.
@@ -5294,6 +5318,11 @@ fn rw_effect(
                 EffectScope::All => {
                     p.merge(board_value_aggregate_read(target, StateKind::ObjectCounters));
                     p.merge(board_value_aggregate_read(target, StateKind::ObjectPt));
+                    // CR 608.2h: the membership test also evaluates the filter's
+                    // own threshold operands ("each other artifact with at least as
+                    // many charge counters on it as its source" reads the source's
+                    // counters), so their reads are reads of this effect.
+                    p.merge(filter_threshold_quantity_reads(target));
                 }
             }
             (p, sc)

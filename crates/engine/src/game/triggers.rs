@@ -46801,6 +46801,85 @@ pub mod tests {
         }
     }
 
+    /// "Remove a charge counter from each other artifact with `threshold` or
+    /// more charge counters on it" (a mass removal, `EffectScope::All`).
+    fn other_artifact_charge_removal(threshold: QuantityExpr) -> ResolvedAbility {
+        ResolvedAbility::new(
+            Effect::RemoveCounter {
+                counter_type: Some(charge_counter()),
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Typed(TypedFilter::new(TypeFilter::Artifact).properties(
+                    vec![
+                        FilterProp::Another,
+                        FilterProp::Counters {
+                            counters: crate::types::counter::CounterMatch::OfType(charge_counter()),
+                            comparator: Comparator::GE,
+                            count: threshold,
+                        },
+                    ],
+                )),
+                scope: crate::types::ability::EffectScope::All,
+            },
+            Vec::new(),
+            ObjectId(0),
+            PlayerId(0),
+        )
+    }
+
+    /// CR 603.3b + CR 608.2h: two identical same-event triggers, each removing a
+    /// charge counter from each OTHER artifact with at least as many charge
+    /// counters as its source (A=2, B=1). The threshold reads the source's
+    /// counters, which the sibling's removal writes, so the order is observable:
+    /// A first leaves (1, 1), B first leaves (1, 0). The filter's threshold read
+    /// is what makes the group prompt; unrecorded, it auto-ordered.
+    #[test]
+    fn same_event_mass_counter_removal_with_source_relative_threshold_prompts() {
+        let source_charge = || {
+            other_artifact_charge_removal(QuantityExpr::Ref {
+                qty: QuantityRef::CountersOn {
+                    scope: crate::types::ability::ObjectScope::Source,
+                    counter_type: Some(charge_counter()),
+                },
+            })
+        };
+        let (state, group) = mass_charge_removal_group(source_charge);
+        // Premise: the two orders really diverge, exactly as the card text reads.
+        assert_eq!(resolve_in_order(state.clone(), &group, [0, 1]), (1, 1));
+        assert_eq!(resolve_in_order(state.clone(), &group, [1, 0]), (1, 0));
+        let mut state = state;
+        assert!(
+            !group_is_order_independent(&state, &group),
+            "a source-relative threshold makes the mass removal order-dependent"
+        );
+        match begin_trigger_ordering(&mut state, group) {
+            TriggerOrderingDisposition::PromptForChoice(_) => {}
+            TriggerOrderingDisposition::NoChoiceNeeded(_) => {
+                panic!("the source-relative mass removal group must prompt")
+            }
+        }
+    }
+
+    /// Control: the same removal with a fixed threshold reads no source state,
+    /// so the identical same-event pair commutes and stays auto-ordered.
+    #[test]
+    fn same_event_mass_counter_removal_with_fixed_threshold_auto_orders() {
+        let (state, group) = mass_charge_removal_group(|| {
+            other_artifact_charge_removal(QuantityExpr::Fixed { value: 1 })
+        });
+        assert_eq!(
+            resolve_in_order(state.clone(), &group, [0, 1]),
+            resolve_in_order(state.clone(), &group, [1, 0]),
+        );
+        let mut state = state;
+        assert!(group_is_order_independent(&state, &group));
+        match begin_trigger_ordering(&mut state, group) {
+            TriggerOrderingDisposition::NoChoiceNeeded(_) => {}
+            TriggerOrderingDisposition::PromptForChoice(_) => {
+                panic!("the fixed-threshold mass removal group must auto-order")
+            }
+        }
+    }
+
     /// Issue #610 — Kratos, Stoic Father. A YouAttack trigger carrying a
     /// `valid_card` attacker-type filter (`Subtype "God"`) must fire iff at least
     /// one *God* attacks (CR 508.1 + CR 506.2 + CR 603.2c). Drives the real

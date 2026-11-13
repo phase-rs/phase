@@ -1204,6 +1204,15 @@ pub(super) fn try_parse_remove_counter(lower: &str, ctx: &mut ParseContext) -> O
     // `resolve_remove_counter_from_target` cannot apply; the shared recipient
     // resolver keeps its anaphor guards and reports what it left unconsumed.
     let (target, remainder) = resolve_counter_target_with_remainder(target_text, ctx);
+    // CR 301.5a + CR 303.4b: a population lead ("from all equipped creatures",
+    // "from each enchanted creature") names every creature an Equipment or Aura
+    // is attached to, not the source's one host. `EquippedBy` / `EnchantedBy`
+    // resolve against the source's own attachment when the source is attached
+    // (CR 301.5f / CR 303.4m), so neither scope models that population: refuse
+    // it, so the clause stays an honest `Effect::unimplemented`.
+    if source == RemovalSource::Mass && target.contains_source_attachment_host() {
+        return None;
+    }
     // CR 608.2k + CR 201.5 + CR 303.4b: an anaphor ("from it", "from that
     // creature"), a self-reference ("from ~") or the source's attachment host
     // ("from enchanted creature") is bound by the resolver's context tiers,
@@ -1318,7 +1327,16 @@ fn mass_removal_is_admissible(
     let count_is_supported = match count {
         QuantityExpr::Fixed { value: -1 } => true,
         QuantityExpr::Fixed { value } => *value > 0 && counter_type.is_some(),
-        _ => false,
+        QuantityExpr::Ref { .. }
+        | QuantityExpr::DivideRounded { .. }
+        | QuantityExpr::Offset { .. }
+        | QuantityExpr::ClampMin { .. }
+        | QuantityExpr::Multiply { .. }
+        | QuantityExpr::Sum { .. }
+        | QuantityExpr::UpTo { .. }
+        | QuantityExpr::Power { .. }
+        | QuantityExpr::Difference { .. }
+        | QuantityExpr::Max { .. } => false,
     };
     target.names_enumerable_population()
         && !target.is_context_ref()
@@ -4987,7 +5005,11 @@ mod tests {
             serde_json::Value::Array(items) => {
                 items.iter().for_each(|v| effects_of_kind(v, kind, out));
             }
-            _ => {}
+            // Scalars nest no `Effect`.
+            serde_json::Value::Null
+            | serde_json::Value::Bool(_)
+            | serde_json::Value::Number(_)
+            | serde_json::Value::String(_) => {}
         }
     }
 
@@ -5159,6 +5181,62 @@ mod tests {
             let effect = remove_counter(text).unwrap_or_else(|| panic!("{text}: must parse"));
             assert_eq!(scope_of(&effect), EffectScope::Single, "{text}");
         }
+    }
+
+    /// CR 301.5a + CR 303.4b: a population lead over attachment hosts ("all
+    /// equipped creatures") names every equipped creature, not the source's one
+    /// host, so it must not collapse to a single attachment-host removal. It is
+    /// refused (honest `Unimplemented`); the bare "enchanted creature" recipient
+    /// still names the source's host as a single removal.
+    #[test]
+    fn mass_attachment_host_population_is_refused_not_single() {
+        for (text, recipient) in [
+            (
+                "remove all counters from all equipped creatures",
+                "all equipped creatures",
+            ),
+            (
+                "remove a +1/+1 counter from each enchanted creature",
+                "each enchanted creature",
+            ),
+        ] {
+            assert_eq!(
+                classify_removal_source(recipient),
+                RemovalSource::Mass,
+                "REACH-GUARD: {recipient} classifies as a population"
+            );
+            let (target, remainder) =
+                resolve_counter_target_with_remainder(recipient, &mut default_ctx());
+            assert!(
+                target.contains_source_attachment_host() && remainder.trim().is_empty(),
+                "REACH-GUARD: {recipient} resolves to an attachment host: {target:?} / {remainder:?}"
+            );
+            assert_eq!(remove_counter(text), None, "{text}");
+
+            let clause = format!("{}{}.", text[..1].to_uppercase(), &text[1..]);
+            let refused = super::super::parse_effect_chain(
+                &clause,
+                crate::types::ability::AbilityKind::Spell,
+            );
+            assert!(
+                parsed_effects_of_kind(&refused, "RemoveCounter").is_empty(),
+                "{clause}: no RemoveCounter may be emitted, got {refused:#?}"
+            );
+            assert_gap_names_clause(&parsed_effects_of_kind(&refused, "Unimplemented"), text);
+        }
+
+        // Control: the source's own host stays a single removal.
+        assert_eq!(
+            remove_counter("remove a +1/+1 counter from enchanted creature"),
+            Some(Effect::RemoveCounter {
+                counter_type: Some(CounterType::Plus1Plus1),
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Typed(
+                    TypedFilter::creature().properties(vec![FilterProp::EnchantedBy])
+                ),
+                scope: EffectScope::Single,
+            })
+        );
     }
 
     /// N5 + positive pairs (T-8): every refusal comes from the mass gate, not
