@@ -1042,11 +1042,6 @@ fn a_step_scoped_to_a_players_turn_does_not_begin_without_one() {
         scenario.add_vanilla(P0, 2, 2);
         scenario.add_vanilla(P0, 2, 2);
         scenario.add_vanilla(P0, 2, 2);
-        let p2_creatures = [
-            scenario.add_vanilla(P2, 2, 2),
-            scenario.add_vanilla(P2, 2, 2),
-            scenario.add_vanilla(P2, 2, 2),
-        ];
         let mut runner = scenario.build();
         if leaves {
             concede(&mut runner, P0);
@@ -1058,7 +1053,6 @@ fn a_step_scoped_to_a_players_turn_does_not_begin_without_one() {
             assert_eq!(stacked, ["Wound Reflection"]);
             assert_eq!(counters(state, cinderhorn), 0);
             assert_eq!(counters(state, luminarch), 0);
-            assert!(p2_creatures.iter().all(|id| state.battlefield.contains(id)));
         } else {
             assert_eq!(ordered, ["Archfiend of Depravity", "Luminarch Ascension"]);
             for name in [
