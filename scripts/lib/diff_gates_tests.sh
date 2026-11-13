@@ -260,16 +260,25 @@ run_gate
 expect_rc 'parser: an unannotated duplicate of an annotated line fails' 1
 expect_listed 'parser: only the unannotated duplicate is listed' "  crates/engine/src/parser/clause.rs:
     $P_FROZEN"
+# Distinct texts above and below the annotation make its direction visible.
 parser_fixture
 put crates/engine/src/parser/clause.rs 'use super::*;' 'fn other() {}'
 commit_base
-put crates/engine/src/parser/clause.rs 'use super::*;' "$P_PLANTED" 'fn other() {}' \
-    "$P_ALLOW" "$P_PLANTED" "$P_PLANTED $P_ALLOW"
-commit 'plant three copies, two annotated'
+put crates/engine/src/parser/clause.rs 'use super::*;' "$P_PLANTED" "$P_ALLOW" "$P_FROZEN" 'fn other() {}'
+commit 'plant around an annotation'
 run_gate
-expect_rc 'parser: an unannotated copy beside annotated ones fails' 1
-expect_listed 'parser: previous-line and same-line annotations each exempt their copy' "  crates/engine/src/parser/clause.rs:
+expect_rc 'parser: the line above an annotation fails' 1
+expect_listed 'parser: the annotation exempts the line below it, not above' "  crates/engine/src/parser/clause.rs:
     $P_PLANTED"
+parser_fixture
+put crates/engine/src/parser/clause.rs 'use super::*;' 'fn other() {}'
+commit_base
+put crates/engine/src/parser/clause.rs 'use super::*;' "$P_PLANTED $P_ALLOW" 'fn other() {}' "$P_FROZEN"
+commit 'plant a same-line annotation'
+run_gate
+expect_rc 'parser: an unannotated line beside a same-line annotation fails' 1
+expect_listed 'parser: a same-line annotation exempts its own line' "  crates/engine/src/parser/clause.rs:
+    $P_FROZEN"
 
 # Under --cached the recorded lines index the staged blob, so the annotation is
 # read there, not from a working tree whose unstaged edit shifted the lines.
@@ -285,6 +294,18 @@ expect_out 'parser cached: the staged index is scanned' 'staged index vs'
 expect_rc 'parser cached: an unannotated staged line fails' 1
 expect_listed 'parser cached: the annotation is read from the index' "  crates/engine/src/parser/clause.rs:
     $P_FROZEN"
+
+# A pattern grep cannot run is no verdict, not a clean scan.
+parser_fixture
+sed 's/^FORBIDDEN_METHODS=.*/FORBIDDEN_METHODS='"'"'('"'"'/' "$FIXTURE/scripts/$GATE" > "$FIXTURE/scripts/$GATE.new" \
+    && mv "$FIXTURE/scripts/$GATE.new" "$FIXTURE/scripts/$GATE"
+put crates/engine/src/parser/clause.rs 'use super::*;' 'fn other() {}'
+commit_base
+put crates/engine/src/parser/clause.rs 'use super::*;' "$P_PLANTED" 'fn other() {}'
+commit planted
+run_gate
+expect_rc 'parser: a failed pattern match fails the gate with no verdict' 2
+expect_out 'parser: the failed match is reported' 'added-line match failed'
 
 # --- check-engine-authorities.sh: family (A) -------------------------------
 # Sections (B0)-(D) are full-tree censuses of the real engine. Here they are
@@ -399,16 +420,51 @@ run_gate
 expect_rc 'authority: an unannotated duplicate of an annotated line fails' 1
 expect_listed 'authority: only the unannotated duplicate is listed' "  crates/engine/src/game/combat.rs:
     $A_FROZEN"
+# Distinct texts above and below the annotation make its direction visible.
 authority_fixture
 put crates/engine/src/game/combat.rs 'use super::*;' 'fn other() {}'
 commit_base
-put crates/engine/src/game/combat.rs 'use super::*;' "$A_PLANTED" 'fn other() {}' \
-    "$A_ALLOW" "$A_PLANTED" "$A_PLANTED $A_ALLOW"
-commit 'plant three copies, two annotated'
+put crates/engine/src/game/combat.rs 'use super::*;' "$A_PLANTED" "$A_ALLOW" "$A_FROZEN" 'fn other() {}'
+commit 'plant around an annotation'
 run_gate
-expect_rc 'authority: an unannotated copy beside annotated ones fails' 1
-expect_listed 'authority: previous-line and same-line annotations each exempt their copy' "  crates/engine/src/game/combat.rs:
+expect_rc 'authority: the line above an annotation fails' 1
+expect_listed 'authority: the annotation exempts the line below it, not above' "  crates/engine/src/game/combat.rs:
     $A_PLANTED"
+authority_fixture
+put crates/engine/src/game/combat.rs 'use super::*;' 'fn other() {}'
+commit_base
+put crates/engine/src/game/combat.rs 'use super::*;' "$A_PLANTED $A_ALLOW" 'fn other() {}' "$A_FROZEN"
+commit 'plant a same-line annotation'
+run_gate
+expect_rc 'authority: an unannotated line beside a same-line annotation fails' 1
+expect_listed 'authority: a same-line annotation exempts its own line' "  crates/engine/src/game/combat.rs:
+    $A_FROZEN"
+
+# Under --cached the annotation is read from the staged blob the recorded lines
+# index, not from a working tree whose unstaged edit shifted the lines.
+authority_fixture
+put crates/engine/src/game/combat.rs 'use super::*;' 'fn other() {}'
+commit_base
+put crates/engine/src/game/combat.rs 'use super::*;' "$A_ALLOW" "$A_PLANTED" "$A_FROZEN" 'fn other() {}'
+git -C "$FIXTURE" add -A
+put crates/engine/src/game/combat.rs 'fn shifted() {}' 'use super::*;' "$A_ALLOW" "$A_PLANTED" "$A_FROZEN" 'fn other() {}'
+BASE="$(git -C "$FIXTURE" rev-parse HEAD)"
+run_gate
+expect_rc 'authority cached: an unannotated staged line fails' 1
+expect_listed 'authority cached: the annotation is read from the index' "  crates/engine/src/game/combat.rs:
+    $A_FROZEN"
+
+# A pattern grep cannot run is no verdict, not a clean scan.
+authority_fixture
+sed 's/^FORBIDDEN_KEYWORD_QUERY=.*/FORBIDDEN_KEYWORD_QUERY='"'"'('"'"'/' "$FIXTURE/scripts/$GATE" > "$FIXTURE/scripts/$GATE.new" \
+    && mv "$FIXTURE/scripts/$GATE.new" "$FIXTURE/scripts/$GATE"
+put crates/engine/src/game/combat.rs 'use super::*;' 'fn other() {}'
+commit_base
+put crates/engine/src/game/combat.rs 'use super::*;' "$A_PLANTED" 'fn other() {}'
+commit planted
+run_gate
+expect_rc 'authority: a failed pattern match fails the gate with no verdict' 2
+expect_out 'authority: the failed match is reported' 'added-line match failed'
 
 # --- check-test-card-data-load.sh -------------------------------------------
 C_FROZEN='    let db = CardDatabase::from_export(Path::new("../../client/public/card-data.json"));'
@@ -587,6 +643,19 @@ commit 'added parser line'
 run_gate
 expect_rc 'parser: a clean family-D run still passes' 0
 expect_out 'parser: the clean run reaches Gate A PASS' 'Gate A PASS head='
+
+# --- added-lines.sh -----------------------------------------------------------
+# Matches past the argv size bound are all kept; the child builds its records
+# in-process because passing them as argv would hit that bound first.
+read -r -d '' LARGE_STREAM <<'EOF'
+. "$1"
+recs=$(awk 'BEGIN{for(i=1;i<=340000;i++) printf "%d\t%s\n", i, (i%2 ? "o.keywords.contains(&k)" : "o.other()")}')
+got=$(added_lines_grep "$recs" '^\+.*\.keywords\.(contains|iter)\(') || exit
+[ "$got" = "$(printf '%s\n' "$recs" | awk 'NR % 2')" ] || { echo "kept $(printf '%s\n' "$got" | wc -l) records"; exit 3; }
+EOF
+OUT="$("$BASH_BIN" -c "$LARGE_STREAM" _ "$REPO_ROOT/scripts/lib/added-lines.sh" 2>&1)"
+RC=$?
+expect_rc 'added-lines: a match stream past the argv bound is kept whole' 0
 
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]

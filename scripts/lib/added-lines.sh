@@ -59,11 +59,14 @@ added_lines_for() {
 }
 
 # $1 = `<line>\t<content>` records, $2 = ERE. Prints the records whose `+<content>`
-# matches $2; the gates' patterns anchor on the diff's `+`.
+# matches $2; the gates' patterns anchor on the diff's `+`. Returns 2, after an
+# error, when the match itself fails.
 added_lines_grep() {
-    local picks
-    picks=$(printf '%s\n' "$1" | cut -f2- | sed 's/^/+/' | grep -nE -- "$2" | cut -d: -f1 | sed 's/$/p/') || return 0
-    printf '%s\n' "$1" | sed -n "$picks"
+    local nums
+    nums=$(set -o pipefail; printf '%s\n' "$1" | cut -f2- | sed 's/^/+/' | grep -nE -- "$2" | cut -d: -f1) \
+        || [ $? -eq 1 ] || { echo "ERROR: added-line match failed for ERE '$2'; no verdict." >&2; return 2; }
+    [ -n "$nums" ] || return 0
+    awk 'NR == FNR { want[$1]; next } FNR in want' <(printf '%s\n' "$nums") <(printf '%s\n' "$1")
 }
 
 # $1 = path, $2 = line number. That line of the post-image the records index.

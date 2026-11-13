@@ -112,7 +112,7 @@ while IFS= read -r file; do
         continue
     fi
 
-    keyword_hits=$(added_lines_grep "$kept" "$FORBIDDEN_KEYWORD_QUERY" || true)
+    keyword_hits=$(added_lines_grep "$kept" "$FORBIDDEN_KEYWORD_QUERY") || exit 2
     keyword_clean=$(filter_allow_annotation "$file" "$keyword_hits")
     if [ -n "$keyword_clean" ]; then
         report_keyword="${report_keyword}

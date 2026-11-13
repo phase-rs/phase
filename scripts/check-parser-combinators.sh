@@ -435,7 +435,7 @@ while IFS= read -r file; do
     fi
 
     # (A) String-method dispatch.
-    methods_hits=$(added_lines_grep "$kept" "$FORBIDDEN_METHODS" || true)
+    methods_hits=$(added_lines_grep "$kept" "$FORBIDDEN_METHODS") || exit 2
     methods_clean=$(filter_allow_noncombinator "$file" "$methods_hits")
     if [ -n "$methods_clean" ]; then
         report_methods="${report_methods}
@@ -448,7 +448,7 @@ while IFS= read -r file; do
     fi
 
     # (B) Match-arm string-literal patterns.
-    match_arm_hits=$(added_lines_grep "$kept" "$FORBIDDEN_MATCH_ARM" || true)
+    match_arm_hits=$(added_lines_grep "$kept" "$FORBIDDEN_MATCH_ARM") || exit 2
     match_arm_clean=$(filter_allow_noncombinator "$file" "$match_arm_hits")
     if [ -n "$match_arm_clean" ]; then
         report_match_arm="${report_match_arm}
@@ -462,7 +462,7 @@ while IFS= read -r file; do
 
     # (C) Chained if-let-tag. Count occurrences in this file's added lines;
     # 2+ is the anti-pattern. Single occurrences are fine (and common).
-    iflet_hits=$(added_lines_grep "$kept" "$IFLET_TAG_PATTERN" || true)
+    iflet_hits=$(added_lines_grep "$kept" "$IFLET_TAG_PATTERN") || exit 2
     iflet_clean=$(filter_allow_noncombinator "$file" "$iflet_hits")
     iflet_count=0
     if [ -n "$iflet_clean" ]; then
@@ -479,7 +479,7 @@ while IFS= read -r file; do
     fi
 
     # (E) Verbatim-sentence equality comparisons.
-    verbatim_hits=$(added_lines_grep "$kept" "$FORBIDDEN_VERBATIM_EQ" || true)
+    verbatim_hits=$(added_lines_grep "$kept" "$FORBIDDEN_VERBATIM_EQ") || exit 2
     verbatim_clean=$(filter_allow_noncombinator "$file" "$verbatim_hits")
     if [ -n "$verbatim_clean" ]; then
         report_verbatim_eq="${report_verbatim_eq}
@@ -492,7 +492,7 @@ while IFS= read -r file; do
     fi
 
     # (F) Hand-constructed Effect::Unimplemented literals.
-    unimpl_hits=$(added_lines_grep "$kept" "$FORBIDDEN_UNIMPL_LITERAL" || true)
+    unimpl_hits=$(added_lines_grep "$kept" "$FORBIDDEN_UNIMPL_LITERAL") || exit 2
     unimpl_clean=$(filter_allow_noncombinator "$file" "$unimpl_hits")
     if [ -n "$unimpl_clean" ]; then
         report_unimpl="${report_unimpl}
