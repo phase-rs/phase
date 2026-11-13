@@ -15259,20 +15259,61 @@ fn change_targets_count_in_card(
     types: &[&str],
     subtypes: &[&str],
 ) -> usize {
-    fn walk(def: &AbilityDefinition) -> usize {
-        usize::from(matches!(&*def.effect, Effect::ChangeTargets { .. }))
-            + def.sub_ability.as_deref().map_or(0, walk)
-    }
     let types: Vec<String> = types.iter().map(|s| s.to_string()).collect();
     let subtypes: Vec<String> = subtypes.iter().map(|s| s.to_string()).collect();
     let parsed = parse_oracle_text(text, name, &[], &types, &subtypes);
-    parsed.abilities.iter().map(walk).sum::<usize>()
-        + parsed
-            .triggers
-            .iter()
-            .filter_map(|t| t.execute.as_deref())
-            .map(walk)
-            .sum::<usize>()
+    change_targets_count(&parsed)
+}
+
+/// Counts `ChangeTargets` over the shared whole-tree walk: chained, else, modal
+/// and granted bodies of every ability, trigger and replacement.
+fn change_targets_count(parsed: &ParsedAbilities) -> usize {
+    let mut defs = Vec::new();
+    collect_parsed_roots(parsed, true, &mut defs);
+    defs.iter()
+        .filter(|def| matches!(&*def.effect, Effect::ChangeTargets { .. }))
+        .count()
+}
+
+/// The no-standalone-retarget count reaches nested bodies. SYNTHETIC tree: a
+/// parsed `ChangeTargets` ability is moved into the else-branch of another
+/// parsed ability, where a walk of `sub_ability` chains alone cannot see it.
+#[test]
+fn change_targets_count_sees_a_retarget_in_a_nested_body() {
+    let instant = ["Instant".to_string()];
+    let retarget = parse_oracle_text(
+        "You may choose new targets for target spell.",
+        "Test Retarget",
+        &[],
+        &instant,
+        &[],
+    )
+    .abilities
+    .into_iter()
+    .next()
+    .expect("the retarget sentence parses to an ability");
+    assert!(
+        matches!(&*retarget.effect, Effect::ChangeTargets { .. }),
+        "reach guard: {:?}",
+        retarget.effect
+    );
+    let mut parsed = parse_oracle_text("Draw a card.", "Test Draw", &[], &instant, &[]);
+    assert_eq!(change_targets_count(&parsed), 0);
+    parsed.abilities[0].else_ability = Some(Box::new(retarget));
+    fn chained(def: &AbilityDefinition) -> usize {
+        usize::from(matches!(&*def.effect, Effect::ChangeTargets { .. }))
+            + def.sub_ability.as_deref().map_or(0, chained)
+    }
+    assert_eq!(
+        parsed.abilities.iter().map(chained).sum::<usize>(),
+        0,
+        "reach guard: the retarget is not on a root's sub-ability chain"
+    );
+    assert_eq!(
+        change_targets_count(&parsed),
+        1,
+        "the nested retarget is counted"
+    );
 }
 
 /// CR 707.10c + CR 707.10: Hive Mind — "each other player copies that spell. Each
