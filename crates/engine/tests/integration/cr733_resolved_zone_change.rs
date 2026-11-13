@@ -4,14 +4,19 @@ use crate::support::shared_card_db;
 use engine::game::layers::flush_layers;
 use engine::game::scenario::{GameScenario, P0};
 use engine::game::scenario_db::GameScenarioDbExt;
-use engine::game::stickers::{available_sticker_candidates, set_player_sticker_sheets};
+use engine::game::stickers::{
+    apply_selected_sticker, available_sticker_candidates, set_player_sticker_sheets,
+};
 use engine::game::zones::{apply_resolved_zone_change, move_to_zone};
+use engine::types::actions::GameAction;
+use engine::types::format::FormatConfig;
 use engine::types::game_state::{
-    GameState, PersistedGameState, PersistedRestoreFinalization, WaitingFor,
+    GameState, PersistedGameState, PersistedRestoreFinalization, ReplacementChoiceKind, WaitingFor,
 };
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaCost, ManaType, ManaUnit};
 use engine::types::phase::Phase;
+use engine::types::player::PlayerCounterKind;
 use engine::types::resolved_commands::{
     ResolvedRulesCommand, ResolvedRulesJournal, ResolvedZoneChangeCommand,
     ResolvedZoneChangeReplayInvariantError, RetainedStickerTimestamp,
@@ -703,6 +708,133 @@ fn hidden_destination_replay_clears_stickers_and_same_zone_reorder_draws_none() 
     assert_eq!(object.abilities.len(), object.base_abilities.len());
     assert_eq!((object.power, object.toughness), (Some(2), Some(2)));
     assert_eq!(replay.next_timestamp, timestamp);
+}
+
+/// CR 123.5 + CR 123.8 + CR 903.9b: Unsummon replaces a stickered commander's
+/// Battlefield-to-Hand move with a public Battlefield-to-Command move. The
+/// carried sticker must be re-applied after the final departure reset.
+#[test]
+fn unsummon_commander_replacement_reapplies_retained_sticker_after_reset() {
+    let db = shared_card_db().expect("integration card fixture must load");
+    let mut scenario = GameScenario::new_with_format(FormatConfig::commander(), 2, 0x9039);
+    scenario.at_phase(Phase::PreCombatMain);
+    let commander = scenario.add_real_card(P0, "Isamaru, Hound of Konda", Zone::Battlefield, db);
+    let unsummon = scenario.add_real_card(P0, "Unsummon", Zone::Hand, db);
+    scenario.with_mana_pool(
+        P0,
+        vec![ManaUnit::new(ManaType::Blue, ObjectId(0), false, vec![])],
+    );
+    let mut runner = scenario.build();
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&commander)
+        .expect("the real Isamaru fixture exists")
+        .is_commander = true;
+    runner.state_mut().players[0].add_player_counters(&PlayerCounterKind::Ticket, 2);
+    set_player_sticker_sheets(runner.state_mut(), P0, &["Sassy Gremlin Blood".to_string()]);
+
+    let sticker = available_sticker_candidates(
+        runner.state(),
+        P0,
+        Some(StickerKind::PowerToughness),
+        None,
+        false,
+    )
+    .into_iter()
+    .find(|candidate| {
+        matches!(
+            &candidate.sticker,
+            AppliedSticker::PowerToughness {
+                power: 3,
+                toughness: 2,
+                ..
+            }
+        )
+    })
+    .expect("Sassy Gremlin Blood supplies its 3/2 power/toughness sticker");
+    apply_selected_sticker(
+        runner.state_mut(),
+        P0,
+        commander,
+        sticker.sticker,
+        sticker.pay_ticket,
+        &mut Vec::new(),
+    );
+    flush_layers(runner.state_mut());
+    assert_eq!(
+        (
+            runner.state().objects[&commander].power,
+            runner.state().objects[&commander].toughness,
+        ),
+        (Some(3), Some(2)),
+        "reach guard: the real commander has the Sassy Gremlin Blood sticker before Unsummon"
+    );
+
+    let mut cast = runner.cast(unsummon).target_object(commander).commit();
+    cast.act(GameAction::PassPriority)
+        .expect("the caster passes priority after Unsummon resolves");
+    cast.act(GameAction::PassPriority)
+        .expect("the opponent passes priority so Unsummon resolves");
+
+    let WaitingFor::ReplacementChoice {
+        player,
+        candidates,
+        kind,
+        ..
+    } = cast.state().waiting_for.clone()
+    else {
+        panic!(
+            "Unsummon must surface CR 903.9b's owner choice: {:?}",
+            cast.state().waiting_for
+        );
+    };
+    assert_eq!(player, P0, "the commander owner chooses its destination");
+    assert_eq!(kind, ReplacementChoiceKind::OptionalBranch);
+    assert_eq!(candidates.len(), 2);
+    let command_choice = candidates
+        .iter()
+        .position(|candidate| candidate.description == "Move to command zone")
+        .expect("the CR 903.9b choice offers the Command destination");
+    assert!(
+        candidates
+            .iter()
+            .any(|candidate| candidate.description == "Put into hand"),
+        "the normal Unsummon destination remains available"
+    );
+    cast.act(GameAction::ChooseReplacement {
+        index: command_choice,
+    })
+    .expect("the owner chooses the CR 903.9b Command replacement");
+
+    assert_eq!(cast.state().objects[&commander].zone, Zone::Command);
+    assert!(cast.state().command_zone.contains(&commander));
+    assert!(cast.state().stack.is_empty());
+    assert!(cast.state().resolution_stack.is_empty());
+    assert!(matches!(
+        cast.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+    drop(cast);
+
+    flush_layers(runner.state_mut());
+    let object = &runner.state().objects[&commander];
+    assert_eq!(object.zone, Zone::Command);
+    assert_eq!((object.power, object.toughness), (Some(3), Some(2)));
+    assert!(matches!(
+        object.stickers.as_slice(),
+        [AppliedSticker::PowerToughness {
+            power: 3,
+            toughness: 2,
+            ..
+        }]
+    ));
+    assert!(runner.state().stack.is_empty());
+    assert!(runner.state().resolution_stack.is_empty());
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
 }
 
 /// J1 (real card) - CR 123.5 + CR 613.7k: a real Cremate records the retained
