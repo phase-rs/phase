@@ -445,6 +445,64 @@ fn strategic_betrayal_mass_leg_records_the_subject() {
     }
 }
 
+/// CR 608.2c + CR 730.3 + CR 406.6: Strategic Betrayal when the creature the
+/// opponent exiles is a merged permanent. Each component card is put into
+/// exile, and each records the opponent as its exiler.
+/// The merge is staged with the engine's merge primitive on two vanilla
+/// creatures (mutate casting is not under test; nearest printed analogue: a
+/// creature with a mutate card such as Gemrazer on it).
+///
+/// Revert sensitivity: with the component requests built without the
+/// performer, both components reach exile with no exiler recorded.
+#[test]
+fn strategic_betrayal_merged_creature_records_the_subject_on_every_component() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let host = scenario.add_creature(P1, "Opp Host Beast", 2, 2).id();
+    let rider = scenario.add_creature(P1, "Opp Mutated Rider", 3, 3).id();
+    let other = scenario.add_creature(P1, "Opp Other Beast", 1, 1).id();
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Strategic Betrayal", false, STRATEGIC_BETRAYAL)
+        .id();
+    let mut runner = scenario.build();
+    {
+        let state = runner.state_mut();
+        engine::game::merge::merge_object_onto(
+            state,
+            rider,
+            host,
+            engine::game::merge::MergeSide::Top,
+            &mut Vec::new(),
+        );
+        state.battlefield.retain(|&id| id != rider);
+    }
+    // Reach-guard: the host is a merged permanent of two cards.
+    assert_eq!(runner.state().objects[&host].merged_components.len(), 2);
+
+    let outcome = runner.cast(spell).target_player(P1).resolve();
+    match outcome.final_waiting_for() {
+        WaitingFor::EffectZoneChoice { player, cards, .. } => {
+            assert_eq!(*player, P1, "the opponent chooses the exiled creature");
+            assert!(cards.contains(&host) && cards.contains(&other), "{cards:?}");
+        }
+        other => panic!("expected the opponent's creature choice; got {other:?}"),
+    }
+    runner
+        .act(GameAction::SelectCards { cards: vec![host] })
+        .expect("the opponent selects the merged creature");
+    drive_to_priority(&mut runner);
+
+    for component in [host, rider] {
+        assert_eq!(zone(&runner, component), Zone::Exile);
+        assert_eq!(
+            exiled_by(&runner, component),
+            Some(P1),
+            "each component of the merged creature records the opponent"
+        );
+    }
+    assert_eq!(zone(&runner, other), Zone::Battlefield);
+}
+
 // ---------------------------------------------------------------------------
 // R2 — a subject-form PICK records the subject.
 // ---------------------------------------------------------------------------

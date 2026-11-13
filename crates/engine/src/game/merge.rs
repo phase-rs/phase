@@ -485,6 +485,7 @@ pub(crate) fn move_merged_permanent_on_leave(
     merged_id: ObjectId,
     dest: Zone,
     applied: &HashSet<AppliedReplacementKey>,
+    performed_by: Option<crate::types::player::PlayerId>,
     events: &mut Vec<GameEvent>,
 ) -> BatchMoveResult {
     let Some(survivor) = state.objects.get(&merged_id) else {
@@ -520,8 +521,17 @@ pub(crate) fn move_merged_permanent_on_leave(
                     .expect("merged component exists")
                     .split_from_merge_survivor = Some(survivor_successor);
             }
+            // CR 608.2c + CR 730.3 + CR 406.6: every component is moved by the
+            // player who performed the merged permanent's move, so each card
+            // that reaches exile records that player as its exiler. No
+            // ownership input is carried, as before: a component goes to its
+            // own owner's zone.
             ZoneMoveRequest::merged_component(component_id, dest)
                 .with_replacement_applied(applied.clone())
+                .actors(zone_pipeline::MoveActors {
+                    performed_by,
+                    ownership_actor: None,
+                })
         })
         .collect();
 

@@ -3885,7 +3885,12 @@ pub(crate) fn deliver_replaced_zone_change(
             // component-specific replacements, including CR 903.9b.
             state.merged_card_component_route = None;
             return match crate::game::merge::move_merged_permanent_on_leave(
-                state, object_id, to, &applied, events,
+                state,
+                object_id,
+                to,
+                &applied,
+                performed_by,
+                events,
             ) {
                 BatchMoveResult::Done => apply_zone_delivery_tail(
                     state,
