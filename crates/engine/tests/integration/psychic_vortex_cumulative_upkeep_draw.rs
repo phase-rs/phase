@@ -2252,6 +2252,18 @@ fn assert_continuation_boundary(runner: &mut GameRunner, owed: u32, context: &st
         vec![GameAction::PayUnlessCost { pay: true }],
         "{context}: continuing is the only answer"
     );
+    // The raw candidate generator, before any legality filter, offers no
+    // decline either.
+    let raw_answers: Vec<GameAction> = engine::ai_support::candidate_actions(runner.state())
+        .into_iter()
+        .map(|candidate| candidate.action)
+        .filter(|action| matches!(action, GameAction::PayUnlessCost { .. }))
+        .collect();
+    assert_eq!(
+        raw_answers,
+        vec![GameAction::PayUnlessCost { pay: true }],
+        "{context}: the raw candidates only continue"
+    );
     let (flat, _, by_object) = engine::ai_support::legal_actions_full(runner.state());
     let mana_actions: Vec<&GameAction> = flat
         .iter()
@@ -4368,4 +4380,88 @@ fn a_mana_upkeep_keeps_its_mana_window() {
         .act(GameAction::PayUnlessCost { pay: true })
         .expect("the tapped mana pays the upkeep");
     assert_eq!(zone_of(&runner, remora), Zone::Battlefield);
+}
+
+/// CR 104.3a + CR 800.4a + CR 616.1: a concession whose reconciliation of the
+/// parked payment fails still stands, and leaves a game that can go on. P0's
+/// one upkeep draw is offered Words of Worship's shield and P1's Hullbreacher,
+/// with P0 one below the largest life total the engine holds. P1 concedes:
+/// Hullbreacher is gone, the shield alone would apply, and its gain of 5
+/// cannot be represented. The payment is retired on the departed board: the
+/// departure is published once, the departed Hullbreacher is not offered, the
+/// board passes a checked save and restore, and the next action succeeds.
+#[test]
+fn a_concession_whose_payment_reconciliation_fails_retires_the_payment() {
+    let (mut runner, vortex, words) = three_player_vortex_board(0, |scenario| {
+        scenario.add_creature_from_oracle(P1, "Hullbreacher", 3, 2, HULLBREACHER_ORACLE);
+        scenario
+            .add_enchantment_from_oracle(P0, "Words of Worship", WORDS_OF_WORSHIP_ORACLE)
+            .id()
+    });
+    runner.state_mut().players[P0.0 as usize]
+        .mana_pool
+        .add(ManaUnit::new(
+            ManaType::Colorless,
+            ObjectId(0),
+            false,
+            vec![],
+        ));
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: words,
+            ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("Words of Worship's ability is activated");
+    runner.advance_until_stack_empty();
+    runner.state_mut().players[P0.0 as usize].life = i32::MAX - 1;
+    advance_through_upkeep(&mut runner);
+    assert_draw_cost_prompt(&runner, 1, 1);
+    let before = ZoneSizes::of(&runner, P0);
+    runner
+        .act(GameAction::PayUnlessCost { pay: true })
+        .expect("choosing the draw cost is legal");
+    assert_replacement_choice(&runner, "P0 orders the shield and Hullbreacher");
+    assert_eq!(
+        offered_candidates(&runner).len(),
+        2,
+        "reach guard: Words of Worship's shield and Hullbreacher both apply"
+    );
+
+    let departure = concede_with_events(&mut runner, P1);
+    assert_eq!(
+        departure
+            .iter()
+            .filter(|event| matches!(
+                event,
+                GameEvent::PlayerEliminated { player_id } if *player_id == P1
+            ))
+            .count(),
+        1,
+        "CR 104.3a: the departure is published once"
+    );
+    let state = runner.state();
+    assert_eq!(
+        state.players[P0.0 as usize].life,
+        i32::MAX - 1,
+        "no life changed"
+    );
+    assert_eq!(ZoneSizes::of(&runner, P0), before, "nothing was drawn");
+    assert!(
+        state.pending_replacement.is_none() && state.pending_cost_move_resume.is_none(),
+        "the unreconcilable payment is retired, not left on a prompt that names Hullbreacher"
+    );
+    assert_eq!(treasures_of(&runner, P1), 0);
+    assert_eq!(zone_of(&runner, vortex), Zone::Battlefield);
+    let WaitingFor::Priority { player } = state.waiting_for else {
+        panic!("a player can act: {:?}", state.waiting_for);
+    };
+    let saved = serde_json::to_string(&PersistedGameState::Raw(Box::new(state.clone())))
+        .expect("the departed board serializes");
+    let mut restored = serde_json::from_str::<PersistedGameState>(&saved)
+        .expect("the save decodes")
+        .into_game_state()
+        .expect("the departed board restores");
+    engine::game::engine::apply(&mut restored, player, GameAction::PassPriority)
+        .expect("the next authenticated action succeeds");
 }

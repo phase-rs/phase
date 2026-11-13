@@ -7793,6 +7793,85 @@ mod tests {
     }
 
     /// `fallback_action` pays a zero Counter payment and declines a nonzero one.
+    /// CR 702.24a: at the continuation of a repeated draw payment the
+    /// fallback continues. Psychic Vortex with 1,025 age counters under an
+    /// opponent's Hullbreacher (verbatim Oracle texts) reaches the boundary
+    /// after one work slice; the only answer the state offers is to pay, and a
+    /// fallback that declined there would be filtered out by the contract and
+    /// answer nothing.
+    #[test]
+    fn fallback_continues_a_repeated_payment_at_its_work_slice_boundary() {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::Untap);
+        let vortex = scenario
+            .add_enchantment_from_oracle(
+                P0,
+                "Psychic Vortex",
+                "Cumulative upkeep\u{2014}Draw a card. (At the beginning of your upkeep, put \
+                 an age counter on this permanent, then sacrifice it unless you pay its upkeep \
+                 cost for each age counter on it.)\nAt the beginning of your end step, \
+                 sacrifice a land and discard your hand.",
+            )
+            .id();
+        scenario.add_creature_from_oracle(
+            P1,
+            "Hullbreacher",
+            3,
+            2,
+            "Flash\nIf an opponent would draw a card except the first one they draw in each \
+             of their draw steps, instead you create a Treasure token. (It's an artifact with \
+             \"{T}, Sacrifice this token: Add one mana of any color.\")",
+        );
+        let mut runner = scenario.build();
+        runner
+            .state_mut()
+            .objects
+            .get_mut(&vortex)
+            .expect("Psychic Vortex exists")
+            .counters
+            .insert(engine::types::counter::CounterType::Age, 1_024);
+        runner.auto_advance_to_main_phase();
+        runner.advance_until_stack_empty();
+        assert!(
+            matches!(
+                runner.state().waiting_for,
+                WaitingFor::UnlessPayment {
+                    repeat: Some(1_025),
+                    ..
+                }
+            ),
+            "reach: the upkeep offers 1,025 draws, got {:?}",
+            runner.state().waiting_for
+        );
+        let offered = fallback_action_default(runner.state());
+        assert_eq!(
+            offered,
+            Some(GameAction::PayUnlessCost { pay: false }),
+            "at the initial offer the fallback still declines a draw cost"
+        );
+        runner
+            .act(GameAction::PayUnlessCost { pay: true })
+            .expect("paying is never refused");
+        assert!(
+            engine::ai_support::unless_payment_only_continues(runner.state()),
+            "reach: the first slice ended at the continuation, got {:?}",
+            runner.state().waiting_for
+        );
+        let answer = fallback_action_default(runner.state());
+        assert_eq!(
+            answer,
+            Some(GameAction::PayUnlessCost { pay: true }),
+            "the fallback continues the payment"
+        );
+        runner
+            .act(answer.expect("the fallback answered"))
+            .expect("the fallback's answer is accepted");
+        assert!(
+            runner.state().pending_cost_move_resume.is_none(),
+            "the payment completed"
+        );
+    }
+
     #[test]
     fn fallback_pays_a_free_unless_payment_and_declines_a_real_one() {
         let payer = PlayerId(1);
