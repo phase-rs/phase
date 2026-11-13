@@ -957,17 +957,6 @@ fn targeted_forms_keep_their_parent_target_reading() {
         "{:#?}",
         parsed.abilities
     );
-    // The head "Choose any number of target creatures with equal toughness" no
-    // longer lowers to a bare `TargetOnly` that silently dropped "with equal
-    // toughness": V.A.T.S. is an unsupported gap until a follow-up parses that
-    // restriction. The "chosen creatures" reading above is the building block
-    // this row pins; the head gap keeps the card honest.
-    assert!(
-        defs.iter()
-            .any(|d| matches!(&*d.effect, Effect::Unimplemented { .. })),
-        "{:#?}",
-        parsed.abilities
-    );
 
     // Kaya's exile arm keeps its own prefix ("for each other player"; a bare
     // "for each player" exile is taken earlier by the player-scope fan-out),

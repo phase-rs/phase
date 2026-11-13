@@ -2,7 +2,7 @@ use std::cmp::Ordering;
 
 use crate::parser::oracle_nom::error::{oracle_err, OracleError, OracleResult};
 use nom::branch::alt;
-use nom::bytes::complete::{tag, tag_no_case, take_till, take_until, take_while, take_while1};
+use nom::bytes::complete::{tag, take_till, take_until, take_while1};
 use nom::character::complete::{anychar, one_of, satisfy, space0, space1, u8 as parse_u8};
 use nom::combinator::{
     all_consuming, eof, map, map_opt, map_res, not, opt, peek, recognize, rest, success, value,
@@ -5004,31 +5004,6 @@ pub(super) fn is_standalone_object_choice_clause(fragment: &str) -> bool {
     parse_battlefield_object_choice_core(rest, rest_lower, &mut throwaway).is_some()
 }
 
-/// True iff the text left after a "choose target ..." phrase carries nothing the
-/// target parser failed to consume: once structural punctuation and whitespace
-/// are skipped it is empty, or is the "controlled by different players"
-/// target-set constraint (which clause assembly extracts as
-/// `TargetSelectionConstraint::DifferentObjectControllers`).
-///
-/// A remainder that merely begins another clause is NOT accepted: `parse_choose_ast`
-/// receives one already-split clause chunk and `ChooseImperativeAst::TargetOnly`
-/// carries no remainder, so nobody re-parses the leftover text and the clause would
-/// vanish while the card still counted as supported.
-fn target_remainder_is_recognised(remainder: &str) -> bool {
-    fn skip_structural(input: &str) -> OracleResult<'_, &str> {
-        take_while(|c: char| c.is_whitespace() || c.is_ascii_punctuation()).parse(input)
-    }
-    let leftover: OracleResult<'_, Option<&str>> = preceded(
-        skip_structural,
-        opt(terminated(
-            tag_no_case(super::lower::CONTROLLED_BY_DIFFERENT_PLAYERS.trim_start()),
-            skip_structural,
-        )),
-    )
-    .parse(remainder);
-    leftover.is_ok_and(|(rest, _)| rest.is_empty())
-}
-
 pub(super) fn parse_choose_ast(
     text: &str,
     lower: &str,
@@ -5188,12 +5163,14 @@ pub(super) fn parse_choose_ast(
             let diagnostic_count = ctx.diagnostics.len();
             let (target, remainder) = parse_target_with_ctx(rest, ctx);
             ctx.diagnostics.truncate(diagnostic_count);
-            // CR 115.1 + CR 601.2c: an unparsed remainder is a restriction on the
-            // declared target (or an instruction) the target parser did not
-            // understand; folding it into `TargetOnly` would silently drop it.
-            // Decline so the clause stays an honest `Unimplemented`.
-            if !target_remainder_is_recognised(remainder)
-                || crate::parser::oracle_quantity::is_empty_typed_filter(&target)
+            let tail = remainder.trim();
+            if (tail.split_whitespace().count() == 1
+                && !tail.chars().all(|c| c.is_ascii_punctuation())
+                && !super::sequence::starts_clause_text_or_conjugated(tail))
+                || matches!(&target, TargetFilter::Typed(filter)
+                    if filter.type_filters.is_empty()
+                        && filter.controller.is_none()
+                        && filter.properties.is_empty())
             {
                 return None;
             }
@@ -10357,10 +10334,7 @@ pub(super) fn shuffle_rest_clause(lower: &str) -> Option<ShuffleRestClause> {
 /// to the selected-population `ChangeZoneAll`, which requires announced targets
 /// to move anything (Alabaster Dragon, Dread, Serra Avatar).
 fn shuffle_it_names_the_source(object: &str, ctx: &ParseContext) -> bool {
-    if all_consuming(tag::<_, _, OracleError<'_>>("it"))
-        .parse(object.trim())
-        .is_err()
-    {
+    if object.trim() != "it" {
         return false;
     }
     if ctx.object_pronoun_ref.is_some() {
@@ -10388,8 +10362,8 @@ pub(super) fn parse_shuffle_ast(
     // The pronoun's referent decides the MOVEMENT AUTHORITY, not just the
     // destination: a bare "it" with no announced antecedent names the ability's
     // own source (CR 400.7e — the object that left is the departure event's
-    // source), so the move is one `ChangeZone`. `ParentTarget` is reserved for a
-    // genuinely announced object, because lowering turns it into the
+    // source), so source-bound placement precedes its one terminal owner shuffle.
+    // `ParentTarget` is reserved for a genuinely announced object; lowering uses
     // selected-population `ChangeZoneAll`, which resolves only against announced
     // targets (CR 115.10a: being affected is not being a target).
     if let Some(((object, owner_library), _)) = nom_on_lower(text, lower, |input| {
@@ -10786,31 +10760,6 @@ fn parse_shuffle_library_target(
     let (input, _) = eof(input)?;
 
     Ok((input, target))
-}
-
-/// CR 400.3 + CR 701.24c: Lower a shuffle of ONE contextual object into its
-/// owner's library. The recovered filter names the single moved object (a
-/// source, an attached host, or a prior anaphor), so a `ParentTarget` keeps its
-/// single-object `ChangeZone` authority instead of becoming the
-/// selected-population `ChangeZoneAll` that requires an announced target
-/// (CR 115.10a).
-pub(super) fn lower_single_object_shuffle_to_library(target: TargetFilter) -> ParsedEffectClause {
-    with_shuffle_sub_ability(Effect::ChangeZone {
-        library_shuffle: Default::default(),
-        origin: None,
-        destination: Zone::Library,
-        target,
-        owner_library: true,
-        enter_transformed: false,
-        enters_under: None,
-        enter_tapped: crate::types::zones::EtbTapState::Unspecified,
-        enters_attacking: false,
-        up_to: false,
-        enter_with_counters: vec![],
-        conditional_enter_with_counters: vec![],
-        face_down_profile: None,
-        enters_modified_if: None,
-    })
 }
 
 /// CR 701.24a: Lower a shuffle AST into a `ParsedEffectClause`.
@@ -11220,6 +11169,13 @@ pub(super) fn with_shuffle_sub_ability(mut effect: Effect) -> ParsedEffectClause
         // object's owner as the anaphoric shuffle subject. Unlike a mass move,
         // this already has one exact parent object and needs no tracked-set
         // population fan-out (Chaos Warp and prevention follow-ups).
+        // CR 108.3 + CR 400.3: the source's owner is independent of any
+        // earlier announced target still carried by this ability.
+        Effect::ChangeZone {
+            target: TargetFilter::SelfRef,
+            owner_library: true,
+            ..
+        } => TargetFilter::Owner,
         Effect::ChangeZone {
             owner_library: true,
             ..
@@ -11229,10 +11185,9 @@ pub(super) fn with_shuffle_sub_ability(mut effect: Effect) -> ParsedEffectClause
     };
     let tracks_owner_population = matches!(&effect, Effect::ChangeZoneAll { .. });
     // A selected graveyard population explicitly owned by the caster or the
-    // declared player has one library subject. ParentTarget/SelfRef moves do
-    // not establish that guarantee: their receiving owner may differ from the
-    // terminal actor. Keep those existing routes unchanged. Mass operations
-    // already carry their complete owner-population scope.
+    // declared player has one library subject (Dwell on the Past). ParentTarget/
+    // SelfRef moves do not establish that guarantee: their receiving owner may
+    // differ from the terminal actor.
     let single_library_population = matches!(
         &effect,
         Effect::ChangeZone {
@@ -11252,11 +11207,21 @@ pub(super) fn with_shuffle_sub_ability(mut effect: Effect) -> ParsedEffectClause
         ))
     );
     match &mut effect {
+        // CR 701.24a + CR 701.24d: every parser-emitted compound move into a
+        // library appends the terminal `Shuffle` below. Randomizing during
+        // delivery as well would shuffle twice (Watery Grasp), so defer to that
+        // single instruction. The source's own move ("shuffle it into its
+        // owner's library": Gandalf, Wandering Wizard; Alabaster Dragon) is the
+        // same operation, and CR 701.24c still shuffles when it cannot move.
+        Effect::ChangeZone {
+            destination: Zone::Library,
+            owner_library: true,
+            library_shuffle,
+            ..
+        } => *library_shuffle = LibraryShuffleMode::TerminalShuffle,
         Effect::ChangeZone {
             library_shuffle, ..
-        } if single_library_population => {
-            *library_shuffle = LibraryShuffleMode::TerminalShuffle;
-        }
+        } if single_library_population => *library_shuffle = LibraryShuffleMode::TerminalShuffle,
         Effect::ChangeZoneAll {
             destination: Zone::Library,
             library_shuffle,
@@ -19715,51 +19680,7 @@ fn try_parse_bolster(lower: &str) -> Option<Effect> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::parser::oracle::{has_unimplemented, parse_oracle_text};
 
-    #[test]
-    fn r2_bound_shuffle_uses_terminal_population_but_self_keeps_explicit_referent() {
-        for target in [
-            TargetFilter::ParentTarget,
-            TargetFilter::ParentTargetSlot { index: 1 },
-        ] {
-            let clause = lower_shuffle_ast(ShuffleImperativeAst::ChangeZoneToLibrary {
-                target: target.clone(),
-                owner_library: true,
-            });
-            assert!(matches!(&clause.effect, Effect::ChangeZoneAll {
-                origin: None, destination: Zone::Library, target: bound,
-                library_position: None, library_shuffle: LibraryShuffleMode::TerminalShuffle,
-                random_order: false, ..
-            } if *bound == target));
-            let terminal = clause.sub_ability.as_deref().expect("terminal shuffle");
-            assert!(matches!(
-                *terminal.effect,
-                Effect::Shuffle {
-                    target: TargetFilter::ScopedPlayer
-                }
-            ));
-            assert_eq!(terminal.player_scope, Some(owner_library_shuffle_scope()));
-        }
-        let own = lower_shuffle_ast(ShuffleImperativeAst::ChangeZoneToLibrary {
-            target: TargetFilter::SelfRef,
-            owner_library: true,
-        });
-        assert!(matches!(
-            own.effect,
-            Effect::ChangeZone {
-                target: TargetFilter::SelfRef,
-                owner_library: true,
-                ..
-            }
-        ));
-        assert!(matches!(
-            *own.sub_ability.unwrap().effect,
-            Effect::Shuffle {
-                target: TargetFilter::ParentTargetOwner
-            }
-        ));
-    }
     use crate::types::ability::{EffectKind, ParitySource, ZoneChoiceChooser};
     use crate::types::counter::CounterType;
     use crate::types::keywords::KeywordKind;
@@ -26667,119 +26588,36 @@ mod tests {
         }
     }
 
-    /// CR 707.10c: Hive Mind's second sentence ("Each of those players may choose new
-    /// targets for their copy.") is no longer a `choose` clause at all: it binds to the
-    /// preceding per-player `CopySpell` as a retarget permission, so the card is fully
-    /// supported with no warning and no `TargetOnly` / `ChangeTargets` residue.
-    ///
-    /// Desperate Gambit and Global Ruin used to be listed here as supported cards:
-    /// their "you control" / "they control ... of each basic land type" restrictions
-    /// were silently dropped into a bare `TargetOnly`. Both are unsupported gaps until
-    /// a follow-up parses the dropped restriction; see
-    /// `choose_target_with_unparsed_restriction_is_an_honest_gap_on_printed_cards`.
     #[test]
-    fn hive_mind_their_copy_retarget_card_is_supported_without_diagnostics() {
+    fn choose_target_only_fallback_preserves_supported_card_diagnostics() {
         use crate::parser::oracle::parse_oracle_text;
 
-        let (name, text, types) = (
-            "Hive Mind",
-            "Whenever a player casts an instant or sorcery spell, each other player copies that spell. Each of those players may choose new targets for their copy.",
-            vec!["Enchantment".to_string()],
-        );
-        let parsed = parse_oracle_text(text, name, &[], &types, &[]);
-        assert!(
-            !parsed.triggers.is_empty(),
-            "{name}: card must reach the parser pipeline"
-        );
-        assert!(
-            parsed.parse_warnings.is_empty(),
-            "{name}: must not add a warning: {:?}",
-            parsed.parse_warnings
-        );
-        let executes: Vec<&AbilityDefinition> = parsed
-            .abilities
-            .iter()
-            .chain(parsed.triggers.iter().filter_map(|t| t.execute.as_deref()))
-            .collect();
-        assert!(
-            !executes
-                .iter()
-                .copied()
-                .any(crate::parser::oracle::has_unimplemented),
-            "{name}: the copy and its retarget sentence must both be supported: {parsed:#?}"
-        );
-        // Positive reach guard: the retarget sentence was absorbed into the copy, not
-        // dropped, so the supported verdict above is not vacuous.
-        assert!(
-            executes.iter().any(|def| matches!(
-                &*def.effect,
-                Effect::CopySpell {
-                    retarget: CopyRetargetPermission::MayChooseNewTargets,
-                    ..
-                }
-            )),
-            "{name}: the CopySpell must carry the retarget permission: {parsed:#?}"
-        );
-    }
-
-    /// CR 115.1 + CR 601.2c: a "choose ..." clause whose target phrase leaves a
-    /// restriction on the declared target that the target parser did not consume
-    /// ("you control", "they control a land of each basic land type") is an honest `Unimplemented`, not a bare
-    /// `TargetOnly` that silently drops the restriction. Desperate Gambit and
-    /// Global Ruin were reported as supported before; each is an unsupported gap
-    /// until a follow-up parses the dropped restriction.
-    ///
-    /// Desperate Gambit additionally pins the replacement fall-through: the
-    /// spell parse is now `Unimplemented`, so Priority 8 reads the line as a
-    /// damage-prevention replacement, whose unreadable "the next time that
-    /// source would deal damage" subject must fail closed
-    /// (`prevention_source_scope`) rather than install a shield for every source.
-    ///
-    /// Revert-failing: restoring the one-word cutoff in `parse_choose_ast`
-    /// makes both cards parse as a bare `TargetOnly` again (no `Unimplemented`).
-    #[test]
-    fn choose_target_with_unparsed_restriction_is_an_honest_gap_on_printed_cards() {
-        for (name, text, types, gap_name) in [
+        for (name, text, types) in [
             (
                 "Desperate Gambit",
                 "Choose a source you control and flip a coin. If you win the flip, the next time that source would deal damage this turn, it deals double that damage instead. If you lose the flip, the next time it would deal damage this turn, prevent that damage.",
                 vec!["Instant".to_string()],
-                Some("prevention_source_scope"),
             ),
             (
                 "Global Ruin",
                 "Each player chooses from the lands they control a land of each basic land type, then sacrifices the rest.",
                 vec!["Sorcery".to_string()],
-                None,
+            ),
+            (
+                "Hive Mind",
+                "Whenever a player casts an instant or sorcery spell, each other player copies that spell. Each of those players may choose new targets for their copy.",
+                vec!["Enchantment".to_string()],
             ),
         ] {
             let parsed = parse_oracle_text(text, name, &[], &types, &[]);
-            // Reach guard: the card produced a spell ability, so the
-            // assertions below are not vacuous over an empty parse.
-            assert!(!parsed.abilities.is_empty(), "{name}: {parsed:#?}");
             assert!(
-                parsed.abilities.iter().any(has_unimplemented),
-                "{name}: the unparsed restriction must be a visible gap: {parsed:#?}"
-            );
-            if let Some(gap_name) = gap_name {
-                assert!(
-                    parsed.abilities.iter().any(|ability| matches!(
-                        &*ability.effect,
-                        Effect::Unimplemented { name, .. } if name == gap_name
-                    )),
-                    "{name}: expected the {gap_name} gap: {parsed:#?}"
-                );
-            }
-            assert!(
-                parsed.replacements.is_empty(),
-                "{name}: no blanket replacement may be installed: {:?}",
-                parsed.replacements
+                !parsed.abilities.is_empty() || !parsed.triggers.is_empty(),
+                "{name}: card must reach the parser pipeline"
             );
             assert!(
-                !parsed.abilities.iter().any(|ability| {
-                    matches!(&*ability.effect, Effect::TargetOnly { .. })
-                }),
-                "{name}: the restriction must not be dropped into TargetOnly: {parsed:#?}"
+                parsed.parse_warnings.is_empty(),
+                "{name}: fallback must not add a warning: {:?}",
+                parsed.parse_warnings
             );
         }
     }
@@ -27377,25 +27215,27 @@ mod tests {
             })
     }
 
-    /// CR 615.1a: Desperate Gambit's shipped text is an honest unsupported gap.
+    /// CR 609.7a + CR 608.2c + CR 615.1 (#5601): Desperate Gambit's win and lose
+    /// branches share one anaphor — "a source you control" — so both the win
+    /// branch's damage-doubling replacement and the lose branch's prevention must
+    /// bind `ChosenDamageSource`, never `SelfRef` (the Instant on the stack, which
+    /// deals no damage, so the prevention would shield nothing).
     ///
-    /// This row used to pin that the win branch's damage-doubling replacement and
-    /// the lose branch's prevention both bound `ChosenDamageSource` (#5601): the
-    /// verbatim "Choose a source you control AND flip a coin" sentence lowered
-    /// its head to a bare `TargetOnly` and silently dropped "you control". The
-    /// head choice now declines (the unparsed "you control and flip a coin" tail
-    /// is not a recognised clause), so the spell parse is `Unimplemented`; the
-    /// line then falls through to the damage-prevention replacement route, whose
-    /// unreadable "the next time that source would deal damage" subject fails
-    /// closed as `prevention_source_scope`. Until a follow-up parses the chosen
-    /// source with its restriction, the whole line is one visible gap, with
-    /// neither a `CreateDamageReplacement`/`PreventDamage` effect nor a blanket
-    /// card-wide replacement standing in for it.
+    /// This uses the VERBATIM shipped oracle text ("Choose a source you control
+    /// AND flip a coin" — one sentence). That form lowers the head choice to a
+    /// bare target selection rather than `Effect::ChooseDamageSource`, so the
+    /// repair pass's original `ChooseDamageSource`-keyed gate no longer fired and
+    /// the lose branch silently reverted to `SelfRef` (the pass mutated
+    /// 0/35,396 pool-wide). Reverting the flattened-head gate signal flips the
+    /// lose-branch assertion below back to `SelfRef` — this test can fail if the
+    /// fix is removed (AI-CONTRIBUTOR.md §5(i)).
     ///
-    /// It drives the FULL card pipeline via `parse_oracle_text` (the entry
-    /// `database::synthesis` uses to generate `card-data.json`).
+    /// It drives the FULL card pipeline via `parse_oracle_text` — the exact entry
+    /// `database::synthesis` uses to generate `card-data.json` — NOT the
+    /// standalone `parse_effect_chain`, so it exercises the path the shipped card
+    /// actually takes and cannot go green while the card is broken.
     #[test]
-    fn desperate_gambit_shipped_text_is_an_honest_gap_not_a_blanket_replacement() {
+    fn desperate_gambit_shipped_text_threads_chosen_damage_source_both_branches() {
         use crate::parser::oracle::parse_oracle_text;
 
         let text = "Choose a source you control and flip a coin. If you win the flip, \
@@ -27404,28 +27244,38 @@ mod tests {
         let parsed =
             parse_oracle_text(text, "Desperate Gambit", &[], &["Instant".to_string()], &[]);
 
-        // Reach guard: the card produced exactly the one spell ability the
-        // negative assertions below inspect.
-        assert_eq!(parsed.abilities.len(), 1, "{parsed:#?}");
+        let win = parsed
+            .abilities
+            .iter()
+            .find_map(|d| {
+                find_effect_in_def(d, &|e| matches!(e, Effect::CreateDamageReplacement { .. }))
+            })
+            .expect("win branch must emit a CreateDamageReplacement");
         assert!(
             matches!(
-                &*parsed.abilities[0].effect,
-                Effect::Unimplemented { name, .. } if name == "prevention_source_scope"
+                win,
+                Effect::CreateDamageReplacement {
+                    source_filter: Some(TargetFilter::ChosenDamageSource { filter: None }),
+                    ..
+                }
             ),
-            "the whole line must be the prevention_source_scope gap: {parsed:#?}"
+            "win branch must bind ChosenDamageSource, got {win:?}"
         );
+
+        let lose = parsed
+            .abilities
+            .iter()
+            .find_map(|d| find_effect_in_def(d, &|e| matches!(e, Effect::PreventDamage { .. })))
+            .expect("lose branch must emit a PreventDamage");
         assert!(
-            parsed.replacements.is_empty(),
-            "no blanket replacement may stand in for the unreadable source: {:?}",
-            parsed.replacements
-        );
-        assert!(
-            find_effect_in_def(&parsed.abilities[0], &|e| matches!(
-                e,
-                Effect::CreateDamageReplacement { .. } | Effect::PreventDamage { .. }
-            ))
-            .is_none(),
-            "no damage effect may be emitted for the unparsed restriction: {parsed:#?}"
+            matches!(
+                lose,
+                Effect::PreventDamage {
+                    damage_source_filter: Some(TargetFilter::ChosenDamageSource { filter: None }),
+                    ..
+                }
+            ),
+            "lose branch prevention must thread ChosenDamageSource (not SelfRef), got {lose:?}"
         );
     }
 

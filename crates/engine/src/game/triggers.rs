@@ -5836,8 +5836,8 @@ fn collect_pending_triggers_with_collection(
                 }
             }
 
-            // CR 702.21a: Ward triggers when this permanent becomes the target
-            // of a spell or ability an opponent controls. Each ward instance
+            // CR 702.21a + CR 102.3: Ward triggers when this permanent becomes the
+            // target of a spell or ability an opponent (not a teammate) controls. Each ward instance
             // triggers independently. Only fires for permanents (battlefield scan).
             if !ward_costs.is_empty() {
                 if let GameEvent::BecomesTarget {
@@ -5869,7 +5869,9 @@ fn collect_pending_triggers_with_collection(
                             &active_suppress_triggers,
                         );
                         if let Some(src_ctrl) = source_controller {
-                            if src_ctrl != controller && !ward_suppressed {
+                            if super::players::is_opponent(state, controller, src_ctrl)
+                                && !ward_suppressed
+                            {
                                 for ward in &ward_costs {
                                     // CR 702.21a + CR 118.12: Ward generates a counter
                                     // effect with an unless-pay modifier. Post-fold, the
@@ -7684,32 +7686,38 @@ fn collect_ring_emblem_triggers(
                 // times, it has "Whenever your Ring-bearer becomes blocked by
                 // a creature, the blocking creature's controller sacrifices it
                 // at end of combat."
-                if let GameEvent::BlockersDeclared { assignments } = event {
-                    for (blocker_id, attacker_id) in assignments {
-                        if *attacker_id != bearer_id {
-                            continue;
-                        }
-                        let Some(blocker) = state.objects.get(blocker_id) else {
-                            continue;
-                        };
-                        if !blocker.card_types.core_types.contains(&CoreType::Creature) {
-                            continue;
-                        }
-                        pending.push(ring_pending_trigger(
-                            state,
-                            bearer_id,
-                            player,
-                            player,
-                            event,
-                            ring_level_three_ability(
-                                bearer_id,
-                                blocker.id,
-                                player,
-                                blocker.controller,
-                            ),
-                            "The Ring level 3",
-                        ));
+                let mut collect_blocker = |blocker_id, attacker_id| {
+                    if attacker_id != bearer_id {
+                        return;
                     }
+                    let Some(blocker) = state.objects.get(&blocker_id) else {
+                        return;
+                    };
+                    if !blocker.card_types.core_types.contains(&CoreType::Creature) {
+                        return;
+                    }
+                    pending.push(ring_pending_trigger(
+                        state,
+                        bearer_id,
+                        player,
+                        player,
+                        event,
+                        ring_level_three_ability(bearer_id, blocker.id, player, blocker.controller),
+                        "The Ring level 3",
+                    ));
+                };
+                match event {
+                    GameEvent::BlockersDeclared { assignments } => {
+                        for &(blocker, attacker) in assignments {
+                            collect_blocker(blocker, attacker);
+                        }
+                    }
+                    // CR 509.3d: entering blocking is also a creature-bound
+                    // attacker occurrence; the bare transition event is not.
+                    GameEvent::AttackerBecameBlockedByFilteredBlocker { attacker, blocker } => {
+                        collect_blocker(*blocker, *attacker);
+                    }
+                    _ => {}
                 }
             }
 
@@ -9987,6 +9995,11 @@ pub(crate) fn seed_event_context_parent_targets(
     let Some(event) = trigger_event else {
         return;
     };
+    if timing == EventContextSeedTiming::StackPush {
+        // CR 400.7 + CR 608.2k: non-targeted event operands need their original
+        // identities before opponents can respond, not a resolution-time lookup.
+        super::effects::phase_out::seed_event_context_pins(state, ability, event);
+    }
     if !effect_uses_parent_target(&ability.effect) || parent_target_seeding_blocked(ability) {
         return;
     }
@@ -52751,6 +52764,7 @@ pub mod tests {
             conditional_enter_with_counters: vec![],
             count_param: 0,
             library_position: None,
+            library_shuffle: crate::types::ability::LibraryShuffleMode::PerObject,
             mass_library_order: None,
             is_cost_payment: false,
             enters_modified_if: None,

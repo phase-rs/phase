@@ -45,7 +45,7 @@ fn stolen_elixir_shuffles_the_activators_graveyard_not_the_owners() {
         .add_artifact_from_oracle(P1, "Elixir of Immortality", ELIXIR)
         .controlled_by(P0)
         .id();
-    // CR 107.4b + CR 601.2h: the activator pays the generic {2} cost.
+    // CR 107.4e / CR 601.2h: the activator pays {2} from their own mana.
     scenario.add_basic_land(P0, ManaColor::Green);
     scenario.add_basic_land(P0, ManaColor::Green);
     // Two nonempty, distinguishable graveyards — one card each.

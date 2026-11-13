@@ -5,7 +5,7 @@
 
 use engine::game::effects::attach::{attach_to, attach_to_player};
 use engine::game::game_object::AttachTarget;
-use engine::game::scenario::{GameRunner, GameScenario, P0};
+use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::triggers::process_triggers;
 use engine::parser::oracle::parse_oracle_text;
 use engine::types::ability::{
@@ -1217,17 +1217,12 @@ fn smoke_shroud_attaches_to_entering_ninja_among_multiple_hosts() {
     );
 }
 
-/// Necrotic Plague used to be a full pipeline row here (the dies trigger's chosen opponent
-/// creature receives the returned Aura, not the dying host): its head "its controller chooses
-/// target creature one of their opponents controls" lowered to a bare `TargetOnly { creature }`
-/// that silently dropped "one of their opponents controls", so the chosen host could be ANY
-/// creature. The head is now an unsupported gap until a follow-up parses the dropped
-/// restriction, so the chosen-target return can no longer run end to end. No other supported
-/// card has the TargetOnly -> ChangeZone -> Attach shape; Gift of Immortality, Next of Kin,
-/// Smoke Shroud, Dragon Breath and Sword of the Meek keep the event-subject attach rows above
-/// and below.
 #[test]
-fn necrotic_plague_chosen_target_head_is_an_honest_gap() {
+fn necrotic_plague_attaches_to_chosen_creature_not_dying_host() {
+    // CR 608.2c + CR 303.4f: Necrotic Plague nests Attach→ParentTarget under a
+    // TargetOnly→ChangeZone chain. Drive the printed dies trigger through
+    // process_triggers → TriggerTargetSelection → resolution with distinct dying
+    // and chosen creatures — no stamp_host / hand-built ResolvedAbility.
     let parsed = parse_oracle_text(
         NECROTIC_PLAGUE_ORACLE,
         "Necrotic Plague",
@@ -1238,11 +1233,45 @@ fn necrotic_plague_chosen_target_head_is_an_honest_gap() {
     let dies = parsed
         .triggers
         .iter()
-        .find(|t| t.trigger_zones.contains(&Zone::Battlefield) && t.execute.is_some())
+        .find(|t| {
+            matches!(
+                t.execute.as_ref().map(|e| e.effect.as_ref()),
+                Some(Effect::TargetOnly { .. })
+            )
+        })
         .expect("dies trigger");
     let execute = dies.execute.as_ref().expect("execute");
-    // Reach guard: the printed return and its Attach continuation still lower,
-    // so the gap below is the head choice and not an empty parse.
+    assert!(
+        execute.forward_result
+            || execute
+                .sub_ability
+                .as_ref()
+                .is_some_and(|s| s.forward_result),
+        "Necrotic Plague return must forward_result into Attach; execute={:?}",
+        execute.effect
+    );
+    fn change_zone_has_forward_result(def: &engine::types::ability::AbilityDefinition) -> bool {
+        let here = matches!(
+            def.effect.as_ref(),
+            Effect::ChangeZone {
+                destination: Zone::Battlefield,
+                ..
+            }
+        ) && def.forward_result;
+        here || def
+            .sub_ability
+            .as_deref()
+            .is_some_and(change_zone_has_forward_result)
+            || def
+                .else_ability
+                .as_deref()
+                .is_some_and(change_zone_has_forward_result)
+    }
+    assert!(
+        change_zone_has_forward_result(execute),
+        "TargetOnly→ChangeZone[+Attach] must stamp forward_result on ChangeZone; execute={:?}",
+        execute.effect
+    );
     fn find_attach_parent(def: &engine::types::ability::AbilityDefinition) -> bool {
         matches!(
             def.effect.as_ref(),
@@ -1255,14 +1284,85 @@ fn necrotic_plague_chosen_target_head_is_an_honest_gap() {
     }
     assert!(
         find_attach_parent(execute),
-        "the Attach->ParentTarget continuation must still lower; execute={:?}",
+        "Necrotic Plague must nest Attach→ParentTarget; execute={:?}",
         execute.effect
     );
     assert!(
-        effect_is_unimplemented(execute.effect.as_ref()),
-        "the unparsed 'one of their opponents controls' head must be a visible gap, not a \
-         TargetOnly; execute={:?}",
-        execute.effect
+        dies.trigger_zones.contains(&Zone::Battlefield),
+        "AttachedTo dies trigger must fire from the battlefield (Gift-shaped), not only GY; \
+         trigger_zones={:?}",
+        dies.trigger_zones
+    );
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    let dying = scenario.add_creature(P0, "Dying Host", 2, 2).id();
+    let chosen = scenario.add_creature(P1, "Chosen Host", 2, 2).id();
+    let other_opp = scenario.add_creature(P1, "Other Opp Creature", 2, 2).id();
+    let plague = scenario
+        .add_creature(P0, "Necrotic Plague", 0, 0)
+        .as_enchantment()
+        .with_subtypes(vec!["Aura"])
+        .from_oracle_text(NECROTIC_PLAGUE_ORACLE)
+        .with_keyword(Keyword::Enchant(TargetFilter::Typed(
+            TypedFilter::creature(),
+        )))
+        .id();
+
+    let mut runner = scenario.build();
+    attach_to(runner.state_mut(), plague, dying);
+
+    // Mirror Gift: collect dies triggers while the Aura is still on the battlefield
+    // (CR 603.6d LKI); SBAs during drain move it to the GY before resolution.
+    let mut death_events = Vec::new();
+    engine::game::zones::move_to_zone(
+        runner.state_mut(),
+        dying,
+        Zone::Graveyard,
+        &mut death_events,
+    );
+    process_triggers(runner.state_mut(), &death_events);
+    assert!(
+        !runner.state().stack.is_empty()
+            || matches!(
+                runner.state().waiting_for,
+                WaitingFor::TriggerTargetSelection { .. } | WaitingFor::OrderTriggers { .. }
+            ),
+        "Necrotic dies trigger must be pending after enchanted creature dies; \
+         stack={} waiting={:?}",
+        runner.state().stack.len(),
+        runner.state().waiting_for
+    );
+    // CR 704.5m + CR 704.3: Aura with illegal/dead host goes to GY before the
+    // pending trigger resolves. The printed return is "from its owner's
+    // graveyard", so ChangeZone's origin guard needs the Aura in GY first.
+    engine::game::sba::check_state_based_actions(runner.state_mut(), &mut death_events);
+    assert_eq!(
+        runner.state().objects[&plague].zone,
+        Zone::Graveyard,
+        "SBA must put Necrotic Plague into GY before its return resolves"
+    );
+    drain_priority_preferring(&mut runner, &[chosen]);
+
+    assert_eq!(
+        runner.state().objects[&plague].zone,
+        Zone::Battlefield,
+        "Necrotic Plague returns from GY"
+    );
+    assert_eq!(
+        runner.state().objects[&plague].attached_to,
+        Some(AttachTarget::Object(chosen)),
+        "must attach to the chosen opponent creature ({chosen:?}), not the dying host \
+         ({dying:?}) or distractor ({other_opp:?}); attached_to={:?}",
+        runner.state().objects[&plague].attached_to
+    );
+    assert!(
+        !matches!(
+            runner.state().waiting_for,
+            WaitingFor::ReturnAsAuraTarget { .. }
+        ),
+        "must not open CR 303.4f Aura host choice when ParentTarget is the chosen creature"
     );
 }
 

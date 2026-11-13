@@ -39,6 +39,7 @@ mod ria_ivor_bane_of_bladehold;
 mod riftsweeper_owner_binding;
 mod riku_modal_modes_chosen_cap;
 mod riku_modal_spell_trigger;
+mod ring_entering_blocker;
 mod riot_control_regression;
 mod ripple_reveal_choice_interaction;
 mod ripple_stolen_spell_controller;

@@ -3647,16 +3647,11 @@ fn prevent_damage_gendered_self_anaphor_recipient_binds_to_source() {
 
 /// Cluster 97 (CR 603.7a + CR 311.2 + CR 701.31): The Doctor's Childhood Barn —
 /// a Planechase plane — parses its "Whenever chaos ensues …" trigger chain with
-/// ZERO `StaticCondition::Unrecognized`, and specifically produces (a) the inline
-/// delayed `PhaseIn { ParentTarget }` trigger keyed to `Planeswalked { role: Any }`
-/// (`uses_tracked_set: false`, `Persistent`) and (b) the plane-face-up `CantPhaseIn`
-/// duration `ForAsLongAs { SourceIsFaceUp }`. Regression against the two prior gaps.
-///
-/// The one remaining `Effect::Unimplemented` is the opening choose clause: its
-/// "that opponent controls" restriction on the declared target is not parsed, and a
-/// choose clause with an unparsed restriction is an honest gap (CR 115.1 + CR 601.2c),
-/// not a bare `TargetOnly` that drops the controller. The rest of the chain (the
-/// untap, phase-out, `CantPhaseIn` and delayed phase-in) still lowers.
+/// ZERO `Effect::Unimplemented` and ZERO `StaticCondition::Unrecognized`, and
+/// specifically produces (a) the inline delayed `PhaseIn { ParentTarget }`
+/// trigger keyed to `Planeswalked { role: Any }` (`uses_tracked_set: false`,
+/// `Persistent`) and (b) the plane-face-up `CantPhaseIn` duration
+/// `ForAsLongAs { SourceIsFaceUp }`. Regression against the two prior gaps.
 #[test]
 fn the_doctors_childhood_barn_planechase_full_parse() {
     let parsed = parse(
@@ -3697,17 +3692,11 @@ fn the_doctors_childhood_barn_planechase_full_parse() {
         }
     }
 
-    let gaps: Vec<&str> = effects
-        .iter()
-        .filter_map(|e| match e {
-            Effect::Unimplemented { name, .. } => Some(name.as_str()),
-            _ => None,
-        })
-        .collect();
-    assert_eq!(
-        gaps,
-        vec!["unparsed_verb_arguments"],
-        "only the opening choose clause (unparsed \"that opponent controls\") may be a gap, got {effects:?}"
+    assert!(
+        !effects
+            .iter()
+            .any(|e| matches!(e, Effect::Unimplemented { .. })),
+        "no Effect::Unimplemented in the Barn's trigger chain, got {effects:?}"
     );
     assert!(
         !durations.iter().any(|d| matches!(
@@ -34016,12 +34005,18 @@ fn printed_subject_of_a_choosing_sentence_becomes_the_target_chooser() {
     use crate::types::ability::ControllerRef;
 
     // Announcer rows: `(name, oracle, expected chooser)`.
-    {
-        let (name, oracle, expected) = (
+    for (name, oracle, expected) in [
+        (
             "Oath of Druids",
             "At the beginning of each player's upkeep, that player chooses target player who controls more creatures than they do and is their opponent. The first player may reveal cards from the top of their library until they reveal a creature card.",
             TargetFilter::ScopedPlayer,
-        );
+        ),
+        (
+            "Oath of Mages",
+            "At the beginning of each player's upkeep, that player chooses target player who has more life than they do and is their opponent. The first player may have this enchantment deal 1 damage to the second player.",
+            TargetFilter::ScopedPlayer,
+        ),
+    ] {
         let parsed = parse(oracle, name, &[], &["Enchantment"], &[]);
         let trigger = parsed
             .triggers
@@ -34041,36 +34036,6 @@ fn printed_subject_of_a_choosing_sentence_becomes_the_target_chooser() {
             "{name}: the printed subject of the choosing sentence must announce the target"
         );
     }
-
-    // Oath of Mages used to be an announcer row above: its choosing sentence
-    // lowered to a bare `TargetOnly { Player }` that silently dropped "who has
-    // more life than they do and is their opponent". The restriction is not
-    // parsed, so the sentence is now an `Unimplemented` gap (and carries no
-    // announcer) until a follow-up parses the dropped restriction. The follow-on
-    // sentence is the positive reach guard: it still lowers to a damage effect.
-    let mages = parse(
-        "At the beginning of each player's upkeep, that player chooses target player who has more life than they do and is their opponent. The first player may have this enchantment deal 1 damage to the second player.",
-        "Oath of Mages",
-        &[],
-        &["Enchantment"],
-        &[],
-    );
-    let mages_execute = mages
-        .triggers
-        .first()
-        .and_then(|trigger| trigger.execute.as_ref())
-        .unwrap_or_else(|| panic!("Oath of Mages must produce an upkeep trigger: {mages:#?}"));
-    assert!(
-        matches!(&*mages_execute.effect, Effect::Unimplemented { .. }),
-        "the unparsed restriction must be a visible gap, not a TargetOnly: {mages:#?}"
-    );
-    assert!(
-        matches!(
-            mages_execute.sub_ability.as_ref().map(|sub| &*sub.effect),
-            Some(Effect::DealDamage { .. })
-        ),
-        "reach guard: the follow-on damage sentence still parses: {mages:#?}"
-    );
 
     // CR 102.2 + CR 601.2c: "An opponent chooses target creature they control"
     // (Echo Chamber) — the player-shaped subject is normalized to the dedicated

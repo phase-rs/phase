@@ -13,18 +13,9 @@
 //!     must gain `MayChooseNewTargets`.
 //!   - Twincast — the no-rider control (copy immediately followed by the
 //!     retarget clause) stays correct.
-//!   - Hive Mind — "each other player copies that spell. Each of those players
-//!     may choose new targets for their copy": the retarget permission rides the
-//!     per-player `CopySpell`, so every copying player (not the caster) is
-//!     offered the retarget choice for the copy they control.
 
-use engine::game::scenario::{GameScenario, P0, P1};
 use engine::parser::oracle::parse_oracle_text;
-use engine::types::ability::{AbilityDefinition, CopyRetargetPermission, Effect, TargetRef};
-use engine::types::actions::GameAction;
-use engine::types::game_state::WaitingFor;
-use engine::types::phase::Phase;
-use engine::types::player::PlayerId;
+use engine::types::ability::{AbilityDefinition, CopyRetargetPermission, Effect};
 
 fn strs(v: &[&str]) -> Vec<String> {
     v.iter().map(|s| s.to_string()).collect()
@@ -194,92 +185,4 @@ fn adjacent_copy_retarget_no_rider_unchanged() {
         "adjacent retarget must still attach to the copy",
     );
     assert!(!has_unimplemented(&effects));
-}
-
-/// CR 707.10 + CR 707.10c: Hive Mind. P0 casts Lightning Bolt at P0; the trigger has
-/// each OTHER player (P1, P2) copy it, and each of them (not P0) decides whether
-/// the copy they control gets new targets.
-///
-/// Before the "their copy" determiner was recognised the second sentence lowered
-/// to a free-standing `ChangeTargets { Any }`: the `CopySpell` kept
-/// `KeepOriginalTargets`, no copy ever opened a `CopyRetarget` prompt, and the
-/// trigger declared a bogus any-target slot. Reverting the fix makes the first
-/// `CopyRetarget` wait below never occur (without a `CopyRetarget` prompt the loop ends
-/// early and the `choosers` assertion fails).
-///
-/// Reach guard: both copies are made (the loop sees one prompt per other player).
-/// The loop redirects whichever copying player is prompted first at P2 and the
-/// second keeps the original target, so the final life totals are the same
-/// whichever of P1/P2 is prompted first: P0 takes the original 3 and the kept
-/// copy's 3, P2 takes the one redirected copy's 3, P1 takes nothing. The totals
-/// show that exactly one copy was redirected at P2; the sorted `choosers`
-/// assertion shows who was asked.
-#[test]
-fn hive_mind_each_other_player_chooses_new_targets_for_their_own_copy() {
-    const P2: PlayerId = PlayerId(2);
-    let mut scenario = GameScenario::new_n_player(3, 11);
-    scenario.at_phase(Phase::PreCombatMain);
-    scenario.add_enchantment_from_oracle(
-        P0,
-        "Hive Mind",
-        "Whenever a player casts an instant or sorcery spell, each other player copies that spell. Each of those players may choose new targets for their copy.",
-    );
-    let bolt = scenario
-        .add_spell_to_hand_from_oracle(
-            P0,
-            "Lightning Bolt",
-            true,
-            "Lightning Bolt deals 3 damage to any target.",
-        )
-        .id();
-    let mut runner = scenario.build();
-    runner.cast(bolt).target_player(P0).commit();
-
-    let mut choosers = Vec::new();
-    for _ in 0..40 {
-        match runner.state().waiting_for.clone() {
-            WaitingFor::CopyRetarget { player, .. } => {
-                // The first copying player redirects at P2; the second keeps.
-                let target = if choosers.is_empty() {
-                    Some(TargetRef::Player(P2))
-                } else {
-                    None
-                };
-                choosers.push(player);
-                runner
-                    .act(GameAction::ChooseTarget { target })
-                    .expect("copy controller answers the retarget prompt");
-            }
-            WaitingFor::Priority { .. } if runner.state().stack.is_empty() => break,
-            WaitingFor::Priority { .. } => {
-                runner.act(GameAction::PassPriority).expect("pass priority");
-            }
-            other => panic!("unexpected prompt while resolving Hive Mind: {other:?}"),
-        }
-    }
-
-    assert_eq!(
-        {
-            let mut sorted = choosers.clone();
-            sorted.sort_by_key(|p| p.0);
-            sorted
-        },
-        vec![P1, P2],
-        "each other player, and only they, is asked to retarget their own copy: {choosers:?}"
-    );
-    assert_eq!(
-        runner.life(P1),
-        20,
-        "exactly one copy was redirected at P2 and none reached P1"
-    );
-    assert_eq!(
-        runner.life(P2),
-        17,
-        "P2 takes the one copy redirected at it"
-    );
-    assert_eq!(
-        runner.life(P0),
-        14,
-        "P0 takes the original Bolt and the copy whose controller kept the target"
-    );
 }

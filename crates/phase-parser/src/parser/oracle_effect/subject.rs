@@ -38,7 +38,8 @@ use super::super::oracle_nom::error::OracleResult;
 use super::super::oracle_nom::primitives as nom_primitives;
 use super::super::oracle_nom::quantity as nom_quantity;
 use super::super::oracle_nom::target::{
-    parse_event_context_ref, parse_object_exclusion_list, parse_supertype_word, ObjectExclusion,
+    parse_declared_target_prefix, parse_event_context_ref, parse_object_exclusion_list,
+    parse_supertype_word, ObjectExclusion,
 };
 use super::super::oracle_quantity;
 use super::super::oracle_static::{
@@ -1838,8 +1839,9 @@ fn try_parse_source_and_other_restriction_clause(
     }
 
     let mut tentative = ctx.clone();
+    let subject_lower = subject.to_lowercase();
     let (primary_application, secondary_application) =
-        parse_source_and_target_subjects(subject, &mut tentative)?;
+        parse_source_and_target_subjects(TextPair::new(subject, &subject_lower), &mut tentative)?;
     let secondary_multi = secondary_application.multi_target.clone();
 
     let primary_clause = build_restriction_clause(primary_application.clone(), predicate)?;
@@ -1868,12 +1870,12 @@ fn try_parse_source_and_other_restriction_clause(
 /// Two independently bound conjuncts: an untargeted subject and an announced
 /// object. Callers commit their tentative context only after the predicate fits.
 fn parse_source_and_target_subjects(
-    subject: &str,
+    subject: TextPair<'_>,
     ctx: &mut ParseContext,
 ) -> Option<(SubjectApplication, SubjectApplication)> {
-    let subject_lower = subject.to_lowercase();
-    let subject_pair = TextPair::new(subject, &subject_lower);
-    let (primary_tp, secondary_tp) = subject_pair.split_around(" and ")?;
+    let (primary_tp, secondary_tp) = subject.split_around(" and ")?;
+    let (declared_text, _) = super::strip_optional_target_prefix(secondary_tp.lower.trim());
+    parse_declared_target_prefix.parse(declared_text).ok()?;
     let primary_application = parse_subject_application_for(
         primary_tp.original.trim(),
         ctx,
@@ -1884,29 +1886,21 @@ fn parse_source_and_target_subjects(
         ctx,
         AnaphorConsumer::AffectedObject,
     )?;
-    // The secondary conjunct must carry its own DECLARED target slot ("up to one
-    // other target creature"); a bare conjunction with no second target — or one
-    // whose second conjunct is only a context reference such as the triggering
-    // object of "that creature" — is not this class and is left to the generic
-    // subject split. `TargetFilter::is_context_ref` is the slot authority: it
-    // names every filter that resolves without announcing a target (CR 115.1).
-    // The primary conjunct, by contrast, must NOT introduce its own target slot —
-    // its grant rides as a direct (self-ref/anaphor) static, with the predicate's
-    // multi_target empty.
-    secondary_application
-        .target
-        .as_ref()
-        .filter(|target| !target.is_context_ref())?;
+    // The secondary conjunct must carry its own target slot ("up to one other
+    // target creature"); a bare conjunction with no second target is not this
+    // class and is left to the generic subject split. The primary conjunct, by
+    // contrast, must NOT introduce its own target slot — its grant rides as a
+    // direct (self-ref/anaphor) static, with the predicate's multi_target empty.
+    secondary_application.target.as_ref()?;
     if primary_application.target.is_some() || primary_application.multi_target.is_some() {
         return None;
     }
     Some((primary_application, secondary_application))
 }
 
-/// CR 702.26b + CR 702.26h: both subjects change to phased-out status in one
-/// phasing batch, and an object that would phase out both directly and
-/// indirectly resolves as indirect (CR 702.26h). Only the second conjunct is
-/// targeted (CR 115.1), even if the source has shroud.
+/// CR 702.26h: resolve source-plus-object phasing in one batch so attachments
+/// phase indirectly with their host. CR 115.10a: an event-context subject is
+/// not a target; only a declared second subject uses an announced target slot.
 pub(super) fn try_parse_source_and_target_phase_out(
     text: &str,
     ctx: &mut ParseContext,
@@ -1921,8 +1915,33 @@ pub(super) fn try_parse_source_and_target_phase_out(
     .parse(lower.as_str())
     .ok()?;
     let mut tentative = ctx.clone();
-    let (source, selected) =
-        parse_source_and_target_subjects(text[..predicate_start].trim(), &mut tentative)?;
+    let subject = text[..predicate_start].trim();
+    let subject_lower = subject.to_lowercase();
+    let Some((source, selected)) =
+        parse_source_and_target_subjects(TextPair::new(subject, &subject_lower), &mut tentative)
+    else {
+        // The declared-target grammar deliberately declines contextual anaphors.
+        // Reuse the subject authority without routing the event through ParentTarget.
+        let (source, partner) = TextPair::new(subject, &subject_lower).split_around(" and ")?;
+        let mut contextual = ctx.clone();
+        let source = parse_subject_application(source.original.trim(), &mut contextual)?;
+        let partner = parse_subject_application(partner.original.trim(), &mut contextual)?;
+        if source.affected != TargetFilter::SelfRef
+            || source.target.is_some()
+            || source.multi_target.is_some()
+            || partner.target != Some(TargetFilter::TriggeringSource)
+            || partner.multi_target.is_some()
+        {
+            return None;
+        }
+        let clause = super::parsed_clause(Effect::PhaseOut {
+            target: TargetFilter::Or {
+                filters: vec![TargetFilter::SelfRef, TargetFilter::TriggeringSource],
+            },
+        });
+        *ctx = contextual;
+        return Some(clause);
+    };
     if source.affected != TargetFilter::SelfRef
         || super::target_filter_can_target_player(&selected.affected)
     {
@@ -3238,18 +3257,55 @@ enum AnaphorConsumer {
     Other,
 }
 
-/// CR 303.4 + CR 301.5: the attached-host possessors ("enchanted creature",
-/// "enchanted permanent", "equipped creature") name a contextual object, not a
-/// declared target. Shared with the owner-shuffle possessor classification so
-/// the tag list lives once.
-pub(super) fn is_contextual_attachment_host(lower: &str) -> bool {
-    alt((
-        tag::<_, _, OracleError<'_>>("enchanted creature"),
-        tag("enchanted permanent"),
-        tag("equipped creature"),
-    ))
-    .parse(lower)
-    .is_ok()
+/// CR 108.3 + CR 608.2c: the owner-subject roles this parser recognizes,
+/// classified ONCE through the typed subject authority so the source-owner
+/// shuffle branch and the selected-owner placement route cannot drift.
+pub(super) enum OwnerSubject {
+    /// "~'s owner" names the ability source's owner (Cerulean Sphinx); it
+    /// declares no target.
+    Source,
+    /// "the owner of target X" / "target X's owner" carries the announced
+    /// object whose owner acts.
+    Selected(TargetFilter),
+    /// "that creature's owner" / "Enchanted creature's owner" is a possessive
+    /// noun anaphor: no declared target, and the moved object is the printed
+    /// noun phrase.
+    Anaphoric(TargetFilter),
+}
+
+pub(super) fn parse_owner_subject(subject: &str, ctx: &mut ParseContext) -> Option<OwnerSubject> {
+    let mut trial = ctx.clone();
+    if let Some(application) = parse_subject_application(subject, &mut trial) {
+        if application.multi_target.is_none() {
+            if application.affected == TargetFilter::Owner && application.target.is_none() {
+                *ctx = trial;
+                return Some(OwnerSubject::Source);
+            }
+            if application.affected == TargetFilter::ParentTargetOwner {
+                if let Some(target) = application.target {
+                    *ctx = trial;
+                    return Some(OwnerSubject::Selected(target));
+                }
+            }
+        }
+    }
+    // A possessive-anaphor actor declares no target of its own; the moved
+    // object is the printed noun phrase, parsed through the shared type-phrase
+    // entry point so attached-host and parent-anaphor nouns keep their filters.
+    let idx = subject
+        .find("'s owner") // allow-noncombinator: possessive boundary scan on an already-tokenized subject
+        .or_else(|| subject.find("\u{2019}s owner"))?; // allow-noncombinator: the same scan for the typographic apostrophe
+    let noun = subject[..idx].trim();
+    if nom_primitives::scan_contains(&noun.to_ascii_lowercase(), "target ") {
+        return None;
+    }
+    let (filter, remainder) = ctx.with_player_antecedents(|scoped| {
+        crate::parser::oracle_target::parse_target_with_ctx(noun, scoped)
+    });
+    if !remainder.trim().is_empty() {
+        return None;
+    }
+    Some(OwnerSubject::Anaphoric(filter))
 }
 
 pub(super) fn parse_subject_application(
@@ -3295,11 +3351,8 @@ fn parse_subject_application_for(
     }) {
         let (object_text, multi_target) = super::strip_optional_target_prefix(object_text);
         let object_lower = object_text.to_lowercase();
-        // CR 115.1 + CR 115.10a: only a printed declaration word makes the object
-        // a target; the shared prefix family also reads "other target" /
-        // "another target" so a slot such as "up to one other target nonland
-        // permanent" (Plan for All Outcomes) is not dropped.
-        crate::parser::oracle_nom::target::parse_declared_target_prefix(object_lower.as_str())
+        parse_declared_target_prefix
+            .parse(object_lower.as_str())
             .ok()?;
         let mut trial = ctx.clone();
         let (filter, remainder) = parse_target_with_ctx(object_text, &mut trial);
@@ -3622,7 +3675,14 @@ fn parse_subject_application_for(
         }
         return subject_filter_application(filter, false);
     }
-    if is_contextual_attachment_host(lower.as_str()) {
+    if alt((
+        tag::<_, _, OracleError<'_>>("enchanted creature"),
+        tag("enchanted permanent"),
+        tag("equipped creature"),
+    ))
+    .parse(lower.as_str())
+    .is_ok()
+    {
         let (filter, _) =
             ctx.with_player_antecedents(|scoped| parse_target_with_ctx(subject, scoped));
         return Some(SubjectApplication {
@@ -4133,6 +4193,28 @@ fn parse_subject_application_for(
     {
         return Some(SubjectApplication {
             affected: TargetFilter::SourceController,
+            target: None,
+            multi_target: None,
+            inherits_parent: false,
+            is_optional: false,
+            player_anaphor: None,
+        });
+    }
+    // CR 108.3: "~'s owner" names the owner of the ability's SOURCE object
+    // (Cerulean Sphinx, Etrata, Fblthp), the owner-side sibling of "~'s
+    // controller" above. Distinct from the anaphoric "its owner" / "[the|that]
+    // <noun>'s owner", which resolve to the PARENT TARGET's owner
+    // (`TargetFilter::ParentTargetOwner`). Lowered to `TargetFilter::Owner`,
+    // whose resolver reads the owner of the object referenced by the source id
+    // — the same filter the source-owner shuffle/put recognizers emit. Modeling
+    // it here keeps the source-owner and selected-object-owner subject grammar
+    // on one typed authority instead of a text-tagged branch beside it.
+    if tag::<_, _, OracleError<'_>>("~'s owner")
+        .parse(lower.as_str())
+        .is_ok_and(|(rest, _)| rest.trim().is_empty())
+    {
+        return Some(SubjectApplication {
+            affected: TargetFilter::Owner,
             target: None,
             multi_target: None,
             inherits_parent: false,
@@ -9375,17 +9457,38 @@ mod tests {
         assert_eq!(owner_subject_seed(&subject, &ctx), None);
     }
 
+    /// SHAPE: owner actor, object exclusion, and optional count are independent
+    /// axes of the declared-target subject grammar.
     #[test]
     fn declared_owner_subject_seed_accepts_only_one_pinned_object() {
-        for phrase in [
-            "the owner of target creature",
-            "the owner of up to one target creature",
-            "target creature's owner",
+        for (phrase, expected_multi, another) in [
+            ("the owner of target creature", None, false),
+            (
+                "the owner of up to one target creature",
+                Some(MultiTargetSpec::fixed(0, 1)),
+                false,
+            ),
+            (
+                "the owner of up to one other target nonland permanent",
+                Some(MultiTargetSpec::fixed(0, 1)),
+                true,
+            ),
+            ("the owner of another target creature", None, true),
+            ("target creature's owner", None, false),
         ] {
             let app =
                 parse_subject_application(phrase, &mut ParseContext::default()).expect(phrase);
             assert_eq!(app.affected, TargetFilter::ParentTargetOwner);
             assert_eq!(app.player_anaphor, None);
+            assert_eq!(app.multi_target, expected_multi, "{phrase}");
+            let Some(TargetFilter::Typed(filter)) = app.target.as_ref() else {
+                panic!("{phrase}: expected a typed object target: {:?}", app.target);
+            };
+            assert_eq!(
+                filter.properties.contains(&FilterProp::Another),
+                another,
+                "{phrase}"
+            );
             let mut subject = subject_phrase_ast(Some(app));
             assert_eq!(
                 subject_player_antecedent(&subject),
@@ -9411,53 +9514,19 @@ mod tests {
                 assert_eq!(subject_possessive_object_antecedent(&subject), None);
             }
         }
-        assert!(parse_subject_application(
+        for phrase in [
             "the owner of target player",
-            &mut ParseContext::default()
-        )
-        .is_none());
-        assert!(parse_subject_application(
+            "the owner of up to one other target player",
             "the owner of target creature nonsense",
-            &mut ParseContext::default()
-        )
-        .is_none());
-
-        // CR 115.1 + CR 115.10a: the declared-target prefix family ("other
-        // target", "another target") announces the same single pinned slot as
-        // the bare "target" sibling. Plan for All Outcomes prints "the owner of
-        // up to one other target nonland permanent" (census of that phrase = 1).
-        let app = parse_subject_application(
-            "the owner of up to one other target nonland permanent",
-            &mut ParseContext::default(),
-        )
-        .expect("Plan for All Outcomes owner subject");
-        assert_eq!(app.affected, TargetFilter::ParentTargetOwner);
-        assert_eq!(app.multi_target, Some(MultiTargetSpec::fixed(0, 1)));
-        let Some(TargetFilter::Typed(typed)) = &app.target else {
-            panic!("expected a typed declared target, got {:?}", app.target);
-        };
-        assert!(
-            typed.properties.contains(&FilterProp::Another),
-            "the 'other' qualifier excludes the source: {typed:?}"
-        );
-        assert!(typed
-            .type_filters
-            .contains(&TypeFilter::Non(Box::new(TypeFilter::Land))));
-        assert!(typed.type_filters.contains(&TypeFilter::Permanent));
-
-        // Labelled grammar control: "another target" is the sibling spelling of
-        // the same prefix family. No printed card uses it after "the owner of"
-        // (census 0); the row pins the grammar, not a card.
-        let control = parse_subject_application(
-            "the owner of another target creature",
-            &mut ParseContext::default(),
-        )
-        .expect("another-target grammar control");
-        assert_eq!(control.affected, TargetFilter::ParentTargetOwner);
-        let Some(TargetFilter::Typed(typed)) = &control.target else {
-            panic!("expected a typed declared target, got {:?}", control.target);
-        };
-        assert!(typed.properties.contains(&FilterProp::Another));
+            "the owner of another target creature nonsense",
+            "the owner of target",
+            "the owner of any target",
+        ] {
+            assert!(
+                parse_subject_application(phrase, &mut ParseContext::default()).is_none(),
+                "{phrase}"
+            );
+        }
     }
 
     #[test]
@@ -9490,6 +9559,51 @@ mod tests {
                 "{text}"
             );
         }
+    }
+
+    #[test]
+    fn compound_phase_out_preserves_event_context_instead_of_declaring_it() {
+        for secondary in [
+            "target creature",
+            "up to one target creature",
+            "up to one other target creature",
+            "another target creature",
+        ] {
+            let text = format!("~ and {secondary} phase out.");
+            assert!(
+                try_parse_source_and_target_phase_out(&text, &mut ParseContext::default())
+                    .is_some(),
+                "{text}"
+            );
+        }
+
+        let mut ctx = ParseContext {
+            subject: Some(TargetFilter::SelfRef),
+            ..ParseContext::default()
+        };
+        let application =
+            parse_subject_application("that creature", &mut ctx).expect("event-context creature");
+        assert_eq!(application.target, Some(TargetFilter::TriggeringSource));
+        assert!(
+            parse_source_and_target_subjects(
+                TextPair::new("~ and that creature", "~ and that creature"),
+                &mut ctx,
+            )
+            .is_none(),
+            "an event-context binding is not an announced target"
+        );
+        let clause = super::super::parse_effect_clause("~ and that creature phase out.", &mut ctx);
+        assert_eq!(
+            clause.effect,
+            Effect::PhaseOut {
+                target: TargetFilter::Or {
+                    filters: vec![TargetFilter::SelfRef, TargetFilter::TriggeringSource],
+                },
+            },
+            "declining the declared-target route must retain both contextual subjects"
+        );
+        assert!(clause.multi_target.is_none());
+        assert!(clause.sub_ability.is_none());
     }
     use crate::types::ability::{
         AbilityKind, BasicLandType, ChoiceType, Comparator, ContinuousModification, ControllerRef,
@@ -11964,6 +12078,20 @@ mod tests {
             parse_subject_application("its owner", &mut ctx).expect("should recognize 'its owner'");
         assert_eq!(app.affected, TargetFilter::ParentTargetOwner);
         assert!(!app.is_optional, "no 'may' modal → not optional");
+    }
+
+    // CR 108.3: "~'s owner" is the SOURCE's owner, not the parent target's
+    // owner — the shared typed subject authority models it as
+    // `TargetFilter::Owner` so the source-owner shuffle recognizer no longer
+    // needs a text-tagged route beside it.
+    #[test]
+    fn parse_subject_source_owner_routes_to_source_owner_filter() {
+        let mut ctx = ParseContext::default();
+        let app = parse_subject_application("~'s owner", &mut ctx)
+            .expect("should recognize \"~'s owner\"");
+        assert_eq!(app.affected, TargetFilter::Owner);
+        assert_eq!(app.target, None);
+        assert!(!app.is_optional);
     }
 
     #[test]

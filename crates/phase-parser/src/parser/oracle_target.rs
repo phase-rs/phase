@@ -45,9 +45,9 @@ use super::oracle_util::{
     SELF_REF_PARSE_ONLY_PHRASES, SELF_REF_TYPE_PHRASES,
 };
 use crate::types::text_grammar::{
-    parse_color_prefix, parse_color_quality_prefix, parse_core_type, parse_leading_keyword_match,
-    parse_leading_pt_designation, parse_token_suffix, separator_continues_enclosing_list,
-    starts_with_type_phrase_lead, KeywordMatch,
+    parse_color_prefix, parse_color_quality_prefix, parse_core_type, parse_exile_visibility_prefix,
+    parse_leading_keyword_match, parse_leading_pt_designation, parse_token_suffix,
+    separator_continues_enclosing_list, starts_with_type_phrase_lead, KeywordMatch,
 };
 pub(crate) use crate::types::text_grammar::{
     parse_combat_status_prefix, parse_without_keyword_suffix, starts_with_type_word,
@@ -422,6 +422,39 @@ mod r2_exile_modifier_tests {
         }));
         let (_, rest) = parse_target("target face-up exiled card frobnicate");
         assert_eq!(rest.trim(), "frobnicate");
+    }
+
+    /// CR 406.3 + CR 108.3: the same modifier run must be reachable from an
+    /// ARTICLE-LED generic phrase. Before the shared `parse_exile_visibility_prefix`
+    /// was admitted by `starts_with_type_phrase_lead`, the indefinite article was
+    /// never stripped, so "a face-up exiled card they own" (Binding Negotiation)
+    /// collapsed to a match-anything filter.
+    #[test]
+    fn article_led_face_up_exiled_card_reaches_exile_modifiers() {
+        let (target, rest) = parse_target("a face-up exiled card they own");
+        assert!(rest.is_empty(), "{rest:?}");
+        let TargetFilter::Typed(filter) = target else {
+            panic!("expected typed card, got {target:?}")
+        };
+        assert!(filter.type_filters.contains(&TypeFilter::Card));
+        assert!(
+            filter
+                .properties
+                .contains(&FilterProp::InZone { zone: Zone::Exile }),
+            "{filter:?}"
+        );
+        assert!(
+            filter.properties.contains(&FilterProp::Not {
+                prop: Box::new(FilterProp::FaceDown)
+            }),
+            "{filter:?}"
+        );
+        assert!(
+            filter.properties.contains(&FilterProp::Owned {
+                controller: ControllerRef::ScopedPlayer
+            }),
+            "{filter:?}"
+        );
     }
 }
 
@@ -1423,10 +1456,10 @@ pub fn parse_target_with_syntax<'a>(
         // separator compositionally, then delegate the complete object tail to
         // the shared type-phrase grammar so controller/type qualifiers retain
         // their ordinary semantics.
-        // CR 115.1: the player noun is number-agnostic in this
+        // CR 115.1 + CR 608.2c: the player noun is number-agnostic in this
         // grammar — "target players" / "target opponents" name the same slot
         // axis as their singular forms, with the clause's `MultiTargetSpec`
-        // carrying the printed count. The plural legs
+        // carrying the printed count (CR 601.2c, CR 115.1d). The plural legs
         // are matched FIRST and are word-bounded through `tag` + the caller's
         // clause boundary check, so the leftover "s" of a half-consumed
         // singular can no longer be mistaken for the rest of the clause
@@ -3682,18 +3715,10 @@ fn parse_type_phrase_folding_unbound<'a>(
 
     // CR 406.3: face-up exiled cards retain both their zone and visibility
     // restrictions. Compose these adjectives before the ordinary type reader.
-    while let Ok((rest, property)) = alt((
-        value(
-            FilterProp::Not {
-                prop: Box::new(FilterProp::FaceDown),
-            },
-            tag::<_, _, OracleError<'_>>("face-up "),
-        ),
-        value(FilterProp::FaceDown, tag("face-down ")),
-        value(FilterProp::InZone { zone: Zone::Exile }, tag("exiled ")),
-    ))
-    .parse(&lower[pos..])
-    {
+    // `parse_exile_visibility_prefix` is the same authority the article guard
+    // (`starts_with_type_phrase_lead`) uses, so admission and consumption can
+    // never disagree.
+    while let Ok((rest, property)) = parse_exile_visibility_prefix(&lower[pos..]) {
         properties.push(property);
         pos = lower.len() - rest.len();
     }

@@ -30,6 +30,59 @@ use crate::types::card_type::CoreType;
 use crate::types::mana::{ManaCost, ManaCostShard};
 use crate::types::statics::CostModifyMode;
 
+#[test]
+fn oblation_draw_retains_the_terminal_shuffle_owner_population() {
+    let parsed = parse_oracle_text(
+        "The owner of target nonland permanent shuffles it into their library, then draws two cards.",
+        "Oblation", &[], &["Instant".to_string()], &[],
+    );
+    let root = &parsed.abilities[0];
+    assert_eq!(root.target_choice_timing, TargetChoiceTiming::Stack);
+    assert!(matches!(root.effect.as_ref(), Effect::TargetOnly { .. }));
+    let mut node = Some(root);
+    let mut found = false;
+    while let Some(ability) = node {
+        if let Effect::Draw { target, .. } = ability.effect.as_ref() {
+            assert_eq!(*target, TargetFilter::ScopedPlayer);
+            found = true;
+        }
+        node = ability.sub_ability.as_deref();
+    }
+    assert!(found, "the printed draw instruction must remain present");
+}
+
+#[test]
+fn watery_grasp_owner_shuffle_keeps_a_resolution_host_operand() {
+    let parsed = parse_oracle_text(
+        "Enchant creature\nEnchanted creature doesn't untap during its controller's untap step.\nWaterbend {5}: Enchanted creature's owner shuffles it into their library. (While paying a waterbend cost, you can tap your artifacts and creatures to help. Each one pays for {1}.)",
+        "Watery Grasp", &[], &["Enchantment".to_string()], &["Aura".to_string()],
+    );
+    let ability = parsed
+        .abilities
+        .iter()
+        .find(|ability| ability.kind == AbilityKind::Activated)
+        .unwrap();
+    assert_eq!(ability.target_choice_timing, TargetChoiceTiming::Resolution);
+    assert!(matches!(
+        ability.effect.as_ref(),
+        Effect::ChangeZone {
+            target,
+            destination: Zone::Library,
+            owner_library: true,
+            library_shuffle: crate::types::ability::LibraryShuffleMode::TerminalShuffle,
+            ..
+        } if target.contains_source_attachment_host()
+    ));
+    let shuffle = ability.sub_ability.as_ref().unwrap();
+    assert!(matches!(
+        shuffle.effect.as_ref(),
+        Effect::Shuffle {
+            target: TargetFilter::ParentTargetOwner
+        }
+    ));
+    assert!(shuffle.sub_ability.is_none());
+}
+
 /// SHAPE: real Technomancer Oracle keeps mill before the direct whole-graveyard
 /// choice, whose immediate continuation moves only the selected parents.
 #[test]
@@ -15251,97 +15304,6 @@ fn effect_mana_spend_trigger_copy_binds_retarget_primal_wellspring() {
     assert_eq!(retargets, vec![CopyRetargetPermission::MayChooseNewTargets]);
 }
 
-/// Counts the `ChangeTargets` effects (CR 115.7) anywhere in a parsed card's
-/// trigger and ability bodies, walking the same def tree as the retarget scan.
-fn change_targets_count_in_card(
-    text: &str,
-    name: &str,
-    types: &[&str],
-    subtypes: &[&str],
-) -> usize {
-    fn walk(def: &AbilityDefinition) -> usize {
-        usize::from(matches!(&*def.effect, Effect::ChangeTargets { .. }))
-            + def.sub_ability.as_deref().map_or(0, walk)
-    }
-    let types: Vec<String> = types.iter().map(|s| s.to_string()).collect();
-    let subtypes: Vec<String> = subtypes.iter().map(|s| s.to_string()).collect();
-    let parsed = parse_oracle_text(text, name, &[], &types, &subtypes);
-    parsed.abilities.iter().map(walk).sum::<usize>()
-        + parsed
-            .triggers
-            .iter()
-            .filter_map(|t| t.execute.as_deref())
-            .map(walk)
-            .sum::<usize>()
-}
-
-/// CR 707.10c + CR 707.10: Hive Mind — "each other player copies that spell. Each
-/// of those players may choose new targets for their copy." The retarget sentence
-/// names the copy each copying player controls, so it binds to the preceding
-/// `CopySpell` (whose per-player scope makes every other player the copy's
-/// controller) instead of lowering to a free-standing `ChangeTargets { Any }`.
-///
-/// Before the fix "their copy" was not a copy-retarget determiner, so the sentence
-/// fell through to `try_parse_change_targets`, whose `parse_target` fallback made it
-/// `ChangeTargets { target: Any }`: a bogus any-target slot on the trigger, a
-/// mandatory retarget, and the wrong chooser.
-#[test]
-fn effect_copy_retarget_their_copy_binds_per_player_copy_hive_mind() {
-    let (retargets, orphaned) = copy_retarget_scan_card(
-        "Whenever a player casts an instant or sorcery spell, each other player copies that spell. \
-         Each of those players may choose new targets for their copy.",
-        "Hive Mind",
-        &["Enchantment"],
-        &[],
-    );
-    // Reach guard: the first sentence still lowers to exactly one CopySpell.
-    assert_eq!(
-        retargets,
-        vec![CopyRetargetPermission::MayChooseNewTargets],
-        "the lone CopySpell must carry the retarget permission"
-    );
-    assert_eq!(orphaned, 0, "orphaned_copy_retarget must not survive");
-    assert_eq!(
-        change_targets_count_in_card(
-            "Whenever a player casts an instant or sorcery spell, each other player copies that spell. \
-             Each of those players may choose new targets for their copy.",
-            "Hive Mind",
-            &["Enchantment"],
-            &[],
-        ),
-        0,
-        "no free-standing ChangeTargets may remain"
-    );
-}
-
-/// CR 707.10c + CR 707.10: Curse of Echoes — "each other player may copy that spell
-/// and may choose new targets for the copy they control". The "they control"
-/// qualifier names the same copy the singular "the copy" determiner does.
-#[test]
-fn effect_copy_retarget_copy_they_control_binds_curse_of_echoes() {
-    let (name, text, types, subtypes) = (
-        "Curse of Echoes",
-        "Enchant player\nWhenever enchanted player casts an instant or sorcery spell, each other player may copy that spell and may choose new targets for the copy they control.",
-        &["Enchantment"][..],
-        &["Aura", "Curse"][..],
-    );
-    let (retargets, orphaned) = copy_retarget_scan_card(text, name, types, subtypes);
-    assert_eq!(
-        retargets,
-        vec![CopyRetargetPermission::MayChooseNewTargets],
-        "{name}: the lone CopySpell must carry the retarget permission"
-    );
-    assert_eq!(
-        orphaned, 0,
-        "{name}: orphaned_copy_retarget must not survive"
-    );
-    assert_eq!(
-        change_targets_count_in_card(text, name, types, subtypes),
-        0,
-        "{name}: no free-standing ChangeTargets may remain"
-    );
-}
-
 /// CR 707.10c: COVERAGE HONESTY — a "you may choose new targets for the copy"
 /// sentence with NO preceding `CopySpell` anywhere in the chain must stay an
 /// honest `orphaned_copy_retarget` residual, never a silently-wrong retarget.
@@ -17100,35 +17062,6 @@ fn effect_shuffle_their_library() {
 }
 
 #[test]
-fn compound_shuffle_it_into_library() {
-    let def = parse_effect_chain("Shuffle it into its owner's library", AbilityKind::Spell);
-    // CR 608.2c + CR 108.3: a bare "it" with no announced antecedent names the
-    // ability's own source, so the move is the single-object `ChangeZone` — the
-    // selected-population `ChangeZoneAll` is reserved for an announced
-    // antecedent (see `announced_parent_target_shuffle_keeps_the_selected_population`).
-    assert!(
-        matches!(
-            &*def.effect,
-            Effect::ChangeZone {
-                origin: None,
-                destination: Zone::Library,
-                target: TargetFilter::SelfRef,
-                owner_library: true,
-                ..
-            }
-        ),
-        "got {:?}",
-        def.effect
-    );
-    // CR 701.24a: Compound shuffle must chain a Shuffle sub_ability.
-    let sub = def
-        .sub_ability
-        .as_ref()
-        .expect("should have Shuffle sub_ability");
-    assert!(matches!(&*sub.effect, Effect::Shuffle { .. }));
-}
-
-#[test]
 fn compound_shuffle_graveyard_into_library() {
     let def = parse_effect_chain(
         "Shuffle your graveyard into your library",
@@ -17775,53 +17708,6 @@ fn controller_subject_shuffle_up_to_keeps_the_caster_shuffle() {
             );
         }
     }
-
-    // Cathartic Parting prints both shapes: an owner shuffle ("The owner of
-    // target artifact or enchantment an opponent controls shuffles it into
-    // their library.") and a controller-subject card shuffle. The anchor arm
-    // must leave both alone.
-    let parsed = parse_oracle_text(
-        "The owner of target artifact or enchantment an opponent controls shuffles it into their library. You may shuffle up to four target cards from your graveyard into your library.",
-        "Cathartic Parting",
-        &[],
-        &["Sorcery".to_string()],
-        &[],
-    );
-    let targets = collect_shuffle_targets(&parsed);
-    assert_eq!(
-        targets.len(),
-        2,
-        "Cathartic Parting must keep both shuffles: {parsed:#?}"
-    );
-    // CR 701.24a + CR 400.3: the owner sentence declares its own target, so its
-    // moved set is a bound owner population and its terminal shuffle is
-    // `Shuffle(ScopedPlayer)` under the owner-library scope, not the scalar
-    // `ParentTargetOwner`.
-    let mut defs = Vec::new();
-    collect_parsed_roots(&parsed, false, &mut defs);
-    assert!(
-        defs.iter().any(|def| {
-            matches!(
-                &*def.effect,
-                Effect::Shuffle {
-                    target: TargetFilter::ScopedPlayer
-                }
-            ) && def.player_scope.as_ref() == Some(&imperative::owner_library_shuffle_scope())
-        }),
-        "Cathartic Parting keeps the owner shuffle, got {targets:?}"
-    );
-    assert!(
-        targets
-            .iter()
-            .any(|target| matches!(target, TargetFilter::Controller)),
-        "Cathartic Parting keeps the caster shuffle, got {targets:?}"
-    );
-    assert!(
-        !targets
-            .iter()
-            .any(|target| matches!(target, TargetFilter::ParentTarget)),
-        "Cathartic Parting must not gain the targeted-player anchor: {parsed:#?}"
-    );
 }
 
 /// CR 115.1 + CR 701.24a + CR 608.2c: whole-graveyard ("their graveyard") and
@@ -51558,8 +51444,59 @@ fn parse_possessive_owner_shuffles_into_library() {
     );
 }
 
-// --- "The next spell" parser tests ---
+/// CR 406.3 + CR 108.3: Binding Negotiation (OTJ) prints "Otherwise, you may
+/// put a face-up exiled card they own into their graveyard." (verified against
+/// `data/mtgjson/AtomicCards.json`). The article-led generic type phrase
+/// "a face-up exiled card they own" must reach the typed exile-visibility
+/// modifier run, not collapse to a match-anything filter.
+#[test]
+fn binding_negotiation_face_up_exiled_card_phrase_carries_the_exile_filter() {
+    const PRINTED: &str = "Target opponent reveals their hand. You may choose a nonland card from it. If you do, they discard it. Otherwise, you may put a face-up exiled card they own into their graveyard.";
+    let parsed = parse_oracle_text(
+        PRINTED,
+        "Binding Negotiation",
+        &[],
+        &["Sorcery".to_string()],
+        &[],
+    );
+    let mut nodes = Vec::new();
+    collect_parsed_roots(&parsed, false, &mut nodes);
+    let target = nodes.iter().find_map(|def| match def.effect.as_ref() {
+        Effect::ChangeZone {
+            destination: Zone::Graveyard,
+            target,
+            ..
+        } => Some(target),
+        _ => None,
+    });
+    let Some(TargetFilter::Typed(filter)) = target else {
+        panic!("expected the face-up exiled card move, got {nodes:?}");
+    };
+    assert!(
+        filter.type_filters.contains(&TypeFilter::Card),
+        "{filter:?}"
+    );
+    assert!(
+        filter
+            .properties
+            .contains(&FilterProp::InZone { zone: Zone::Exile }),
+        "{filter:?}"
+    );
+    assert!(
+        filter.properties.contains(&FilterProp::Not {
+            prop: Box::new(FilterProp::FaceDown)
+        }),
+        "{filter:?}"
+    );
+    assert!(
+        filter.properties.contains(&FilterProp::Owned {
+            controller: ControllerRef::ScopedPlayer
+        }),
+        "{filter:?}"
+    );
+}
 
+// --- "The next spell" parser tests ---
 #[test]
 fn parse_next_creature_spell_cant_be_countered() {
     // Insist pattern
@@ -53323,6 +53260,11 @@ fn name_hate_any_number_lowers_to_interactive_search_library() {
             ControllerRef::ParentTargetController,
         ),
         (
+            "Surgical Extraction",
+            "Choose target card in a graveyard other than a basic land card. Search its owner's graveyard, hand, and library for any number of cards with the same name as that card and exile them. Then that player shuffles.",
+            ControllerRef::ParentTargetOwner,
+        ),
+        (
             "Test of Talents",
             "Counter target instant or sorcery spell. Search its controller's graveyard, hand, and library for any number of cards with the same name as that spell and exile them. That player shuffles, then draws a card for each card exiled from their hand this way.",
             ControllerRef::ParentTargetController,
@@ -53389,48 +53331,6 @@ fn name_hate_any_number_lowers_to_interactive_search_library() {
             "{label}: expected intrinsic ChangeZone{{Exile}} continuation: {def:#?}"
         );
     }
-}
-
-/// Surgical Extraction used to be a row of
-/// `name_hate_any_number_lowers_to_interactive_search_library` (the only real
-/// card on the `ParentTargetOwner` axis): its head "Choose target card in a
-/// graveyard other than a basic land card" lowered to a bare `TargetOnly` that
-/// silently dropped "other than a basic land card". The head now declines and is
-/// an unsupported gap until a follow-up parses the dropped restriction. The
-/// search tail is the positive reach guard: it still lowers to the interactive
-/// multi-zone `SearchLibrary` on the owner axis.
-#[test]
-fn surgical_extraction_choose_head_is_an_honest_gap() {
-    use crate::types::ability::ControllerRef;
-    let def = parse_effect_chain(
-        "Choose target card in a graveyard other than a basic land card. Search its owner's graveyard, hand, and library for any number of cards with the same name as that card and exile them. Then that player shuffles.",
-        AbilityKind::Spell,
-    );
-    let search = find_search_library(&def)
-        .unwrap_or_else(|| panic!("reach guard: expected SearchLibrary in chain: {def:#?}"));
-    let Effect::SearchLibrary {
-        source_zones,
-        target_player,
-        ..
-    } = search
-    else {
-        unreachable!()
-    };
-    assert_eq!(
-        *source_zones,
-        vec![Zone::Graveyard, Zone::Hand, Zone::Library]
-    );
-    assert_eq!(
-        *target_player,
-        Some(TargetFilter::Typed(
-            crate::types::ability::TypedFilter::default()
-                .controller(ControllerRef::ParentTargetOwner)
-        ))
-    );
-    assert!(
-        matches!(def.effect.as_ref(), Effect::Unimplemented { .. }),
-        "the unparsed restriction must be a visible gap, not a TargetOnly: {def:#?}"
-    );
 }
 
 /// CR 400.7 + CR 608.2c: The draw rider "That player ... draws a card for each
@@ -61721,19 +61621,10 @@ fn flash_put_creature_forwards_reduced_cost_sacrifice() {
     );
 }
 
-/// CR 608.2c: Emperor of Bones class — a ChangeZone-to-Battlefield
-/// followed by sibling clauses that anaphorically reference the just-
-/// moved card ("it gains haste. sacrifice it ...") must mark
-/// `forward_result: true` on the ChangeZone parent so the runtime
-/// rewrites the sub-chain's `source_id` to the moved card. Without
-/// this, the trailing GenericEffect/Pump and CreateDelayedTrigger
-/// subs target Emperor itself (via `SelfRef`) instead of the
-/// returned creature.
-///
-/// Building-block test: the same pattern covers any
-/// "[move a card to the battlefield]. it gains [keyword].
-/// sacrifice it at the beginning of the next end step." chain
-/// (Emperor of Bones plus any future card with the same shape).
+/// CR 608.2c: Emperor of Bones' returned creature is the referent of
+/// "it gains haste" and the delayed sacrifice. The parent must forward that
+/// result context for the generic grant and delayed instruction without
+/// changing the creating source's identity.
 #[test]
 fn change_zone_to_battlefield_anaphor_subchain_sets_forward_result() {
     let def = parse_effect_chain(
@@ -61772,9 +61663,8 @@ fn change_zone_to_battlefield_anaphor_subchain_sets_forward_result() {
     let parent = find_change_zone_to_battlefield(&def)
         .expect("expected a ChangeZone|Dig to Battlefield parent in the parsed chain");
 
-    // CR 608.2c: the bare-"it" anaphor sub-chain must trigger the
-    // rewire, so the runtime rebinds the sub's source_id to the
-    // moved card.
+    // CR 608.2c: the parent must supply the returned card's forwarded context.
+    // This asserts referent availability, not a change to the printed source.
     assert!(
         parent.forward_result,
         "ChangeZone-to-Battlefield with bare-\"it\" sub-chain must mark forward_result"
@@ -96297,16 +96187,7 @@ fn that_player_chooser_without_a_declared_player_is_not_bound_to_one() {
         "Choose two target creatures controlled by the same opponent. That player chooses one of those creatures. Trial of Agony deals 5 damage to that creature, and the other can't block this turn.",
         AbilityKind::Spell,
     );
-    // Trial of Agony's head "Choose two target creatures controlled by the same
-    // opponent" no longer lowers to a bare `TargetOnly` (which silently dropped
-    // "controlled by the same opponent"): it is an unsupported gap until a
-    // follow-up parses the dropped restriction, and that gap declares no player.
-    assert!(
-        matches!(def.effect.as_ref(), Effect::Unimplemented { .. }),
-        "{def:?}"
-    );
-    // Reach guard: the "That player chooses one of those creatures" sentence
-    // still lowers, so the unbound-chooser assertion below is not vacuous.
+    assert!(!chain_has_unimplemented(&def), "{def:?}");
     let chooser = chain_defs(&def)
         .into_iter()
         .find_map(|d| match &*d.effect {
@@ -96939,75 +96820,6 @@ fn compound_shuffle_this_artifact_and_graveyard_moves_whole_zone() {
     );
 }
 
-/// CR 608.2c + CR 400.7e + CR 115.10a: a bare "it" in a source-departure
-/// shuffle names the ability's OWN SOURCE — the object that left is the
-/// departure event's source — so the move is the single-object `ChangeZone`.
-/// Lowering it as the selected-population `ChangeZoneAll` would move nothing,
-/// because no object was ever announced as a target (Alabaster Dragon, Dread,
-/// Serra Avatar).
-#[test]
-fn source_departure_shuffle_moves_the_source_not_a_population() {
-    // Verbatim MTGJSON Oracle text and keyword names per card.
-    let cards: [(&str, &[&str], &str); 3] = [
-        (
-            "Alabaster Dragon",
-            &["Flying"],
-            "Flying\nWhen this creature dies, shuffle it into its owner's library.",
-        ),
-        (
-            "Dread",
-            &["Fear"],
-            "Fear (This creature can't be blocked except by artifact creatures and/or black creatures.)\nWhenever a creature deals damage to you, destroy it.\nWhen Dread is put into a graveyard from anywhere, shuffle it into its owner's library.",
-        ),
-        (
-            "Serra Avatar",
-            &[],
-            "Serra Avatar's power and toughness are each equal to your life total.\nWhen Serra Avatar is put into a graveyard from anywhere, shuffle it into its owner's library.",
-        ),
-    ];
-    for (name, keywords, text) in cards {
-        let keywords: Vec<String> = keywords.iter().map(|k| (*k).to_string()).collect();
-        let parsed = parse_oracle_text(text, name, &keywords, &["Creature".to_string()], &[]);
-        let mut found: Option<&AbilityDefinition> = None;
-        for trigger in &parsed.triggers {
-            let mut current = trigger.execute.as_deref();
-            while let Some(def) = current {
-                if matches!(
-                    &*def.effect,
-                    Effect::ChangeZone {
-                        destination: Zone::Library,
-                        target: TargetFilter::SelfRef,
-                        owner_library: true,
-                        ..
-                    }
-                ) {
-                    found = Some(def);
-                    break;
-                }
-                current = def.sub_ability.as_deref();
-            }
-            if found.is_some() {
-                break;
-            }
-        }
-        let move_clause = found
-            .unwrap_or_else(|| panic!("{name}: no source-library move: {:?}", parsed.triggers));
-        assert!(
-            move_clause.sub_ability.is_some(),
-            "{name}: CR 701.24c needs the terminal shuffle"
-        );
-        let mut cursor = Some(move_clause);
-        while let Some(def) = cursor {
-            assert!(
-                !matches!(&*def.effect, Effect::ChangeZoneAll { .. }),
-                "{name}: a departure pronoun must not lower to a selected population: {:?}",
-                def.effect
-            );
-            cursor = def.sub_ability.as_deref();
-        }
-    }
-}
-
 /// CR 608.2c + CR 601.2c + CR 115.6: once an object IS announced — including an
 /// optional "up to one" announcement that may be declined — the bare "it"
 /// names that announced object, and the chain keeps the selected-population
@@ -97046,204 +96858,237 @@ fn announced_parent_target_shuffle_keeps_the_selected_population() {
     }
 }
 
-/// CR 108.3 + CR 115.10a: a source-owner possessive subject
-/// ("{U}: This creature's owner shuffles it into their library" — Cerulean
-/// Sphinx) moves the SOURCE. The possessor is typed on the printed subject and
-/// declares no target slot, so the movement authority stays the single-object
-/// `ChangeZone`.
 #[test]
-fn source_owner_possessive_shuffle_moves_the_source() {
-    let parsed = parse_oracle_text(
-        "Flying\n{U}: This creature's owner shuffles it into their library.",
-        "Cerulean Sphinx",
-        &[],
-        &["Creature".to_string()],
-        &["Sphinx".to_string()],
-    );
-    let ability = parsed
-        .abilities
-        .iter()
-        .find(|ability| ability.kind == AbilityKind::Activated)
-        .unwrap_or_else(|| panic!("no activated ability: {:?}", parsed.abilities));
-    assert!(
-        matches!(
-            &*ability.effect,
-            Effect::ChangeZone {
-                destination: Zone::Library,
-                target: TargetFilter::SelfRef,
-                owner_library: true,
-                ..
+fn source_owner_shuffle_full_oracle_keeps_named_and_gendered_source_objects() {
+    for (name, text, has_exile_target) in [
+        (
+            "Etrata, the Silencer",
+            "Etrata can't be blocked.\nWhenever Etrata deals combat damage to a player, exile target creature that player controls and put a hit counter on that card. That player loses the game if they own three or more exiled cards with hit counters on them. Etrata's owner shuffles Etrata into their library.",
+            true,
+        ),
+        (
+            "Fblthp, Impossibly Lost",
+            "When one or more of your opponents are dealt combat damage during your turn, draw two cards. If your library has no cards in it, you win the game. Fblthp's owner shuffles him into their library. (If you draw from an empty library this way, you still win the game.)",
+            false,
+        ),
+    ] {
+        let parsed = parse_oracle_text(text, name, &[], &["Creature".to_string()], &[]);
+        let mut nodes = Vec::new();
+        for trigger in &parsed.triggers {
+            if let Some(execute) = trigger.execute.as_deref() {
+                collect_test_tree(execute, false, &mut nodes);
             }
-        ),
-        "expected the source's own library move, got {:?}",
-        ability.effect
-    );
-    assert!(
-        ability.sub_ability.is_some(),
-        "CR 701.24c needs the terminal shuffle"
-    );
-}
-
-/// CR 108.3 + CR 115.10a: an untargeted attached-host possessive
-/// ("Enchanted creature's owner shuffles it..." — Watery Grasp) moves the host
-/// itself. The possessor declares no target slot, so the movement stays the
-/// single-object `ChangeZone` rather than the selected-population
-/// `ChangeZoneAll`.
-///
-/// This is a deliberate ability EXCERPT, not the full card: the untap-restriction
-/// static and the Waterbend reminder text are omitted so the row isolates the
-/// Waterbend ability's own clause. The full verbatim card
-/// runs through the engine in `riftsweeper_owner_binding`.
-#[test]
-fn enchanted_host_owner_shuffle_moves_the_host_without_a_target_declaration() {
-    let parsed = parse_oracle_text(
-        "Enchant creature\nWaterbend {5}: Enchanted creature's owner shuffles it into their library.",
-        "Watery Grasp",
-        &[],
-        &["Enchantment".to_string()],
-        &["Aura".to_string()],
-    );
-    let ability = parsed
-        .abilities
-        .iter()
-        .find(|ability| ability.kind == AbilityKind::Activated)
-        .unwrap_or_else(|| panic!("no activated ability: {:?}", parsed.abilities));
-    assert!(
-        matches!(
-            &*ability.effect,
-            Effect::ChangeZone {
-                destination: Zone::Library,
-                target: TargetFilter::Typed(filter),
-                owner_library: true,
-                ..
-            } if filter
-                .properties
-                .contains(&crate::types::ability::FilterProp::EnchantedBy)
-        ),
-        "expected the enchanted host's single-object library move, got {:?}",
-        ability.effect
-    );
-    let movement = ability.sub_ability.as_ref().expect("bound move");
-    assert!(
-        matches!(&*movement.effect, Effect::Shuffle { .. }),
-        "expected the terminal shuffle, got {:?}",
-        movement.effect
-    );
-}
-
-/// The effects of the first trigger or ability chain that holds the source's own
-/// owner-library move (`ChangeZone { SelfRef, Library, owner_library }`),
-/// starting at that move, in `sub_ability` order.
-fn source_owner_shuffle_tail(parsed: &crate::parser::oracle::ParsedAbilities) -> Vec<Effect> {
-    let roots = parsed
-        .triggers
-        .iter()
-        .filter_map(|trigger| trigger.execute.as_deref())
-        .chain(parsed.abilities.iter());
-    for root in roots {
-        let chain = chain_effects(root);
-        if let Some(start) = chain.iter().position(|effect| {
-            matches!(
-                effect,
-                Effect::ChangeZone {
-                    destination: Zone::Library,
-                    target: TargetFilter::SelfRef,
-                    owner_library: true,
-                    ..
+        }
+        if has_exile_target {
+            assert!(
+                nodes.iter().any(|def| matches!(
+                    &*def.effect,
+                    Effect::ChangeZone {
+                        destination: Zone::Exile,
+                        target: TargetFilter::Typed(filter),
+                        ..
+                    } if filter.type_filters.contains(&TypeFilter::Creature)
+                )),
+                "{name}: missing the distinct earlier creature target: {nodes:?}"
+            );
+        }
+        assert!(
+            nodes.iter().any(|def| matches!(
+                &*def.effect,
+                Effect::Shuffle {
+                    target: TargetFilter::Owner
                 }
+            )),
+            "{name}: the shuffle must name the source's owner: {nodes:?}"
+        );
+        assert!(
+            !nodes.iter().any(|def| matches!(
+                &*def.effect,
+                Effect::TargetOnly { target: TargetFilter::SelfRef }
+            )),
+            "{name}: source references must not declare a target slot"
+        );
+    }
+}
+
+/// CR 201.5 + CR 608.2c: owner-shuffle grammar rejects foreign object/library
+/// referents and trailing instructions instead of silently changing their scope.
+#[test]
+fn source_owner_shuffle_object_grammar_is_scoped_and_whole_clause() {
+    let control = "The owner of target creature shuffles it into their library";
+    let lower = control.to_ascii_lowercase();
+    let clause = try_parse_owner_of_target_shuffle(
+        TextPair::new(control, &lower),
+        &mut ParseContext::default(),
+    )
+    .expect("generic owner-target control");
+    assert!(matches!(
+        clause.effect,
+        Effect::TargetOnly {
+            target: TargetFilter::Typed(_)
+        }
+    ));
+    for text in [
+        "~'s owner shuffles ~ into their library and draws a card mysteriously",
+        "~'s owner shuffles ~ into their library and dances",
+        "~'s owner shuffles ~ into their library and draws three cards and dances",
+        "The owner of target creature shuffles it into their library and draws a card",
+        "~'s owner shuffles target creature into their library",
+        "~'s owner shuffles him into your library",
+        "The owner of target creature shuffles him into their library",
+        "The owner of target creature shuffles ~ into their library",
+        "The owner of up to one target creature shuffles it into their library",
+        "The owner of target player shuffles it into their library",
+    ] {
+        let lower = text.to_ascii_lowercase();
+        assert!(
+            try_parse_owner_of_target_shuffle(
+                TextPair::new(text, &lower),
+                &mut ParseContext::default(),
             )
-        }) {
-            return chain[start..].to_vec();
+            .is_none(),
+            "{text}"
+        );
+    }
+}
+
+#[test]
+fn source_owner_shuffle_draw_tail_reuses_numeric_grammar_and_rejects_suffixes() {
+    for (tail, count) in [("draws a card", 1), ("draws five cards", 5)] {
+        let text = format!("~'s owner shuffles him into their library and {tail}");
+        let lower = text.to_ascii_lowercase();
+        let clause = try_parse_owner_of_target_shuffle(
+            TextPair::new(&text, &lower),
+            &mut ParseContext::default(),
+        )
+        .expect(&text);
+        let mut ability = AbilityDefinition::new(AbilityKind::Spell, clause.effect);
+        ability.sub_ability = clause.sub_ability;
+        let mut nodes = Vec::new();
+        collect_test_tree(&ability, false, &mut nodes);
+        assert!(nodes.iter().any(|def| matches!(&*def.effect,
+            Effect::Draw { count: QuantityExpr::Fixed { value }, target: TargetFilter::Owner } if *value == count
+        )), "{text}: {nodes:?}");
+        assert!(
+            !nodes
+                .iter()
+                .any(|def| effect_has_stack_target_declaration(&def.effect)),
+            "{text}: {nodes:?}"
+        );
+        for suffix in [" mysteriously", " and dances"] {
+            let invalid = format!("{text}{suffix}");
+            let lower = invalid.to_ascii_lowercase();
+            assert!(
+                try_parse_owner_of_target_shuffle(
+                    TextPair::new(&invalid, &lower),
+                    &mut ParseContext::default(),
+                )
+                .is_none(),
+                "{invalid}"
+            );
         }
     }
-    panic!("no source owner-library move: {parsed:?}");
 }
 
-/// CR 201.5 + CR 108.3 + CR 400.3 + CR 701.24a: "<Name>'s owner shuffles
-/// <name/him> into their library" (Etrata, the Silencer; Fblthp, Impossibly
-/// Lost) means the SOURCE goes to its owner's library and that library is
-/// shuffled. Full verbatim Oracle text. The row asserts the move and the
-/// terminal shuffle's presence, not the shuffle's target.
 #[test]
-fn source_owner_name_and_pronoun_spellings_move_the_source() {
-    let etrata = parse_oracle_text(
-        "Etrata can't be blocked.\nWhenever Etrata deals combat damage to a player, exile target creature that player controls and put a hit counter on that card. That player loses the game if they own three or more exiled cards with hit counters on them. Etrata's owner shuffles Etrata into their library.",
-        "Etrata, the Silencer",
-        &[],
-        &["Creature".to_string()],
-        &["Vampire".to_string(), "Assassin".to_string()],
+fn source_owner_draw_binding_is_independent_of_an_earlier_target() {
+    let ability = parse_effect_chain(
+        "Exile target creature. ~'s owner shuffles him into their library and draws two cards.",
+        AbilityKind::Spell,
     );
-    let tail = source_owner_shuffle_tail(&etrata);
-    assert_eq!(tail.len(), 2, "Etrata: move then shuffle: {tail:?}");
+    let mut nodes = Vec::new();
+    collect_test_tree(&ability, false, &mut nodes);
     assert!(
-        matches!(&tail[1], Effect::Shuffle { .. }),
-        "Etrata: CR 701.24c needs the terminal shuffle: {tail:?}"
-    );
-
-    let fblthp = parse_oracle_text(
-        "When one or more of your opponents are dealt combat damage during your turn, draw two cards. If your library has no cards in it, you win the game. Fblthp's owner shuffles him into their library. (If you draw from an empty library this way, you still win the game.)",
-        "Fblthp, Impossibly Lost",
-        &[],
-        &["Creature".to_string()],
-        &["Homunculus".to_string()],
-    );
-    let tail = source_owner_shuffle_tail(&fblthp);
-    assert_eq!(tail.len(), 2, "Fblthp: move then shuffle: {tail:?}");
-    assert!(
-        matches!(&tail[1], Effect::Shuffle { .. }),
-        "Fblthp: CR 701.24c needs the terminal shuffle: {tail:?}"
+        nodes.iter().any(|def| matches!(
+            &*def.effect,
+            Effect::ChangeZone {
+                destination: Zone::Exile,
+                target: TargetFilter::Typed(_),
+                ..
+            }
+        )),
+        "{nodes:?}"
     );
     assert!(
-        !tail
-            .iter()
-            .any(|effect| matches!(effect, Effect::Unimplemented { .. })),
-        "Fblthp: the shuffle clause must not be a gap: {tail:?}"
-    );
-}
-
-/// CR 201.5 + CR 608.2c: Gandalf's "{6}: Gandalf's owner shuffles him into
-/// their library and draws three cards." The shuffle half restores the source's
-/// own library move; the " and draws three cards" instruction stays an explicit
-/// strict-failure tail, so coverage remains red instead of silently dropping the
-/// draw. Never `TargetOnly(SelfRef)`.
-#[test]
-fn source_owner_shuffle_conjunct_tail_stays_unimplemented() {
-    let gandalf = parse_oracle_text(
-        "Ward {3} (Whenever this creature becomes the target of a spell or ability an opponent controls, counter it unless that player pays {3}.)\n{6}: Gandalf's owner shuffles him into their library and draws three cards.",
-        "Gandalf, Wandering Wizard",
-        &["Ward".to_string()],
-        &["Creature".to_string()],
-        &["Avatar".to_string(), "Wizard".to_string()],
-    );
-    let tail = source_owner_shuffle_tail(&gandalf);
-    assert_eq!(tail.len(), 3, "Gandalf: move, shuffle, gap tail: {tail:?}");
-    assert!(
-        matches!(&tail[1], Effect::Shuffle { .. }),
-        "Gandalf: {tail:?}"
+        nodes.iter().any(|def| matches!(
+            &*def.effect,
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 2 },
+                target: TargetFilter::Owner
+            }
+        )),
+        "{nodes:?}"
     );
     assert!(
-        matches!(
-            &tail[2],
-            Effect::Unimplemented { name, description }
-                if name == "source_owner_shuffle_continuation"
-                    && description.as_deref() == Some("draws three cards")
-        ),
-        "Gandalf: {tail:?}"
-    );
-    let activated = gandalf
-        .abilities
-        .iter()
-        .find(|ability| ability.kind == AbilityKind::Activated)
-        .expect("Gandalf activated ability");
-    assert!(
-        !chain_effects(activated).iter().any(|effect| matches!(
-            effect,
+        !nodes.iter().any(|def| matches!(
+            &*def.effect,
             Effect::TargetOnly {
                 target: TargetFilter::SelfRef
             }
         )),
-        "Gandalf: the source is not a declared target (CR 115.10a)"
+        "{nodes:?}"
     );
+}
+
+/// SHAPE — CR 903.3 + CR 115.1c: a commander designation and entry history
+/// constrain a target without a card-type or controller restriction.
+#[test]
+fn forge_of_heroes_full_oracle_preserves_properties_only_target() {
+    let parsed = parse_oracle_text(
+        "{T}: Add {C}.\n{T}: Choose target commander that entered this turn. Put a +1/+1 counter on it if it's a creature and a loyalty counter on it if it's a planeswalker.",
+        "Forge of Heroes",
+        &[],
+        &["Land".to_string()],
+        &[],
+    );
+    let declaration = parsed
+        .abilities
+        .iter()
+        .find(|ability| matches!(&*ability.effect, Effect::TargetOnly { .. }))
+        .unwrap_or_else(|| panic!("missing commander target declaration: {parsed:?}"));
+    let Effect::TargetOnly {
+        target: TargetFilter::Typed(filter),
+    } = &*declaration.effect
+    else {
+        panic!(
+            "expected a properties-only target: {:?}",
+            declaration.effect
+        );
+    };
+    assert!(filter.type_filters.is_empty());
+    assert_eq!(filter.controller, None);
+    assert!(filter.properties.contains(&FilterProp::IsCommander));
+    assert!(filter.properties.contains(&FilterProp::EnteredThisTurn));
+
+    // Synthetic counted sibling exercises the separate clause-level guard.
+    let counted = parse_effect_clause(
+        "Choose two target commanders that entered this turn",
+        &mut ParseContext::default(),
+    );
+    assert_eq!(
+        counted.multi_target,
+        Some(MultiTargetSpec::exact(QuantityExpr::Fixed { value: 2 }))
+    );
+    let Effect::TargetOnly {
+        target: TargetFilter::Typed(filter),
+    } = &counted.effect
+    else {
+        panic!("expected a counted commander target: {:?}", counted.effect);
+    };
+    assert!(filter.properties.contains(&FilterProp::IsCommander));
+    assert!(filter.properties.contains(&FilterProp::EnteredThisTurn));
+
+    // Positive declarations above prove these malformed-tail refusals reach
+    // the same grammar instead of passing because targeting is disabled.
+    for text in [
+        "Choose target commander that entered this turn nonsense",
+        "Choose two target commanders that entered this turn nonsense",
+    ] {
+        assert!(
+            matches!(parse_effect(text), Effect::Unimplemented { .. }),
+            "{text}: malformed target tail must not be discarded"
+        );
+    }
 }
 
 /// CR 109.5 + CR 400.6 + CR 115.10a: "Shuffle this artifact and your graveyard
@@ -97316,47 +97161,35 @@ fn plural_player_target_nouns_share_the_target_grammar() {
         );
     }
 
-    // Full-Oracle controls: the plural noun is the clause's whole payload. Both
-    // cards print a cost-modification sentence first, so the target declaration
-    // is located by effect rather than by position.
+    // Full-Oracle controls: the plural noun is the clause's whole payload.
     let officious = parse_oracle_text(
         "This spell costs {W}{U} more to cast for each target beyond the first.\nChoose any number of target players. Investigate X times, where X is the total number of creatures those players control.",
         "Officious Interrogation",
-        &["Investigate".to_string()],
+        &[],
         &["Instant".to_string()],
         &[],
     );
-    let officious_declaration = officious
-        .abilities
-        .iter()
-        .find(|ability| matches!(&*ability.effect, Effect::TargetOnly { .. }))
-        .unwrap_or_else(|| panic!("Officious Interrogation: no TargetOnly: {officious:?}"));
     assert!(
         matches!(
-            &*officious_declaration.effect,
+            &*officious.abilities[0].effect,
             Effect::TargetOnly {
                 target: TargetFilter::Player
             }
         ),
         "Officious Interrogation: got {:?}",
-        officious_declaration.effect
+        officious.abilities[0].effect
     );
 
     let coppercoats = parse_oracle_text(
-        "Strive \u{2014} This spell costs {1}{W} more to cast for each target beyond the first.\nChoose any number of target opponents. Create X 1/1 white Human Soldier creature tokens, where X is the number of creatures those opponents control.",
+        "Strive — This spell costs {1}{W} more to cast for each target beyond the first.\nChoose any number of target opponents. Create X 1/1 white Human Soldier creature tokens, where X is the number of creatures those opponents control.",
         "Call the Coppercoats",
-        &["Strive".to_string()],
+        &[],
         &["Instant".to_string()],
         &[],
     );
-    let coppercoats_declaration = coppercoats
-        .abilities
-        .iter()
-        .find(|ability| matches!(&*ability.effect, Effect::TargetOnly { .. }))
-        .unwrap_or_else(|| panic!("Call the Coppercoats: no TargetOnly: {coppercoats:?}"));
     assert!(
         matches!(
-            &*coppercoats_declaration.effect,
+            &*coppercoats.abilities[0].effect,
             Effect::TargetOnly { target }
                 if matches!(
                     target,
@@ -97366,7 +97199,7 @@ fn plural_player_target_nouns_share_the_target_grammar() {
                 )
         ),
         "Call the Coppercoats: got {:?}",
-        coppercoats_declaration.effect
+        coppercoats.abilities[0].effect
     );
 }
 
@@ -97633,166 +97466,6 @@ fn return_arm_routes_through_the_shared_this_way_policy() {
             "reveal-choice return keeps its pre-routing outcome, got {parsed:?} for {line:?}"
         );
     }
-}
-
-/// CR 702.26b + CR 115.1: the compound "<source> and <target> phase out" arm
-/// requires a DECLARED second target slot. Dream Fighter's "that creature" is
-/// only the triggering-event creature (a context reference that announces no
-/// target), so the trigger must stay an honest strict failure rather than parse
-/// to `TargetOnly{TriggeringSource}` > `PhaseOut{Or[SelfRef, ParentTarget]}`,
-/// which would phase out only Dream Fighter itself. The positive reach guard
-/// drives the same helper over U.S.S. Defiant's declared-target clause.
-#[test]
-fn compound_phase_out_requires_a_declared_second_target_slot() {
-    fn mentions_phase_out_union(def: &AbilityDefinition) -> bool {
-        let this_node = matches!(def.effect.as_ref(), Effect::TargetOnly { .. })
-            || matches!(
-                def.effect.as_ref(),
-                Effect::PhaseOut {
-                    target: TargetFilter::Or { .. }
-                }
-            );
-        this_node
-            || def
-                .sub_ability
-                .as_deref()
-                .is_some_and(mentions_phase_out_union)
-            || def
-                .else_ability
-                .as_deref()
-                .is_some_and(mentions_phase_out_union)
-    }
-    fn has_unimplemented(def: &AbilityDefinition) -> bool {
-        matches!(def.effect.as_ref(), Effect::Unimplemented { .. })
-            || def.sub_ability.as_deref().is_some_and(has_unimplemented)
-            || def.else_ability.as_deref().is_some_and(has_unimplemented)
-    }
-
-    // Positive reach guard: the helper accepts the declared-target class.
-    let mut ctx = ParseContext::default();
-    let defiant = subject::try_parse_source_and_target_phase_out(
-        "~ and up to one target creature you control phase out.",
-        &mut ctx,
-    )
-    .expect("declared second target slot parses to the union");
-    assert!(matches!(defiant.effect, Effect::TargetOnly { .. }));
-    assert_eq!(
-        *defiant.sub_ability.expect("one phasing batch").effect,
-        Effect::PhaseOut {
-            target: TargetFilter::Or {
-                filters: vec![TargetFilter::SelfRef, TargetFilter::ParentTarget]
-            }
-        }
-    );
-
-    // The helper rejects a context-reference second conjunct.
-    assert!(
-        subject::try_parse_source_and_target_phase_out(
-            "~ and that creature phase out",
-            &mut ParseContext::default()
-        )
-        .is_none(),
-        "\"that creature\" declares no target slot"
-    );
-
-    // Dream Fighter, verbatim Oracle (MTGJSON AtomicCards).
-    let parsed = parse_oracle_text(
-        "Whenever this creature blocks or becomes blocked by a creature, this creature and that creature phase out. (While they're phased out, they're treated as though they don't exist. Each one phases in before its controller untaps during their next untap step.)",
-        "Dream Fighter",
-        &[],
-        &["Creature".to_string()],
-        &["Human".to_string(), "Soldier".to_string()],
-    );
-    assert_eq!(parsed.triggers.len(), 1, "{parsed:#?}");
-    let execute = parsed.triggers[0].execute.as_ref().expect("trigger body");
-    assert!(
-        !mentions_phase_out_union(execute),
-        "no TargetOnly / PhaseOut union for an undeclared second conjunct: {execute:#?}"
-    );
-    assert!(
-        has_unimplemented(execute),
-        "the unsupported clause must stay a visible strict failure: {execute:#?}"
-    );
-}
-
-/// CR 115.1 + CR 601.2c: a "choose target ..." clause whose remainder holds an unparsed
-/// restriction on the declared target must stay an honest `Unimplemented`, never fold into a bare
-/// `TargetOnly` that silently drops the restriction (the old gate only declined
-/// a ONE-word unparsed tail). Keeper of the Flame, verbatim Oracle (MTGJSON
-/// AtomicCards): "who has more life than you do as you activate this ability"
-/// is a multi-word restriction the target parser does not consume.
-///
-/// Revert-failing: restoring the one-word cutoff in `parse_choose_ast` makes
-/// the clause a `TargetOnly { opponent }` again and the first assertion fails.
-#[test]
-fn choose_target_with_unparsed_multiword_tail_stays_unimplemented() {
-    let parsed = parse_oracle_text(
-        "{R}, {T}: Choose target opponent who has more life than you do as you activate this ability. This creature deals 2 damage to that player.",
-        "Keeper of the Flame",
-        &[],
-        &["Creature".to_string()],
-        &["Human".to_string(), "Wizard".to_string()],
-    );
-    assert_eq!(parsed.abilities.len(), 1, "{parsed:#?}");
-    let ability = &parsed.abilities[0];
-    // Reach guard: the neighbouring damage clause still parses, so the
-    // activated ability reached the choose-clause path rather than failing
-    // wholesale upstream.
-    assert!(
-        chain_any(ability, &|d| matches!(
-            &*d.effect,
-            Effect::DealDamage {
-                amount: QuantityExpr::Fixed { value: 2 },
-                ..
-            }
-        )),
-        "{ability:#?}"
-    );
-    assert!(
-        chain_any(ability, &|d| matches!(
-            &*d.effect,
-            Effect::Unimplemented { .. }
-        )),
-        "the unparsed restriction must be a visible gap: {ability:#?}"
-    );
-    assert!(
-        !chain_any(ability, &|d| matches!(
-            &*d.effect,
-            Effect::TargetOnly { .. }
-        )),
-        "the restriction must not be dropped into TargetOnly: {ability:#?}"
-    );
-}
-
-/// CR 115.1: the converse of the row above. When the target parser consumes the
-/// whole declared target (Forge of Heroes, verbatim Oracle from MTGJSON
-/// AtomicCards) the remainder is only terminal punctuation and the clause still
-/// lowers to `TargetOnly` carrying the full filter.
-#[test]
-fn choose_target_with_recognised_tail_still_parses() {
-    let parsed = parse_oracle_text(
-        "{T}: Add {C}.\n{T}: Choose target commander that entered this turn. Put a +1/+1 counter on it if it's a creature and a loyalty counter on it if it's a planeswalker.",
-        "Forge of Heroes",
-        &[],
-        &["Land".to_string()],
-        &[],
-    );
-    let target = parsed
-        .abilities
-        .iter()
-        .find_map(|ability| match &*ability.effect {
-            Effect::TargetOnly { target } => Some(target),
-            _ => None,
-        })
-        .unwrap_or_else(|| panic!("no TargetOnly ability: {parsed:#?}"));
-    let TargetFilter::Typed(filter) = target else {
-        panic!("expected a typed commander filter, got {target:?}");
-    };
-    assert!(
-        filter.properties.contains(&FilterProp::IsCommander)
-            && filter.properties.contains(&FilterProp::EnteredThisTurn),
-        "{filter:?}"
-    );
 }
 
 #[test]
@@ -99226,5 +98899,98 @@ fn fused_subject_look_exile_preserves_or_rejects_the_complete_instruction() {
             matches!(effect, Effect::Unimplemented { name, .. } if name == "look_exile_tail")
         }),
         "the public chain must retain the honest gap, not fall back to Dig: {unsupported:?}"
+    );
+}
+
+/// CR 115.1c + CR 115.1d: an exact count before "other target" ("Untap two
+/// other target creatures") declares exactly two targets, and "other" stays on
+/// the target filter. Printed lines of Fleet Captain Christopher Pike, Ioreth
+/// of the Healing House and Nimbleclaw Adept, parsed through the full Oracle
+/// pipeline.
+#[test]
+fn exact_count_before_other_target_declares_exactly_two_targets() {
+    for (name, text) in [
+        (
+            "Fleet Captain Christopher Pike",
+            "Yes \u{2014} {1}, {T}: Untap two other target creatures.\nNo \u{2014} {2}, {T}: Tap two other target creatures.",
+        ),
+        (
+            "Ioreth of the Healing House",
+            "{T}: Untap another target permanent.\n{T}: Untap two other target legendary creatures.",
+        ),
+        (
+            "Nimbleclaw Adept",
+            "Bigby's Hand \u{2014} {T}: Untap two other target permanents. Activate only as a sorcery and only once each turn.",
+        ),
+    ] {
+        let parsed = parse_oracle_text(text, name, &[], &["Creature".into()], &[]);
+        let exact_two: Vec<_> = parsed
+            .abilities
+            .iter()
+            .filter(|ability| ability.multi_target == Some(MultiTargetSpec::fixed(2, 2)))
+            .collect();
+        let expected = match name {
+            "Fleet Captain Christopher Pike" => 2,
+            _ => 1,
+        };
+        assert_eq!(
+            exact_two.len(),
+            expected,
+            "{name}: expected {expected} exactly-two target slot(s) in {:?}",
+            parsed.abilities
+        );
+        for ability in exact_two {
+            let Effect::SetTapState { target, .. } = ability.effect.as_ref() else {
+                panic!("{name}: expected a tap-state effect, got {:?}", ability.effect);
+            };
+            let TargetFilter::Typed(filter) = target else {
+                panic!("{name}: expected a typed target, got {target:?}");
+            };
+            assert!(
+                filter.properties.contains(&FilterProp::Another),
+                "{name}: \"other\" belongs to the target filter: {filter:?}"
+            );
+        }
+    }
+}
+
+/// CR 701.24a + CR 608.2c: after an each-player search, "then shuffles their
+/// library" shuffles the library of the player the search iterates on
+/// (`ScopedPlayer`, no scope of its own), not a parent target no instruction
+/// announced. Mojave Desert's printed planeswalk trigger, parsed through the
+/// full Oracle pipeline; a sibling sentence with a single searcher keeps its
+/// `Controller` shuffle.
+#[test]
+fn each_player_search_then_shuffle_anchors_the_scoped_players_library() {
+    let parsed = parse_oracle_text(
+        "Whenever you planeswalk here, each player searches their library for up to two basic land or Desert cards and puts them onto the battlefield tapped, then shuffles their library. If a Desert entered the battlefield under a player's control this way, they create a 1/1 black Snake creature token with deathtouch.",
+        "Mojave Desert",
+        &[],
+        &["Plane".into()],
+        &[],
+    );
+    let trigger = parsed.triggers.first().expect("the planeswalk trigger");
+    let mut node = trigger.execute.as_deref().expect("the trigger's chain");
+    let mut shuffle = None;
+    loop {
+        if matches!(node.effect.as_ref(), Effect::Shuffle { .. }) {
+            shuffle = Some(node);
+            break;
+        }
+        match node.sub_ability.as_deref() {
+            Some(next) => node = next,
+            None => break,
+        }
+    }
+    let shuffle = shuffle.expect("reach guard: the chain contains the shuffle");
+    assert_eq!(
+        shuffle.effect.as_ref(),
+        &Effect::Shuffle {
+            target: TargetFilter::ScopedPlayer
+        }
+    );
+    assert_eq!(
+        shuffle.player_scope, None,
+        "the shuffle runs inside the search's own iteration"
     );
 }

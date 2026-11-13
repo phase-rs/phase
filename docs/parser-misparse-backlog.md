@@ -13,6 +13,27 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 
 Cards listed in `crates/phase-ast/data/confirmed-misparses.toml` are held unsupported in coverage until their fix lands; fixing one means deleting its row there and regenerating card data (and the committed test fixture only when its copy of that face carries the `confirmed_misparse` marker).
 
+## Regression coverage boundaries
+
+The owner/phasing repairs in PR #10635 retain distinct binding authorities:
+
+- A source-owner shuffle retains the source binding and its owner's shuffle obligation without announcing a target. Alabaster Dragon's death trigger follows its recorded graveyard successor; a stolen token copy still shuffles its owner's library after it ceases to exist. Etrata's source shuffle remains independent of its earlier exile target.
+- A forwarded result never replaces a primary source reference. After Beacon of Unrest pays for Mox Diamond's real entry-cost discard, the Artifact-only Mox stays on the battlefield while Beacon alone enters its owner's shuffled library. Returned-object anaphora use their separate context; a primary `SelfRef` retains the creating source and does not enable result forwarding by itself.
+- A library search publishes its chosen card as a later bare-object anaphor's referent. The composed search-then-counter controls put counters on the found creature after entry, so Elemental Bond still reads its entry-time power; printed Green Sun's Zenith controls keep the spell's own shuffle separate from the creature it found.
+- Coordinated owner instructions defer source placement to one terminal owner shuffle, then draw for that owner. Gandalf, Wandering Wizard shuffles once and draws three under own or stolen control; an opposing Cosi's Trickster receives one counter. If Gandalf is returned to hand in response, the source stays there while the owner still shuffles once and draws three. Oblation draws two for the selected permanent's owner.
+- A merged source carries that same library-placement authority into each physical component's replacement-aware batch request. Gemrazer cast underneath Gandalf enters the owner's library with Gandalf before the one shuffle and three draws; component delivery does not add its own shuffles.
+- An owner-population shuffle uses the selected objects' owners, but does not rewrite an explicit origin possessor. A stolen Elixir of Immortality still moves its activator's graveyard.
+- Compound phasing distinguishes an announced optional target from an untargeted combat partner. Dream Fighter captures the partner's incarnation when the trigger binds: blinking that partner does not phase out the returned object, including after save/restore. Ordinary mixed source/creature filters still phase out only their announced target.
+- Entering-blocker effects publish attacker-side combat events without pretending the new creature declared a block. Mirror Match triggers the original attacking Dream Fighter once per entering copy, never the copy's own blocks ability; a bare becomes-blocked trigger such as Drelnoch fires only on the first blocked transition.
+- The shared attacker-blocked family and Ring emblem consume those same occurrences. Afflict loses life only on the first blocked transition; Ring level three schedules the entering creature's sacrifice at end of combat. The public Ring control counters Mirror Match's separate expiry with Stifle, distinguishing the exact sacrifice from the spell's ordinary exile.
+- Entering-blocker admission reads the entrant's effective type after layers settle. A Mirror Match copy of a crewed Smuggler's Copter is an uncrewed noncreature Vehicle: it establishes no block or Cunning Evasion trigger, the original deals its combat damage, and the token still expires at end of combat.
+- Supported compound phasing references use their own binding authority. An indexed parent slot is selected before incarnation checks, so a stale earlier slot cannot renumber a later one; a missing or stale selected slot cannot revive another inherited object. Unsupported context unions retain ordinary announced-target behavior.
+- Authoritative raw and trusted restores reject a constructed combat-phase instruction whose live battlefield partner lacks a captured incarnation. Exact stale pins and already-departed partners remain admissible; unplaced trigger blueprints are not mistaken for constructed stack abilities.
+- A target filter containing only properties is still constrained. Forge of Heroes retains both commander designation and entry-this-turn restrictions.
+- An untargeted Aura-host instruction remains a resolution-time attachment operand. Watery Grasp can shuffle its enchanted creature into that creature's owner's library after the host gains shroud; the activation does not announce the host as a target.
+
+The full-Oracle controls establish these clauses, not complete support for every ability on those cards. Etrata's conditional game-loss clause remains a separate parser gap under [#10728](https://github.com/phase-rs/phase/issues/10728); Forge of Heroes' conditional dual-counter tail remains unsupported under [#8112](https://github.com/phase-rs/phase/issues/8112). Fblthp, Impossibly Lost is a gendered source-reference parsing control, not a claim that its trigger condition is supported.
+
 ## Ranked root causes
 
 | # | Root cause | # cards | Fix hint (where it likely lives) |

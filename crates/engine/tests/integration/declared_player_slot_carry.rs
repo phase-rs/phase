@@ -811,13 +811,7 @@ fn an_optional_that_player_instruction_is_offered_to_the_declared_player() {
 }
 
 const GATE_THEN_TWO_DECLARATIONS: &str = "You may discard a card. If you do, you gain 5 life. Target player gains 2 life. Target opponent gains 2 life.";
-// Synthetic row. The nearest printed card is Keeper of the Flame ("Choose target opponent who has more
-// life than you do as you activate this ability."); this text omits that "who has more life than you do"
-// restriction because the parser does not understand it, and a choose clause with an unparsed restriction
-// is an honest `Unimplemented` (not a bare `TargetOnly`), which would end the row before the carry it
-// exercises. The carry mechanic does not depend on the restriction.
-const DECLARE_THEN_CHOOSE_OPPONENT: &str =
-    "Target player draws a card. Choose target opponent. This spell deals 2 damage to that player.";
+const DECLARE_THEN_CHOOSE_OPPONENT: &str = "Target player draws a card. Choose target opponent who has more life than you do as you cast this spell. This spell deals 2 damage to that player.";
 
 /// CR 118.12 + CR 608.2c: the "if you do" rider governs only its own sentence, so declining the
 /// discard still leaves both later declarations in force.
@@ -843,8 +837,6 @@ fn declining_an_if_you_do_gate_keeps_the_later_declaring_clauses() {
 fn a_chosen_clause_declaration_affects_no_one_once_its_player_is_gone() {
     let run_with = |eliminate| {
         let (mut r, spell, _) = setup_row(DECLARE_THEN_CHOOSE_OPPONENT);
-        // Inert: this 25 life existed only for the removed "who has more life than you do"
-        // restriction. It is kept because the asserted totals below are built on it.
         r.state_mut().players[1].life = 25;
         cast(&mut r, spell);
         drive(
@@ -974,9 +966,7 @@ fn a_they_instruction_after_a_declared_player_belongs_to_that_player() {
 
 const CHOOSE_THEN_THEY_MAY: &str =
     "Choose target player. They may discard up to two cards. Then they draw a card for each card discarded this way.";
-// Synthetic row; same omission as `DECLARE_THEN_CHOOSE_OPPONENT` (Keeper of the Flame's restriction).
-const DECLARE_CHOOSE_THEN_THEY_MAY: &str =
-    "Target player draws a card. Choose target opponent. They may discard a card.";
+const DECLARE_CHOOSE_THEN_THEY_MAY: &str = "Target player draws a card. Choose target opponent who has more life than you do as you cast this spell. They may discard a card.";
 
 /// CR 608.2d: a reader of a chosen-clause declaration keeps `ParentTarget` in its effect slot, but
 /// its "may" is offered to the chosen player.
@@ -1011,6 +1001,7 @@ fn a_they_may_after_a_chosen_clause_declaration_is_offered_to_the_chosen_player(
     assert_eq!(hands(&r), vec![2, 2, 2]);
 
     let (mut r, spell, _) = setup_row(DECLARE_CHOOSE_THEN_THEY_MAY);
+    r.state_mut().players[1].life = 25;
     cast(&mut r, spell);
     let seen = drive(
         &mut r,

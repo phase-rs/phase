@@ -14417,6 +14417,7 @@ fn effect_zone_put_at_library_position_mixed_sources_preserves_legacy_library_or
             conditional_enter_with_counters: vec![],
             count_param: 0,
             library_position: Some(position),
+            library_shuffle: engine::types::ability::LibraryShuffleMode::PerObject,
             mass_library_order: None,
             is_cost_payment: false,
             enters_modified_if: None,
