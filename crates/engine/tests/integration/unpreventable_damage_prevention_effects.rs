@@ -1082,11 +1082,16 @@ const TEST_OF_FAITH: &str = "Prevent the next 3 damage that would be dealt to ta
 /// itself: fight damage is dealt simultaneously, so Dralnu's 3 is still dealt after P1 sacrifices
 /// it.
 ///
-/// Both directions are one simultaneous damage event (CR 701.14a), so the reverse direction's
-/// replacements apply before anything happens (CR 614.6), and Dralnu's ruling has the sacrifice
-/// happen with the damage: "If any of the sacrificed permanents would deal or be dealt damage at
-/// the same time as Dralnu, they deal or are dealt damage at the same time that they're
-/// sacrificed." P0, the active player, orders first (CR 616.1, CR 101.4), then P1 sacrifices.
+/// strict-failure: the prompt order is not the cards' reading. Both directions are one
+/// simultaneous damage event (CR 701.14a), so the reverse direction's replacements apply before
+/// anything happens (CR 614.6), and Dralnu's ruling has the sacrifice happen with the damage: "If
+/// any of the sacrificed permanents would deal or be dealt damage at the same time as Dralnu,
+/// they deal or are dealt damage at the same time that they're sacrificed." The cards ask P0's
+/// order first, then P1's sacrifice. The engine carries every portion through its automatic
+/// replacements before asking any order, and Dralnu's sacrifice runs as his portion's
+/// replacement, so P1's sacrifice is asked first. Holding a substitution's action until the
+/// batch's replacements finish is the held-rider follow-up; Dralnu reports unsupported
+/// (`ResolverFeature:structural:damage_replacement_choice_unasked_in_combat`).
 #[test]
 fn a_fight_waits_behind_dralnus_sacrifice() {
     for sacrifice_dralnu in [false, true] {
@@ -1112,20 +1117,7 @@ fn a_fight_waits_behind_dralnus_sacrifice() {
                 vec![TargetRef::Object(hydra), TargetRef::Object(dralnu)],
             );
 
-            // P0's order for Dralnu's 3 comes first (APNAP), and nothing else is asked over it.
-            assert_eq!(
-                plus_counters(&runner, hydra),
-                0,
-                "nothing is dealt before the replacements"
-            );
-            let pick = if test_of_faith_first {
-                Pick::Described(TEST_OF_FAITH_SHIELD)
-            } else {
-                Pick::Described(PHYTOHYDRA_SUBSTITUTION)
-            };
-            let prompts = answer(&mut runner, &[pick], hydra, &mut events);
-
-            // Then P1's sacrifice.
+            // strict-failure: P1's sacrifice is asked first (see the doc comment).
             let WaitingFor::EffectZoneChoice {
                 player,
                 count,
@@ -1155,6 +1147,19 @@ fn a_fight_waits_behind_dralnus_sacrifice() {
                     .events,
             );
             drive(&mut runner, &mut Vec::new(), &mut events);
+
+            // Then P0's order for Dralnu's 3.
+            assert_eq!(
+                plus_counters(&runner, hydra),
+                0,
+                "nothing is dealt before the replacements"
+            );
+            let pick = if test_of_faith_first {
+                Pick::Described(TEST_OF_FAITH_SHIELD)
+            } else {
+                Pick::Described(PHYTOHYDRA_SUBSTITUTION)
+            };
+            let prompts = answer(&mut runner, &[pick], hydra, &mut events);
 
             assert_eq!(prompts.len(), 1, "{prompts:?}");
             assert_settled(&runner);
@@ -1240,6 +1245,68 @@ fn a_fight_applies_the_reverse_replacements_before_dralnus_sacrifice() {
     assert_eq!(state.objects[&pit_fight].zone, Zone::Graveyard);
     assert_eq!(damage_dealt_to(&events, mastodon), vec![6]);
     assert_eq!(state.objects[&mastodon].zone, Zone::Graveyard);
+}
+
+/// strict-failure: the Gratuitous Violence fight above, on P1's turn. With Dralnu's controller
+/// active, Dralnu's portion is carried through replacement first (CR 616.1, CR 101.4), and Dralnu's
+/// sacrifice runs as that portion's replacement, before the reverse direction is replaced. P1
+/// sacrifices Gratuitous Violence and both Bears, so Dralnu's 3 is no longer doubled. The cards
+/// give 6, as on P0's turn: the sacrifice and the doubled damage are one event (Dralnu's ruling).
+/// Holding a substitution's action until the batch's replacements finish is the held-rider
+/// follow-up; Dralnu reports unsupported for it.
+#[test]
+fn a_fight_on_dralnus_turn_sacrifices_before_the_reverse_replacements() {
+    let mut scenario = main_phase();
+    let mastodon = scenario.add_creature(P0, "Siege Mastodon", 3, 5).id();
+    let dralnu = scenario
+        .add_creature_from_oracle(P1, "Dralnu, Lich Lord", 3, 3, DRALNU_LICH_LORD)
+        .id();
+    let violence = scenario
+        .add_enchantment_from_oracle(P1, "Gratuitous Violence", GRATUITOUS_VIOLENCE)
+        .id();
+    let bears: Vec<ObjectId> = (0..2)
+        .map(|_| scenario.add_creature(P1, "Grizzly Bears", 2, 2).id())
+        .collect();
+    let pit_fight = spell(&mut scenario, "Pit Fight", PIT_FIGHT, true);
+    let mut runner = scenario.build();
+    runner.state_mut().active_player = P1;
+    runner.state_mut().priority_player = P0;
+    runner.state_mut().waiting_for = WaitingFor::Priority { player: P0 };
+
+    let mut events = cast(
+        &mut runner,
+        pit_fight,
+        vec![TargetRef::Object(mastodon), TargetRef::Object(dralnu)],
+    );
+
+    let WaitingFor::EffectZoneChoice { player, count, .. } = runner.state().waiting_for.clone()
+    else {
+        panic!(
+            "expected Dralnu's sacrifice, got {:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert_eq!((player, count), (P1, 3));
+    let mut sacrificed = bears.clone();
+    sacrificed.push(violence);
+    events.extend(
+        runner
+            .act(GameAction::SelectCards {
+                cards: sacrificed.clone(),
+            })
+            .expect("P1 sacrifices three permanents")
+            .events,
+    );
+    drive(&mut runner, &mut Vec::new(), &mut events);
+
+    let state = runner.state();
+    for id in &sacrificed {
+        assert_eq!(state.objects[id].zone, Zone::Graveyard);
+    }
+    assert_eq!(state.objects[&pit_fight].zone, Zone::Graveyard);
+    // strict-failure: the cards deal 6 and the Mastodon dies; the engine deals 3.
+    assert_eq!(damage_dealt_to(&events, mastodon), vec![3]);
+    assert_eq!(state.objects[&mastodon].zone, Zone::Battlefield);
 }
 
 /// CR 608.2c + CR 700.1: a later instruction is a new event and reads the guard live. Misthios's

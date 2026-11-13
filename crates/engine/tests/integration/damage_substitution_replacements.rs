@@ -3811,6 +3811,52 @@ fn reverse_fight_rider_holds_fight_completion_until_its_answer() {
     assert_at_rest(&runner);
 }
 
+/// CR 616.1 + CR 101.4: every automatic redirect is found before anyone is asked. Rakdos Charm,
+/// four players, P0 active. P1's sole Pariah sends P1's 1 to P2's Wall, and P3's sole Pariah
+/// sends P3's 1 to P0's Wall; each Wall is under Test of Faith and Mending Hands, an order its
+/// controller chooses. The outstanding choices are P0's and P2's, asked P0 first, and the batch
+/// completes once.
+#[test]
+fn every_automatic_redirect_is_found_before_a_choice_is_asked() {
+    let p3 = PlayerId(3);
+    let mut scenario = GameScenario::new_n_player(4, 11);
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.add_creature(P1, "Grizzly Bears", 2, 2);
+    scenario.add_creature(p3, "Hill Giant", 3, 3);
+    let p0_wall = scenario.add_creature(P0, "P0 Wall", 0, 20).id();
+    let p2_wall = scenario.add_creature(P2, "P2 Wall", 0, 20).id();
+    let pariah = |scenario: &mut GameScenario, owner| {
+        scenario
+            .add_enchantment_from_oracle(owner, "Pariah", PARIAH)
+            .with_subtypes(vec!["Aura"])
+            .from_oracle_text_with_keywords(&["Enchant"], PARIAH)
+            .id()
+    };
+    let p1_pariah = pariah(&mut scenario, P1);
+    let p3_pariah = pariah(&mut scenario, p3);
+    let spells: Vec<ObjectId> = [TEST_OF_FAITH, MENDING_HANDS, TEST_OF_FAITH, MENDING_HANDS]
+        .iter()
+        .map(|text| instant(&mut scenario, "Shield", text))
+        .collect();
+    let charm = instant(&mut scenario, "Rakdos Charm", RAKDOS_CHARM);
+    let mut runner = scenario.build();
+    attach_to(runner.state_mut(), p1_pariah, p2_wall);
+    attach_to(runner.state_mut(), p3_pariah, p0_wall);
+    for (spell, wall) in spells.iter().zip([p2_wall, p2_wall, p0_wall, p0_wall]) {
+        cast(&mut runner, *spell, vec![object_target(wall)]);
+    }
+    assert_at_rest(&runner);
+    let mut events = cast_rakdos_charm_damage_mode(&mut runner, charm);
+
+    let prompts = answer_batch_prompts(&mut runner, &mut events, |_, _| None);
+
+    assert_eq!(prompts, vec![("order", P0, 0), ("order", P2, 0)]);
+    assert_eq!((damage(&runner, p0_wall), damage(&runner, p2_wall)), (0, 0));
+    assert_eq!((life(&runner, P1), life(&runner, p3)), (20, 20));
+    assert_completes_once_after_its_damage(&events, EffectKind::EachSourceDealsDamage, charm);
+    assert_at_rest(&runner);
+}
+
 /// CR 616.1 + CR 101.4 at first discovery: Rakdos Charm, four players. P1's Pariah ("All damage
 /// that would be dealt to you is dealt to enchanted creature instead.") enchants P3's Wall and is
 /// the only replacement on P1's 1, so it redirects without a choice. The Wall's 1 then meets Test

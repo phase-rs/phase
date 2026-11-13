@@ -1438,29 +1438,28 @@ fn run_damage_batch(
     let order = crate::game::players::apnap_order(state);
     let mut portions: std::collections::VecDeque<BatchPortion> =
         in_apnap_order(state, portions).into();
-    // Phase B: replacement (CR 120.4b + CR 614 + CR 615). CR 616.1 + CR 101.4: the next
-    // choice is the outstanding one whose player comes first in APNAP order: a deferred
-    // choice (handed to its player by a redirect) ahead of a portion whose affected player
-    // comes later.
+    // Phase B: replacement (CR 120.4b + CR 614 + CR 615). CR 616.1 + CR 101.4: every portion
+    // is first carried through its automatic replacements (a sole Pariah's redirect) up to the
+    // choice it needs, which waits in `deferred`; only then is a choice asked, the outstanding
+    // one whose player comes first in APNAP order. So who chooses is known for every portion
+    // before anyone is asked.
     loop {
-        let next_portion_rank = portions
-            .front()
-            .and_then(BatchPortion::raw)
-            .map(|raw| affected_rank(state, &order, &raw.target));
-        let earliest_deferred = deferred
-            .iter()
-            .enumerate()
-            .min_by_key(|(_, choice)| player_rank(&order, choice.chooser))
-            .map(|(index, choice)| (index, player_rank(&order, choice.chooser)));
-        let portion = match (earliest_deferred, next_portion_rank) {
-            (Some((index, rank)), Some(next)) if rank <= next => {
-                deferred_portion(state, ability, deferred.remove(index))
+        let (portion, asking) = match portions.pop_front() {
+            Some(portion) => (portion, false),
+            None => {
+                let Some(index) = deferred
+                    .iter()
+                    .enumerate()
+                    .min_by_key(|(_, choice)| player_rank(&order, choice.chooser))
+                    .map(|(index, _)| index)
+                else {
+                    break;
+                };
+                (
+                    deferred_portion(state, ability, deferred.remove(index)),
+                    true,
+                )
             }
-            (Some((index, _)), None) => deferred_portion(state, ability, deferred.remove(index)),
-            _ => match portions.pop_front() {
-                Some(portion) => portion,
-                None => break,
-            },
         };
         // CR 800.4a: damage to a player who left the game, or to an object that is gone, is not
         // dealt; the batch goes on for the rest.
@@ -1519,20 +1518,9 @@ fn run_damage_batch(
                     pending.excess_recipient = ctx.excess_recipient;
                     pending.lifelink_bonus = ctx.lifelink_bonus;
                 }
-                // CR 616.1 + CR 101.4: a choice that falls to a player later in APNAP order than
-                // another outstanding choice of this batch (a sole Pariah redirecting P1's damage
-                // to P3's creature while P2's portion is still to come) waits its turn.
-                let earliest_outstanding = portions
-                    .iter()
-                    .filter_map(BatchPortion::raw)
-                    .map(|raw| affected_rank(state, &order, &raw.target))
-                    .chain(
-                        deferred
-                            .iter()
-                            .map(|choice| player_rank(&order, choice.chooser)),
-                    )
-                    .min();
-                if earliest_outstanding.is_some_and(|rank| rank < player_rank(&order, player)) {
+                // CR 616.1 + CR 101.4: a choice found while carrying portions through their
+                // automatic replacements waits until every portion's chooser is known.
+                if !asking {
                     if let Some(choice) = take_pending_damage_choice(state, player) {
                         deferred.push(choice);
                         continue;
@@ -4722,8 +4710,9 @@ mod tests {
         let cont = state
             .active_ability_continuation()
             .expect("remaining source must be stashed while first source waits");
-        // CR 120.4b: the batch owns the rest: the raw Phase-B source with its own source id,
-        // and the paused portion it awaits back from the answer.
+        // CR 120.4b + CR 616.1: the batch owns the rest. Both sources were carried to their
+        // choices before either was asked; the one asked is awaited back from the answer, and
+        // the other waits with its own source id.
         let Effect::ResumeDamageBatch {
             kind,
             replaced,
@@ -4735,18 +4724,21 @@ mod tests {
         };
         assert_eq!(*kind, EffectKind::EachSourceDealsDamage);
         assert!(replaced.is_empty());
+        assert!(remaining.is_empty());
+        let deferred: Vec<ObjectId> = cont
+            .chain
+            .context
+            .deferred_damage_choices
+            .iter()
+            .flat_map(|choices| choices.iter().map(|choice| choice.source))
+            .collect();
+        let asked = awaiting.as_ref().map(|portion| portion.source);
+        let mut both: Vec<ObjectId> = deferred.iter().copied().chain(asked).collect();
+        both.sort_by_key(|id| id.0);
         assert_eq!(
-            remaining,
-            &vec![RawDamagePortion {
-                source: source_b,
-                target: TargetRef::Object(recipient),
-                amount: 1,
-            }],
-            "remaining raw Phase-B source must resume with its own source id"
-        );
-        assert_eq!(
-            awaiting.as_ref().map(|portion| portion.source),
-            Some(source_a)
+            both,
+            vec![source_a, source_b],
+            "each source keeps its own source id: one asked, one waiting"
         );
         assert_eq!(cont.parent_kind, None, "the batch emits its own completion");
 

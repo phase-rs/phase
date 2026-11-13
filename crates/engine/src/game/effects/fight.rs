@@ -652,22 +652,30 @@ mod tests {
         let cont = state
             .active_ability_continuation()
             .expect("expected pending_continuation for second-direction fight damage");
-        // CR 701.14a + CR 616.1 + CR 101.4: both directions are one batch, asked in APNAP
-        // order: the active player P0's bear is affected first (the wolf's 2), so the parked
-        // fight holds the bear's 3 to the wolf, and completes the fight itself once both are
-        // dealt.
+        // CR 701.14a + CR 616.1 + CR 101.4: both directions are one batch, carried to their
+        // choices before either is asked. The active player P0's bear is affected first (the
+        // wolf's 2), so that choice is asked; the bear's 3 to the wolf waits, and the parked
+        // fight completes itself once both are dealt.
         match &cont.chain.effect {
             Effect::ResumeDamageBatch {
-                kind, remaining, ..
+                kind,
+                remaining,
+                awaiting,
+                ..
             } => {
                 assert_eq!(*kind, EffectKind::Fight);
+                assert!(remaining.is_empty());
+                assert_eq!(awaiting.as_ref().map(|portion| portion.source), Some(wolf));
+                let waiting: Vec<(ObjectId, u32)> = cont
+                    .chain
+                    .context
+                    .deferred_damage_choices
+                    .iter()
+                    .flat_map(|choices| choices.iter().map(|choice| (choice.source, choice.amount)))
+                    .collect();
                 assert_eq!(
-                    remaining,
-                    &vec![crate::types::ability::RawDamagePortion {
-                        source: bear,
-                        target: TargetRef::Object(wolf),
-                        amount: 3,
-                    }],
+                    waiting,
+                    vec![(bear, 3)],
                     "bear.power = 3 drives the other direction"
                 );
             }
