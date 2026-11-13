@@ -423,6 +423,28 @@ fn classify_status_compares_against_spec_not_rubber_stamp() {
         ),
         "a correct certificate must Confirm"
     );
+
+    // A certificate naming no win kind reads as advantage: it confirms this Advantage row and
+    // fails a LethalDamage one.
+    let ends_nothing = |axis: ResourceAxis| LoopCertificate {
+        unbounded: vec![axis],
+        rising: vec![axis],
+        win_kind: None,
+        win_kind_at: None,
+        mandatory: false,
+        residual_board_delta: BoardDelta::default(),
+        per_cycle: None,
+    };
+    assert!(matches!(
+        corpus::classify_status(row, Some(ends_nothing(ResourceAxis::Mana(ManaType::Green)))),
+        corpus::RowStatus::Confirmed { .. }
+    ));
+    let drain = corpus::row(58);
+    assert_eq!(drain.win_kind, WinKind::LethalDamage, "reach-guard");
+    assert!(matches!(
+        corpus::classify_status(drain, Some(ends_nothing(ResourceAxis::Life(P1)))),
+        corpus::RowStatus::Failed { .. }
+    ));
 }
 
 /// REVERT-PROBE (live path), symmetric with the offline probe above:

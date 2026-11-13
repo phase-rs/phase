@@ -9785,7 +9785,8 @@ fn a_two_headed_giant_offer_counts_the_opposing_teams_shared_loss() {
 
 /// CR 704.6b + CR 732.2a: the proposer's team holds 12 shared poison plus 1 a repetition and
 /// reaches fifteen at the third, before the opponents' 8 plus 2 does at the fourth, so the most
-/// the offer counts is 2, and a declared 3 is refused.
+/// the offer counts is 2, and a declared 3 is refused. The take of 2 ends nothing, so neither the
+/// offer nor its proposal names a win.
 #[test]
 fn a_two_headed_giant_offer_never_eliminates_the_proposers_team() {
     let Some(db) = shared_card_db() else { return };
@@ -9793,8 +9794,23 @@ fn a_two_headed_giant_offer_never_eliminates_the_proposers_team() {
     let mut runner = two_headed_giant_kilo_offer(offered, &[P1, PlayerId(2), PlayerId(3)], db);
     let (count, capacity, certificate) = offered_parts(&runner);
     assert_eq!((count, capacity), (IterationCount::Fixed(2), 2));
-    assert_eq!(certificate.win_kind_at, None);
+    assert_eq!(
+        (certificate.win_kind, certificate.win_kind_at),
+        (None, None)
+    );
     assert_eq!(predicted_winner(&runner), None);
+    let declared = proposed(runner.state().clone(), 2);
+    let WaitingFor::RespondToShortcut { proposal, .. } = &declared.waiting_for else {
+        unreachable!("proposed")
+    };
+    assert_eq!(
+        (
+            proposal.win_kind,
+            proposal.win_kind_at,
+            proposal.predicted_winner
+        ),
+        (None, None, None)
+    );
 
     let mut over = GameRunner::from_state(runner.state().clone());
     over.act(GameAction::DeclareShortcut {

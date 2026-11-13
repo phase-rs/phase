@@ -2809,7 +2809,7 @@ fn a_continuing_loop_past_the_proof_budget_is_not_a_draw() {
 /// player a poison counter, so both players reach ten poison counters and lose together, as Off
 /// plays it. Poison is a loss axis the holder may shortcut (CR 732.2a): from one poison counter
 /// each, the offer is the 8 repetitions P0 survives and the bound is the 9th, whose counter is the
-/// tenth (CR 104.3d).
+/// tenth (CR 104.3d). The take of 8 ends nothing, so the offer names no win.
 fn mandatory_poison_loop_is_offered_short_of_ten_poison(drive: Drive) {
     let board = Board {
         ichor_rats: true,
@@ -2859,8 +2859,17 @@ fn mandatory_poison_loop_is_offered_short_of_ten_poison(drive: Drive) {
     };
     assert!(
         certificate.unbounded.contains(&ResourceAxis::Poison(P1))
-            && certificate.win_kind == Some(WinKind::PoisonLoss),
+            && (certificate.win_kind, certificate.win_kind_at) == (None, None),
         "{drive:?}: {certificate:?}"
+    );
+    let (taken, _) = accepted_take(offered.state(), 8, &format!("{drive:?}"));
+    assert_eq!(
+        (
+            taken.players[0].poison_counters,
+            taken.players[1].poison_counters
+        ),
+        (9, 9),
+        "{drive:?}: the take of 8 ends nothing"
     );
 }
 

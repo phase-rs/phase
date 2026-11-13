@@ -300,7 +300,8 @@ pub enum CounterClass {
     Loyalty,
     /// CR 310.4c: a defense counter on a battle.
     Defense,
-    /// CR 122.1 + CR 704.5c: a poison counter on a player (10 ⇒ that player loses).
+    /// CR 122.1 + CR 704.5c / CR 704.6b: a poison counter on a player (its configured threshold
+    /// ⇒ that player loses).
     Poison,
     /// CR 122.1: an energy counter ({E}) in a player's energy reserve.
     Energy,
@@ -382,9 +383,10 @@ pub struct ResourceVector {
     #[serde(with = "map_key_pairs")]
     pub library_delta: BTreeMap<PlayerId, i64>,
 
-    /// CR 122.1 + CR 704.5c: poison counters keyed by VICTIM `PlayerId` (10 ⇒ that
-    /// player loses). Per-victim so a multiplayer poison ∞ attributes the loss to the
-    /// afflicted seat, not the loop's controller. **State-readable.**
+    /// CR 122.1 + CR 704.5c / CR 704.6b: poison counters keyed by VICTIM `PlayerId` (its
+    /// configured threshold ⇒ that player loses). Per-victim so a multiplayer poison ∞
+    /// attributes the loss to the afflicted seat, not the loop's controller.
+    /// **State-readable.**
     #[serde(with = "map_key_pairs")]
     pub poison: BTreeMap<PlayerId, i64>,
 
@@ -2552,8 +2554,9 @@ impl ResourceVector {
             // CR 401: per-player library size.
             v.library_delta
                 .insert(player.id, state.library_of(player.id).len() as i64);
-            // CR 704.5c: poison counters, keyed by the VICTIM's `PlayerId` (10 ⇒ that
-            // player loses) — mirrors the per-player `life`/`library_delta` maps above.
+            // CR 704.5c / CR 704.6b: poison counters, keyed by the VICTIM's `PlayerId` (its
+            // configured threshold ⇒ that player loses) — mirrors the per-player
+            // `life`/`library_delta` maps above.
             v.poison.insert(player.id, player.poison_counters as i64);
             // CR 107.14: each seat's own energy reserve.
             v.energy.insert(player.id, player.energy as i64);
@@ -2763,8 +2766,8 @@ impl ResourceVector {
         let life = self.life.values().map(|&n| (Component::Consumed, n));
         let library = self.library_delta.values().map(|&n| (Component::Gained, n));
         let damage = self.damage_dealt.values().map(|&n| (Component::Gained, n));
-        // CR 704.5c: poison is a Gained axis (monotone rising toward the 10-loss), so a
-        // poison-pumping loop stays net-progress.
+        // CR 704.5c / CR 704.6b: poison is a Gained axis (monotone rising toward its configured
+        // loss threshold), so a poison-pumping loop stays net-progress.
         let poison = self.poison.values().map(|&n| (Component::Gained, n));
         let energy = self.energy.values().map(|&n| (Component::Gained, n));
         let counters = self.counters.values().map(|&n| (Component::Gained, n));
@@ -2913,11 +2916,10 @@ impl ResourceVector {
     /// CR 401: the `LibraryDelta` exemption is what keeps a mill loop — unbounded
     /// *downward* on library size — in the result while every other axis must have risen.
     ///
-    /// CR 704.5c: rising poison on a victim is an unbounded loss axis, and unlike mill it
-    /// needs no exemption, because poison RISES toward the ten-counter loss ("If a player
-    /// has ten or more poison counters, that player loses the game"), so `Poison(p)` is
-    /// carried by the `n > 0` term itself. The pair states WHICH loss axes survive the
-    /// filter and why.
+    /// CR 704.5c / CR 704.6b: rising poison on a victim is an unbounded loss axis, and unlike
+    /// mill it needs no exemption, because poison RISES toward its configured loss threshold,
+    /// so `Poison(p)` is carried by the `n > 0` term itself. The pair states WHICH loss axes
+    /// survive the filter and why.
     pub fn unbounded_components(&self) -> Vec<(ResourceAxis, i64)> {
         self.axis_components()
             .into_iter()
@@ -3431,8 +3433,9 @@ pub enum ResourceAxis {
     EtbTriggers,
     LtbTriggers,
     SacTriggers,
-    /// CR 704.5c: poison counters on a player (10 ⇒ that player loses). Appended at
-    /// the END to keep the derived `Ord` discriminant of every earlier variant stable.
+    /// CR 704.5c / CR 704.6b: poison counters on a player (its configured threshold ⇒ that
+    /// player loses). Appended at the END to keep the derived `Ord` discriminant of every
+    /// earlier variant stable.
     Poison(PlayerId),
     /// CR 107.14 + CR 122.1: energy counters on a player. Appended last, as `Poison` was.
     Energy(PlayerId),

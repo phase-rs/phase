@@ -810,10 +810,11 @@ pub fn row(idx: usize) -> &'static ComboRow {
 /// mismatch is a `Failed` — this is the comparison the revert-probe pins: dropping
 /// the `win_kind == row.win_kind && family_matches_axis(..)` check (rubber-stamping
 /// any `Some(cert)`), or treating `None` as confirmed, flips a Failed to Confirmed.
+/// A certificate naming no win kind wins nothing, so it is compared as `Advantage`.
 pub(crate) fn classify_status(row: &ComboRow, outcome: Option<LoopCertificate>) -> RowStatus {
     match outcome {
         Some(cert)
-            if cert.win_kind == Some(row.win_kind)
+            if cert.win_kind.unwrap_or(WinKind::Advantage) == row.win_kind
                 && cert
                     .unbounded
                     .iter()

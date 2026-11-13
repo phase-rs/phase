@@ -3970,11 +3970,11 @@ fn perform_published(
                 crate::analysis::decision_template::RepetitionBound::Measured;
         }
         parts.predicted_winner = record.ending.map(|(_, winner)| winner);
-        // A winning performance names its win by its recorded reasons, at the count that reaches it.
-        if let Some((kind, _)) = record.ending {
-            parts.certificate.win_kind = Some(kind);
-            parts.certificate.win_kind_at = Some(record.reach);
-        }
+        // A performed offer is labelled by what its performance reached: the win its recorded
+        // reasons name, at the count that reaches it, or no win at all.
+        (parts.certificate.win_kind, parts.certificate.win_kind_at) = record
+            .ending
+            .map_or((None, None), |(kind, _)| (Some(kind), Some(record.reach)));
     }
     (performed, recorded)
 }

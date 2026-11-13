@@ -74,8 +74,8 @@ pub enum WinKind {
     /// CR 704.5a: an opponent's life is driven to 0 or less — unbounded life loss
     /// from an opponent (damage without infect, CR 120.3a, or a drain).
     LethalDamage,
-    /// CR 704.5c: an opponent accrues 10+ poison counters — an unbounded poison
-    /// (infect/proliferate-poison) loop.
+    /// CR 704.5c / CR 704.6b: an opponent reaches its configured poison-loss threshold — an
+    /// unbounded poison (infect/proliferate-poison) loop.
     PoisonLoss,
     /// CR 104.3c / CR 121.4: an opponent's library is emptied (mill) such that the
     /// next draw — or the mill itself reaching 0 — loses them the game. Surfaces as
@@ -130,8 +130,8 @@ pub struct LoopCertificate {
     pub rising: Vec<ResourceAxis>,
     /// The classified win condition, derived from `unbounded`, or read from the reasons recorded
     /// in the winning repetition the confirmer performed (a counted offer, or a threshold offer
-    /// whose performance wins); for a counted offer, `None` when its take does not end the game with
-    /// its proposer the winner.
+    /// whose performance wins); for an offer whose take the confirmer performed, `None` when that
+    /// take does not end the game with its proposer the winner.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub win_kind: Option<WinKind>,
     /// CR 732.2a: the count whose take `win_kind` is the outcome of, for an outcome a smaller
@@ -480,13 +480,13 @@ pub(crate) fn live_mandatory_loop_winner(
         return None;
     }
 
-    // CR 704.5a (life ≤ 0) OR CR 704.5c (poison → 10): partition living into strict
-    // fallers vs. non-fallers. A player whose life is draining OR whose poison is
-    // accumulating each cycle extrapolates to a loss. Delta-based (not the absolute SBA
-    // threshold): the loop works on per-cycle deltas + extrapolation. Exactly one
-    // non-faller is the sole survivor candidate; since fallers/non-fallers partition
-    // `living`, that single non-faller condition IS "every other living player falls"
-    // (CR 104.2a).
+    // CR 704.5a (life ≤ 0) OR CR 704.5c / CR 704.6b (poison → its configured threshold):
+    // partition living into strict fallers vs. non-fallers. A player whose life is draining
+    // OR whose poison is accumulating each cycle extrapolates to a loss. Delta-based (not
+    // the absolute SBA threshold): the loop works on per-cycle deltas + extrapolation.
+    // Exactly one non-faller is the sole survivor candidate; since fallers/non-fallers
+    // partition `living`, that single non-faller condition IS "every other living player
+    // falls" (CR 104.2a).
     let fallers: Vec<PlayerId> = living
         .iter()
         .copied()
@@ -591,15 +591,16 @@ pub(crate) fn live_mandatory_loop_winner(
         {
             return None;
         }
-        // CR 704.3 poison simultaneity: all poison-fallers must cross 10 in the SAME SBA
-        // batch. Require BOTH equal per-cycle poison delta AND equal ABSOLUTE poison at
-        // cycle_end — equal-absolute alone is a fail-open (differing deltas with equal
-        // current totals cross at different future cycles); equal-delta alone is a
-        // fail-open (equal +1/cycle from staggered starts). Staggered on either axis ⇒
-        // fail-safe None. This also rejects mixed life+poison pods (a life-faller has
-        // poison 0, a poison-faller has poison>0 → unequal → None). Unlike the life
-        // arm, poison is monotone (proliferate only adds), so no intra-cycle dip check
-        // is needed (contrast `winner_life_never_dips`, which stays life-only).
+        // CR 704.3 poison simultaneity: all poison-fallers must cross their configured
+        // poison-loss threshold in the SAME SBA batch. Require BOTH equal per-cycle poison
+        // delta AND equal ABSOLUTE poison at cycle_end — equal-absolute alone is a
+        // fail-open (differing deltas with equal current totals cross at different future
+        // cycles); equal-delta alone is a fail-open (equal +1/cycle from staggered starts).
+        // Staggered on either axis ⇒ fail-safe None. This also rejects mixed life+poison
+        // pods (a life-faller has poison 0, a poison-faller has poison>0 → unequal → None).
+        // Unlike the life arm, poison is monotone (proliferate only adds), so no
+        // intra-cycle dip check is needed (contrast `winner_life_never_dips`, which stays
+        // life-only).
         let first_pd = delta.poison.get(&fallers[0]).copied().unwrap_or(0);
         if fallers
             .iter()
