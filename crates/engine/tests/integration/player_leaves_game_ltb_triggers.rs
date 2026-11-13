@@ -1413,3 +1413,67 @@ fn debug_draw_from_an_empty_library_places_the_departure_triggers() {
         "Super Shredder's ability for the Bears is on the stack"
     );
 }
+
+/// CR 704.3 + CR 603.2c + CR 603.10a: one state-based-action event, one "one or
+/// more" trigger. P0 controls Nefarious Imp ("Whenever one or more permanents
+/// you control leave the battlefield, scry 1."), their own Circuit Mender, and
+/// P1's Grizzly Bears, taken with Turn Against. The state-based-action check
+/// finds P1 at 0 life and the Mender with lethal damage: P1 loses and the
+/// Bears leave the game with their owner, and the Mender is destroyed, in the
+/// same check. Both are permanents P0 controlled leaving in one event, so the
+/// Imp triggers once.
+///
+/// The life total and the damage are staged on the board; the cards are the
+/// printed ones.
+#[test]
+fn a_loss_and_a_death_in_one_state_based_action_event_trigger_one_or_more_once() {
+    let db = shared_card_db().expect("integration card fixture must load");
+    let mut scenario = GameScenario::new_n_player(3, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    let imp = scenario.add_real_card(P0, "Nefarious Imp", Zone::Battlefield, db);
+    let mender = scenario.add_real_card(P0, "Circuit Mender", Zone::Battlefield, db);
+    let bears = scenario.add_real_card(P1, "Grizzly Bears", Zone::Battlefield, db);
+    let turn_against = scenario.add_real_card(P0, "Turn Against", Zone::Hand, db);
+    scenario.with_mana_pool(P0, red_mana(5));
+    scenario.with_library_top(P0, &["Forest", "Forest", "Forest"]);
+    let mut runner = scenario.build();
+    runner.cast(turn_against).target_object(bears).resolve();
+    assert_eq!(runner.state().objects[&bears].controller, P0);
+    let toughness = runner.state().objects[&mender]
+        .toughness
+        .expect("Circuit Mender has toughness");
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&mender)
+        .expect("Circuit Mender exists")
+        .damage_marked = toughness as u32;
+    lose_the_game(&mut runner, &[P1], Loss::ZeroLife);
+    assert!(runner.state().players[1].is_eliminated);
+    assert_eq!(zone(&runner, bears), Zone::Exile);
+    assert_eq!(zone(&runner, mender), Zone::Graveyard);
+    let imp_triggers = |runner: &GameRunner| {
+        let queued = runner
+            .state()
+            .pending_trigger_order
+            .iter()
+            .flat_map(|order| order.groups.iter())
+            .flat_map(|group| group.triggers.iter())
+            .filter(|context| context.pending.source_id == imp)
+            .count();
+        queued + triggers_from(runner, imp)
+    };
+    assert_eq!(
+        imp_triggers(&runner),
+        1,
+        "one event, one Imp trigger: {:?}",
+        runner.state().waiting_for
+    );
+    drive_trigger_prompts(&mut runner);
+    assert_eq!(triggers_from(&runner, imp), 1);
+    assert_eq!(
+        triggers_from(&runner, mender),
+        1,
+        "the Mender's own leaves-the-battlefield ability still triggers once"
+    );
+}

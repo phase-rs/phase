@@ -9402,6 +9402,18 @@ fn departure_event_looks_back(event: &GameEvent) -> bool {
     }
 }
 
+/// CR 603.10a + CR 603.10c + CR 704.3: the events performed in the same
+/// state-based-action event as a player's departure that look back to the game
+/// immediately before it: a permanent leaving the battlefield, an Aura or
+/// Equipment becoming unattached, a permanent phasing out.
+fn simultaneous_event_looks_back(event: &GameEvent) -> bool {
+    match event {
+        GameEvent::ZoneChanged { from, .. } => *from == Some(Zone::Battlefield),
+        GameEvent::Unattached { .. } | GameEvent::PermanentPhasedOut { .. } => true,
+        _ => false,
+    }
+}
+
 /// CR 603.2 + CR 603.2c + CR 603.7: Collect the ordinary and delayed triggered
 /// abilities that `events[event_start..]` trigger into `state.deferred_triggers`,
 /// skipping occurrences a collector already claimed. For an action whose events
@@ -9411,18 +9423,22 @@ fn departure_event_looks_back(event: &GameEvent) -> bool {
 /// `looked_back` names the observers latched before `events[event_start..split]`
 /// happened; that prefix's look-back events (objects leaving the game and
 /// becoming unattached, CR 603.10a + CR 603.10c) are matched against them,
-/// every other event against the live game.
+/// every other event against the live game. `events[split..batch_end]` is the
+/// rest of the same simultaneous event (CR 704.3: the state-based actions
+/// performed with the departure): its leaves-the-battlefield events look back
+/// to the same observers and are collected in the same pass, so an ability
+/// that triggers once for "one or more" of them triggers once (CR 603.2c).
 /// Delayed abilities carry their controller from creation and are matched live.
 pub(crate) fn collect_unclaimed_triggers_into_deferred(
     state: &mut GameState,
     events: &[GameEvent],
     event_start: usize,
-    looked_back: Option<(ImmediatelyBeforeObservers, usize)>,
+    looked_back: Option<(ImmediatelyBeforeObservers, usize, usize)>,
 ) {
     let consumed = state.consumed_before_priority_trigger_events.clone();
     let mut ordinary =
         filter_already_collected_trigger_events_from(state, events, event_start, &consumed);
-    if let Some((observers, split)) = looked_back {
+    if let Some((observers, split, batch_end)) = looked_back {
         // CR 603.10: only the departure's look-back events are matched against
         // the observers as they were before it (`departure_event_looks_back`);
         // every other event of the prefix (the monarch or the initiative
@@ -9436,6 +9452,16 @@ pub(crate) fn collect_unclaimed_triggers_into_deferred(
         )
         .into_iter()
         .filter(departure_event_looks_back)
+        .chain(
+            filter_already_collected_trigger_events_from(
+                state,
+                &events[..batch_end.min(events.len())],
+                split,
+                &consumed,
+            )
+            .into_iter()
+            .filter(simultaneous_event_looks_back),
+        )
         .collect();
         ordinary.retain(|event| !looked_back_events.contains(event));
         observers.collect_into_deferred(state, &looked_back_events);
@@ -9462,7 +9488,7 @@ pub(crate) fn collect_departure_triggers_into_deferred(
     state: &mut GameState,
     events: &[GameEvent],
     event_start: usize,
-    looked_back: Option<(ImmediatelyBeforeObservers, usize)>,
+    looked_back: Option<(ImmediatelyBeforeObservers, usize, usize)>,
 ) {
     collect_unclaimed_triggers_into_deferred(state, events, event_start, looked_back);
     let claims = (event_start..events.len()).map(|index| ConsumedTriggerEventOccurrence {

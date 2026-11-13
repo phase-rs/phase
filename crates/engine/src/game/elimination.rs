@@ -170,7 +170,8 @@ pub fn eliminate_players_simultaneously(
     // CR 603.2: an effect's loss is no state-based-action batch, so nothing
     // stamps the departure after it: collect it now.
     if let Some(looked_back) = outcome.looked_back {
-        let _queued = looked_back.collect(state, events);
+        let departure_end = looked_back.departure_end();
+        let _queued = looked_back.collect(state, events, departure_end);
     }
 }
 
@@ -248,6 +249,11 @@ pub(crate) struct LookedBackDeparture {
 }
 
 impl LookedBackDeparture {
+    /// Where the departure's own events end in the action buffer.
+    pub(crate) fn departure_end(&self) -> usize {
+        self.departure_end
+    }
+
     /// CR 603.10a + CR 603.3a: queue the triggers the departure's events
     /// trigger, matching its look-back events against the observers latched
     /// before it, and claim the occurrences (CR 603.2c) so no later scan of the
@@ -256,7 +262,19 @@ impl LookedBackDeparture {
     /// (CR 603.3b). CR 104.1: nothing triggers once the game is over, and
     /// CR 800.4d: a trigger whose controller left is retired. Returns how many
     /// contexts it queued, which are the last that many of `deferred_triggers`.
-    pub(crate) fn collect(self, state: &mut GameState, events: &[GameEvent]) -> usize {
+    ///
+    /// `batch_end` ends the simultaneous event the departure belongs to: for a
+    /// state-based-action loss, the end of that check's iteration, whose other
+    /// departures from the battlefield happened with it (CR 704.3) and are
+    /// collected and claimed in this same pass; for an effect's loss, the
+    /// departure's own end ([`Self::departure_end`]).
+    pub(crate) fn collect(
+        self,
+        state: &mut GameState,
+        events: &[GameEvent],
+        batch_end: usize,
+    ) -> usize {
+        let batch_end = batch_end.clamp(self.departure_end, events.len());
         if matches!(state.waiting_for, WaitingFor::GameOver { .. }) {
             return 0;
         }
@@ -266,9 +284,9 @@ impl LookedBackDeparture {
         let queued_before = state.deferred_triggers.len();
         super::triggers::collect_departure_triggers_into_deferred(
             state,
-            &events[..self.departure_end],
+            &events[..batch_end],
             self.first_event,
-            Some((self.observers, self.departure_end)),
+            Some((self.observers, self.departure_end, batch_end)),
         );
         state.deferred_triggers.len() - queued_before
     }
@@ -556,7 +574,7 @@ pub(crate) fn eliminate_players(
             first_event,
             looked_back_observers
                 .take()
-                .map(|observers| (observers, departure_end)),
+                .map(|observers| (observers, departure_end, departure_end)),
         );
     }
 
