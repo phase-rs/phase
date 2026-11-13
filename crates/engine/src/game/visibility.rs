@@ -1771,6 +1771,7 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
         None => identity_projection_for_unseated_viewer(state),
     };
     let mut hidden_zone_change_ids = HashSet::new();
+    let mut face_down_redacted_ids = HashSet::new();
     let mut hidden_library_ids = HashSet::new();
     for (obj_id, projection) in identity_projection {
         match projection {
@@ -1787,6 +1788,7 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
                 );
             }
             IdentityProjection::FaceDownRedacted => {
+                face_down_redacted_ids.insert(obj_id);
                 if let Some(obj) = filtered.objects.get_mut(&obj_id) {
                     redact_face_down_identity_from_observer(obj);
                     record_hidden_replacement_candidate_source(
@@ -1871,6 +1873,17 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
     for event in &mut filtered.current_trigger_events {
         redact_hidden_zone_change_event(event, &hidden_zone_change_ids);
     }
+    // CR 708.5 + CR 400.2: an entry held unmatched while its entering instruction finishes
+    // carries the entrant's own record (its name and the card identity in its source
+    // context). A viewer who may not identify the face-down permanent that entered gets that
+    // record redacted exactly as for a hidden card; its controller keeps it.
+    let held_entry_hidden_ids: HashSet<ObjectId> = hidden_zone_change_ids
+        .union(&face_down_redacted_ids)
+        .copied()
+        .collect();
+    for event in &mut filtered.unsettled_entry_batch_events {
+        redact_hidden_zone_change_event(event, &held_entry_hidden_ids);
+    }
     // CR 601.2h + CR 603.3b + CR 400.2: the same event shapes wait in the trigger
     // collection carriers. A carrier whose trigger controller is not this viewer is
     // cleared further down; the controller keeps it with only hidden-source payment
@@ -1881,7 +1894,6 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
         .iter_mut()
         .chain(filtered.pending_attack_trigger_events.iter_mut())
         .chain(filtered.deferred_entry_events.iter_mut())
-        .chain(filtered.unsettled_entry_batch_events.iter_mut())
         .chain(
             filtered
                 .consumed_before_priority_trigger_events
@@ -8658,6 +8670,62 @@ mod tests {
                 ..
             }
         )));
+    }
+
+    /// CR 708.5: a manifested card's entry held in `unsettled_entry_batch_events` (placed there
+    /// directly: the hold itself is exercised by the integration suite) discloses its name and
+    /// card identity only to its controller.
+    #[test]
+    fn held_face_down_entry_record_is_redacted_from_other_viewers() {
+        let mut state = GameState::new_two_player(42);
+        let controller = PlayerId(0);
+        let _secret = create_object(
+            &mut state,
+            CardId(7),
+            controller,
+            "Secret Manifest".to_string(),
+            Zone::Library,
+        );
+        let mut events = Vec::new();
+        manifest(&mut state, controller, &mut events).unwrap();
+        let entry = events
+            .iter()
+            .find(|event| {
+                matches!(
+                    event,
+                    GameEvent::ZoneChanged {
+                        to: Zone::Battlefield,
+                        ..
+                    }
+                )
+            })
+            .expect("the manifested card entered")
+            .clone();
+        let GameEvent::ZoneChanged { record, .. } = &entry else {
+            unreachable!()
+        };
+        assert_eq!(record.name, "Secret Manifest");
+        assert!(
+            record.trigger_source_context.is_some(),
+            "reach guard: the record carries the entrant's card identity"
+        );
+        state.unsettled_entry_batch_events = vec![entry];
+
+        let held_record = |view: &GameState| match &view.unsettled_entry_batch_events[..] {
+            [GameEvent::ZoneChanged { record, .. }] => (**record).clone(),
+            other => panic!("expected the one held entry, got {other:?}"),
+        };
+        let own = held_record(&filter_state_for_viewer(&state, controller));
+        assert_eq!(own.name, "Secret Manifest");
+        assert!(own.trigger_source_context.is_some());
+        for view in [
+            filter_state_for_viewer(&state, PlayerId(1)),
+            filter_state_for_unseated_viewer(&state),
+        ] {
+            let record = held_record(&view);
+            assert_eq!(record.name, HIDDEN_CARD_NAME);
+            assert!(record.trigger_source_context.is_none());
+        }
     }
 
     #[test]

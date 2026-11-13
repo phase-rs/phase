@@ -5294,12 +5294,16 @@ fn settle_entries_at_boundary(
     // earlier co-entrants onto the battlefield has not completed. Nor between the seat legs of
     // a paused player-scope clause resuming under its scope sidecar
     // (`resolving_player_scope_tail`): its seats' actions are one simultaneous event
-    // (CR 101.4), completed at its `after_scope` boundary. Seat legs resumed without a sidecar
-    // (a clause with no following clause that reads its result) are not distinguished here.
+    // (CR 101.4), completed at its `after_scope` boundary.
     let completed_through = state.completed_instruction_ledger_len();
     let mut instruction_completed = false;
+    // CR 101.4: nor before a node an instruction bound to a player. The remaining seats of a
+    // paused player-scope clause resume as such nodes whether or not a sidecar was installed
+    // (a clause with no tail that reads its result has none), and their entries are one
+    // simultaneous event with the seats that already acted.
     if !crate::game::triggers::battlefield_entry_in_progress(state)
         && state.resolving_player_scope_tail.is_none()
+        && !bound_to_a_player_by_an_instruction(next)
     {
         let ledger_len = state.zone_changes_this_turn.len();
         if ledger_len > completed_through {
@@ -5331,7 +5335,10 @@ fn settle_entries_at_boundary(
 /// entry event, so the next occurrence is an instruction boundary: the entries of the one before
 /// it are observed and collected before it runs. Every other repeated entering effect is a
 /// quantity expansion of one instruction ("For each nonland card discarded this way, create a
-/// 1/1 red Elemental creature token" is one simultaneous creation) and is not split.
+/// 1/1 red Elemental creature token" is one simultaneous creation) and is not split. Only the
+/// boundary between two performances is handled here: the last performance is not separated
+/// from a later entering instruction of the same resolution, which reaches the action's scan
+/// with it.
 fn settle_entries_before_repeat_occurrence(
     state: &mut GameState,
     events: &[GameEvent],
@@ -5865,14 +5872,21 @@ fn frame_may_apply_with_entry(frame: &ResolutionFrame) -> bool {
 /// D3 (every seat leg carries `scoped_player`); a multi-target-player fan-out's `after_fanout`
 /// tail reaches no entering leg; and no entering `repeat_for` / nested driver carries a later
 /// candidate outside its iterated subtree.
+/// CR 101.4 + CR 603.2b: is `node` bound to a player by an instruction (a `player_scope` seat
+/// leg, or a "that player" bound at resolution) rather than by its phase trigger's turn player?
+/// A binding that is the phase's own is no seat leg; the equality guards a node a later binding
+/// rewrote without clearing the phase's.
+fn bound_to_a_player_by_an_instruction(node: &ResolvedAbility) -> bool {
+    node.scoped_player.is_some() && node.scoped_player != node.context.phase_turn_player
+}
+
 fn entry_observation_deferred(
     state: &GameState,
     next: &ResolvedAbility,
     completed: Option<&ResolvedAbility>,
 ) -> bool {
-    // D3 — CR 603.6a + CR 101.4. A binding that is the phase's own (CR 603.2b) is no seat leg;
-    // the equality guards a node a later binding rewrote without clearing the phase's.
-    if next.scoped_player.is_some() && next.scoped_player != next.context.phase_turn_player {
+    // D3 — CR 603.6a + CR 101.4.
+    if bound_to_a_player_by_an_instruction(next) {
         return true;
     }
     // D2 — CR 303.4f.
@@ -64517,18 +64531,33 @@ mod entry_observation_settlement_tests {
         );
     }
 
-    /// CR 608.2c + CR 101.4: a boundary marks the instruction on the ledger
-    /// even when it defers the entry observation (D3: a phase trigger stamps every
-    /// node with its player), but not between the seat legs of a player-scope
-    /// clause still in progress, whose seats' actions are one simultaneous event.
-    /// Synthetic: the sidecar is installed by hand. No printed card reaches the
-    /// seat-leg case today (Kambal, Profiteering Mayor's "for each of them" is
-    /// parsed as a single `CopyTokenOf`), so the building block is pinned here.
+    /// CR 608.2c + CR 101.4: a boundary marks the instruction on the ledger before a node bound
+    /// to its phase trigger's turn player, but not between the seat legs of a player-scope
+    /// clause still in progress, whose seats' actions are one simultaneous event: neither
+    /// before a seat leg resumed without a sidecar (Grismold, the Dreadsower reaches it; see the
+    /// integration suite) nor under a sidecar. Synthetic: the nodes and the sidecar are built
+    /// by hand.
     #[test]
     fn boundary_marks_the_instruction_outside_seat_legs() {
         let mut seat_scoped = node(put_counter());
         seat_scoped.scoped_player = Some(PlayerId(0));
 
+        // A node bound to its phase trigger's turn player is an ordinary instruction.
+        let mut phase_bound = node(put_counter());
+        phase_bound.set_phase_turn_player_recursive(PlayerId(0));
+        let mut state = GameState::new_two_player(3);
+        let (_, events) = entered(&mut state, 1);
+        settle_entries_before_instruction(&mut state, &events, &phase_bound, None);
+        assert_eq!(
+            state.instruction_boundary_marks,
+            vec![state.zone_changes_this_turn.len()],
+            "the completed instruction's entry is below the mark"
+        );
+        // A second boundary with no new ledger row marks nothing.
+        settle_entries_before_instruction(&mut state, &events, &phase_bound, None);
+        assert_eq!(state.instruction_boundary_marks.len(), 1);
+
+        // A seat leg resumed without a sidecar: no observation (D3) and no mark.
         let mut state = GameState::new_two_player(3);
         let (_, events) = entered(&mut state, 1);
         settle_entries_before_instruction(&mut state, &events, &seat_scoped, None);
@@ -64536,14 +64565,10 @@ mod entry_observation_settlement_tests {
             state.battlefield_entry_observations.is_empty(),
             "reach guard: D3 defers the observation"
         );
-        assert_eq!(
-            state.instruction_boundary_marks,
-            vec![state.zone_changes_this_turn.len()],
-            "the completed instruction's entry is below the mark"
+        assert!(
+            state.instruction_boundary_marks.is_empty(),
+            "the next seat leg is part of the same clause, sidecar or not"
         );
-        // A second boundary with no new ledger row marks nothing.
-        settle_entries_before_instruction(&mut state, &events, &seat_scoped, None);
-        assert_eq!(state.instruction_boundary_marks.len(), 1);
 
         let mut state = GameState::new_two_player(3);
         let (source, events) = entered(&mut state, 1);

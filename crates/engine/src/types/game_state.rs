@@ -13614,6 +13614,16 @@ fn validate_restored_entry_hold(state: &GameState) -> Result<(), String> {
         }
         previous = *mark;
     }
+    // CR 603.6a + CR 603.2c: entries are held only while an action is unfinished. Every action
+    // that ends at priority has its held entries scanned first (`settled_entry_batch_is_due`),
+    // so a settled state that still names held entries would hand rows that were already
+    // collected to the next scan.
+    if !state.unsettled_entry_batch_events.is_empty()
+        && matches!(state.waiting_for, WaitingFor::Priority { .. })
+        && state.pending_replacement.is_none()
+    {
+        return Err("unsettled_entry_batch_events holds entries in a settled state".to_string());
+    }
     let mut seen = HashSet::new();
     for event in &state.unsettled_entry_batch_events {
         let GameEvent::ZoneChanged {
@@ -44704,6 +44714,11 @@ mod tests {
         state.zone_changes_this_turn.push_back(second);
         state.unsettled_entry_batch_events = vec![persisted_zone_change_event(first)];
         state.instruction_boundary_marks = marks;
+        // Entries are held only while an action is unfinished: any wait but priority.
+        state.waiting_for = WaitingFor::MeldPairChoice {
+            player: PlayerId(0),
+            choices: Vec::new(),
+        };
         state
     }
 
@@ -44777,6 +44792,14 @@ mod tests {
     /// release.
     #[test]
     fn persisted_entry_hold_rejects_duplicate_and_foreign_entries() {
+        // CR 603.2c: a settled state owes no entry collection, so a held entry there is one
+        // that was already collected.
+        let mut settled = persisted_entry_hold_fixture(Vec::new());
+        settled.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+        assert!(restore_error(settled).contains("in a settled state"));
+
         let mut duplicate = persisted_entry_hold_fixture(Vec::new());
         let held = duplicate.unsettled_entry_batch_events[0].clone();
         duplicate.unsettled_entry_batch_events.push(held);

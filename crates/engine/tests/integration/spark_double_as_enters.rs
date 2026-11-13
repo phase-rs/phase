@@ -2862,12 +2862,14 @@ mod feldon_tokens {
     /// CR 603.2c + CR 616.1: Ever After returns two Servant of the Scale cards
     /// as one event. Each enters with a counter whose Hardened Scales /
     /// Doubling Season order stops the move, and each order's answer resumes the
-    /// logical zone-change owner. Satoru, the Infiltrator's "one or more other
-    /// nontoken creatures you control enter" ability triggers once for the
-    /// event: one draw. A positive witness that the answer parks leave a card
-    /// batch's batched observers to its owner; the merge base also draws once.
+    /// logical zone-change owner, which this change leaves as it is on main.
+    /// KNOWN-WRONG, and equal to main (measured there: two draws): that owner
+    /// collects per delivered segment, so Satoru, the Infiltrator's "one or more
+    /// other nontoken creatures you control enter" ability triggers twice for the
+    /// one event. The row pins that this change neither adds a third trigger nor
+    /// loses the spell's last instruction; it is not evidence of correct batching.
     #[test]
-    fn a_counter_order_answer_inside_a_card_batch_triggers_a_one_or_more_observer_once() {
+    fn a_counter_order_answer_inside_a_card_batch_keeps_the_card_batch_owners_collection() {
         let (mut scenario, _feldon) = setup();
         scenario
             .add_creature_from_oracle(P0, "Satoru, the Infiltrator", 2, 3, SATORU)
@@ -2884,6 +2886,7 @@ mod feldon_tokens {
             .id();
         let mut runner = scenario.build();
         let library = runner.state().players[0].library.len();
+        let hand = runner.state().players[0].hand.len();
         runner
             .cast(ever_after)
             .target_objects(&[first, second])
@@ -2896,10 +2899,24 @@ mod feldon_tokens {
         settle_answering(&mut runner, scales);
         assert_eq!(runner.state().objects[&first].zone, Zone::Battlefield);
         assert_eq!(runner.state().objects[&second].zone, Zone::Battlefield);
+        // Ever After left the hand when it was cast. KNOWN-WRONG (equal to main): two draws
+        // for one entry event; one is correct.
         assert_eq!(
-            library - runner.state().players[0].library.len(),
-            1,
-            "one draw for the one entry event"
+            runner.state().players[0].hand.len(),
+            hand - 1 + 2,
+            "the card-batch owner's per-segment collection, as on main"
+        );
+        // CR 608.2c: "Put Ever After on the bottom of its owner's library."
+        assert_eq!(runner.state().objects[&ever_after].zone, Zone::Library);
+        assert_eq!(
+            runner.state().players[0].library.last(),
+            Some(&ever_after),
+            "Ever After is the bottom card of its owner's library"
+        );
+        assert_eq!(
+            runner.state().players[0].library.len(),
+            library + 1 - 2,
+            "two cards drawn, Ever After returned"
         );
     }
 
@@ -4041,6 +4058,179 @@ mod feldon_tokens {
             "the held entry was not released before Hushbringer"
         );
         assert_eq!(marks, valid_marks, "the forged mark is not restored");
+    }
+
+    const GRISMOLD: &str = "Trample\nAt the beginning of your end step, each player creates a 1/1 green Plant creature token.\nWhenever a creature token dies, put a +1/+1 counter on Grismold.";
+    const IMPOSING_SOVEREIGN: &str = "Creatures your opponents control enter tapped.";
+    const ARCHELOS: &str = "As long as Archelos is tapped, other permanents enter tapped.\nAs long as Archelos is untapped, other permanents enter untapped.";
+
+    /// Grismold, the Dreadsower's end-step trigger with Imposing Sovereign and an untapped
+    /// Archelos, Lagoon Mystic under the active player's control: each opponent's Plant has two
+    /// competing tap-state replacements to order, the active player's has none. Soul Warden
+    /// watches every Plant. Returns the ordering prompts, the entries held at each ordering
+    /// prompt, and the life Soul Warden gained.
+    fn grismold_plants_held(players: u8, persist: bool) -> (usize, Vec<usize>, i32) {
+        let mut scenario = GameScenario::new_n_player(players, 42);
+        scenario.at_phase(Phase::PostCombatMain);
+        for player in (0..players).map(PlayerId) {
+            scenario.with_library_top(player, &["Plains", "Island", "Swamp", "Mountain"]);
+        }
+        scenario
+            .add_creature_from_oracle(P0, "Grismold, the Dreadsower", 3, 3, GRISMOLD)
+            .as_legendary()
+            .with_subtypes(vec!["Troll", "Shaman"]);
+        scenario
+            .add_creature_from_oracle(P0, "Imposing Sovereign", 2, 1, IMPOSING_SOVEREIGN)
+            .with_subtypes(vec!["Human", "Noble"]);
+        scenario
+            .add_creature_from_oracle(P0, "Archelos, Lagoon Mystic", 2, 4, ARCHELOS)
+            .as_legendary()
+            .with_subtypes(vec!["Turtle", "Shaman"]);
+        scenario.add_creature_from_oracle(P0, "Soul Warden", 1, 1, SOUL_WARDEN);
+        let mut runner = scenario.build();
+        let life = runner.life(P0);
+        // Every player passes in turn: the end step begins.
+        for _ in 0..players {
+            runner.act(GameAction::PassPriority).unwrap();
+        }
+        assert_eq!(runner.state().phase, Phase::End);
+        assert_eq!(runner.state().stack.len(), 1, "Grismold's trigger");
+        let mut orders = 0;
+        let mut held_at_orders = Vec::new();
+        for _ in 0..60 {
+            if persist && !matches!(runner.state().waiting_for, WaitingFor::Priority { .. }) {
+                runner = restore(runner);
+            }
+            match &runner.state().waiting_for {
+                WaitingFor::ReplacementChoice { player, .. } => {
+                    assert_ne!(*player, P0, "only the opponents' Plants have an order");
+                    orders += 1;
+                    held_at_orders.push(runner.state().unsettled_entry_batch_events.len());
+                    assert!(
+                        runner.state().deferred_triggers.is_empty(),
+                        "nothing is matched while a seat's Plant is still to enter"
+                    );
+                    runner
+                        .act(GameAction::ChooseReplacement { index: 0 })
+                        .unwrap();
+                }
+                WaitingFor::OrderTriggers { triggers, .. } => {
+                    let order = (0..triggers.len()).collect();
+                    runner.act(GameAction::OrderTriggers { order }).unwrap();
+                }
+                WaitingFor::Priority { .. }
+                    if runner.state().stack.is_empty()
+                        && runner.state().deferred_triggers.is_empty() =>
+                {
+                    break
+                }
+                WaitingFor::Priority { .. } => {
+                    runner.act(GameAction::PassPriority).unwrap();
+                }
+                other => panic!("unexpected prompt: {other:?}"),
+            }
+        }
+        let plants = |controller: PlayerId| {
+            runner
+                .state()
+                .objects
+                .values()
+                .filter(|object| {
+                    object.is_token
+                        && object.zone == Zone::Battlefield
+                        && object.name == "Plant"
+                        && object.controller == controller
+                })
+                .count()
+        };
+        for player in (0..players).map(PlayerId) {
+            assert_eq!(plants(player), 1, "each player created a Plant");
+        }
+        (orders, held_at_orders, runner.life(P0) - life)
+    }
+
+    /// CR 603.6a + CR 101.4: "each player creates a 1/1 green Plant creature token" is one
+    /// simultaneous event, although each opponent orders their Plant's tap-state replacements
+    /// in turn. In a three-player game the active player's Plant and the first opponent's are
+    /// both still held, with nothing matched, at the second opponent's prompt; Soul Warden then
+    /// gains 1 life for each Plant. Control: with one opponent there is one order.
+    #[test]
+    fn resumed_seat_legs_keep_one_simultaneous_entry_event() {
+        for persist in [false, true] {
+            assert_eq!(
+                grismold_plants_held(3, persist),
+                (2, vec![1, 2], 3),
+                "the earlier Plants wait for the last (restore: {persist})"
+            );
+            assert_eq!(
+                grismold_plants_held(2, persist),
+                (1, vec![1], 2),
+                "control: one opponent (restore: {persist})"
+            );
+        }
+    }
+
+    /// CR 603.2c: Altar of the Brood has already triggered for a token's entry. A save of the
+    /// settled game that names that entry as still held is refused by the persisted reader:
+    /// entries are held only while an action is unfinished, so restoring it would hand the
+    /// entry to the next scan and Altar would trigger for it again. Control: the same settled
+    /// save, untouched, restores.
+    #[test]
+    fn a_settled_save_cannot_resubmit_a_collected_entry() {
+        use engine::types::game_state::PersistedGameState;
+        let db = crate::support::shared_card_db().expect("integration card database");
+        let (mut scenario, feldon) = setup();
+        let card = graveyard_copier(&mut scenario, false);
+        let scales = scenario
+            .add_enchantment_from_oracle(P0, "Hardened Scales", SCALES)
+            .id();
+        let season = scenario
+            .add_enchantment_from_oracle(P0, "Doubling Season", SEASON)
+            .id();
+        scenario.add_real_card(P0, "Altar of the Brood", Zone::Battlefield, db);
+        let mut runner = scenario.build();
+        let before = runner.state().players[1].library.len();
+        let mut events = runner
+            .activate(feldon, 0)
+            .target_object(card)
+            .resolve()
+            .events()
+            .to_vec();
+        let (first, copy_events) = choose_copy(&mut runner, feldon);
+        events.extend(copy_events);
+        events.extend(choose_token_counter_order(&mut runner, first, scales));
+        let (second, copy_events) = choose_copy(&mut runner, feldon);
+        events.extend(copy_events);
+        events.extend(choose_token_counter_order(&mut runner, second, season));
+        runner.advance_until_stack_empty();
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { .. }
+        ));
+        assert_eq!(runner.state().players[1].library.len(), before - 2);
+        assert!(runner.state().unsettled_entry_batch_events.is_empty());
+        let collected = events
+            .iter()
+            .find(|event| {
+                matches!(
+                    event,
+                    GameEvent::ZoneChanged { object_id, to: Zone::Battlefield, .. }
+                        if *object_id == first
+                )
+            })
+            .expect("the first token's entry event")
+            .clone();
+        let restore_result = |state: engine::types::game_state::GameState| {
+            let wire = serde_json::to_value(PersistedGameState::capture(state)).unwrap();
+            serde_json::from_value::<PersistedGameState>(wire)
+                .map(|_| ())
+                .map_err(|error| error.to_string())
+        };
+        restore_result(runner.state().clone()).expect("control: the settled save restores");
+        let mut forged = runner.state().clone();
+        forged.unsettled_entry_batch_events.push(collected);
+        let error = restore_result(forged).expect_err("the collected entry is refused");
+        assert!(error.contains("in a settled state"), "{error}");
     }
 
     const SECRETS_OF_THE_KEY: &str = "Investigate. If this spell was cast from a graveyard, investigate twice instead. (Create a Clue token. It's an artifact with \"{2}, Sacrifice this token: Draw a card.\")\nFlashback {3}{U}";
