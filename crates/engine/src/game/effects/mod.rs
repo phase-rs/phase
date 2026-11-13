@@ -15336,20 +15336,10 @@ pub(crate) fn mandatory_parent_effect_performed(effect: &Effect, events: &[GameE
                 }
             )
         }),
-        // CR 110.2 + CR 608.2c: "that player gains control of ~. If they do, …"
-        // gates the rider on whether control actually changed (Kain, Traitorous
-        // Dragoon). `resolve_give` emits `EffectResolved` and, when the
-        // recipient differs from the object's current controller,
-        // `ControllerChanged`.
-        Effect::GiveControl { .. } => events.iter().any(|event| {
-            matches!(
-                event,
-                GameEvent::EffectResolved {
-                    kind: crate::types::ability::EffectKind::GiveControl,
-                    ..
-                } | GameEvent::ControllerChanged { .. }
-            )
-        }),
+        // CR 118.12 + CR 400.7: "If they do" holds only if some object actually changed controller.
+        Effect::GiveControl { .. } => events
+            .iter()
+            .any(|event| matches!(event, GameEvent::ControllerChanged { .. })),
         // CR 701.12a + CR 701.12b + CR 608.2c: an exchange whose subjects can't both
         // be bound, aren't both in an exchangeable zone (CR 109.4 — battlefield or
         // stack), or already share a controller resolves and exchanges NOTHING.
@@ -60175,10 +60165,10 @@ mod tests {
         );
     }
 
-    /// CR 110.2 + CR 608.2c (issue #1335): Kain's "that player gains control of
+    /// CR 118.12 + CR 608.2c (issue #1335): Kain's "that player gains control of
     /// Kain. If they do, …" gates the rider on whether control actually
     /// transferred. `GiveControl` counts as performed only when
-    /// `ControllerChanged` or a `GiveControl` `EffectResolved` is emitted.
+    /// `ControllerChanged` is emitted.
     #[test]
     fn give_control_performed_tracks_controller_changed_event() {
         let give = Effect::GiveControl {
@@ -60198,7 +60188,11 @@ mod tests {
             "GiveControl that changed controllers is 'performed'"
         );
 
-        let not_transferred: [GameEvent; 0] = [];
+        let not_transferred = [GameEvent::EffectResolved {
+            kind: EffectKind::GiveControl,
+            source_id: ObjectId(9),
+            subject: None,
+        }];
         assert!(
             !mandatory_parent_effect_performed(&give, &not_transferred),
             "GiveControl that failed must not seed the if-they-do rider"
@@ -60268,9 +60262,7 @@ mod tests {
     ///
     /// NOTE the negative slice: it is the event trail the resolver ACTUALLY
     /// emits on a no-op (a lone `EffectResolved { ExchangeControl }`), not an
-    /// empty slice. An empty slice is never produced in production, and using
-    /// one would let a regression that keys on `EffectResolved` — the exact
-    /// defect that makes the `GiveControl` arm above vacuous — pass here.
+    /// empty slice. An empty slice is never produced in production.
     #[test]
     fn exchange_control_performed_tracks_controller_changed_event() {
         let exchange = exchange_control_effect();

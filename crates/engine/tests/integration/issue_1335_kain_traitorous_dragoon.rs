@@ -8,9 +8,11 @@
 
 use engine::game::scenario::{GameScenario, P0, P1};
 use engine::parser::oracle::parse_oracle_text;
-use engine::types::ability::{DamageKindFilter, Effect, TargetFilter, TargetRef};
+use engine::types::ability::{DamageKindFilter, Effect, EffectKind, TargetFilter, TargetRef};
+use engine::types::events::GameEvent;
 use engine::types::phase::Phase;
 use engine::types::triggers::TriggerMode;
+use engine::types::zones::Zone;
 
 use super::rules::run_combat;
 
@@ -400,5 +402,66 @@ fn kain_combat_damage_transfers_control_and_rewards_attacker() {
         p0_life_before - p0_life_after,
         2,
         "attacker should lose life equal to damage dealt"
+    );
+}
+
+/// CR 118.12 + CR 400.7: Kain destroyed in response is a new object, so no
+/// player gains control of it and the "if they do" rider does nothing.
+#[test]
+fn kain_destroyed_before_trigger_resolves_pays_no_rider() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_library_top(P0, &["Card A", "Card B", "Card C", "Card D"]);
+    let kain = scenario
+        .add_creature_from_oracle(P0, "Kain, Traitorous Dragoon", 2, 4, KAIN_ORACLE)
+        .id();
+    let murder = scenario
+        .add_spell_to_hand_from_oracle(P0, "Murder", true, "Destroy target creature.")
+        .id();
+    let mut runner = scenario.build();
+
+    run_combat(&mut runner, vec![kain], vec![]);
+    let p0_hand_before = runner.state().players[P0.0 as usize].hand.len();
+    let out = runner.cast(murder).target_objects(&[kain]).resolve();
+
+    assert!(
+        out.events().iter().any(|event| matches!(
+            event,
+            GameEvent::EffectResolved { kind: EffectKind::GiveControl, source_id, .. }
+                if *source_id == kain
+        )),
+        "Kain's trigger must resolve its GiveControl"
+    );
+    assert!(
+        !out.events()
+            .iter()
+            .any(|event| matches!(event, GameEvent::ControllerChanged { .. })),
+        "no object may change controller"
+    );
+    assert_eq!(runner.state().objects[&kain].zone, Zone::Graveyard);
+
+    let p0_hand_after = runner.state().players[P0.0 as usize].hand.len();
+    let p0_treasures = runner
+        .state()
+        .objects
+        .values()
+        .filter(|obj| {
+            obj.zone == Zone::Battlefield
+                && obj.controller == P0
+                && obj
+                    .card_types
+                    .subtypes
+                    .iter()
+                    .any(|st| st.eq_ignore_ascii_case("Treasure"))
+        })
+        .count();
+    // (cards drawn, Treasures created, P0 life): only Murder leaves P0's hand.
+    assert_eq!(
+        (
+            p0_hand_after + 1 - p0_hand_before,
+            p0_treasures,
+            runner.state().players[P0.0 as usize].life,
+        ),
+        (0, 0, 20),
     );
 }
