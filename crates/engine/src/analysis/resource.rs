@@ -5486,74 +5486,91 @@ fn stack_pin_liveness(state: &mut GameState) -> Vec<(ObjectId, Vec<bool>)> {
         .collect()
 }
 
+/// A stack entry as the pin relation sees it: its carrier (the entry id, with an occurrence
+/// number so two entries sharing an id within one frame stay distinct) and the liveness of
+/// each pin it holds.
+type PinnedCarrier = ((ObjectId, usize), Vec<bool>);
+
+/// [`stack_pin_liveness`] with each entry keyed by carrier.
+fn pinned_carriers(state: &mut GameState) -> Vec<PinnedCarrier> {
+    let mut seen: HashMap<ObjectId, usize> = HashMap::new();
+    stack_pin_liveness(state)
+        .into_iter()
+        .map(|(id, live)| {
+            let occurrence = seen.entry(id).or_default();
+            *occurrence += 1;
+            ((id, *occurrence), live)
+        })
+        .collect()
+}
+
+/// CR 405.5 + CR 400.7: is `current` the stack `prior` plus growth, as far as pins go?
+///
+/// Both stacks are read bottom to top. A carrier is SHARED when both stacks hold it (the
+/// same stack entry stayed on the stack) and FRESH when only one does. The relation holds
+/// exactly when there is a map from the prior entries to the current entries such that:
+///
+/// 1. it is one to one and ORDER-PRESERVING over all entries, shared and fresh together:
+///    if one prior entry is below another, its image is below the other's image;
+/// 2. a shared prior entry maps to ITSELF, and its pins have the same liveness, pin for pin,
+///    in both stacks;
+/// 3. a fresh prior entry (it resolved or left) maps to a fresh current entry with the same
+///    liveness pattern (the entry put on the stack in its place);
+/// 4. every current entry that is nobody's image is fresh and carries a liveness pattern
+///    some prior entry carries (growth of a kind of carrier already present).
+///
+/// Anything else is not growth: a shared carrier whose pin changed (2), shared carriers in a
+/// different order or a fresh entry that would have to cross a shared one (1), a prior entry
+/// with no counterpart (3), a grown entry of a new pattern (4).
+///
+/// One walk decides it. The shared carriers are anchors; between two consecutive anchors the
+/// prior's fresh entries must be a subsequence of the current's fresh entries, for which the
+/// first match is always a correct choice. Condition 4 does not depend on the map chosen: a
+/// matched current entry carries a prior pattern by 3, so it asks that EVERY fresh current
+/// entry carries a prior pattern.
+fn stack_is_prior_plus_growth(prior: &[PinnedCarrier], current: &[PinnedCarrier]) -> bool {
+    let prior_keys: HashSet<_> = prior.iter().map(|(key, _)| *key).collect();
+    let current_keys: HashSet<_> = current.iter().map(|(key, _)| *key).collect();
+    let mut above = current.iter();
+    let placed = prior.iter().all(|(key, live)| {
+        let shared = current_keys.contains(key);
+        // The next current entry that can be this one's image. A shared current entry on the
+        // way is an anchor: only its own prior entry may map to it, in order.
+        loop {
+            match above.next() {
+                None => break false,
+                Some((candidate, pins)) if prior_keys.contains(candidate) => {
+                    break shared && candidate == key && pins == live;
+                }
+                Some((_, pins)) if !shared && pins == live => break true,
+                Some(_) => {}
+            }
+        }
+    });
+    placed
+        && current
+            .iter()
+            .filter(|(key, _)| !prior_keys.contains(key))
+            .all(|(_, live)| prior.iter().any(|(_, pattern)| pattern == live))
+}
+
 /// CR 400.7 + CR 603.7c + CR 608.2b: whether the two frames disagree about which stack pins
-/// still name their object. The two covers that set the whole stack aside ask this; the
-/// other comparators keep the stack, where the ranked pin itself separates a live carrier
-/// from a stale one (the stack-growth cover's buried arm sets aside only the entries below
-/// the replay floor, which the period does not resolve). A frame pair whose stacks hold no
-/// superseded pin is not judged here, as before.
+/// still name their object. The two covers that set the whole stack aside ask this, through
+/// this one function; the other comparators keep the stack, where the ranked pin itself
+/// separates a live carrier from a stale one (the stack-growth cover's buried arm sets aside
+/// only the entries below the replay floor, which the period does not resolve).
 ///
-/// The pins are aligned by their carrier, never by position or by pattern alone:
-///
-/// - a stack entry both frames hold (the same entry id, CR 405.5: it stayed on the stack) must
-///   have the same liveness, pin for pin, in both. A superseded pin it holds in both frames (a
-///   Clue that sacrificed itself to pay for its own ability, a trigger whose source left) is
-///   the same position; a pin live in one frame and superseded in the other is not;
-/// - the entries only one frame holds (resolved, or put on the stack since) are different
-///   stack objects, so none of them is a carrier whose pin changed. Among them the prior
-///   frame's liveness patterns must embed in the current frame's, bottom up, with every extra
-///   entry a pattern the prior frame already holds (the embedding `stack_covers` requires of
-///   the entries themselves); equal counts therefore compare entry by entry. A pair that does
-///   not embed is refused; refusing can only miss a cover.
+/// A frame pair whose stacks hold no superseded pin is not judged here, as before. Otherwise
+/// the pair is refused unless the current stack is the prior stack plus growth
+/// ([`stack_is_prior_plus_growth`]). Refusing can only miss a cover; accepting a pair that is
+/// not growth would certify a loop across a carrier that resolves differently.
 fn stack_pins_superseded_apart(prior: &mut GameState, current: &mut GameState) -> bool {
-    let (prior, current) = (stack_pin_liveness(prior), stack_pin_liveness(current));
-    let superseded = |live: &[bool]| live.iter().any(|live| !live);
-    if !prior
+    let (prior, current) = (pinned_carriers(prior), pinned_carriers(current));
+    let superseded = prior
         .iter()
         .chain(current.iter())
-        .any(|(_, live)| superseded(live))
-    {
-        return false;
-    }
-    // Occurrence-keyed, so two entries that share an id within a frame still pair one to one.
-    let keyed = |frame: Vec<(ObjectId, Vec<bool>)>| {
-        let mut seen: HashMap<ObjectId, usize> = HashMap::new();
-        frame
-            .into_iter()
-            .map(|(id, live)| {
-                let occurrence = seen.entry(id).or_default();
-                *occurrence += 1;
-                ((id, *occurrence), live)
-            })
-            .collect::<Vec<_>>()
-    };
-    let (prior, current) = (keyed(prior), keyed(current));
-    let current_by_key: HashMap<_, _> = current.iter().map(|(key, live)| (*key, live)).collect();
-    let prior_keys: HashSet<_> = prior.iter().map(|(key, _)| *key).collect();
-    if prior
-        .iter()
-        .any(|(key, live)| current_by_key.get(key).is_some_and(|other| *other != live))
-    {
-        return true;
-    }
-    let prior_unshared: Vec<&Vec<bool>> = prior
-        .iter()
-        .filter(|(key, _)| !current_by_key.contains_key(key))
-        .map(|(_, live)| live)
-        .collect();
-    let current_unshared: Vec<&Vec<bool>> = current
-        .iter()
-        .filter(|(key, _)| !prior_keys.contains(key))
-        .map(|(_, live)| live)
-        .collect();
-    let mut remaining = current_unshared.iter();
-    let embeds = prior_unshared
-        .iter()
-        .all(|pattern| remaining.any(|candidate| candidate == pattern));
-    let grown_from_present = current_unshared
-        .iter()
-        .all(|pattern| prior.iter().any(|(_, live)| live == *pattern));
-    !(embeds && grown_from_present)
+        .any(|(_, live)| live.iter().any(|live| !live));
+    superseded && !stack_is_prior_plus_growth(&prior, &current)
 }
 
 /// A condition of [`loop_states_cover_modulo_fodder_growth`] that refused a frame pair, in the
@@ -10996,6 +11013,14 @@ mod tests {
             apart(&[(1, 5), (2, 8)], &[(1, 8), (3, 5), (2, 8)]),
             "the same, the other way round"
         );
+        assert!(
+            apart(&[(2, 5), (1, 8)], &[(1, 8), (3, 5)]),
+            "the stale entry crossed the surviving carrier A"
+        );
+        assert!(
+            apart(&[(1, 8), (2, 5)], &[(2, 5), (1, 8)]),
+            "two surviving carriers in the other order"
+        );
         // Positive control: actual growth with unchanged carriers.
         assert!(
             !apart(&[(1, 8), (2, 5)], &[(1, 8), (3, 8), (2, 5)]),
@@ -11026,6 +11051,97 @@ mod tests {
         assert!(
             apart(&[(1, 8)], &[(2, 5)]),
             "live in one frame, superseded in the other, no carrier in common"
+        );
+    }
+
+    /// The definition of [`stack_is_prior_plus_growth`], written independently of its walk:
+    /// try every order-preserving one-to-one map from the prior entries into the current ones
+    /// and accept if one satisfies conditions 2 to 4 of the relation.
+    fn prior_plus_growth_by_definition(prior: &[PinnedCarrier], current: &[PinnedCarrier]) -> bool {
+        let shared_in = |frame: &[PinnedCarrier], key: &(ObjectId, usize)| {
+            frame.iter().any(|(other, _)| other == key)
+        };
+        // Every increasing choice of `prior.len()` current positions, as a bit mask.
+        (0u32..1 << current.len())
+            .filter(|mask| mask.count_ones() as usize == prior.len())
+            .any(|mask| {
+                let images: Vec<usize> = (0..current.len())
+                    .filter(|index| mask & (1 << index) != 0)
+                    .collect();
+                let mapped = prior.iter().zip(&images).all(|((key, live), &image)| {
+                    let (image_key, image_live) = &current[image];
+                    if shared_in(current, key) {
+                        image_key == key && image_live == live
+                    } else {
+                        !shared_in(prior, image_key) && image_live == live
+                    }
+                });
+                let growth = (0..current.len())
+                    .filter(|index| !images.contains(index))
+                    .all(|index| {
+                        let (key, live) = &current[index];
+                        !shared_in(prior, key) && prior.iter().any(|(_, pattern)| pattern == live)
+                    });
+                mapped && growth
+            })
+    }
+
+    /// Every stack of up to four entries drawn without repetition from four carriers, each
+    /// holding one pin that is live or superseded.
+    fn short_pinned_stacks() -> Vec<Vec<PinnedCarrier>> {
+        let mut stacks: Vec<Vec<PinnedCarrier>> = vec![Vec::new()];
+        let mut frontier = stacks.clone();
+        for _ in 0..4 {
+            let mut longer = Vec::new();
+            for stack in &frontier {
+                for id in 1..=4u64 {
+                    let key = (ObjectId(id), 1);
+                    if stack.iter().any(|(other, _)| *other == key) {
+                        continue;
+                    }
+                    for live in [true, false] {
+                        let mut next = stack.clone();
+                        next.push((key, vec![live]));
+                        longer.push(next);
+                    }
+                }
+            }
+            stacks.extend(longer.iter().cloned());
+            frontier = longer;
+        }
+        stacks
+    }
+
+    /// The walk agrees with the definition on every pair of short stacks: lengths 0 to 4, live
+    /// and superseded pins, carriers shared between the two stacks and carriers fresh in one.
+    /// Exhaustive, 633 stacks and every ordered pair of them.
+    #[test]
+    fn loop_stack_pin_relation_matches_its_definition_on_every_short_stack_pair() {
+        let stacks = short_pinned_stacks();
+        assert_eq!(
+            stacks.len(),
+            633,
+            "reach guard: the enumeration is complete"
+        );
+        let (mut accepted, mut refused) = (0usize, 0usize);
+        for prior in &stacks {
+            for current in &stacks {
+                let by_walk = stack_is_prior_plus_growth(prior, current);
+                assert_eq!(
+                    by_walk,
+                    prior_plus_growth_by_definition(prior, current),
+                    "prior {prior:?} current {current:?}"
+                );
+                if by_walk {
+                    accepted += 1;
+                } else {
+                    refused += 1;
+                }
+            }
+        }
+        assert!(
+            accepted > 1_000 && refused > 1_000,
+            "reach guard: both answers occur ({accepted} accepted, {refused} refused)"
         );
     }
 
@@ -11071,6 +11187,28 @@ mod tests {
         assert!(
             fodder_refuses(&prior, &changed),
             "fodder cover: A's pin changed behind the grown entry"
+        );
+        // The cross-anchor case: bottom to top `[B stale, A live]`, then `[A live, C stale]`.
+        // A stays; the stale entry moved from below it to above it, so the next entry to
+        // resolve changed from live A to stale C (CR 405.5).
+        let (crossed_prior, _) = framed(&[(2, 5), (1, 8)]);
+        let (_, crossed) = framed(&[(1, 8), (3, 5)]);
+        let (_, grown_above) = framed(&[(2, 5), (1, 8), (3, 5)]);
+        assert!(
+            loop_states_cover_modulo_object_growth(&crossed_prior, &grown_above),
+            "reach guard: B and A unchanged with a stale entry grown above A still covers"
+        );
+        assert!(
+            !loop_states_cover_modulo_object_growth(&crossed_prior, &crossed),
+            "object-growth cover: the stale entry crossed the surviving carrier A"
+        );
+        assert!(
+            !fodder_refuses(&crossed_prior, &grown_above),
+            "fodder cover: unchanged carriers with growth above A is not refused on this ground"
+        );
+        assert!(
+            fodder_refuses(&crossed_prior, &crossed),
+            "fodder cover: the stale entry crossed the surviving carrier A"
         );
     }
 
