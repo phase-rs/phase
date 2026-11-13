@@ -52619,6 +52619,40 @@ mod tests {
         assert_eq!(state.objects[&source].exiled_by, Some(PlayerId(2)));
     }
 
+    /// CR 608.2c + CR 109.4: an independently announced player target stays in
+    /// the target list ahead of each iteration's member. The object-derived
+    /// performer still reads the member: P1 exiles the first member and P2 the
+    /// second, never the announced P0; and the announced player is still bound
+    /// after the loop. Synthetic typed form (see
+    /// `member_loop_credits_each_members_controller_as_performer`).
+    /// Revert-probe: drop `object_derived_performer` from
+    /// `change_zone::instruction_performer` ⇒ both members record P0.
+    #[test]
+    fn member_loop_performer_ignores_a_retained_player_target() {
+        let (mut state, first, second, source) = member_loop_board();
+        let mut ability = ResolvedAbility::new(
+            subject_exile(
+                TargetFilter::ParentTarget,
+                LibraryInstructionActor::Player {
+                    player: TargetFilter::ParentTargetController,
+                },
+            ),
+            vec![TargetRef::Player(PlayerId(0))],
+            source,
+            PlayerId(0),
+        );
+        ability.repeat_for = Some(QuantityExpr::Ref {
+            qty: QuantityRef::TrackedSetSize,
+        });
+        resolve_ability_chain(&mut state, &ability, &mut Vec::new(), 1).unwrap();
+
+        assert_eq!(state.objects[&first].zone, Zone::Exile);
+        assert_eq!(state.objects[&second].zone, Zone::Exile);
+        assert_eq!(state.objects[&first].exiled_by, Some(PlayerId(1)));
+        assert_eq!(state.objects[&second].exiled_by, Some(PlayerId(2)));
+        assert_eq!(ability.targets, vec![TargetRef::Player(PlayerId(0))]);
+    }
+
     /// CR 603.7c + CR 608.2c: a zone move whose only parent reference is its
     /// performer still counts as referencing the parent target, so a delayed
     /// trigger snapshots the parent referent for it. Synthetic: no printed

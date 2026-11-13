@@ -512,10 +512,37 @@ fn instruction_performer(
         LibraryInstructionActor::Controller => ability.controller,
         LibraryInstructionActor::LibraryPlayer => filter_controller,
         LibraryInstructionActor::Player { player } => {
-            super::resolve_player_for_context_ref(state, ability, player)
+            object_derived_performer(state, ability, player)
+                .or_else(|| super::resolve_player_for_context_ref(state, ability, player))
                 .unwrap_or(ability.controller)
         }
     }
+}
+
+/// CR 608.2c + CR 109.4: "its controller exiles it" names the controller of
+/// the parent OBJECT. When the instruction's targets hold an object, that
+/// object decides, wherever it sits in the list: a member-driven loop binds
+/// each iteration's member as an object occurrence beside any independently
+/// announced player target, and that player must not answer for the member's
+/// controller. `None` when no object is bound (the reference then names the
+/// announced player, as before), for an authoritatively empty announcement
+/// (CR 608.2b), and for every other reference.
+fn object_derived_performer(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    player: &TargetFilter,
+) -> Option<PlayerId> {
+    if !matches!(player, TargetFilter::ParentTargetController)
+        || ability.has_authoritative_empty_binding()
+    {
+        return None;
+    }
+    ability.targets.iter().find_map(|target| match target {
+        TargetRef::Object(id) => {
+            crate::game::ability_utils::last_known_permanent_controller(state, *id)
+        }
+        TargetRef::Player(_) => None,
+    })
 }
 
 /// CR 608.2d + CR 701.13a: report whether this exact optional-for-any-player
