@@ -1,0 +1,7 @@
+{
+  "surfaces": [
+    "full",
+    "wire"
+  ],
+  "reason": "PendingCast.cast_timing_permission records the authorizing timing route"
+}

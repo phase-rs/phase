@@ -9,7 +9,7 @@ use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::scenario_db::GameScenarioDbExt;
 use engine::types::ability::TargetRef;
 use engine::types::actions::GameAction;
-use engine::types::game_state::WaitingFor;
+use engine::types::game_state::{CastPaymentMode, ManaChoice, PayCostKind, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::keywords::Keyword;
 use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
@@ -295,19 +295,19 @@ fn borne_upon_a_wind_spell_does_not_gain_the_flash_keyword() {
         )
     });
     assert!(cast(&mut runner, borne));
+    let hand_after_cast = runner.state().players[P0.0 as usize].hand.len();
     runner.resolve_top();
+    // CR 608.2d + CR 611.2a: resolution installs the permission and draws without a prompt.
     assert!(
-        matches!(
-            runner.state().waiting_for,
-            WaitingFor::OptionalEffectChoice { .. }
-        ),
+        matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
         "{:?}",
         runner.state().waiting_for
     );
-    runner
-        .act(GameAction::DecideOptionalEffect { accept: true })
-        .expect("P0 accepts the permission");
     assert!(runner.state().stack.is_empty());
+    assert_eq!(
+        runner.state().players[P0.0 as usize].hand.len(),
+        hand_after_cast + 1
+    );
     assert_upkeep_cast_snapshot_flash(&mut runner, bears, false);
 }
 
@@ -369,16 +369,23 @@ fn leyline_of_anticipation_lets_timely_ward_target_a_noncommander_in_the_upkeep(
     assert!(on_stack(&runner, ward));
 }
 
-// CR 601.3: Azula's unconditional as-though-flash permission alone allows casting a card exiled
-// with it, so Timely Ward's own "if it targets a commander" option (CR 601.3b) does not limit
-// its targets.
-#[test]
-fn azula_lets_an_exiled_timely_ward_target_a_noncommander_in_the_upkeep() {
+struct AzulaBoard {
+    runner: GameRunner,
+    azula: ObjectId,
+    ward: ObjectId,
+    bears: ObjectId,
+    altar: Option<ObjectId>,
+}
+
+/// Azula exiles P1's Timely Ward, then play reaches P0's next upkeep with `white` {W} floating.
+fn azula_upkeep(white: usize, with_altar: bool) -> AzulaBoard {
     let db = load_db().expect("the committed integration card fixture loads");
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PostCombatMain);
     let azula = scenario.add_real_card(P0, "Azula, Cunning Usurper", Zone::Hand, db);
     let bears = scenario.add_real_card(P0, "Grizzly Bears", Zone::Battlefield, db);
+    let altar =
+        with_altar.then(|| scenario.add_real_card(P0, "Phyrexian Altar", Zone::Battlefield, db));
     scenario.add_real_card(P1, "Grizzly Bears", Zone::Battlefield, db);
     let ward = scenario.add_real_card(P1, "Timely Ward", Zone::Graveyard, db);
     for player in [P0, P1] {
@@ -411,7 +418,7 @@ fn azula_lets_an_exiled_timely_ward_target_a_noncommander_in_the_upkeep() {
         (runner.state().active_player, runner.state().phase),
         (P0, Phase::Upkeep)
     );
-    for _ in 0..3 {
+    for _ in 0..white {
         runner.state_mut().players[P0.0 as usize]
             .mana_pool
             .add(ManaUnit::new(
@@ -421,20 +428,16 @@ fn azula_lets_an_exiled_timely_ward_target_a_noncommander_in_the_upkeep() {
                 vec![],
             ));
     }
+    AzulaBoard {
+        runner,
+        azula,
+        ward,
+        bears,
+        altar,
+    }
+}
 
-    assert!(
-        engine::ai_support::legal_actions(runner.state())
-            .iter()
-            .any(|action| matches!(
-                action,
-                GameAction::CastSpell { object_id, .. } if *object_id == ward
-            )),
-        "Timely Ward exiled with Azula is a legal cast in P0's upkeep"
-    );
-    assert!(
-        cast(&mut runner, ward),
-        "Azula lets P0 announce Timely Ward"
-    );
+fn select_ward_target(runner: &mut GameRunner, bears: ObjectId) {
     assert!(
         matches!(
             runner.state().waiting_for,
@@ -448,7 +451,257 @@ fn azula_lets_an_exiled_timely_ward_target_a_noncommander_in_the_upkeep() {
             targets: vec![TargetRef::Object(bears)],
         })
         .expect("a non-commander target keeps Azula's permission");
+}
+
+// CR 601.3: Azula's unconditional as-though-flash permission alone allows casting a card exiled
+// with it, so Timely Ward's own "if it targets a commander" option (CR 601.3b) does not limit
+// its targets.
+#[test]
+fn azula_lets_an_exiled_timely_ward_target_a_noncommander_in_the_upkeep() {
+    let AzulaBoard {
+        mut runner,
+        ward,
+        bears,
+        ..
+    } = azula_upkeep(3, false);
+    assert!(
+        engine::ai_support::legal_actions(runner.state())
+            .iter()
+            .any(|action| matches!(
+                action,
+                GameAction::CastSpell { object_id, .. } if *object_id == ward
+            )),
+        "Timely Ward exiled with Azula is a legal cast in P0's upkeep"
+    );
+    assert!(
+        cast(&mut runner, ward),
+        "Azula lets P0 announce Timely Ward"
+    );
+    select_ward_target(&mut runner, bears);
     assert!(on_stack(&runner, ward));
+}
+
+// CR 601.6 + CR 605.3a: the cast was proposed under Azula's permission, so sacrificing Azula to
+// Phyrexian Altar ("Sacrifice a creature: Add one mana of any color.") during mana payment does
+// not make Timely Ward's commander condition apply to the noncommander target.
+#[test]
+fn azula_permission_holds_when_azula_is_sacrificed_for_mana_mid_payment() {
+    let AzulaBoard {
+        mut runner,
+        azula,
+        ward,
+        bears,
+        altar,
+    } = azula_upkeep(2, true);
+    let altar = altar.expect("Phyrexian Altar is on the battlefield");
+    let card_id = runner.state().objects[&ward].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: ward,
+            card_id,
+            targets: Vec::new(),
+            payment_mode: CastPaymentMode::Manual,
+        })
+        .expect("Azula lets P0 announce Timely Ward");
+    select_ward_target(&mut runner, bears);
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::ManaPayment { .. }),
+        "{:?}",
+        runner.state().waiting_for
+    );
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: altar,
+            ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("Phyrexian Altar is a mana ability usable during payment");
+    runner
+        .act(GameAction::SelectCards { cards: vec![azula] })
+        .expect("P0 sacrifices Azula");
+    runner
+        .act(GameAction::ChooseManaColor {
+            choice: ManaChoice::SingleColor(ManaType::White),
+            count: 1,
+        })
+        .expect("Phyrexian Altar adds {W}");
+    assert_eq!(runner.state().objects[&azula].zone, Zone::Graveyard);
+    runner
+        .act(GameAction::PassPriority)
+        .expect("Timely Ward finishes casting");
+    assert!(on_stack(&runner, ward));
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+        "{:?}",
+        runner.state().waiting_for
+    );
+}
+
+const TEGWYLLS_SCOURING: &str = "You may cast this spell as though it had flash by tapping three \
+untapped creatures you control with flying in addition to paying its other costs.\nDestroy all \
+creatures. Create three 1/1 black Faerie Rogue creature tokens with flying.";
+
+/// P0's upkeep with three Storm Crows, six {B} floating and Tegwyll's Scouring in hand; Leyline
+/// of Anticipation on the battlefield when `with_leyline`.
+fn tegwyll_upkeep(with_leyline: bool) -> (GameRunner, ObjectId, [ObjectId; 3]) {
+    let db = load_db().expect("the committed integration card fixture loads");
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::Upkeep);
+    if with_leyline {
+        scenario.add_enchantment_from_oracle(
+            P0,
+            "Leyline of Anticipation",
+            LEYLINE_OF_ANTICIPATION,
+        );
+    }
+    let crows = [0; 3].map(|_| scenario.add_real_card(P0, "Storm Crow", Zone::Battlefield, db));
+    let scouring = scenario
+        .add_spell_to_hand_from_oracle(P0, "Tegwyll's Scouring", false, TEGWYLLS_SCOURING)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Black, ManaCostShard::Black],
+            generic: 4,
+        })
+        .id();
+    scenario.with_library_top(P0, &["Library A", "Library B"]);
+    scenario.with_mana_pool(
+        P0,
+        vec![ManaUnit::new(ManaType::Black, ObjectId(9_900), false, vec![]); 6],
+    );
+    (scenario.build(), scouring, crows)
+}
+
+fn tapped_count(runner: &GameRunner, ids: &[ObjectId]) -> usize {
+    ids.iter()
+        .filter(|id| runner.state().objects[*id].tapped)
+        .count()
+}
+
+// CR 601.3b + CR 601.3c: Leyline alone lets Tegwyll's Scouring be cast in the upkeep, so its own
+// "by tapping three untapped creatures" option is not the route and its cost is not imposed.
+#[test]
+fn leyline_lets_tegwylls_scouring_be_cast_without_tapping_fliers() {
+    let (mut runner, scouring, crows) = tegwyll_upkeep(true);
+    assert!(cast(&mut runner, scouring), "Leyline lets P0 cast it");
+    assert!(on_stack(&runner, scouring));
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+        "{:?}",
+        runner.state().waiting_for
+    );
+    assert_eq!(tapped_count(&runner, &crows), 0);
+    assert_eq!(pool(&runner, P0), 0);
+}
+
+// CR 601.3c: with no other permission, the spell's own option is the route and its tap cost is
+// paid.
+#[test]
+fn tegwylls_scouring_own_flash_option_requires_tapping_three_fliers() {
+    let (mut runner, scouring, crows) = tegwyll_upkeep(false);
+    assert!(
+        cast(&mut runner, scouring),
+        "its own option allows the cast"
+    );
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::PayCost {
+                kind: PayCostKind::TapCreatures { .. },
+                min_count: 3,
+                ..
+            }
+        ),
+        "{:?}",
+        runner.state().waiting_for
+    );
+    runner
+        .act(GameAction::SelectCards {
+            cards: crows.to_vec(),
+        })
+        .expect("P0 taps the three Storm Crows");
+    assert!(on_stack(&runner, scouring));
+    assert_eq!(tapped_count(&runner, &crows), 3);
+}
+
+/// P0's upkeep with Primal Prayers, two energy, Grizzly Bears in hand and Radagast when
+/// `with_radagast`.
+fn primal_prayers_upkeep(with_radagast: bool) -> (GameRunner, ObjectId) {
+    let (mut runner, bears) = upkeep(|scenario, db| {
+        if with_radagast {
+            scenario.add_creature_from_oracle(
+                P0,
+                "Radagast of Rhosgobel",
+                2,
+                5,
+                RADAGAST_OF_RHOSGOBEL,
+            );
+        }
+        scenario.add_real_card(P0, "Primal Prayers", Zone::Battlefield, db);
+        scenario.add_real_card(P0, "Grizzly Bears", Zone::Hand, db)
+    });
+    runner.state_mut().players[P0.0 as usize].energy = 2;
+    (runner, bears)
+}
+
+fn energy(runner: &GameRunner) -> u32 {
+    runner.state().players[P0.0 as usize].energy
+}
+
+// CR 118.9b + CR 601.3c: Radagast alone lets the first Grizzly Bears be cast in the upkeep, so
+// Primal Prayers' {E} is an optional alternative cost rather than a timing requirement.
+#[test]
+fn radagast_leaves_primal_prayers_energy_cost_optional() {
+    let (mut runner, bears) = primal_prayers_upkeep(true);
+    let before = pool(&runner, P0);
+    assert!(cast(&mut runner, bears), "Radagast lets P0 cast it");
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::OptionalCostChoice { .. }
+        ),
+        "{:?}",
+        runner.state().waiting_for
+    );
+    assert_eq!(energy(&runner), 2, "no energy is taken before the choice");
+
+    let mut paid_energy = GameRunner::from_state(runner.state().clone());
+    runner
+        .act(GameAction::DecideOptionalCost { pay: false })
+        .expect("P0 pays the reduced mana cost");
+    assert!(on_stack(&runner, bears));
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+    assert_eq!(energy(&runner), 2);
+    assert_eq!(pool(&runner, P0), before - 1);
+
+    paid_energy
+        .act(GameAction::DecideOptionalCost { pay: true })
+        .expect("P0 pays {E}");
+    assert!(on_stack(&paid_energy, bears));
+    assert!(matches!(
+        paid_energy.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+    assert_eq!(energy(&paid_energy), 1);
+    assert_eq!(pool(&paid_energy, P0), before);
+}
+
+// CR 118.9a + CR 601.3c: Primal Prayers alone allows the upkeep cast only by paying {E}, which is
+// paid once and not offered again.
+#[test]
+fn primal_prayers_alone_requires_its_energy_cost_once() {
+    let (mut runner, bears) = primal_prayers_upkeep(false);
+    let before = pool(&runner, P0);
+    assert!(cast(&mut runner, bears), "Primal Prayers lets P0 cast it");
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+        "{:?}",
+        runner.state().waiting_for
+    );
+    assert!(on_stack(&runner, bears));
+    assert_eq!(energy(&runner), 1);
+    assert_eq!(pool(&runner, P0), before);
 }
 
 // CR 702.8a: "have flash" grants the keyword itself, unlike an "as though" permission.

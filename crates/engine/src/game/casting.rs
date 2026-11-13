@@ -26,7 +26,7 @@ use crate::types::game_state::{
 };
 use crate::types::game_state::{
     ActivationResidual, ActivationTargetSelection, AlternativeAdditionalCostDescription,
-    CastOfferKind, CastPaymentMode, CastingPermissionIndex, CastingVariant,
+    CastOfferKind, CastPaymentMode, CastTimingRoute, CastingPermissionIndex, CastingVariant,
     CastingVariantChoiceOption, CastingVariantFace, ConvokeMode, CostResume, DistributionUnit,
     EmergeSacrificeQuality, GameState, ManaAbilityCostParent, ManaAbilityResume, ManaChoice,
     ManaChoiceContext, ManaChoicePrompt, NextSpellModifier, PayCostKind, PendingCast,
@@ -939,7 +939,7 @@ struct PreparedSpellCast {
     modal: Option<crate::types::ability::ModalChoice>,
     casting_variant: CastingVariant,
     casting_permission_index: Option<CastingPermissionIndex>,
-    cast_timing_permission: Option<CastTimingPermission>,
+    cast_timing_permission: Option<CastTimingRoute>,
     /// CR 601.2a: Zone the card was in before announcement (hand / command /
     /// graveyard / exile). Threaded onto `PendingCast.origin_zone` so that
     /// CancelCast (CR 601.2i) can return the object to its origin zone.
@@ -10771,7 +10771,7 @@ fn prepare_spell_cast_announced(
                 )?;
                 mana_cost = restrictions::add_mana_cost(&mana_cost, &flash_cost);
                 if cast_outside_sorcery_timing {
-                    cast_timing_permission = Some(CastTimingPermission::AsThoughHadFlash);
+                    cast_timing_permission = Some(CastTimingRoute::SpellOption);
                 }
             } else if casting_costs::payable_spell_alternative_cost_for_timing(
                 state,
@@ -10793,12 +10793,12 @@ fn prepare_spell_cast_announced(
                     casting_variant,
                 )?;
                 if cast_outside_sorcery_timing {
-                    cast_timing_permission = Some(CastTimingPermission::AsThoughHadFlash);
+                    cast_timing_permission = Some(CastTimingRoute::AlternativeCost);
                 }
             } else if casting_costs::can_pay_offering_additional_cost(state, player, object_id) {
                 // CR 702.48a: "[Quality] offering" — if the controller has a legal
                 // sacrifice target, the spell may be cast at instant speed.
-                // `CastTimingPermission::Offering` signals that the upcoming sacrifice
+                // `CastTimingRoute::Offering` signals that the upcoming sacrifice
                 // prompt is required (not optional) because the player used Offering
                 // to unlock instant-speed timing.
                 restrictions::check_spell_timing(
@@ -10810,13 +10810,13 @@ fn prepare_spell_cast_announced(
                     casting_variant,
                 )?;
                 if cast_outside_sorcery_timing {
-                    cast_timing_permission = Some(CastTimingPermission::Offering);
+                    cast_timing_permission = Some(CastTimingRoute::Offering);
                 }
             } else {
                 return Err(base_timing_error);
             }
         } else if cast_outside_sorcery_timing && has_granted_flash {
-            cast_timing_permission = Some(CastTimingPermission::AsThoughHadFlash);
+            cast_timing_permission = Some(CastTimingRoute::Permission);
         }
         restrictions::check_casting_restrictions(
             state,
@@ -20419,7 +20419,7 @@ fn continue_with_prepared(
                 prepared.object_id,
             )
             .expect("offering quality implies offering additional cost");
-            let required = prepared.cast_timing_permission == Some(CastTimingPermission::Offering);
+            let required = prepared.cast_timing_permission == Some(CastTimingRoute::Offering);
             if required {
                 // CR 702.48b: Required when cast used instant-speed timing via Offering.
                 return casting_costs::begin_required_cost_before_targets(
@@ -21653,7 +21653,7 @@ fn can_cast_prepared_now_with_probe(
     // CR 702.102b: fuse-project the real-flash short-circuit for a fused split
     // candidate (marker not set during candidate generation) so a value-keyed
     // granted Flash is not dropped on the front half.
-    if prepared.cast_timing_permission == Some(CastTimingPermission::AsThoughHadFlash)
+    if prepared.cast_timing_permission == Some(CastTimingRoute::SpellOption)
         && !restrictions::target_dependent_flash_permission_feasible(
             state,
             player,
@@ -21666,7 +21666,7 @@ fn can_cast_prepared_now_with_probe(
 
     // CR 702.48a: When the Offering timing unlock was used, a legal sacrifice
     // target must still exist (state may have changed since prepare time).
-    if prepared.cast_timing_permission == Some(CastTimingPermission::Offering)
+    if prepared.cast_timing_permission == Some(CastTimingRoute::Offering)
         && !casting_costs::can_pay_offering_additional_cost(state, player, prepared.object_id)
     {
         return false;

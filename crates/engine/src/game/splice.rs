@@ -26,10 +26,11 @@ use crate::game::casting::combined_spell_ability_def;
 use crate::game::casting_costs::begin_deferred_target_selection;
 use crate::game::engine::EngineError;
 use crate::game::game_object::GameObject;
-use crate::types::ability::{CastTimingPermission, ResolvedAbility};
+use crate::types::ability::ResolvedAbility;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
-    CastPaymentMode, CastingVariant, DistributionUnit, GameState, PendingCast, WaitingFor,
+    CastPaymentMode, CastTimingRoute, CastingVariant, DistributionUnit, GameState, PendingCast,
+    WaitingFor,
 };
 use crate::types::identifiers::{CardId, ObjectId};
 use crate::types::keywords::Keyword;
@@ -88,7 +89,7 @@ pub(crate) fn begin_offer(
     base_mana_cost: ManaCost,
     casting_variant: CastingVariant,
     casting_permission_index: Option<crate::types::game_state::CastingPermissionIndex>,
-    cast_timing_permission: Option<CastTimingPermission>,
+    cast_timing_permission: Option<CastTimingRoute>,
     distribute: Option<DistributionUnit>,
     origin_zone: Zone,
     payment_mode: CastPaymentMode,

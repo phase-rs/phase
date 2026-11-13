@@ -2252,37 +2252,20 @@ pub(crate) fn triggering_spell_targets_filter(
 /// `condition` is a `SpellTargetsFilter` either does not gate this cast or
 /// passes against the targets.
 ///
-/// Called at `finish_pending_cast_cost_or_pay` after `assign_targets_in_chain`
-/// has committed the player's choices. If a target-dependent flash permission
-/// authorized the cast (i.e., the cast is outside the sorcery-speed window via
-/// `cast_timing_permission == AsThoughHadFlash`) AND no flash permission's
-/// condition currently passes, the cast is illegal under CR 601.3d and must be
+/// Consulted only when the cast was proposed under the spell's own option
+/// (`CastTimingRoute::SpellOption`); an independent flash route recorded at
+/// proposal never reaches it (CR 601.6). If no flash option's condition passes
+/// against the chosen targets, the cast is illegal under CR 601.3d and must be
 /// aborted.
-/// `fused` projects the COMBINED characteristics of a pre-payment fused split
-/// spell (CR 702.102b) into the `has_real_flash` short-circuit so a value-keyed
-/// `CastWithKeyword{Flash}` grant (CR 702.8a) is seen for the fused spell. This
-/// re-validation runs before the `fused_split_spell` marker is set at
-/// `finalize_cast_with_phyrexian_choices`, so pre-payment fused callers pass
-/// `casting_variant == CastingVariant::Fuse`; all non-fused / single-face callers
-/// pass `false` (byte-identical to the pre-fix behavior).
 pub(crate) fn target_dependent_flash_permission_satisfied(
     state: &crate::types::game_state::GameState,
-    player: PlayerId,
     object_id: ObjectId,
     ability: &crate::types::ability::ResolvedAbility,
-    fused: bool,
 ) -> bool {
     use crate::types::ability::{ParsedCondition, SpellCastingOptionKind, TargetRef};
     let Some(obj) = state.objects.get(&object_id) else {
         return true;
     };
-    // CR 702.8a / CR 601.3b: an unconditional flash route (keyword or as-though
-    // permission) authorizes instant-speed casting independent of any
-    // conditional flash option, whatever that option's condition.
-    let has_real_flash = super::casting::spell_has_effective_flash(state, player, object_id, fused);
-    if has_real_flash {
-        return true;
-    }
     let targets = super::ability_utils::declared_targets_in_chain(ability);
     let ctx = super::filter::FilterContext::from_source(state, object_id);
     let evaluate_target_filter = |filter: &crate::types::ability::TargetFilter| -> bool {
@@ -4570,8 +4553,6 @@ mod tests {
     /// SpellTargetsFilter { IsCommander })` and verifies the post-target gate:
     /// - targets containing a commander → permission satisfied (cast legal)
     /// - targets without a commander → permission unsatisfied (cast illegal)
-    /// - real Flash keyword on the spell → permission satisfied regardless
-    ///   (printed Flash trumps the conditional flash option per CR 702.8a)
     #[test]
     fn target_dependent_flash_permission_satisfied_against_commander_target() {
         use crate::game::game_object::GameObject;
@@ -4656,99 +4637,14 @@ mod tests {
         assert!(
             target_dependent_flash_permission_satisfied(
                 &state,
-                caster,
                 ObjectId(10),
-                &ability_with_commander,
-                false
+                &ability_with_commander
             ),
             "casting at instant speed targeting a commander must satisfy the flash condition"
         );
         assert!(
-            !target_dependent_flash_permission_satisfied(
-                &state,
-                caster,
-                ObjectId(10),
-                &ability_with_plain,
-                false
-            ),
+            !target_dependent_flash_permission_satisfied(&state, ObjectId(10), &ability_with_plain),
             "casting at instant speed targeting a non-commander must FAIL the flash condition"
-        );
-    }
-
-    /// CR 702.8a: A real Flash keyword on the spell short-circuits the
-    /// target-dependent flash permission check — printed Flash authorizes
-    /// instant-speed casting irrespective of any `AsThoughHadFlash` option's
-    /// condition.
-    #[test]
-    fn real_flash_keyword_overrides_target_dependent_flash_condition() {
-        use crate::game::game_object::GameObject;
-        use crate::types::ability::{
-            FilterProp, ParsedCondition, ResolvedAbility, SpellCastingOption, TargetFilter,
-            TargetRef, TypedFilter,
-        };
-        use crate::types::keywords::Keyword;
-
-        let mut state = crate::types::game_state::GameState::new_two_player(42);
-        let caster = PlayerId(0);
-        let opponent = PlayerId(1);
-
-        let mut spell = GameObject::new(
-            ObjectId(10),
-            CardId(10),
-            caster,
-            "Hypothetical With Both".to_string(),
-            Zone::Hand,
-        );
-        spell.card_types.core_types.push(CoreType::Enchantment);
-        spell.keywords.push(Keyword::Flash);
-        spell
-            .casting_options
-            .push(SpellCastingOption::as_though_had_flash().condition(
-                ParsedCondition::SpellTargetsFilter {
-                    filter: TargetFilter::Typed(TypedFilter {
-                        properties: vec![FilterProp::IsCommander],
-                        ..Default::default()
-                    }),
-                },
-            ));
-        state.objects.insert(spell.id, spell);
-
-        // A non-commander target — the conditional flash option's filter would
-        // FAIL against this target, but the printed Flash keyword should
-        // independently authorize the cast.
-        let plain = create_object(
-            &mut state,
-            CardId(21),
-            opponent,
-            "Ordinary Bear".to_string(),
-            Zone::Battlefield,
-        );
-        state
-            .objects
-            .get_mut(&plain)
-            .unwrap()
-            .card_types
-            .core_types
-            .push(CoreType::Creature);
-
-        let ability = ResolvedAbility::new(
-            Effect::Draw {
-                count: QuantityExpr::Fixed { value: 0 },
-                target: TargetFilter::Controller,
-            },
-            vec![TargetRef::Object(plain)],
-            ObjectId(10),
-            caster,
-        );
-        assert!(
-            target_dependent_flash_permission_satisfied(
-                &state,
-                caster,
-                ObjectId(10),
-                &ability,
-                false
-            ),
-            "printed Flash keyword must short-circuit the target-dependent flash check"
         );
     }
 

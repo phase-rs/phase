@@ -8819,6 +8819,32 @@ pub enum SpellAlternativeCostElection {
     Legacy,
 }
 
+/// CR 601.3 + CR 601.6: the route that let this cast begin outside sorcery timing,
+/// fixed when the cast is proposed and read, never re-derived, by payment and finalization.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CastTimingRoute {
+    /// CR 702.8a + CR 601.3b: flash, or a permission to cast it as though it had flash, needing no cost or target.
+    Permission,
+    /// CR 601.3c + CR 601.3d: only the spell's own "as though it had flash" option.
+    SpellOption,
+    /// CR 118.9 + CR 601.3c: only a granted alternative cost that carries the timing.
+    AlternativeCost,
+    /// CR 702.48a: only an Offering sacrifice.
+    Offering,
+}
+
+impl CastTimingRoute {
+    /// The provenance stamped on the cast object (CR 601.3b timing permission used).
+    pub fn permission(self) -> CastTimingPermission {
+        match self {
+            Self::Offering => CastTimingPermission::Offering,
+            Self::Permission | Self::SpellOption | Self::AlternativeCost => {
+                CastTimingPermission::AsThoughHadFlash
+            }
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PendingCast {
     pub object_id: ObjectId,
@@ -8908,7 +8934,7 @@ pub struct PendingCast {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub casting_permission_index: Option<CastingPermissionIndex>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cast_timing_permission: Option<crate::types::ability::CastTimingPermission>,
+    pub cast_timing_permission: Option<CastTimingRoute>,
     /// CR 601.2d: When set, after target selection the caster must distribute this
     /// resource (damage, counters, life) among the chosen targets via DistributeAmong.
     #[serde(default, skip_serializing_if = "Option::is_none")]
