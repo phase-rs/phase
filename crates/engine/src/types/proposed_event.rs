@@ -458,9 +458,15 @@ pub enum ProposedEvent {
         /// order. They ride the event — like counters — so every applicable
         /// same-entry rider survives, and delivery installs them on the new
         /// object after CR 400.7's reset, exactly as the post-entry drain
-        /// would have for a single rider.
-        #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        enter_with_grants: Vec<EnterWithGrant>,
+        /// would have for a single rider. `None` when there are none; appended only through
+        /// [`EnterWithGrants::append`], so `Some` is never empty. Boxed like
+        /// `face_down_profile`.
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "EnterWithGrants::deserialize_nonempty"
+        )]
+        enter_with_grants: Option<Box<EnterWithGrants>>,
         /// Override the controller on ETB. Used by Earthbending return ("under your control")
         /// and other "enters the battlefield under [player]'s control" effects.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -525,8 +531,14 @@ pub enum ProposedEvent {
         with_entry_effect: Option<Box<WithEntryEffect>>,
         /// CR 614.4 + CR 614.12: the other members of this battlefield entry's event
         /// ([`CoEntrants`]), carried through every replacement pass and CR 616.1 pause.
-        #[serde(default, skip_serializing_if = "CoEntrants::is_empty")]
-        co_entrants: CoEntrants,
+        /// `None` when there are none; built only by [`CoEntrants::for_entrant`], so `Some` is
+        /// never empty. Boxed like `face_down_profile`.
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "CoEntrants::deserialize_nonempty"
+        )]
+        co_entrants: Option<Box<CoEntrants>>,
         #[serde(serialize_with = "crate::types::deterministic_serde::hash_set")]
         applied: HashSet<AppliedReplacementKey>,
     },
@@ -978,22 +990,25 @@ impl EntrantAbilities {
 /// proposed, yet it did not exist before the event, and a replacement effect must exist
 /// before the event it modifies (Metallic Mimic ruling 2017-02-09: "Creatures of the chosen
 /// type that enter the battlefield at the same time as Metallic Mimic won't enter with an
-/// additional +1/+1 counter."). Empty for a lone entry and for a proposal outside a logical
-/// zone-change group; a `TokenEntry` carries none.
+/// additional +1/+1 counter."). Never empty: a lone entry, a proposal outside a logical
+/// zone-change group and a `TokenEntry` carry none (`ZoneChange::co_entrants` is `None`).
 /// Known gap: per-player simultaneous puts resolved as separate player-scoped legs are
 /// separate logical groups, so an entrant of an earlier leg is still a replacement source for
 /// a later leg's (Show and Tell, "Each player may put an artifact, creature, enchantment, or
 /// land card from their hand onto the battlefield.": a Containment Priest put by an earlier
 /// player exiles a later player's creature). Closing it needs one group spanning the legs, as
 /// Living Death's per-seat legs already share one.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(transparent)]
 pub struct CoEntrants(Box<[ObjectIncarnationRef]>);
 
 impl CoEntrants {
-    /// The members of `event_members` other than `entrant`.
-    pub fn for_entrant(event_members: &[ObjectIncarnationRef], entrant: ObjectId) -> Self {
-        Self(
+    /// The members of `event_members` other than `entrant`; `None` when there are none.
+    pub fn for_entrant(
+        event_members: &[ObjectIncarnationRef],
+        entrant: ObjectId,
+    ) -> Option<Box<Self>> {
+        Self::nonempty(
             event_members
                 .iter()
                 .filter(|member| member.object_id != entrant)
@@ -1002,8 +1017,21 @@ impl CoEntrants {
         )
     }
 
-    pub fn is_empty(&self) -> bool {
-        self.0.is_empty()
+    /// The single constructor: `None` for an empty member set, so a `CoEntrants` is never empty.
+    fn nonempty(members: Box<[ObjectIncarnationRef]>) -> Option<Box<Self>> {
+        (!members.is_empty()).then(|| Box::new(Self(members)))
+    }
+
+    /// Wire reader for `ZoneChange::co_entrants`: an empty list reads as `None`, the same as an
+    /// absent key, so a decoded `Some` is never empty either.
+    fn deserialize_nonempty<'de, D>(deserializer: D) -> Result<Option<Box<Self>>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        Ok(
+            Option::<Box<[ObjectIncarnationRef]>>::deserialize(deserializer)?
+                .and_then(Self::nonempty),
+        )
     }
 
     pub fn as_slice(&self) -> &[ObjectIncarnationRef] {
@@ -1035,6 +1063,45 @@ pub struct EnterWithGrant {
     pub controller: PlayerId,
 }
 
+/// CR 614.1c + CR 611.2a + CR 616.1: the entry grants riding one battlefield entry
+/// (`ZoneChange::enter_with_grants`), in application order. Never empty: an entry with no
+/// grant carries `None`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(transparent)]
+pub struct EnterWithGrants(Vec<EnterWithGrant>);
+
+impl EnterWithGrants {
+    /// The single authority that adds grants to an entry: appends `grants` in order, creating
+    /// the box on the first one, so `Some` is never empty.
+    pub fn append(
+        slot: &mut Option<Box<EnterWithGrants>>,
+        grants: impl IntoIterator<Item = EnterWithGrant>,
+    ) {
+        let mut grants = grants.into_iter().peekable();
+        if grants.peek().is_some() {
+            slot.get_or_insert_with(|| Box::new(Self(Vec::new())))
+                .0
+                .extend(grants);
+        }
+    }
+
+    /// The carried grants of an entry, in application order (`[]` when it carries none).
+    pub fn of(grants: &Option<Box<EnterWithGrants>>) -> &[EnterWithGrant] {
+        grants.as_deref().map_or(&[], |grants| grants.0.as_slice())
+    }
+
+    /// Wire reader for `ZoneChange::enter_with_grants`: an empty list reads as `None`, the same
+    /// as an absent key, so a decoded `Some` is never empty either.
+    fn deserialize_nonempty<'de, D>(deserializer: D) -> Result<Option<Box<Self>>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        Ok(Option::<Vec<EnterWithGrant>>::deserialize(deserializer)?
+            .filter(|grants| !grants.is_empty())
+            .map(|grants| Box::new(Self(grants))))
+    }
+}
+
 impl ProposedEvent {
     /// Construct a `ZoneChange` with default `enter_tapped: Unspecified` and empty `applied` set.
     pub fn zone_change(object_id: ObjectId, from: Zone, to: Zone, cause: Option<ObjectId>) -> Self {
@@ -1047,7 +1114,7 @@ impl ProposedEvent {
             enter_tapped: EtbTapState::Unspecified,
             enters_attacking: false,
             enter_with_counters: Vec::new(),
-            enter_with_grants: Vec::new(),
+            enter_with_grants: None,
             controller_override: None,
             enter_transformed: false,
             face_down_profile: None,
@@ -1058,7 +1125,7 @@ impl ProposedEvent {
             discard_frame: None,
             performed_by: None,
             with_entry_effect: None,
-            co_entrants: CoEntrants::default(),
+            co_entrants: None,
             applied: HashSet::new(),
         }
     }
@@ -1189,11 +1256,10 @@ impl ProposedEvent {
     }
 
     /// CR 614.4 + CR 614.12: the other members of the entry event a zone change belongs to.
-    /// `Some` only for a `ZoneChange` (empty unless it is a battlefield entry of a
-    /// multi-member event).
+    /// `Some` only for a `ZoneChange` that is a battlefield entry of a multi-member event.
     pub fn co_entrants(&self) -> Option<&CoEntrants> {
         match self {
-            ProposedEvent::ZoneChange { co_entrants, .. } => Some(co_entrants),
+            ProposedEvent::ZoneChange { co_entrants, .. } => co_entrants.as_deref(),
             ProposedEvent::Damage { .. }
             | ProposedEvent::Draw { .. }
             | ProposedEvent::SearchFound { .. }
@@ -2284,7 +2350,8 @@ mod tests {
             .iter()
             .map(|id| ObjectIncarnationRef::from_object(&state.objects[id]))
             .collect();
-        let co_entrants = CoEntrants::for_entrant(&announced, ObjectId(9_999));
+        let co_entrants =
+            CoEntrants::for_entrant(&announced, ObjectId(9_999)).expect("four members");
 
         // The earlier member is delivered (a new battlefield object); another is exiled.
         let moved = state.objects.get_mut(&delivered).expect("member");
@@ -2309,18 +2376,21 @@ mod tests {
             ObjectIncarnationRef::of(ObjectId(3), 4),
             ObjectIncarnationRef::of(ObjectId(5), 6),
         ];
-        let co_entrants = CoEntrants::for_entrant(&announced, ObjectId(3));
+        let co_entrants = CoEntrants::for_entrant(&announced, ObjectId(3)).expect("two others");
         assert_eq!(
             co_entrants.as_slice(),
             &[announced[0], announced[2]],
             "the entrant is not its own co-entrant"
         );
-        assert!(CoEntrants::for_entrant(&announced[..1], ObjectId(1)).is_empty());
+        assert!(
+            CoEntrants::for_entrant(&announced[..1], ObjectId(1)).is_none(),
+            "a lone entrant has no co-entrants"
+        );
     }
 
-    /// U2 — CR 614.4 + CR 614.12: `co_entrants` is an optional wire field — empty is
-    /// omitted, a stamp round-trips, and a proposal without the key decodes empty. Only a
-    /// zone change carries one.
+    /// U2 — CR 614.4 + CR 614.12: `co_entrants` is an optional wire field — none is
+    /// omitted, a stamp round-trips, and a proposal without the key or with an empty list
+    /// decodes as none. Only a zone change carries one.
     #[test]
     fn zone_change_co_entrants_serde() {
         let plain = ProposedEvent::zone_change(
@@ -2334,8 +2404,13 @@ mod tests {
             value["ZoneChange"].get("co_entrants").is_none(),
             "empty must not be serialized: {value}"
         );
-        let back: ProposedEvent = serde_json::from_value(value).expect("reads without the key");
-        assert_eq!(back.co_entrants(), Some(&CoEntrants::default()));
+        let back: ProposedEvent =
+            serde_json::from_value(value.clone()).expect("reads without the key");
+        assert_eq!(back.co_entrants(), None);
+        let mut empty_list = value;
+        empty_list["ZoneChange"]["co_entrants"] = serde_json::json!([]);
+        let back: ProposedEvent = serde_json::from_value(empty_list).expect("reads an empty list");
+        assert_eq!(back, plain, "an empty list reads as no co-entrants");
 
         let mut stamped = plain.clone();
         let ProposedEvent::ZoneChange { co_entrants, .. } = &mut stamped else {
@@ -2364,5 +2439,61 @@ mod tests {
             ProposedEvent::begin_turn(PlayerId(0), false).co_entrants(),
             None
         );
+    }
+
+    /// CR 614.1c + CR 611.2a: `enter_with_grants` keeps the wire shape of the upstream
+    /// `Vec<EnterWithGrant>` field — omitted when there are none, the same array of grants
+    /// otherwise, and an empty array (or no key) decodes as none. Appending no grant leaves
+    /// none; appending keeps application order.
+    #[test]
+    fn zone_change_enter_with_grants_serde_matches_the_vec_wire_shape() {
+        use crate::types::ability::{AbilityDefinition, AbilityKind, Effect};
+        let grant = |controller: u8| EnterWithGrant {
+            grant: AbilityDefinition::new(AbilityKind::Spell, Effect::RingTemptsYou),
+            controller: PlayerId(controller),
+        };
+        let plain = ProposedEvent::zone_change(
+            ObjectId(7),
+            Zone::Graveyard,
+            Zone::Battlefield,
+            Some(ObjectId(3)),
+        );
+        let value = serde_json::to_value(&plain).expect("serializes");
+        assert!(
+            value["ZoneChange"].get("enter_with_grants").is_none(),
+            "none must not be serialized: {value}"
+        );
+        let mut empty_list = value;
+        empty_list["ZoneChange"]["enter_with_grants"] = serde_json::json!([]);
+        let back: ProposedEvent = serde_json::from_value(empty_list).expect("reads an empty list");
+        assert_eq!(back, plain, "an empty list reads as no grants");
+
+        let mut granted = plain.clone();
+        let ProposedEvent::ZoneChange {
+            enter_with_grants, ..
+        } = &mut granted
+        else {
+            unreachable!("zone_change constructs a ZoneChange");
+        };
+        EnterWithGrants::append(enter_with_grants, std::iter::empty());
+        assert!(
+            enter_with_grants.is_none(),
+            "appending no grant leaves none"
+        );
+        EnterWithGrants::append(enter_with_grants, [grant(0)]);
+        EnterWithGrants::append(enter_with_grants, [grant(1)]);
+        assert_eq!(
+            EnterWithGrants::of(enter_with_grants),
+            &[grant(0), grant(1)]
+        );
+
+        let value = serde_json::to_value(&granted).expect("serializes");
+        assert_eq!(
+            value["ZoneChange"]["enter_with_grants"],
+            serde_json::to_value(vec![grant(0), grant(1)]).expect("serializes"),
+            "the same array a Vec<EnterWithGrant> field writes"
+        );
+        let back: ProposedEvent = serde_json::from_value(value).expect("round-trips");
+        assert_eq!(back, granted);
     }
 }

@@ -37,8 +37,8 @@ use crate::types::mana::{StepEndManaAction, UnitDisposition};
 use crate::types::player::PlayerId;
 use crate::types::proposed_event::{
     AppliedReplacementKey, BoundSearchFoundCandidate, BoundSearchFoundDisposition,
-    BoundSearchFoundGrant, CoEntrants, CopyTokenSpec, CounterMoveStage, CounterPlacement,
-    DrawEventStage, EnterWithGrant, EtbTapState, ProposedEvent, ReplacementId,
+    BoundSearchFoundGrant, CopyTokenSpec, CounterMoveStage, CounterPlacement, DrawEventStage,
+    EnterWithGrant, EnterWithGrants, EtbTapState, ProposedEvent, ReplacementId,
     SearchFoundDisposition, TokenAttackRequest, TokenBatch,
 };
 use crate::types::replacements::ReplacementEvent;
@@ -2270,12 +2270,12 @@ fn discard_applier(
             enter_tapped: EtbTapState::Unspecified,
             enters_attacking: false,
             enter_with_counters: Vec::new(),
-            enter_with_grants: Vec::new(),
+            enter_with_grants: None,
             controller_override: None,
             enter_transformed: false,
             face_down_profile: None,
             with_entry_effect: None,
-            co_entrants: CoEntrants::default(),
+            co_entrants: None,
             face_down_in_exile: crate::types::ability::ExileConcealment::Public,
             chain_referent: crate::types::zones::ChainReferentIntent::Silent,
             enter_as_copy: None,
@@ -11089,7 +11089,7 @@ fn apply_single_replacement(
                         enter_with_grants, ..
                     } = &mut new_event
                     {
-                        enter_with_grants.extend(entry_grants.iter().cloned());
+                        EnterWithGrants::append(enter_with_grants, entry_grants.iter().cloned());
                     }
                 }
                 // CR 614.5 + CR 609.7b: a `Modified` result that left the
@@ -16131,7 +16131,7 @@ mod tests {
             enter_tapped: EtbTapState::Unspecified,
             enters_attacking: false,
             enter_with_counters: Vec::new(),
-            enter_with_grants: Vec::new(),
+            enter_with_grants: None,
             controller_override: None,
             enter_transformed: false,
             enter_as_copy: None,
@@ -16141,7 +16141,7 @@ mod tests {
             applied: HashSet::new(),
             face_down_profile: None,
             with_entry_effect: None,
-            co_entrants: crate::types::proposed_event::CoEntrants::default(),
+            co_entrants: None,
             face_down_in_exile: crate::types::ability::ExileConcealment::Public,
             chain_referent: crate::types::zones::ChainReferentIntent::Silent,
         };
@@ -20191,7 +20191,7 @@ mod tests {
             enter_tapped: EtbTapState::Unspecified,
             enters_attacking: false,
             enter_with_counters: Vec::new(),
-            enter_with_grants: Vec::new(),
+            enter_with_grants: None,
             controller_override: None,
             enter_transformed: false,
             enter_as_copy: None,
@@ -20201,7 +20201,7 @@ mod tests {
             applied: HashSet::new(),
             face_down_profile: None,
             with_entry_effect: None,
-            co_entrants: crate::types::proposed_event::CoEntrants::default(),
+            co_entrants: None,
             face_down_in_exile: crate::types::ability::ExileConcealment::Public,
             chain_referent: crate::types::zones::ChainReferentIntent::Silent,
         };
@@ -21670,7 +21670,7 @@ mod tests {
             enter_tapped: EtbTapState::Tapped,
             enters_attacking: false,
             enter_with_counters: Vec::new(),
-            enter_with_grants: Vec::new(),
+            enter_with_grants: None,
             controller_override: None,
             enter_transformed: false,
             enter_as_copy: None,
@@ -21680,7 +21680,7 @@ mod tests {
             applied: HashSet::new(),
             face_down_profile: None,
             with_entry_effect: None,
-            co_entrants: crate::types::proposed_event::CoEntrants::default(),
+            co_entrants: None,
             face_down_in_exile: crate::types::ability::ExileConcealment::Public,
             chain_referent: crate::types::zones::ChainReferentIntent::Silent,
         };
@@ -25082,14 +25082,14 @@ mod tests {
             enter_tapped: EtbTapState::Unspecified,
             enters_attacking: false,
             enter_with_counters: Vec::new(),
-            enter_with_grants: Vec::new(),
+            enter_with_grants: None,
             controller_override: None,
             enter_transformed: false,
             enter_as_copy: None,
             enter_with_choices: None,
             face_down_profile: None,
             with_entry_effect: None,
-            co_entrants: crate::types::proposed_event::CoEntrants::default(),
+            co_entrants: None,
             face_down_in_exile: crate::types::ability::ExileConcealment::Public,
             chain_referent: crate::types::zones::ChainReferentIntent::Silent,
             discard_frame: None,
@@ -25137,14 +25137,14 @@ mod tests {
             enter_tapped: EtbTapState::Unspecified,
             enters_attacking: false,
             enter_with_counters: Vec::new(),
-            enter_with_grants: Vec::new(),
+            enter_with_grants: None,
             controller_override: None,
             enter_transformed: false,
             enter_as_copy: None,
             enter_with_choices: None,
             face_down_profile: None,
             with_entry_effect: None,
-            co_entrants: crate::types::proposed_event::CoEntrants::default(),
+            co_entrants: None,
             face_down_in_exile: crate::types::ability::ExileConcealment::Public,
             chain_referent: crate::types::zones::ChainReferentIntent::Silent,
             discard_frame: None,

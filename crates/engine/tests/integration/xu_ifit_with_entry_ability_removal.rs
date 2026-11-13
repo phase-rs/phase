@@ -3200,13 +3200,13 @@ fn put_on_library_top(runner: &mut GameRunner, player: PlayerId, cards: &[Object
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Prompt {
     /// Metallic Mimic's "As this creature enters, choose a creature type." (CR 614.12a).
-    NamedChoice,
+    NamedType,
     /// A choice among applicable replacement effects (CR 616.1).
-    ReplacementChoice,
+    Replacement,
     /// Eerie Ultimatum's choice of cards to return.
-    EffectZoneChoice,
+    EffectZone,
     /// Collected Company's choice of cards to put onto the battlefield.
-    DigChoice,
+    Dig,
 }
 
 /// Answer every prompt of a committed spell's resolution until P0 has priority with an empty
@@ -3222,7 +3222,7 @@ fn answer_until_priority(
     for _ in 0..24 {
         match runner.state().waiting_for.clone() {
             WaitingFor::NamedChoice { .. } => {
-                prompts.push(Prompt::NamedChoice);
+                prompts.push(Prompt::NamedType);
                 runner
                     .act(GameAction::ChooseOption {
                         choice: chosen.to_string(),
@@ -3230,13 +3230,13 @@ fn answer_until_priority(
                     .expect("name the creature type");
             }
             WaitingFor::ReplacementChoice { .. } => {
-                prompts.push(Prompt::ReplacementChoice);
+                prompts.push(Prompt::Replacement);
                 runner
                     .act(GameAction::ChooseReplacement { index: 0 })
                     .expect("order the replacements");
             }
             WaitingFor::EffectZoneChoice { .. } => {
-                prompts.push(Prompt::EffectZoneChoice);
+                prompts.push(Prompt::EffectZone);
                 runner
                     .act(GameAction::SelectCards {
                         cards: selection.to_vec(),
@@ -3244,7 +3244,7 @@ fn answer_until_priority(
                     .expect("choose the cards to return");
             }
             WaitingFor::DigChoice { .. } => {
-                prompts.push(Prompt::DigChoice);
+                prompts.push(Prompt::Dig);
                 runner
                     .act(GameAction::SelectCards {
                         cards: selection.to_vec(),
@@ -3371,11 +3371,7 @@ fn ever_after_returned_mimic_gives_no_counter_to_a_giant_returned_with_it() {
     let prompts = ever_after_returns(&mut runner, ever_after, &[mimic, giant], "Zombie");
 
     // Reach: the Mimic was delivered first and named Zombie at its own choice.
-    assert_eq!(
-        prompt_count(&prompts, Prompt::NamedChoice),
-        1,
-        "{prompts:?}"
-    );
+    assert_eq!(prompt_count(&prompts, Prompt::NamedType), 1, "{prompts:?}");
     assert_entered_in_order(&runner, mimic, giant);
     assert_mimic_chose(&runner, mimic, "Zombie");
     // Pre-existing rider-after-pause defect (on main, filed separately): a member whose
@@ -3528,16 +3524,8 @@ fn eerie_ultimatum_returned_mimic_gives_no_counter_to_a_giant_returned_with_it()
         eerie_ultimatum_returns(|scenario| metallic_mimic_in_graveyard(scenario, P0));
 
     // Reach: the cards were chosen, and the Mimic was delivered first and named Giant.
-    assert_eq!(
-        prompt_count(&prompts, Prompt::EffectZoneChoice),
-        1,
-        "{prompts:?}"
-    );
-    assert_eq!(
-        prompt_count(&prompts, Prompt::NamedChoice),
-        1,
-        "{prompts:?}"
-    );
+    assert_eq!(prompt_count(&prompts, Prompt::EffectZone), 1, "{prompts:?}");
+    assert_eq!(prompt_count(&prompts, Prompt::NamedType), 1, "{prompts:?}");
     assert_entered_in_order(&runner, mimic, giant);
     assert_mimic_chose(&runner, mimic, "Giant");
     assert_eq!(runner.state().objects[&giant].zone, Zone::Battlefield);
@@ -3552,11 +3540,7 @@ fn eerie_ultimatum_returned_priest_does_not_exile_a_giant_returned_with_it() {
     let (runner, prompts, priest, giant) =
         eerie_ultimatum_returns(|scenario| containment_priest_in_graveyard(scenario, P0));
 
-    assert_eq!(
-        prompt_count(&prompts, Prompt::EffectZoneChoice),
-        1,
-        "{prompts:?}"
-    );
+    assert_eq!(prompt_count(&prompts, Prompt::EffectZone), 1, "{prompts:?}");
     assert_eq!(runner.state().objects[&priest].zone, Zone::Battlefield);
     assert_eq!(runner.state().objects[&giant].zone, Zone::Battlefield);
     assert_entered_in_order(&runner, priest, giant);
@@ -3729,7 +3713,7 @@ fn collected_company_mimic_gives_no_counter_to_a_co_entering_elf() {
         let prompts = answer_until_priority(&mut runner, "Elf", &selection);
 
         // Reach: both cards were chosen and delivered in the selected order.
-        assert_eq!(prompt_count(&prompts, Prompt::DigChoice), 1, "{prompts:?}");
+        assert_eq!(prompt_count(&prompts, Prompt::Dig), 1, "{prompts:?}");
         for id in [mimic, mystic] {
             assert_eq!(runner.state().objects[&id].zone, Zone::Battlefield);
         }
@@ -3932,7 +3916,7 @@ fn ever_after_second_mimic_choice_is_not_preceded_by_a_replacement_choice() {
             parked
                 .proposed
                 .co_entrants()
-                .expect("B's proposal is a zone change")
+                .expect("B's proposal carries its co-entrants")
                 .as_slice()
                 .contains(&mimic_a_announced),
             "B's parked proposal names Mimic A as a co-entrant (trusted {trusted})"
@@ -3940,7 +3924,7 @@ fn ever_after_second_mimic_choice_is_not_preceded_by_a_replacement_choice() {
         let mut restored = GameRunner::from_state(restored);
         let prompts = answer_until_priority(&mut restored, "Zombie", &[]);
 
-        assert_eq!(prompts, vec![Prompt::NamedChoice], "trusted {trusted}");
+        assert_eq!(prompts, vec![Prompt::NamedType], "trusted {trusted}");
         for mimic in [mimic_a, mimic_b] {
             assert_mimic_chose(&restored, mimic, "Zombie");
             assert_eq!(restored.state().objects[&mimic].zone, Zone::Battlefield);

@@ -30,7 +30,8 @@ use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
 use crate::types::keywords::Keyword;
 use crate::types::player::PlayerId;
 use crate::types::proposed_event::{
-    AppliedReplacementKey, CoEntrants, EntrantAbilities, ProposedEvent, WithEntryEffect,
+    AppliedReplacementKey, CoEntrants, EnterWithGrants, EntrantAbilities, ProposedEvent,
+    WithEntryEffect,
 };
 use crate::types::zones::{EtbTapState, Zone};
 
@@ -3657,6 +3658,25 @@ pub(crate) fn apply_face_down_entry_profile(
     }
 }
 
+/// CR 708.3 + CR 400.4a: the preflight of a face-down battlefield entry, before the move. The
+/// object is turned face down before it enters, so the instant/sorcery entry guard inside
+/// `zones::move_to_zone`, which reads only `face_down`, admits a face-down instant or sorcery
+/// card (a manifested or cloaked spell card enters as a 2/2 creature, CR 701.40a / CR 701.58a),
+/// and the origin-exit LKI and the zone-change record the move captures carry no printing.
+/// Returns the prior `face_down` flag, so a rejected entry can roll back the flag (only the
+/// flag); `None` when the object does not exist. The single authority shared by delivery and
+/// the CR 614.12 projection (`filter::BattlefieldEntrantProjection`).
+pub(crate) fn turn_face_down_before_battlefield_entry(
+    state: &mut GameState,
+    object_id: ObjectId,
+) -> Option<bool> {
+    let obj = state.objects.get_mut(&object_id)?;
+    let prior_face_down = obj.face_down;
+    obj.face_down = true;
+    obj.conceal_printing();
+    Some(prior_face_down)
+}
+
 /// CR 708.3 + CR 608.2c + CR 614.12a + CR 707.2: what a battlefield entry installs on the new
 /// object right after the move, from what the entry event carries: the face-down profile
 /// (turned face down before it enters) and, right after it, the chain-referent publish its
@@ -3983,7 +4003,9 @@ pub(crate) fn deliver_replaced_zone_change(
                     matches!(
                         def.mode,
                         crate::types::statics::StaticMode::EntersWithAdditionalCounters { .. }
-                    ) && !co_entrants.entered_earlier(source_obj)
+                    ) && !co_entrants
+                        .as_deref()
+                        .is_some_and(|co_entrants| co_entrants.entered_earlier(source_obj))
                 })
                 .map(|(source_obj, def)| (source_obj.id, def.clone()))
                 .collect()
@@ -4071,19 +4093,10 @@ pub(crate) fn deliver_replaced_zone_change(
         // origin zone.
         let face_down_preflight = to == Zone::Battlefield && face_down_profile.is_some();
         let prior_face_down = if face_down_preflight {
-            state.objects.get(&object_id).map(|obj| obj.face_down)
+            turn_face_down_before_battlefield_entry(state, object_id)
         } else {
             None
         };
-        if face_down_preflight {
-            if let Some(obj) = state.objects.get_mut(&object_id) {
-                obj.face_down = true;
-                // CR 708.3: turned face down before it enters, so the origin-exit LKI and the
-                // zone-change record `move_to_zone` captures next carry no printing. A rejected
-                // entry rolls back only the flag.
-                obj.conceal_printing();
-            }
-        }
         // pod-lab loop-3 Q5: tracks whether this delivery took the plain,
         // non-merge, non-library-placement `move_to_zone` branch — the ONLY
         // branch whose own internal dirty-mark decision (see the carve-out
@@ -4313,7 +4326,8 @@ pub(crate) fn deliver_replaced_zone_change(
         // same-entry riders. Gated on a battlefield arrival like the counters
         // below; a redirected entry drops its grants with them.
         if entered_battlefield {
-            for grant in &enter_with_grants {
+            let grants = EnterWithGrants::of(&enter_with_grants);
+            for grant in grants {
                 // The source-as-SelfRef hook, mirroring the drain's Template
                 // dispatch: the grant binds the entering object.
                 let resolved = crate::game::ability_utils::build_resolved_from_def_with_targets(
@@ -4334,7 +4348,7 @@ pub(crate) fn deliver_replaced_zone_change(
                     debug_assert!(false, "entry-grant install must not prompt: {prompt:?}");
                 }
             }
-            if !enter_with_grants.is_empty() {
+            if !grants.is_empty() {
                 crate::game::layers::mark_layers_full(state);
             }
         }

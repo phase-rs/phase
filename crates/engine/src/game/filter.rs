@@ -5566,6 +5566,15 @@ pub(crate) struct BattlefieldEntrantProjection {
     entrant: ObjectId,
 }
 
+// Test-only count of carrier-bearing projections `for_proposed_entry` starts to build, each a
+// state clone and a full layer pass. Thread-local like the layer counters: a test reads only its
+// own thread's work.
+#[cfg(test)]
+thread_local! {
+    static PROPOSED_ENTRY_PROJECTION_BUILDS: core::cell::Cell<usize> =
+        const { core::cell::Cell::new(0) };
+}
+
 /// What an entry event already gives its entrant as it is placed on the scratch
 /// battlefield: the event's own fields, borrowed.
 struct EntrantStaging<'a> {
@@ -5587,12 +5596,9 @@ impl BattlefieldEntrantProjection {
     /// delivery does.
     ///
     /// Known gaps: an effect-carried entry gate does not install a with-entry
-    /// effect (no printed return carries both a gate and a `WithEntry` rider); a
+    /// effect (no printed return carries both a gate and a `WithEntry` rider); and a
     /// liminal (transformed or melded) entrant with a rider keeps its liminal read
-    /// (none printed); and a face-down entrant is placed without delivery's
-    /// face-down preflight, so a face-down instant or sorcery card is refused on
-    /// the scratch (CR 400.4a) and keeps today's read (no printed face-down return
-    /// carries a rider).
+    /// (none printed).
     pub(crate) fn new(
         state: &GameState,
         entrant: ObjectId,
@@ -5650,9 +5656,11 @@ impl BattlefieldEntrantProjection {
         else {
             return None;
         };
+        #[cfg(test)]
+        PROPOSED_ENTRY_PROJECTION_BUILDS.with(|builds| builds.set(builds.get() + 1));
         // CR 614.12 + CR 614.4: the continuous effects that "already exist" are those of the
         // board before the event; a member of this event delivered earlier is not on it.
-        let pre_event = Self::pre_event_board(state, co_entrants)?;
+        let pre_event = Self::pre_event_board(state, co_entrants.as_deref())?;
         let (scratch, origin) = Self::place(
             &pre_event,
             *object_id,
@@ -5684,14 +5692,18 @@ impl BattlefieldEntrantProjection {
     /// `state`'s, so it carries no synthetic battlefield-to-origin rows. The layer pass then
     /// reruns, so every remaining object's characteristics are current, because
     /// `layers::pin_entry_population_conditions` reads the pre-entry board as-is. Borrowed when
-    /// no member was delivered earlier. `None` when such a member has no entry record with an
+    /// the entry has no co-entrants or none was delivered earlier. `None` when such a member has
+    /// no entry record with an
     /// origin zone (guarded by a `debug_assert!`); the caller then keeps the read without the
     /// carried effect. That case is not expected: every battlefield delivery records its
     /// entered incarnation, and a member is a card moved from a zone.
     fn pre_event_board<'a>(
         state: &'a GameState,
-        co_entrants: &CoEntrants,
+        co_entrants: Option<&CoEntrants>,
     ) -> Option<Cow<'a, GameState>> {
+        let Some(co_entrants) = co_entrants else {
+            return Some(Cow::Borrowed(state));
+        };
         let earlier = co_entrants
             .as_slice()
             .iter()
@@ -5751,9 +5763,10 @@ impl BattlefieldEntrantProjection {
         Some(Self::finish(state.clone(), None, entrant, Some(effect)))
     }
 
-    /// Place the entrant onto a scratch copy of `state` the way delivery does: the move, the
-    /// characteristics its event installs, the back face, then the controller. Returns the
-    /// scratch and the entrant's origin zone, or `None` when it can't be placed.
+    /// Place the entrant onto a scratch copy of `state` the way delivery does: the face-down
+    /// preflight, the move, the characteristics its event installs, the back face, then the
+    /// controller. Returns the scratch and the entrant's origin zone, or `None` when it can't be
+    /// placed.
     fn place(
         state: &GameState,
         entrant: ObjectId,
@@ -5765,6 +5778,14 @@ impl BattlefieldEntrantProjection {
         }
         let mut scratch = state.clone();
         let mut events = Vec::new();
+        // CR 708.3 + CR 400.4a: a face-down entrant is turned face down before the move, by
+        // delivery's own preflight, so a face-down instant or sorcery card is placed.
+        if staging.face_down_profile.is_some() {
+            crate::game::zone_pipeline::turn_face_down_before_battlefield_entry(
+                &mut scratch,
+                entrant,
+            );
+        }
         // CR 400.7 + CR 613.7d: the zone-move primitive makes the new object and draws its timestamp on the scratch.
         crate::game::zones::move_to_zone_with_entry_flags(
             &mut scratch,
@@ -5856,6 +5877,89 @@ fn entry_projection_exists_for(
             entrant.static_definitions.as_slice(),
             target_filter_characteristic_reads(consumer),
         )
+}
+
+/// CR 614.12: whether `filter`'s verdict for an object is decided by the object's identity
+/// alone, or by nothing: `Any`, a fixed object reference compared by id (`SelfRef`,
+/// `OriginalSource`, `SpecificObject`), a player reference whose object arm is a constant
+/// `false`, and `Not`/`Or`/`And` of those. Such a verdict reads no characteristic, zone or
+/// status, so the entrant "as it would exist on the battlefield" gives the same answer as the
+/// entrant itself, and the CR 614.12 projection is not built for it (a host's own `SelfRef`
+/// entry replacement, Barkhide Troll's "This creature enters with a +1/+1 counter on it.").
+/// Under a trigger-source context `SelfRef` and `OriginalSource` read the source's live
+/// incarnation (`object_matches_trigger_source`), a fact about the source, not the entrant;
+/// a replacement's `valid_card` context carries none.
+///
+/// EXHAUSTIVE and wildcard-free: adding a `TargetFilter` variant forces a decision here.
+/// `false` means "may read the object" and keeps the projection. That includes the references
+/// that read a ledger, a chain binding or the paired/attached source, because the scratch
+/// placement can change those.
+fn filter_verdict_is_identity_only(filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::Not { filter: inner } => filter_verdict_is_identity_only(inner),
+        TargetFilter::Or { filters } | TargetFilter::And { filters } => {
+            filters.iter().all(filter_verdict_is_identity_only)
+        }
+        // `filter_inner_for_object`: a constant, or `object_id` compared with a fixed id.
+        TargetFilter::None
+        | TargetFilter::CastingSpell
+        | TargetFilter::Any
+        | TargetFilter::Player
+        | TargetFilter::AllPlayers
+        | TargetFilter::Controller
+        | TargetFilter::SourceController
+        | TargetFilter::Opponent
+        | TargetFilter::OriginalController
+        | TargetFilter::SourceChosenPlayer
+        | TargetFilter::ScopedPlayer
+        | TargetFilter::SelfRef
+        | TargetFilter::OriginalSource
+        | TargetFilter::SpecificObject { .. }
+        | TargetFilter::SpecificPlayer { .. }
+        | TargetFilter::PlayerWhoChoseLabel { .. }
+        | TargetFilter::PlayerMatching { .. }
+        | TargetFilter::Neighbor { .. } => true,
+        TargetFilter::Typed(_)
+        | TargetFilter::SourceOrPaired
+        | TargetFilter::StackAbility { .. }
+        | TargetFilter::StackSpell
+        | TargetFilter::AttachedTo
+        | TargetFilter::LastCreated
+        | TargetFilter::LastRevealed
+        | TargetFilter::LastZoneChanged
+        | TargetFilter::CostPaidObject
+        | TargetFilter::AmassedArmy
+        | TargetFilter::ChosenCard
+        | TargetFilter::TrackedSet { .. }
+        | TargetFilter::TrackedSetFiltered { .. }
+        | TargetFilter::ExiledBySource
+        | TargetFilter::ExiledCardByIndex { .. }
+        | TargetFilter::TriggeringSpellController
+        | TargetFilter::TriggeringSpellOwner
+        | TargetFilter::TriggeringSourceController
+        | TargetFilter::EventTargetController
+        | TargetFilter::TriggeringPlayer
+        | TargetFilter::TriggeringSource
+        | TargetFilter::EventTarget
+        | TargetFilter::ParentTarget
+        | TargetFilter::ParentTargetSlot { .. }
+        | TargetFilter::DeclaredPlayer { .. }
+        | TargetFilter::ParentTargetController
+        | TargetFilter::ParentTargetOwner
+        | TargetFilter::PostReplacementSourceController
+        | TargetFilter::PostReplacementDamageSource
+        | TargetFilter::PostReplacementDamageTarget
+        | TargetFilter::PostReplacementDamageTargetOwner
+        | TargetFilter::ControllerAndControlledPermanents { .. }
+        | TargetFilter::DefendingPlayer
+        | TargetFilter::AttackedPlayerOrPlaneswalker
+        | TargetFilter::HasChosenName
+        | TargetFilter::ChosenDamageSource { .. }
+        | TargetFilter::Named { .. }
+        | TargetFilter::Owner
+        | TargetFilter::AffectedObjectOwner
+        | TargetFilter::GrantingObject { .. } => false,
+    }
 }
 
 /// CR 614.12 + CR 613.1d + CR 613.1e: the projection's allowlist — the own
@@ -6106,9 +6210,14 @@ pub fn matches_target_filter_on_battlefield_entry(
         } if *to == Zone::Battlefield => {
             // CR 614.12 + CR 611.2e: an entry whose resolution applies a simultaneous "is/has"
             // effect is checked with that effect applied; every other entry keeps the reads below.
-            if let Some(projection) = BattlefieldEntrantProjection::for_proposed_entry(state, event)
-            {
-                return projection.matches(filter, ctx);
+            // A filter decided by identity alone reads nothing the effect changes, so it keeps
+            // the reads below and builds no projection.
+            if !filter_verdict_is_identity_only(filter) {
+                if let Some(projection) =
+                    BattlefieldEntrantProjection::for_proposed_entry(state, event)
+                {
+                    return projection.matches(filter, ctx);
+                }
             }
             if let Some(profile) = face_down_profile {
                 // CR 708.2a + CR 708.3 + CR 708.10 + CR 614.12: an object
@@ -14674,6 +14783,137 @@ mod tests {
         );
     }
 
+    /// CR 708.3 + CR 400.4a + CR 701.40a: the projection places a face-down entrant by delivery's
+    /// own face-down preflight (`zone_pipeline::turn_face_down_before_battlefield_entry`), so an
+    /// instant card entering face down is placed as the face-down 2/2 creature rather than refused,
+    /// and the carried effect applies to it. Manifest can turn an instant face down (Whisperwood
+    /// Elemental, "At the beginning of your end step, manifest the top card of your library."; a
+    /// manifested Lightning Bolt). The graveyard origin is the fixture helper's, and no printed
+    /// face-down entry carries a with-entry rider: the carried Zombie subtype is the nearest
+    /// printed shape (Rise from the Grave, "That creature is a black Zombie in addition to its
+    /// other colors and types."). Sibling: the same card entering face up is refused (CR 400.4a).
+    #[test]
+    fn battlefield_entrant_projection_places_a_face_down_instant_card() {
+        let (mut state, source, _) = rider_board(Entrant::GrizzlyBears);
+        let bolt = graveyard_card(&mut state, "Lightning Bolt", &[CoreType::Instant]);
+        let profile = FaceDownProfile::vanilla_2_2();
+        let staging = |face_down_profile| EntrantStaging {
+            controller_override: None,
+            enter_transformed: false,
+            face_down_profile,
+            chain_referent: crate::types::zones::ChainReferentIntent::Silent,
+            enter_with_choices: None,
+            enter_as_copy: None,
+        };
+
+        let (scratch, origin) =
+            BattlefieldEntrantProjection::place(&state, bolt, &staging(Some(&profile)))
+                .expect("a face-down instant card is placed");
+        assert_eq!(origin, Zone::Graveyard);
+        assert_eq!(scratch.objects[&bolt].zone, Zone::Battlefield);
+        assert!(scratch.objects[&bolt].face_down);
+        assert!(
+            BattlefieldEntrantProjection::place(&state, bolt, &staging(None)).is_none(),
+            "sibling: face up, an instant card can't enter the battlefield (CR 400.4a)"
+        );
+
+        let mut event = carried_entry(
+            bolt,
+            Zone::Battlefield,
+            Some(carried_effect(source, zombie_rider())),
+        );
+        if let ProposedEvent::ZoneChange {
+            face_down_profile, ..
+        } = &mut event
+        {
+            *face_down_profile = Some(Box::new(profile.clone()));
+        }
+        assert_projection_reads(
+            &state,
+            source,
+            &event,
+            &[subtype_filter("Zombie"), power_is(2)],
+            &[],
+        );
+        assert_eq!(
+            state.objects[&bolt].zone,
+            Zone::Graveyard,
+            "live state untouched"
+        );
+        assert!(!state.objects[&bolt].face_down, "live state untouched");
+    }
+
+    /// CR 614.12: a filter decided by the entrant's identity alone is answered without building
+    /// the projection, with the projection's answer. Barkhide Troll's own entry replacement,
+    /// "This creature enters with a +1/+1 counter on it.", is a `SelfRef` filter read with the
+    /// Troll as its source; the carried effect is Xu-Ifit, Osteoharmonist's "It's a Skeleton in
+    /// addition to its other types and has no abilities.". Reach guard: a characteristic filter
+    /// on the same entry builds one.
+    #[test]
+    fn battlefield_entry_identity_only_filter_builds_no_projection() {
+        let (state, source, troll) = rider_board(Entrant::BarkhideTroll);
+        let skeleton_with_no_abilities = vec![
+            ContinuousModification::AddSubtype {
+                subtype: "Skeleton".to_string(),
+            },
+            ContinuousModification::RemoveAllAbilities,
+        ];
+        let event = carried_entry(
+            troll,
+            Zone::Battlefield,
+            Some(carried_effect(source, skeleton_with_no_abilities)),
+        );
+        let host_ctx = FilterContext::from_source(&state, troll);
+        let other_ctx = FilterContext::from_source(&state, source);
+        let builds = || PROPOSED_ENTRY_PROJECTION_BUILDS.with(core::cell::Cell::get);
+        let projection =
+            BattlefieldEntrantProjection::for_proposed_entry(&state, &event).expect("a carrier");
+        let projected_host = projection.matches(&TargetFilter::SelfRef, &host_ctx);
+        let projected_other = projection.matches(&TargetFilter::SelfRef, &other_ctx);
+        assert!(projected_host, "the Troll's own SelfRef names it");
+        assert!(!projected_other, "another source's SelfRef does not");
+
+        let before = builds();
+        assert!(super::matches_target_filter_on_battlefield_entry(
+            &state,
+            &event,
+            &subtype_filter("Skeleton"),
+            &host_ctx
+        ));
+        assert_eq!(builds(), before + 1, "reach: a subtype filter is projected");
+
+        let before = builds();
+        assert_eq!(
+            super::matches_target_filter_on_battlefield_entry(
+                &state,
+                &event,
+                &TargetFilter::SelfRef,
+                &host_ctx
+            ),
+            projected_host
+        );
+        assert_eq!(
+            super::matches_target_filter_on_battlefield_entry(
+                &state,
+                &event,
+                &TargetFilter::SelfRef,
+                &other_ctx
+            ),
+            projected_other
+        );
+        assert_eq!(builds(), before, "a SelfRef filter builds no projection");
+
+        // The classification: identity references and their compositions only.
+        assert!(super::filter_verdict_is_identity_only(&TargetFilter::Not {
+            filter: Box::new(TargetFilter::SelfRef),
+        }));
+        assert!(!super::filter_verdict_is_identity_only(
+            &TargetFilter::And {
+                filters: vec![TargetFilter::SelfRef, creature_filter()],
+            }
+        ));
+    }
+
     /// R-U2 h — the delivered and proposed constructors read the same characteristics for the
     /// same entry: after a real move of the Bears on a clone, `entered` and the proposal's
     /// `for_proposed_entry` agree on card types, colors, power/toughness and keywords.
@@ -14723,7 +14963,7 @@ mod tests {
         let giant_co_entrants = CoEntrants::for_entrant(&announced, giant);
 
         assert!(matches!(
-            BattlefieldEntrantProjection::pre_event_board(&state, &giant_co_entrants),
+            BattlefieldEntrantProjection::pre_event_board(&state, giant_co_entrants.as_deref()),
             Some(Cow::Borrowed(_))
         ));
 
@@ -14731,7 +14971,7 @@ mod tests {
         crate::game::zones::move_to_zone(&mut state, bears, Zone::Battlefield, &mut Vec::new());
         let ledger_len = state.zone_changes_this_turn.len();
         let Some(Cow::Owned(board)) =
-            BattlefieldEntrantProjection::pre_event_board(&state, &giant_co_entrants)
+            BattlefieldEntrantProjection::pre_event_board(&state, giant_co_entrants.as_deref())
         else {
             panic!("a member delivered earlier makes a detached copy");
         };
