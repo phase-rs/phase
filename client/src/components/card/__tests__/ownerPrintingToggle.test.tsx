@@ -1116,7 +1116,7 @@ describe("owner printing remaining carrier surfaces (group 2)", () => {
       "components/modal/CardChoiceModal.tsx": 22, "components/modal/cardChoice/libraryModals.tsx": 6,
       "components/modal/cardChoice/SelectableCardGrid.tsx": 1, "components/modal/RetargetChoiceModal.tsx": 1,
       "components/modal/SeparatePilesModal.tsx": 2, "components/chrome/DebugLibraryViewer.tsx": 1,
-      "pages/GamePage.tsx": 2,
+      "components/modal/ReplacementDecisionOrderModal.tsx": 1, "pages/GamePage.tsx": 2,
     };
     const expectedHelpers: Record<string, number> = {
       "components/animation/ResolvedAnimationImage.tsx": 1, "components/stack/StackEntry.tsx": 1,
@@ -1125,6 +1125,7 @@ describe("owner printing remaining carrier surfaces (group 2)", () => {
       "components/zone/ZoneViewer.tsx": 1, "components/modal/CardChoiceModal.tsx": 20,
       "components/modal/cardChoice/libraryModals.tsx": 6,
       "components/modal/cardChoice/SelectableCardGrid.tsx": 1, "components/modal/RetargetChoiceModal.tsx": 1,
+      "components/modal/ReplacementDecisionOrderModal.tsx": 1,
     };
     const hooks: Record<string, number> = {};
     const images: Record<string, number> = {};
@@ -1240,10 +1241,10 @@ describe("owner printing remaining carrier surfaces (group 2)", () => {
     expect(Object.values(hooks).reduce((sum, count) => sum + count, 0)).toBe(29);
     expect(Object.values(objectHooks).reduce((sum, count) => sum + count, 0)).toBe(17);
     expect(images).toEqual(expectedImages);
-    expect(Object.values(images).reduce((sum, count) => sum + count, 0)).toBe(47);
+    expect(Object.values(images).reduce((sum, count) => sum + count, 0)).toBe(48);
     expect(helpers).toEqual(expectedHelpers);
-    expect(Object.values(helpers).reduce((sum, count) => sum + count, 0)).toBe(36);
-    expect(Object.keys(helpers)).toHaveLength(11);
+    expect(Object.values(helpers).reduce((sum, count) => sum + count, 0)).toBe(37);
+    expect(Object.keys(helpers)).toHaveLength(12);
     expect(exclusions).toEqual({ "components/modal/BoosterPackModal.tsx": 1, "pages/GamePage.tsx": 1 });
     expect(intermediates).toEqual({ HandCard: 1, ZoneFanCard: 2, DrawerCard: 1, CardTextboxPreview: 3 });
   }, V15_CENSUS_TIMEOUT_MS);
