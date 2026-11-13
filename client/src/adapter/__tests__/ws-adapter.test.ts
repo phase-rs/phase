@@ -7615,13 +7615,16 @@ describe("WebSocketAdapter — acquired socket ownership", () => {
     });
 
     it("retires a reconnect candidate and its lease at once when disposal lands inside the transport's setup send", async () => {
-      const codec = scriptedCodec();
-      const provider = vi.fn(() => Promise.resolve(codec.session));
+      // Distinct sessions: the incumbent's release must not stand in for the candidate's.
+      const incumbentCodec = scriptedCodec();
+      const candidateCodec = scriptedCodec();
+      const provider = vi.fn()
+        .mockResolvedValueOnce(incumbentCodec.session)
+        .mockResolvedValue(candidateCodec.session);
       const { adapter, raw } = await establishCodecAdapter(provider);
       expect(adapter.tryReconnect(session() as never)).toBe(true);
       await vi.waitFor(() => expect(MockWebSocket.last).not.toBe(raw));
       const candidate = latestSocket();
-      const closesBefore = codec.close.mock.calls.length;
       candidate.sendReceipt = vi.fn(() => {
         adapter.dispose();
         return new Promise<void>(() => undefined);
@@ -7629,8 +7632,11 @@ describe("WebSocketAdapter — acquired socket ownership", () => {
       candidate.dispatchSynthetic("message", CODEC_SESSION_HELLO);
       await vi.waitFor(() => expect(candidate.sendReceipt).toHaveBeenCalledOnce());
       await vi.advanceTimersByTimeAsync(0);
+      // Before the receipt or any deadline: the candidate's own lease is
+      // released exactly once, and the incumbent's separately.
       expect(candidate.close).toHaveBeenCalled();
-      expect(codec.close.mock.calls.length).toBeGreaterThan(closesBefore);
+      expect(candidateCodec.close).toHaveBeenCalledOnce();
+      expect(incumbentCodec.close).toHaveBeenCalledOnce();
     });
 
     it("fails an initial join at the bound when its setup receipt never settles on a socket that stays open", async () => {
