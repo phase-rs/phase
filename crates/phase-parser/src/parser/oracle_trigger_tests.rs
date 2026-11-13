@@ -23053,6 +23053,97 @@ fn a_phase_triggers_scope_is_whose_step_not_its_effects_target() {
     }
 }
 
+/// CR 102.1 + CR 102.3 + CR 303.4m: a phase trigger's turn-owner possessive decides whose step
+/// it is, as a turn constraint or a player scope.
+#[test]
+fn a_phase_triggers_turn_owner_is_its_possessive() {
+    let other_player = Some(TargetFilter::PlayerMatching {
+        player: Box::new(PlayerFilter::AllExcept {
+            exclude: Box::new(PlayerFilter::Controller),
+            relation: PlayerRelation::All,
+        }),
+    });
+    let opponents_turn = Some(TriggerConstraint::OnlyDuringOpponentsTurn);
+    for (name, line, phase, constraint, scope) in [
+        (
+            "Sentinel of the Eternal Watch",
+            "At the beginning of combat on each opponent's turn, tap target creature that player controls.",
+            Phase::BeginCombat,
+            opponents_turn.clone(),
+            None,
+        ),
+        (
+            "Web of Inertia",
+            "At the beginning of combat on each opponent's turn, that player may exile a card from their graveyard. If the player doesn't, creatures they control can't attack you this turn.",
+            Phase::BeginCombat,
+            opponents_turn.clone(),
+            None,
+        ),
+        (
+            "Fight or Flight",
+            "At the beginning of combat on each opponent's turn, separate all creatures that player controls into two piles. Only creatures in the pile of their choice can attack this turn.",
+            Phase::BeginCombat,
+            opponents_turn.clone(),
+            None,
+        ),
+        (
+            "Champions of Minas Tirith",
+            "At the beginning of combat on each opponent's turn, if you're the monarch, that opponent may pay {X}, where X is the number of cards in their hand. If they don't, they can't attack you this combat.",
+            Phase::BeginCombat,
+            opponents_turn.clone(),
+            None,
+        ),
+        (
+            "Overencumbered",
+            "At the beginning of combat on enchanted opponent's turn, that player may pay {1} for each artifact they control. If they don't, creatures can't attack this combat.",
+            Phase::BeginCombat,
+            None,
+            Some(TargetFilter::AttachedTo),
+        ),
+        (
+            "Tenuous Truce",
+            "At the beginning of enchanted opponent's end step, you and that player each draw a card.",
+            Phase::End,
+            None,
+            Some(TargetFilter::AttachedTo),
+        ),
+        (
+            "Well of Ideas",
+            "At the beginning of each other player's draw step, that player draws an additional card.",
+            Phase::Draw,
+            None,
+            other_player.clone(),
+        ),
+        (
+            "Miss Demeanor",
+            "At the beginning of each other player's upkeep, you may compliment that player on their game play. If you don't, sacrifice this creature.",
+            Phase::Upkeep,
+            None,
+            other_player.clone(),
+        ),
+        (
+            "Additive Evolution",
+            "At the beginning of combat on your turn, put a +1/+1 counter on target creature you control. It gains vigilance until end of turn.",
+            Phase::BeginCombat,
+            Some(TriggerConstraint::OnlyDuringYourTurn),
+            None,
+        ),
+        (
+            "Peace in Our Time",
+            "At the beginning of combat on each player's turn, that player may draw a card. If they do, they can't attack this turn and you put a peace counter on this enchantment.",
+            Phase::BeginCombat,
+            None,
+            Some(TargetFilter::Player),
+        ),
+    ] {
+        let def = parse_trigger_line(line, name);
+        assert_eq!(def.mode, TriggerMode::Phase, "{name}");
+        assert_eq!(def.phase, Some(phase), "{name}");
+        assert_eq!(def.constraint, constraint, "{name}");
+        assert_eq!(def.valid_target, scope, "{name}");
+    }
+}
+
 #[test]
 fn phase_trigger_enchanted_players_first_upkeep() {
     let def = parse_trigger_line(

@@ -1204,3 +1204,80 @@ fn festival_is_not_cast_in_an_upkeep_without_an_active_player() {
         assert_eq!((castable, applies), (!leaves, !leaves), "leaves={leaves}");
     }
 }
+
+/// CR 102.1 + CR 102.3: "each opponent's turn" (Sentinel of the Eternal Watch) and "each other
+/// player's draw step" (Well of Ideas) are steps of another player's turn, so on its controller's
+/// own turn neither triggers.
+#[test]
+fn a_trigger_on_another_players_turn_does_not_fire_on_its_controllers() {
+    let db = shared_card_db().expect("card db");
+    let mut scenario = GameScenario::new_n_player(4, 42);
+    scenario.at_phase(Phase::Upkeep);
+    let mut sentinels = Vec::new();
+    let mut wells = Vec::new();
+    let mut creatures = Vec::new();
+    for seat in [P0, P1] {
+        let sentinel =
+            scenario.add_real_card(seat, "Sentinel of the Eternal Watch", Zone::Battlefield, db);
+        sentinels.push(sentinel);
+        wells.push(scenario.add_real_card(seat, "Well of Ideas", Zone::Battlefield, db));
+        creatures.push(vec![sentinel, scenario.add_vanilla(seat, 2, 2)]);
+        scenario.with_library_top(
+            seat,
+            &[
+                "Filler A", "Filler B", "Filler C", "Filler D", "Filler E", "Filler F",
+            ],
+        );
+    }
+    let mut runner = scenario.build();
+    let library = runner.state().players[0].library.len();
+
+    let mut stacked: Vec<(Phase, ObjectId)> = Vec::new();
+    for _ in 0..300 {
+        let state = runner.state();
+        for entry in &state.stack {
+            if !stacked.contains(&(state.phase, entry.source_id)) {
+                stacked.push((state.phase, entry.source_id));
+            }
+        }
+        match &state.waiting_for {
+            WaitingFor::DeclareAttackers { .. } => break,
+            WaitingFor::Priority { .. } => pass(&mut runner),
+            WaitingFor::OrderTriggers { triggers, .. } => {
+                let order = (0..triggers.len()).collect();
+                runner
+                    .act(GameAction::OrderTriggers { order })
+                    .expect("CR 603.3b: order the triggers");
+            }
+            WaitingFor::TriggerTargetSelection { .. } => {
+                runner
+                    .choose_first_legal_target()
+                    .expect("choose a trigger target");
+            }
+            other => panic!("unexpected prompt in P0's turn: {other:?}"),
+        }
+    }
+    let state = runner.state();
+    assert!(matches!(
+        state.waiting_for,
+        WaitingFor::DeclareAttackers { .. }
+    ));
+
+    let in_step = |phase: Phase| -> Vec<ObjectId> {
+        stacked
+            .iter()
+            .filter(|(p, _)| *p == phase)
+            .map(|&(_, id)| id)
+            .collect()
+    };
+    assert!(in_step(Phase::Draw).contains(&wells[1]), "{stacked:?}");
+    // Turn draw, two from P0's Well, one from P1's Well; only P1's Sentinel stacks.
+    let drawn = library - state.players[0].library.len();
+    assert_eq!(
+        (drawn, in_step(Phase::BeginCombat)),
+        (4, vec![sentinels[1]]),
+        "{stacked:?}"
+    );
+    let tapped = |ids: &[ObjectId]| ids.iter().filter(|id| state.objects[id].tapped).count();
+    assert_eq!((tapped(&creatures[0]), tapped(&creatures[1])), (1, 0));
+}

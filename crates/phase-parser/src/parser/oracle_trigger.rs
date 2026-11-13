@@ -20411,7 +20411,10 @@ fn try_parse_phase_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefinitio
     } else {
         turn_constraint
     };
-    if scan_contains(phase_text, "enchanted player's") {
+    // CR 303.4m: "enchanted player's/opponent's [step]" is a step of the enchanted player's turn.
+    if nom_primitives::scan_at_word_boundaries(phase_text, parse_enchanted_player_possessive)
+        .is_some()
+    {
         def.valid_target = Some(TargetFilter::AttachedTo);
     }
     // CR 303.4e + CR 109.4 + CR 503.1: "the upkeep of enchanted creature's
@@ -20429,13 +20432,11 @@ fn try_parse_phase_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefinitio
     {
         def.valid_target = Some(TargetFilter::ParentTargetController);
     }
-    // CR 102.1 + CR 800.4j: "each player's [step]" is a step of a player's turn, a scope
-    // the unscoped "each [step]" does not carry.
-    if def.valid_target.is_none()
-        && nom_primitives::scan_at_word_boundaries(phase_text, parse_each_players_possessive)
-            .is_some()
-    {
-        def.valid_target = Some(TargetFilter::Player);
+    // CR 102.1 + CR 800.4j: "each [other] player's [step]" is a step of a player's turn, a
+    // scope the unscoped "each [step]" does not carry.
+    if def.valid_target.is_none() {
+        def.valid_target =
+            nom_primitives::scan_at_word_boundaries(phase_text, parse_each_players_possessive);
     }
     if scan_contains(phase_text, "chosen player's")
         || scan_contains(phase_text, "chosen player\u{2019}s ")
@@ -24573,14 +24574,34 @@ fn parse_phase_determiner_prefix(input: &str) -> OracleResult<'_, ()> {
     value((), alt((tag("each player's "), tag("each "), tag("the ")))).parse(input)
 }
 
-fn parse_each_players_possessive(input: &str) -> OracleResult<'_, ()> {
+fn parse_each_players_possessive(input: &str) -> OracleResult<'_, TargetFilter> {
+    delimited(
+        tag("each "),
+        alt((
+            value(TargetFilter::Player, tag("player")),
+            value(
+                TargetFilter::PlayerMatching {
+                    player: Box::new(PlayerFilter::AllExcept {
+                        exclude: Box::new(PlayerFilter::Controller),
+                        relation: PlayerRelation::All,
+                    }),
+                },
+                tag("other player"),
+            ),
+        )),
+        alt((tag("'s "), tag("\u{2019}s "), tag("s "))),
+    )
+    .parse(input)
+}
+
+fn parse_enchanted_player_possessive(input: &str) -> OracleResult<'_, ()> {
     value(
         (),
-        alt((
-            tag("each player's "),
-            tag("each player\u{2019}s "),
-            tag("each players "),
-        )),
+        (
+            tag("enchanted "),
+            alt((tag("player"), tag("opponent"))),
+            tag("'s"),
+        ),
     )
     .parse(input)
 }
@@ -24644,20 +24665,10 @@ fn parse_turn_constraint(phase_text: &str) -> Option<TriggerConstraint> {
     if let Ok((_, constraint)) = parse_turn_possessive_prefix(phase_text) {
         return Some(constraint);
     }
-    // Suffix-based: "combat on your turn", "each combat on your turn"
-    let mut remaining = phase_text;
-    while !remaining.is_empty() {
-        if tag::<_, _, OracleError<'_>>("on your turn")
-            .parse(remaining)
-            .is_ok()
-        {
-            return Some(TriggerConstraint::OnlyDuringYourTurn);
-        }
-        remaining = remaining
-            .find(' ')
-            .map_or("", |i| remaining[i + 1..].trim_start());
-    }
-    None
+    // Suffix-based: "combat on your turn", "combat on each opponent's turn"
+    nom_primitives::scan_at_word_boundaries(phase_text, |i| {
+        delimited(tag("on "), parse_turn_possessive_prefix, tag("turn")).parse(i)
+    })
 }
 
 /// CR 603.1: match the turn specifier that follows "during " in a trigger's
