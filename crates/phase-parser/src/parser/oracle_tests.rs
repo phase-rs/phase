@@ -27111,6 +27111,62 @@ fn plate_armor_equip_cost_reduction_stays_on_equip_ability() {
     );
 }
 
+/// CR 725.1 + CR 109.5 + CR 602.2b: Crown of Gondor's equip discount is gated
+/// on a player designation ("if you're the monarch"), not on a filter or a
+/// quantity. The designation must be captured on the equip ability as a typed
+/// `ParsedCondition::IsMonarch` restriction condition; otherwise the whole
+/// trailing sentence is swallowed by the equip line and the discount is lost.
+#[test]
+fn crown_of_gondor_equip_discount_carries_monarch_condition() {
+    let result = parse(
+        "Equipped creature gets +1/+1 for each creature you control.\n\
+         When a legendary creature you control enters, if there is no monarch, you become the monarch.\n\
+         Equip {4}. This ability costs {3} less to activate if you're the monarch.",
+        "Crown of Gondor",
+        &[Keyword::Equip(ManaCost::Cost {
+            generic: 4,
+            shards: vec![],
+        })],
+        &["Artifact"],
+        &["Equipment"],
+    );
+
+    assert_eq!(result.abilities.len(), 1);
+    let equip = &result.abilities[0];
+    assert_eq!(
+        equip.cost,
+        Some(AbilityCost::Mana {
+            cost: ManaCost::Cost {
+                generic: 4,
+                shards: vec![],
+            },
+        })
+    );
+    let reduction = equip
+        .cost_reduction
+        .as_ref()
+        .expect("the monarch discount must stay on the equip ability");
+    assert_eq!(
+        reduction.mode,
+        crate::types::statics::CostModifyMode::Reduce
+    );
+    assert_eq!(reduction.amount_per, 3);
+    assert_eq!(reduction.count, QuantityExpr::Fixed { value: 1 });
+    assert_eq!(
+        reduction.condition,
+        Some(ParsedCondition::IsMonarch),
+        "the 'if you're the monarch' gate must be the typed monarch leaf"
+    );
+    assert!(
+        result
+            .parse_warnings
+            .iter()
+            .all(|warning| !warning.to_string().contains("Condition_If")),
+        "the discount clause must not survive as a swallowed Condition_If: {:?}",
+        result.parse_warnings
+    );
+}
+
 /// Regression: pin the broader "Equipment you control have equip {N}"
 /// class — Astor (no ability-word prefix, no em-dash on the line) and
 /// Syr Gwyn (Knight-restricted equip {0}) were silently affected by the

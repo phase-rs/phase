@@ -12,8 +12,8 @@ use super::oracle_nom::condition as nom_condition;
 use super::oracle_nom::primitives as nom_primitives;
 use super::oracle_target::parse_type_phrase_folding;
 use crate::types::ability::{
-    Comparator, FilterProp, ParsedCondition, QuantityExpr, QuantityRef, StaticCondition,
-    TargetFilter, TypedFilter,
+    Comparator, FilterProp, ParsedCondition, PlayerScope, QuantityExpr, QuantityRef,
+    StaticCondition, TargetFilter, TypedFilter,
 };
 use crate::types::card_type::CoreType;
 use crate::types::counter::CounterMatch;
@@ -298,6 +298,15 @@ fn static_condition_to_restriction_condition(
         }),
         // Player-state leaves with an exact restriction evaluator.
         StaticCondition::HasCityBlessing => Some(ParsedCondition::HasCityBlessing),
+        // CR 725.1 + CR 109.5 + CR 602.5b: "if you're the monarch" is a
+        // player-designation leaf read off the ACTIVATOR, exactly like the
+        // city's blessing above (Crown of Gondor's equip discount). Only the
+        // controller-addressed subject converts: the scoped-player anaphor
+        // ("that player is the monarch") has no referent at a cast/activation
+        // gate, so it stays rejected rather than approximated.
+        StaticCondition::IsMonarch {
+            player: PlayerScope::Controller,
+        } => Some(ParsedCondition::IsMonarch),
         // CR 702.179e: max speed is a player-state leaf in the same sense as the
         // city's blessing — a designation read off the scoped player, with no
         // filter or quantity to approximate. Both readings call

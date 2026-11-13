@@ -1,0 +1,7 @@
+{
+  "surfaces": [
+    "full",
+    "wire"
+  ],
+  "reason": "CR 725.1 + CR 601.2f + CR 602.2b: ParsedCondition gains IsMonarch, the restriction-layer monarch designation used to price 'this ability costs {N} less to activate if you're the monarch' (Crown of Gondor's equip). It is serialized in GameState card/ability definitions and activation restrictions; older full-game and P2P peers cannot deserialize the new tagged variant."
+}

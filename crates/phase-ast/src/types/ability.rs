@@ -17950,6 +17950,21 @@ pub enum ParsedCondition {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         specific: Option<crate::types::dungeon::DungeonId>,
     },
+    /// CR 725.1 + CR 109.5 + CR 602.5b: True when the ACTIVATING player holds
+    /// the monarch designation — the restriction-layer reading of "if you're
+    /// the monarch" (Crown of Gondor's equip discount). A player-designation
+    /// leaf in the same sense as the city's blessing, the enduring story and
+    /// dungeon completion above: it reads a status off the scoped player and
+    /// carries no filter or quantity, so
+    /// `static_condition_to_restriction_condition` converts it exactly instead
+    /// of rejecting it.
+    ///
+    /// Activator-relative like `HasCityBlessing`, because the printed clause is
+    /// addressed to whoever is activating ("if you're"). CR 602.2 lets an
+    /// `activator_filter` of `PlayerFilter::All` make the activator someone
+    /// other than the source's controller, and the designation read must follow
+    /// that player. CR 725.5: a vacant designation makes the leaf false.
+    IsMonarch,
     /// CR 702.178a: True when the SOURCE's player has max speed — its
     /// controller on the battlefield, its owner anywhere else, per the "Max
     /// Speed" glossary entry (sense 2). Unlike its designation siblings above,
