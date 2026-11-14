@@ -188,6 +188,27 @@ fn replacement_source_host(rid: ReplacementId, def: &ReplacementDefinition) -> O
     def.source_object.unwrap_or(rid.source)
 }
 
+/// CR 614.1a + CR 611.2a: the floating replacements a spell or ability created
+/// that still stand (not used up), each with the host its host-relative
+/// references name, as the candidate scan in `find_applicable_replacements`
+/// reads them.
+pub(crate) fn live_floating_replacements(
+    state: &GameState,
+) -> impl Iterator<Item = (ObjectId, &ReplacementDefinition)> {
+    state
+        .pending_damage_replacements
+        .iter()
+        .enumerate()
+        .filter(|(_, def)| !def.is_consumed)
+        .map(|(index, def)| {
+            let rid = ReplacementId {
+                source: ObjectId(0),
+                index,
+            };
+            (replacement_source_host(rid, def), def)
+        })
+}
+
 fn compleated_replacement_id(object_id: ObjectId) -> ReplacementId {
     ReplacementId {
         source: object_id,

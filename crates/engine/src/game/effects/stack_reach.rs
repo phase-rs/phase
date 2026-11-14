@@ -7,11 +7,13 @@ use crate::game::ability_utils::{
     apply_instead_swap, flatten_specified_targets_in_chain, validate_targets_in_chain,
 };
 use crate::game::functioning_abilities::{active_replacements, replacement_functions_in_zone};
-use crate::game::replacement::{find_applicable_replacements, replacement_registry};
+use crate::game::replacement::{
+    find_applicable_replacements, live_floating_replacements, replacement_registry,
+};
 use crate::game::{stack, targeting};
 use crate::types::ability::{
-    AbilityCondition, Effect, EffectOutcomeSignal, EffectScope, ObjectScope, ResolvedAbility,
-    TapStateChange, TargetFilter, TargetRef,
+    AbilityCondition, Effect, EffectOutcomeSignal, EffectScope, ObjectScope, ReplacementDefinition,
+    ResolvedAbility, TapStateChange, TargetFilter, TargetRef,
 };
 use crate::types::game_state::{GameState, StackEntry, StackEntryKind};
 use crate::types::identifiers::ObjectId;
@@ -587,9 +589,8 @@ fn replacement_may_come_to_apply(
                 .is_some_and(|host| replaces(kind, host, event))
         }) || active_replacements(board)
             .any(|(_, object, definition)| replaces(&definition.event, object.id, event))
-            || board.pending_damage_replacements.iter().any(|definition| {
-                !definition.is_consumed && replaces(&definition.event, ObjectId(0), event)
-            })
+            || live_floating_replacements(board)
+                .any(|(host, definition)| replaces(&definition.event, host, event))
     })
 }
 
@@ -722,7 +723,11 @@ fn hidden_library_move(destination: Zone) -> ProposedEvent {
 /// apply to some card may apply. A definition is set aside only on facts that
 /// need no knowledge of that card: its event kind, its destination zone, and
 /// a `valid_card` that names its own host, which sits in a public zone and so
-/// is not the hidden card. The replacements of objects in hidden zones are not
+/// is not the hidden card. The definitions read are those the live candidate
+/// scan reads: those of objects in public zones, and the floating ones a
+/// resolved spell or ability left standing (CR 611.2a; Magus of the Will's "If
+/// a card would be put into your graveyard from anywhere this turn, exile that
+/// card instead"). The replacements of objects in hidden zones are not
 /// public. The resolver currently does not admit the hidden card's own
 /// from-anywhere redirect when it declares no active zones. It does admit
 /// the card's own entry replacement (CR 614.12), so a move onto the
@@ -746,17 +751,20 @@ fn hidden_library_move_may_be_replaced(
     }
     let event = hidden_library_move(destination);
     let registry = replacement_registry();
-    active_replacements(board).any(|(_, host, definition)| {
-        host.zone.is_public()
-            && replacement_functions_in_zone(host, definition)
-            && definition
-                .destination_zone
-                .is_none_or(|zone| zone == destination)
+    let may_apply = |host: ObjectId, definition: &ReplacementDefinition| {
+        definition
+            .destination_zone
+            .is_none_or(|zone| zone == destination)
             && !matches!(definition.valid_card, Some(TargetFilter::SelfRef))
             && registry
                 .get(&definition.event)
-                .is_some_and(|handler| (handler.matcher)(&event, host.id, board))
-    })
+                .is_some_and(|handler| (handler.matcher)(&event, host, board))
+    };
+    active_replacements(board).any(|(_, host, definition)| {
+        host.zone.is_public()
+            && replacement_functions_in_zone(host, definition)
+            && may_apply(host.id, definition)
+    }) || live_floating_replacements(board).any(|(host, definition)| may_apply(host, definition))
 }
 
 /// The events `bound`'s resolver proposes to the replacement pipeline for what

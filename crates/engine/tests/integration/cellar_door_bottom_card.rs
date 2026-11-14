@@ -8,7 +8,7 @@
 
 use engine::game::effects::stack_reach::stack_entry_node_reach;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
-use engine::types::ability::{Effect, TargetRef};
+use engine::types::ability::{AbilityKind, Effect, TargetRef};
 use engine::types::actions::GameAction;
 use engine::types::events::GameEvent;
 use engine::types::game_state::{CastPaymentMode, WaitingFor};
@@ -768,4 +768,109 @@ fn cellar_door_stack_reach_reads_no_hidden_library_membership() {
             WaitingFor::Priority { .. }
         ));
     }
+}
+
+/// Verbatim printed Oracle text (Scryfall): its activation leaves a turn-long
+/// floating redirect of cards put into its activator's graveyard.
+const MAGUS_OF_THE_WILL: &str = "{2}{B}, {T}, Exile this creature: Until end of turn, you may play lands and cast spells from your graveyard. If a card would be put into your graveyard from anywhere this turn, exile that card instead.";
+
+/// Cellar Door on the stack targeting P1, whose bottom card is a creature,
+/// with P1's Magus of the Will on the battlefield. When `activate_magus`, P0
+/// first passes priority and P1 activates Magus, which resolves before P0
+/// activates Cellar Door. Returns the runner, Cellar Door, and the bottom card.
+fn stage_cellar_door_under_magus(activate_magus: bool) -> (GameRunner, ObjectId, ObjectId) {
+    let mut magus = None;
+    let (mut runner, cellar_door, bottom, target) = stage_cellar_door_with(true, 1, |scenario| {
+        scenario.with_mana_pool(
+            P1,
+            vec![
+                ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]),
+                ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]),
+                ManaUnit::new(ManaType::Black, ObjectId(0), false, vec![]),
+            ],
+        );
+        magus = Some(
+            scenario
+                .add_creature_from_oracle(P1, "Magus of the Will", 3, 3, MAGUS_OF_THE_WILL)
+                .id(),
+        );
+    });
+    let magus = magus.expect("Magus of the Will is staged");
+    if activate_magus {
+        runner
+            .act(GameAction::PassPriority)
+            .expect("P0 passes priority to P1");
+        assert!(
+            matches!(runner.state().waiting_for, WaitingFor::Priority { player } if player == P1),
+            "P1 must hold priority to activate Magus of the Will"
+        );
+        let index = runner.state().objects[&magus]
+            .abilities
+            .iter()
+            .position(|ability| matches!(ability.kind, AbilityKind::Activated))
+            .expect("Magus of the Will has an activated ability");
+        runner.activate(magus, index).pay_with(&[magus]).resolve();
+        // Reach guard: the activation resolved, paid its self-exile cost, and
+        // left its floating redirect standing, with P0 back on priority.
+        assert_eq!(runner.state().objects[&magus].zone, Zone::Exile);
+        assert!(runner.state().stack.is_empty());
+        assert!(
+            !runner.state().pending_damage_replacements.is_empty(),
+            "Magus of the Will's redirect must be floating"
+        );
+        assert!(
+            matches!(runner.state().waiting_for, WaitingFor::Priority { player } if player == P0),
+            "P0 must hold priority to activate Cellar Door"
+        );
+    }
+    announce_cellar_door(&mut runner, cellar_door, target);
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+        "the activation must stop with the ability on the stack"
+    );
+    (runner, cellar_door, bottom)
+}
+
+/// CR 611.2a + CR 614.1a + CR 614.6: a resolved Magus of the Will leaves no
+/// permanent behind, only a floating redirect, yet it still exiles the card
+/// Cellar Door moves out of its activator's library. Stack reach reads that
+/// floating redirect as the live resolver does, so the move answers nothing;
+/// with Magus of the Will unactivated on the battlefield it acts on the chosen
+/// player and the card reaches the graveyard.
+#[test]
+fn cellar_door_stack_reach_defers_to_a_floating_graveyard_redirect() {
+    std::thread::Builder::new()
+        .stack_size(256 * 1024 * 1024)
+        .spawn(|| {
+            for activate_magus in [false, true] {
+                let (mut runner, cellar_door, bottom) =
+                    stage_cellar_door_under_magus(activate_magus);
+                let (reach, zone) = if activate_magus {
+                    (Vec::new(), Zone::Exile)
+                } else {
+                    (vec![TargetRef::Player(P1)], Zone::Graveyard)
+                };
+                assert_eq!(
+                    mill_node_reach(&runner, cellar_door),
+                    reach,
+                    "Magus of the Will activated: {activate_magus}"
+                );
+
+                // The live resolver agrees.
+                runner.advance_until_stack_empty();
+                assert_eq!(
+                    runner.state().objects[&bottom].zone,
+                    zone,
+                    "Magus of the Will activated: {activate_magus}"
+                );
+                assert!(runner.state().stack.is_empty());
+                assert!(matches!(
+                    runner.state().waiting_for,
+                    WaitingFor::Priority { .. }
+                ));
+            }
+        })
+        .expect("spawn the test thread")
+        .join()
+        .expect("the test thread must not panic");
 }
