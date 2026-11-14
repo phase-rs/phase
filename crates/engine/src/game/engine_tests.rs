@@ -8103,8 +8103,8 @@ fn disciple_of_bolas_uses_sacrificed_creature_power_for_life_and_draw() {
 ///
 /// CR 701.21a: sacrifice moves the chosen permanent to its owner's graveyard.
 /// The `another` qualifier parses to `FilterProp::Another`; the effect resolver
-/// builds its eligible pool via `FilterContext::from_ability` (source excluded
-/// at `filter.rs` `FilterProp::Another => object_id != source.id`).
+/// builds its eligible pool via `FilterContext::from_ability` (no recipient
+/// bound, so `FilterProp::Another` excludes the source).
 ///
 /// COST/EFFECT CLASS REDUNDANCY (fix-constraint #2): the sibling cost path
 /// (`find_eligible_sacrifice_targets` → `FilterContext::from_source`) sets

@@ -7246,10 +7246,12 @@ pub enum FilterProp {
     Unpaired,
     /// CR 603.4 + CR 109.3: Matches any object that is NOT the object that caused
     /// the currently-evaluating trigger to fire (the "triggering object"). Distinct
-    /// from `Another`, which excludes the *ability source*. Used for intervening-if
-    /// count predicates like Valakut, the Molten Pinnacle's "if you control at
-    /// least five other Mountains" — here "other" means "other than the newly-
-    /// entered Mountain," not "other than Valakut." Resolves against
+    /// from `Another`, whose live-object matcher excludes a bound recipient, else
+    /// the *ability source*; see [`FilterProp::Another`].
+    /// Used for intervening-if count predicates like Valakut, the Molten
+    /// Pinnacle's "if you control at least five other Mountains" — here "other"
+    /// means "other than the newly-entered Mountain," not "other than Valakut."
+    /// Resolves against
     /// `FilterContext::triggering_object`, populated at trigger-condition
     /// evaluation from the current `GameEvent`.
     ///
@@ -7472,7 +7474,8 @@ pub enum FilterProp {
     /// `DistinctFrom { reference: ParentTarget }` with
     /// `SharesQuality { Color, reference: ParentTarget }` so the fan-out damages
     /// every color-sharer EXCEPT the already-damaged target. Distinct from
-    /// [`FilterProp::Another`] (excludes the ability *source*) and
+    /// [`FilterProp::Another`] (whose live-object matcher excludes a bound
+    /// recipient, else the ability *source*) and
     /// [`FilterProp::OtherThanTriggerObject`] (excludes the *triggering* object).
     DistinctFrom {
         reference: Box<TargetFilter>,
