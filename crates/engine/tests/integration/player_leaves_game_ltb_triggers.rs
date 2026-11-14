@@ -1883,6 +1883,99 @@ fn an_earlier_checks_departure_trigger_is_ordered_with_the_combat_damage_trigger
     );
 }
 
+/// CR 117.3b + CR 800.4j + CR 800.4a: when the active player concedes while a
+/// resolution a surviving player controls is paused on their prompt, the
+/// resolution finishes and the next player in turn order still in the game
+/// receives priority, not the player who left. It is P1's turn. P0 controls
+/// Ninth Bridge Patrol ("Whenever another creature you control leaves the
+/// battlefield, put a +1/+1 counter on this creature."), Leyline of
+/// Anticipation (flash) and P1's commander Karn, Silver Golem, and casts Kor
+/// Skyfisher ("When this creature enters, return a permanent you control to its
+/// owner's hand.") choosing Karn. P1, the commander's owner, concedes at its
+/// command-zone replacement prompt.
+#[test]
+fn a_concession_by_the_active_player_mid_resolution_gives_priority_to_a_living_player() {
+    let db = shared_card_db().expect("integration card fixture must load");
+    let mut scenario =
+        GameScenario::new_with_format(engine::types::format::FormatConfig::commander(), 3, 7);
+    scenario.at_phase(Phase::PreCombatMain);
+    let karn = scenario.add_real_card(P1, "Karn, Silver Golem", Zone::Battlefield, db);
+    scenario.add_real_card(P0, "Control Magic", Zone::Battlefield, db);
+    let patrol = scenario.add_real_card(P0, "Ninth Bridge Patrol", Zone::Battlefield, db);
+    scenario.add_real_card(P0, "Leyline of Anticipation", Zone::Battlefield, db);
+    let skyfisher = scenario.add_real_card(P0, "Kor Skyfisher", Zone::Hand, db);
+    let mut pool = (0..3)
+        .map(|_| ManaUnit::new(ManaType::White, ObjectId(0), false, vec![]))
+        .collect::<Vec<_>>();
+    pool.extend((0..2).map(|_| ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![])));
+    scenario.with_mana_pool(P0, pool);
+    let mut runner = scenario.build();
+    {
+        let state = runner.state_mut();
+        let object = state.objects.get_mut(&karn).unwrap();
+        object.is_commander = true;
+        state.active_player = P1;
+        state.priority_player = P0;
+        state.waiting_for = WaitingFor::Priority { player: P0 };
+        state.layers_dirty.mark_full();
+        engine::game::layers::flush_layers(state);
+    }
+    assert_eq!(runner.state().objects[&karn].controller, P0);
+    runner.cast(skyfisher).commit();
+    for _ in 0..12 {
+        match runner.state().waiting_for.clone() {
+            WaitingFor::Priority { .. } if !runner.state().stack.is_empty() => {
+                runner.act(GameAction::PassPriority).expect("pass");
+            }
+            _ => break,
+        }
+    }
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::EffectZoneChoice { player: P0, .. }
+        ),
+        "reach guard: Skyfisher asks P0 what to return: {:?}",
+        runner.state().waiting_for
+    );
+    runner
+        .act(GameAction::SelectCards { cards: vec![karn] })
+        .expect("P0 returns Karn");
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::ReplacementChoice { player: P1, .. }
+        ),
+        "reach guard: P1 owns the command-zone choice: {:?}",
+        runner.state().waiting_for
+    );
+    assert_eq!(runner.state().active_player, P1);
+
+    runner
+        .act(GameAction::Concede { player_id: P1 })
+        .expect("P1 concedes");
+    assert!(runner.state().players[1].is_eliminated);
+    assert_eq!(
+        runner
+            .state()
+            .stack
+            .iter()
+            .filter(|entry| entry.source_id == patrol)
+            .count(),
+        1,
+        "the Patrol trigger is on the stack"
+    );
+    let holder = runner.state().waiting_for.acting_player();
+    assert!(
+        holder.is_some_and(|player| player != P1),
+        "an eliminated player holds no priority: {:?}",
+        runner.state().waiting_for
+    );
+    runner
+        .act(GameAction::PassPriority)
+        .expect("the player holding priority can act");
+}
+
 /// Welcoming Vampire ("Whenever one or more other creatures you control with
 /// power 2 or less enter, draw a card. This ability triggers only once each
 /// turn.") and Sol Ring on P0's side; with `suppressor`, Hushbringer
