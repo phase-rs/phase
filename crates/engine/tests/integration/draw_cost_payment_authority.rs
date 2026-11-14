@@ -3005,7 +3005,7 @@ fn checked_restore_refuses_a_used_floating_shield_candidate() {
     used.is_consumed = true;
     let candidate = ReplacementId {
         source: ObjectId(0),
-        index: floating.len(),
+        index: floating.len() as u64,
     };
     floating.push(used);
     // Listed beside the live Dredge candidate: no applicable effect is left

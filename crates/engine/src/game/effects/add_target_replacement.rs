@@ -837,6 +837,8 @@ mod tests {
             target,
             amount,
             is_combat: false,
+            source_name: None,
+            source_incarnation: None,
             applied: Default::default(),
         }
     }
@@ -1707,6 +1709,8 @@ mod tests {
             target: TargetRef::Object(victim),
             amount: 2,
             is_combat: false,
+            source_name: None,
+            source_incarnation: None,
             applied: Default::default(),
         };
         let result = replace_event(&mut state, proposed, &mut events);
@@ -1724,6 +1728,8 @@ mod tests {
             target: TargetRef::Object(victim),
             amount: 2,
             is_combat: false,
+            source_name: None,
+            source_incarnation: None,
             applied: Default::default(),
         };
         let result = replace_event(&mut state, proposed, &mut events);

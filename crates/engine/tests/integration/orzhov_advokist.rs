@@ -95,6 +95,7 @@ fn orzhov_advokist_parser_keeps_scoped_player_and_trigger_controller_distinct() 
                 activity: ProhibitedActivity::Attack {
                     defended: AttackTargetFilter::PlayerOrPlaneswalker,
                     protected_player: None,
+                    protected_scope: None,
                 },
             },
         }
@@ -234,6 +235,7 @@ fn orzhov_advokist_restriction_tracks_acceptance_controller_changes_and_expiry()
             activity: ProhibitedActivity::Attack {
                 defended: AttackTargetFilter::PlayerOrPlaneswalker,
                 protected_player: Some(P0),
+                protected_scope: None,
             },
         } if *source == advokist
     ));
@@ -377,6 +379,7 @@ fn scoped_advokist_planeswalker_only_restriction_snapshots_controller_provenance
             activity: ProhibitedActivity::Attack {
                 defended: AttackTargetFilter::Planeswalker,
                 protected_player: Some(P0),
+                protected_scope: None,
             },
         }] if *stored_source == source
     ));

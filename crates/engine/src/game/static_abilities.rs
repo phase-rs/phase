@@ -2081,6 +2081,224 @@ pub fn player_protection_from_object_with_source_name(
     false
 }
 
+/// CR 702.16 + CR 615.13 (Matt R8-F1): the resolved quality of the FIRST
+/// player-scope protection ability sheltering `player_id` from `source`.
+/// First-match-wins like the object path: the damage gate claims each event
+/// for this ability, and the batch tally keys by this quality plus the
+/// recipient, so disjoint abilities publish separate applications.
+pub fn preventing_player_protection_quality(
+    state: &GameState,
+    player_id: PlayerId,
+    source: Option<ObjectId>,
+    source_incarnation: Option<u64>,
+    source_name: Option<&str>,
+) -> Option<crate::types::keywords::MatchedProtectionQuality> {
+    all_preventing_player_protection_qualities(
+        state,
+        player_id,
+        source,
+        source_incarnation,
+        source_name,
+    )
+    .into_iter()
+    .next()
+}
+
+/// CR 616.1 (Matt R10-F1): EVERY resolved quality sheltering `player_id`
+/// from `source`, in scan order, deduplicated. Same-quality grants collapse
+/// to one entry (unobservable distinction — both key the same tally entry).
+/// The single-match fns delegate to this enumeration's head.
+pub fn all_preventing_player_protection_qualities(
+    state: &GameState,
+    player_id: PlayerId,
+    source: Option<ObjectId>,
+    source_incarnation: Option<u64>,
+    source_name: Option<&str>,
+) -> Vec<crate::types::keywords::MatchedProtectionQuality> {
+    all_matching_player_protections(state, player_id, source, source_incarnation, source_name)
+}
+
+/// Collecting authority behind the single-match fns: every resolved
+/// quality, `Everything` first, then granting statics in scan order,
+/// deduplicated.
+fn all_matching_player_protections(
+    state: &GameState,
+    player_id: PlayerId,
+    source: Option<ObjectId>,
+    source_incarnation: Option<u64>,
+    source_name: Option<&str>,
+) -> Vec<crate::types::keywords::MatchedProtectionQuality> {
+    use crate::game::keywords::matching_card_type_quality;
+    use crate::game::keywords::ProtectionSourceRef;
+    use crate::types::ability::ControllerRef;
+    use crate::types::keywords::{
+        Keyword, MatchedProtectionQuality, ProtectionPlayerScope, ProtectionTarget,
+    };
+
+    let mut out = Vec::new();
+    // CR 702.16j: protection from everything covers every source.
+    if player_has_protection_from_everything(state, player_id) {
+        out.push(MatchedProtectionQuality::Everything);
+    }
+    // CR 702.16 + CR 608.2h + CR 400.7: match against the source's
+    // original incarnation — the live object only while it is still that
+    // incarnation, else its exit last-known information (a ceased token
+    // still has a name, colors, types, and controller), else the event's
+    // latched name alone.
+    // A departed source must never silently lose name protection (Runed Halo
+    // over a dead Clone keeps stopping that name).
+    let source_ref =
+        crate::game::keywords::damage_protection_source(state, source, source_incarnation);
+    // CR 702.16b + CR 702.16e: resolution-created "you gain protection from
+    // [quality]" (Seht's Tiger, Faith's Shield) and "protection from that
+    // player" (Eon Frolicker) are player-bound transient grants, not
+    // battlefield statics. Resolve each through the shared protection
+    // authority for the protected player, so damage routing and targeting
+    // cannot disagree.
+    for tce in &state.transient_continuous_effects {
+        let TargetFilter::SpecificPlayer { id: affected_id } = tce.affected else {
+            continue;
+        };
+        if affected_id != player_id {
+            continue;
+        }
+        if !crate::game::layers::transient_gate_conditions(tce)
+            .all(|condition| evaluate_condition(state, condition, tce.controller, tce.source_id))
+        {
+            continue;
+        }
+        for modification in &tce.modifications {
+            let quality = match modification {
+                ContinuousModification::AddKeyword {
+                    keyword: Keyword::Protection(quality),
+                } => quality,
+                ContinuousModification::AddStaticMode {
+                    mode: StaticMode::PlayerProtection(quality),
+                } => quality,
+                _ => continue,
+            };
+            if let Some(resolved) = crate::game::keywords::matching_protection_quality(
+                quality,
+                crate::game::keywords::ProtectionBearer::Player(player_id),
+                source_ref,
+                source_name,
+            ) {
+                if !out.contains(&resolved) {
+                    out.push(resolved);
+                }
+            }
+        }
+    }
+    let context = StaticCheckContext {
+        player_id: Some(player_id),
+        ..Default::default()
+    };
+    // CR 702.16: O(1) presence gate on the battlefield/command-zone PlayerProtection
+    // authority ONLY. The `Everything` transient-effect authority is handled by the
+    // short-circuit above (a separate authority the index does not fold), so wrap the
+    // loop rather than early-returning.
+    if static_kind_present(state, StaticModeKind::PlayerProtection) {
+        crate::game::perf_counters::record_static_full_scan();
+        // CR 114.4: Abilities of emblems function in the command zone.
+        for (src_obj, def) in game_functioning_statics(state) {
+            let StaticMode::PlayerProtection(ref target) = def.mode else {
+                continue;
+            };
+            if let Some(ref affected) = def.affected {
+                if !static_filter_matches(state, &context, affected, src_obj.id) {
+                    continue;
+                }
+            }
+            if !static_condition_matches_context(
+                state,
+                src_obj.id,
+                src_obj.controller,
+                def,
+                &context,
+            ) {
+                continue;
+            }
+            let matched = match target {
+                // CR 702.16j: handled by the short-circuit above.
+                ProtectionTarget::Everything => None,
+                // CR 702.16 + CR 205.2: protection from the card type
+                // chosen as the granting permanent (e.g. Serra's Emissary) entered.
+                ProtectionTarget::ChosenCardType => src_obj
+                    .chosen_card_type()
+                    .and_then(|ct| ct.protection_quality_str())
+                    .and_then(|quality| {
+                        matching_card_type_quality(
+                            source_ref.core_types(),
+                            source_ref.subtypes(),
+                            quality,
+                        )
+                    }),
+                // CR 702.16a + CR 702.16e + CR 608.2h + CR 201.2: protection from the card name
+                // chosen as the granting permanent (e.g. Runed Halo) entered.
+                ProtectionTarget::ChosenCardName => src_obj
+                    .chosen_card_name()
+                    .filter(|chosen| {
+                        crate::game::filter::source_has_chosen_name(
+                            source_ref.live(),
+                            source_name,
+                            chosen,
+                        )
+                    })
+                    .map(|chosen| {
+                        MatchedProtectionQuality::ChosenName(crate::game::keywords::fnv1a_64(
+                            chosen.as_bytes(),
+                        ))
+                    }),
+                // CR 702.16k: "Protection from [a player]" at the player level — the
+                // protected player has protection from each object the specified
+                // player(s) control. "Each of your opponents" (CR 702.16i) → the
+                // `Opponent` scope: any source NOT controlled by the protected
+                // player is an opponent's object in 1v1 and free-for-all. Mirrors the
+                // object-level arm in `game/keywords.rs::source_matches_protection_target`.
+                ProtectionTarget::FromPlayer(scope) => {
+                    // CR 608.2h: live controller, else last-known; unknown fails closed.
+                    let controller = match source_ref {
+                        ProtectionSourceRef::Live(object) => Some(object.controller),
+                        ProtectionSourceRef::Lki(lki) => Some(lki.controller),
+                        ProtectionSourceRef::NameOnly => None,
+                    };
+                    controller.and_then(|controller| match scope {
+                        ControllerRef::Opponent => (controller != player_id).then_some(
+                            MatchedProtectionQuality::FromPlayer(ProtectionPlayerScope::Opponent),
+                        ),
+                        ControllerRef::You => (controller == player_id).then_some(
+                            MatchedProtectionQuality::FromPlayer(ProtectionPlayerScope::You),
+                        ),
+                        // Target/chosen player refs have no static context here —
+                        // fail closed (the parser never emits them for protection).
+                        _ => None,
+                    })
+                }
+                // Truly inert at the player level — no card grants these qualities to
+                // a player; object-level grants of these qualities flow through the
+                // `AddKeyword(Protection)` continuous path, not `PlayerProtection`.
+                ProtectionTarget::ChosenColor
+                | ProtectionTarget::ChosenPlayer
+                | ProtectionTarget::Color(_)
+                | ProtectionTarget::Multicolored
+                | ProtectionTarget::Quality(_)
+                | ProtectionTarget::CardType(_)
+                | ProtectionTarget::Filter(_) => None,
+                // CR 702.16i: no card grants a color-set protection to a player;
+                // inert like the arms above (no quality to resolve). Object-level
+                // sets expand through `keywords::resolve_granted_protection`.
+                ProtectionTarget::EachColor(_) => None,
+            };
+            if let Some(quality) = matched {
+                if !out.contains(&quality) {
+                    out.push(quality);
+                }
+            }
+        }
+    }
+    out
+}
+
 /// Allocation-free equivalent of `check_static_ability` for
 /// `StaticMode::Other(String)` variants. Scans battlefield + command zone
 /// for a static whose mode is `Other(s)` with `s == name`, whose `affected`
@@ -2299,6 +2517,88 @@ pub fn object_has_static_other(state: &GameState, object_id: ObjectId, name: &st
             ..Default::default()
         },
     )
+}
+
+/// CR 109.5 + CR 701.21a: actor-aware object sacrifice prohibition — the
+/// single legality authority for "can't be sacrificed" shared by selection
+/// (`find_eligible_sacrifice_targets`), cost guards, and execution
+/// (`sacrifice_permanent`).
+///
+/// A resolution-created "you can't sacrifice those <objects>" (Call for Aid)
+/// binds its "you" to the installing caster (CR 109.5): the installed TCE
+/// carries the resolved caster as its `bound_actor`, and the layer-6 graft
+/// copies it onto the grafted def's `source_controller` anchor — only that
+/// player is barred, and a later controller may sacrifice the same object.
+/// Object characteristics ("~ can't be sacrificed" printed, "this permanent
+/// can't be sacrificed" granted — Stilt-Man) carry no binding and bar every
+/// actor.
+///
+/// Both scans below consult the SAME stored binding — the TCE scan for
+/// pre-derivation timing, the functioning-defs scan per graft — so exactly
+/// the actor-bound graft is exempted for other actors while an independent
+/// object-wide grant on the same object keeps barring them.
+pub(crate) fn object_cant_be_sacrificed_by(
+    state: &GameState,
+    actor: PlayerId,
+    object_id: ObjectId,
+) -> bool {
+    let mode = StaticMode::Other("CantBeSacrificed".to_string());
+    // Shared resolution-grant bar predicate (pin + gates + mode),
+    // actor-agnostic: the caller pairs it with the stored binding below.
+    let tce_bars = |tce: &crate::types::game_state::TransientContinuousEffect| -> bool {
+        let pins_object = matches!(
+            &tce.affected,
+            TargetFilter::SpecificObject { id: pinned, .. } if *pinned == object_id
+        );
+        if !pins_object {
+            return false;
+        }
+        // CR 611.2b + CR 611.3a: every gate of a resolution-created effect
+        // must hold for it to apply — same authority
+        // (`transient_gate_conditions`) as `transient_grants_other_static_to_context`.
+        if !crate::game::layers::transient_gate_conditions(tce)
+            .all(|condition| evaluate_condition(state, condition, tce.controller, tce.source_id))
+        {
+            return false;
+        }
+        tce.modifications.iter().any(|modification| {
+            matches!(
+                modification,
+                ContinuousModification::AddStaticMode {
+                    mode: StaticMode::Other(name),
+                } if name == "CantBeSacrificed"
+            )
+        })
+    };
+    // Live-TCE scan: an installer-bound TCE bars only its bound actor; an
+    // unbound (object-wide) TCE bars every actor. CR 701.21a already
+    // restricts every sacrifice to the object's controller, so
+    // installer-scoping here never frees a legal sacrifice — it only frees
+    // players the prohibition never named.
+    for tce in state.transient_continuous_effects.iter() {
+        if tce_bars(tce) && tce.bound_actor.is_none_or(|bound| bound == actor) {
+            return true;
+        }
+    }
+    // Functioning-defs scan: each graft carries its own exact provenance
+    // (`source_controller`, stamped by the layer-6 arm from the backing
+    // TCE), so the exemption applies graft-by-graft — an installer-bound
+    // graft frees other actors while an independent object-wide grant on
+    // the same object keeps barring them. A printed def (present in the
+    // graft-free `base_static_definitions` baseline) always binds. This must
+    // NOT be `object_has_static_other` or `check_static_ability`: both read
+    // the live slot actor-blind, which would re-bar players the binding
+    // just cleared.
+    let context = StaticCheckContext {
+        target_id: Some(object_id),
+        ..Default::default()
+    };
+    crate::game::functioning_abilities::game_functioning_statics(state).any(|(obj, def)| {
+        def.mode == mode
+            && static_ability_match_applies(state, &mode, &context, obj, def)
+            && (obj.base_static_definitions.contains(def)
+                || def.source_controller.is_none_or(|bound| bound == actor))
+    })
 }
 
 /// Check if a static ability named `name` applies to a specific player

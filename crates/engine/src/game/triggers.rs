@@ -4618,7 +4618,7 @@ fn apnap_rank(order: &[PlayerId], controller: PlayerId) -> usize {
         .unwrap_or(order.len())
 }
 
-fn trigger_apnap_rank(state: &GameState, controller: PlayerId) -> usize {
+pub(crate) fn trigger_apnap_rank(state: &GameState, controller: PlayerId) -> usize {
     if state.format_config.topology().has_shared_team_turns() {
         super::topology::apnap_team_rank(state, controller)
     } else {
@@ -14123,6 +14123,11 @@ fn gate_binding_diverges_at_fire_time(condition: &AbilityCondition) -> bool {
         // CR 115.10: the per-iteration player of the RESOLVING ability, which the
         // fire-time context derives from the matched event instead.
         | AbilityCondition::ScopedPlayerMatches { .. }
+        // CR 115.1 + CR 608.2c: reads the resolving ability's declared
+        // targets via a `Target` endpoint (the stamped chosen player);
+        // empty at fire time -- same resolution-scoped class as
+        // `ScopedPlayerMatches` above.
+        | AbilityCondition::PlayerAttackedPlayer { .. }
         // CR 615.5: the post-replacement window, populated only while a
         // prevention replacement is being applied.
         | AbilityCondition::PostReplacementDamageSourceMatchesFilter { .. }
@@ -47597,6 +47602,7 @@ pub mod tests {
             granting_object: None,
             duration_event_source: None,
             source_name: "Jhoira".to_string(),
+            bound_actor: None,
         };
         state.transient_continuous_effects.push_back(grant.clone());
 
@@ -48691,6 +48697,7 @@ pub mod tests {
             granting_object: None,
             duration_event_source: None,
             source_name: "Keyword Granter".to_string(),
+            bound_actor: None,
         }
     }
 
@@ -48812,6 +48819,7 @@ pub mod tests {
                 granting_object: None,
                 duration_event_source: None,
                 source_name: "Grant source".to_string(),
+                bound_actor: None,
             });
 
         // This is the ordinary production trigger entry point: it flushes
@@ -48959,6 +48967,7 @@ pub mod tests {
                     granting_object: None,
                     duration_event_source: None,
                     source_name: "Jhoira of the Ghitu".to_string(),
+                    bound_actor: None,
                 },
             );
             suspended.push(card);

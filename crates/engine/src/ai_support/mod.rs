@@ -6762,6 +6762,7 @@ mod tests {
                 protection_does_not_remove: None,
                 room_door: None,
                 granting_object: None,
+                bound_actor: None,
             };
             obj.static_definitions = vec![def].into();
         }
@@ -6887,6 +6888,7 @@ mod tests {
                 protection_does_not_remove: None,
                 room_door: None,
                 granting_object: None,
+                bound_actor: None,
             };
             obj.static_definitions = vec![def].into();
         }

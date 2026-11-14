@@ -30,6 +30,14 @@ pub fn resolve(
         return Ok(());
     };
     state.monarch = Some(player_id);
+    // CR 611.3a + CR 725.5: a crowning can flip live monarch-reading statics
+    // (designation-anchored control, IsMonarch/NoMonarch gates) — escalate to
+    // a full re-evaluation iff any such static is live (rare-event only: this
+    // runs once per crowning, never per frame or per pass).
+    crate::game::layers::mark_layers_full_if_dimension_read_live(
+        state,
+        crate::game::layers::LayerInvalidationDimension::Monarch,
+    );
     events.push(GameEvent::MonarchChanged { player_id });
     Ok(())
 }

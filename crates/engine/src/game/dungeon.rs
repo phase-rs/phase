@@ -1192,6 +1192,7 @@ pub fn room_effects(
                         protection_does_not_remove: None,
                         room_door: None,
                         granting_object: None,
+                        bound_actor: None,
                     }],
                     triggers: Vec::new(),
                 },

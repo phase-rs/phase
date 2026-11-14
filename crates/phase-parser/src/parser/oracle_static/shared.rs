@@ -1039,6 +1039,8 @@ fn continuous_modification_dynamic_quantity_mut(
         | ContinuousModification::AssignDamageAsThoughUnblocked
         | ContinuousModification::AssignNoCombatDamage
         | ContinuousModification::ChangeController
+        // Scalar designation payload: no quantity to extract.
+        | ContinuousModification::ChangeControllerToDesignation { .. }
         | ContinuousModification::SetBasicLandType { .. }
         | ContinuousModification::SetChosenBasicLandType
         | ContinuousModification::SetChosenName
@@ -1224,6 +1226,7 @@ impl<'a> ZoneConditionNode<'a> {
             | StaticCondition::WasStartingPlayer { .. }
             | StaticCondition::SpellCastWithVariantThisTurn { .. }
             | StaticCondition::AnyPlayerAttackedYouLastTurn { .. }
+            | StaticCondition::PlayerAttackedPlayer { .. }
             | StaticCondition::OpponentPoisonAtLeast { .. }
             | StaticCondition::UnlessPay { .. }
             | StaticCondition::Unrecognized { .. }

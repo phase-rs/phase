@@ -210,6 +210,7 @@ mod tests {
                 protection_does_not_remove: None,
                 room_door: None,
                 granting_object: None,
+                bound_actor: None,
             }],
             target: None,
             duration: None,

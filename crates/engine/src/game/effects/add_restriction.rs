@@ -186,15 +186,69 @@ fn fill_runtime_fields(
     }
 
     if let GameRestriction::ProhibitActivity {
-        activity: ProhibitedActivity::Attack {
-            protected_player, ..
-        },
+        activity:
+            ProhibitedActivity::Attack {
+                protected_player,
+                protected_scope,
+                ..
+            },
         ..
     } = restriction
     {
-        // CR 109.5: snapshot the resolving ability's controller for the
-        // controller-relative "you" in the attack restriction.
-        *protected_player = Some(original_controller);
+        // CR 109.5 + CR 608.2c: scope-SELECTION for the protected player. The
+        // legacy contract (`protected_scope: None` — every shipped user)
+        // snapshots the resolving ability's controller for the
+        // controller-relative "you" in the attack restriction. A targeted
+        // scope instead snapshots the spell/ability's already-chosen player
+        // target (Call for Aid's "that player" anaphor reuses the declared
+        // target slot without declaring a second one).
+        use crate::types::ability::RestrictionPlayerScope;
+        match protected_scope {
+            Some(
+                RestrictionPlayerScope::ParentTargetedPlayer
+                | RestrictionPlayerScope::TargetedPlayer,
+            ) => {
+                *protected_player = Some(resolved_target_player);
+            }
+            // CR 508.5: same capture as the affected-player lowering
+            // above; an unresolvable defender falls back to the
+            // installer (fail-closed toward "you").
+            Some(RestrictionPlayerScope::DefendingPlayer) => {
+                *protected_player = Some(
+                    crate::game::combat::resolve_defending_player(state, ability.source_id)
+                        .or_else(|| {
+                            super::myriad::defending_player_from_attack_event(
+                                state.current_trigger_event.as_ref(),
+                                ability.source_id,
+                            )
+                        })
+                        .unwrap_or(original_controller),
+                );
+            }
+            // CR 109.5 + CR 118.12: the per-iteration scoped player, as
+            // in the affected-player lowering above.
+            Some(RestrictionPlayerScope::ScopedPlayer) => {
+                *protected_player = Some(ability.scoped_player.unwrap_or(original_controller));
+            }
+            // No producer emits an explicit protected player today; an
+            // explicit id wins if one ever does.
+            Some(RestrictionPlayerScope::SpecificPlayer(player)) => {
+                *protected_player = Some(*player);
+            }
+            // Controller-relative "you" (None, SourceController) and the
+            // multi-player scopes no producer emits as a protected
+            // player (AllPlayers, OpponentsOfSourceController,
+            // ParentObjectTargetController): the installer. A protected
+            // player must resolve to a single id, so unlisted scopes
+            // collapse here rather than leaving the field empty.
+            None
+            | Some(RestrictionPlayerScope::SourceController)
+            | Some(RestrictionPlayerScope::ParentObjectTargetController)
+            | Some(RestrictionPlayerScope::AllPlayers)
+            | Some(RestrictionPlayerScope::OpponentsOfSourceController) => {
+                *protected_player = Some(original_controller);
+            }
+        }
     }
 
     match restriction {
@@ -530,6 +584,7 @@ mod tests {
                     activity: ProhibitedActivity::Attack {
                         defended: AttackTargetFilter::PlayerOrPermanents,
                         protected_player: None,
+                        protected_scope: None,
                     },
                 },
             },
@@ -559,6 +614,7 @@ mod tests {
                 activity: ProhibitedActivity::Attack {
                     defended: AttackTargetFilter::PlayerOrPermanents,
                     protected_player: Some(PlayerId(0)),
+                    protected_scope: None,
                 },
             }
         ));
@@ -581,6 +637,7 @@ mod tests {
                     activity: ProhibitedActivity::Attack {
                         defended: AttackTargetFilter::Player,
                         protected_player: None,
+                        protected_scope: None,
                     },
                 },
             },
@@ -618,6 +675,7 @@ mod tests {
                     activity: ProhibitedActivity::Attack {
                         defended: AttackTargetFilter::PlayerOrPlaneswalker,
                         protected_player: None,
+                        protected_scope: None,
                     },
                 },
             },
@@ -645,6 +703,7 @@ mod tests {
                 activity: ProhibitedActivity::Attack {
                     defended: AttackTargetFilter::PlayerOrPlaneswalker,
                     protected_player: Some(PlayerId(0)),
+                    protected_scope: None,
                 },
             }
         ));

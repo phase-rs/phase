@@ -62,6 +62,8 @@ fn damage_from(source: ObjectId, target: TargetRef, amount: u32) -> ProposedEven
         target,
         amount,
         is_combat: false,
+        source_name: None,
+        source_incarnation: None,
         applied: Default::default(),
     }
 }

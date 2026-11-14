@@ -86,6 +86,7 @@ fn najeela_chain(source: ObjectId, controller: PlayerId) -> ResolvedAbility {
                 protection_does_not_remove: None,
                 room_door: None,
                 granting_object: None,
+                bound_actor: None,
             }],
             duration: Some(Duration::UntilEndOfTurn),
             target: None,
