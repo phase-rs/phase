@@ -52,6 +52,9 @@
 
 //! CR 702.145b + CR 702.145e: ordinary instructions cannot transform daybound or nightbound permanents.
 //! CR 613.7g + CR 730.2i: transforming merged permanents keep their timestamps.
+//! CR 502.2a + CR 731.2a + CR 731.2b: with shared team turns, day/night reads each member of the
+//! previous turn's active team: one cast by a teammate keeps it day, two by one teammate make it day.
+//! CR 800.4i: a teammate who cast and then left the game during that turn still counts.
 
 use engine::database::card_db::CardDatabase;
 use engine::game::combat::AttackTarget;
@@ -270,6 +273,9 @@ const SUMMONERS_PACT: &str = "Summoner's Pact";
 const SUMMONERS_PACT_ORACLE: &str = "Search your library for a green creature card, reveal it, put it into your hand, then shuffle.\nAt the beginning of your next upkeep, pay {2}{G}{G}. If you don't, you lose the game.";
 const GERMINATION_PRACTICUM: &str = "Germination Practicum";
 const GERMINATION_PRACTICUM_ORACLE: &str = "Put two +1/+1 counters on each creature you control.\nParadigm (Then exile this spell. After you first resolve a spell with this name, you may cast a copy of it from exile without paying its mana cost at the beginning of each of your first main phases.)";
+const ETALI: &str = "Etali, Primal Storm";
+const ETALI_ORACLE: &str = "Whenever Etali attacks, exile the top card of each player's library, then you may cast any number of spells from among those cards without paying their mana costs.";
+const MEMNITE: &str = "Memnite";
 
 /// A board at `phase`, with stocked libraries so a real draw step can't end the
 /// game (CR 704.5b).
@@ -8595,4 +8601,297 @@ fn resolve_into_the_night_with_celestus(
     assert_settled(&runner);
     assert_eq!(runner.state().objects[&spell].zone, Zone::Graveyard);
     (runner, events, life)
+}
+
+/// A game on shared team turns (CR 805.1) at P0's precombat main, in which P0 represents the
+/// active team, P1 is P0's teammate and P2 is on the other team: Two-Headed Giant (P0 and P1
+/// against P2 and P3, CR 810.1) or Archenemy with P2 as the archenemy (P0, P1 and P3 its heroes,
+/// CR 904.2a + CR 904.2b; `archenemy_against_p0s_team`). P1 controls Etali, Primal Storm, able
+/// to attack; P0 controls The Celestus. Each `(player, zone)` in `memnites` puts a Memnite in that player's
+/// library or hand (a library holds nothing else, so the Memnite is its top card); P2 and P3
+/// get three generic library cards. Returns the runner, Etali, The Celestus and the Memnites in
+/// `memnites` order. Setup only: P0 is made the active player (Archenemy's first turn is the
+/// archenemy's, CR 904.6), and the designation and Etali's summoning sickness are written
+/// directly.
+fn shared_turn_etali_board(
+    format: FormatConfig,
+    start: DayNight,
+    memnites: &[(PlayerId, Zone)],
+) -> (GameRunner, ObjectId, ObjectId, Vec<ObjectId>) {
+    let db = load_db().expect("card db");
+    assert_oracle(db, ETALI, ETALI_ORACLE);
+    assert_oracle(db, CELESTUS, CELESTUS_ORACLE);
+    assert!(
+        db.get_face_by_name(MEMNITE)
+            .expect("Memnite is in the fixture")
+            .oracle_text
+            .is_none(),
+        "Memnite has no rules text"
+    );
+    let mut scenario = GameScenario::new_with_format(format, 4, 769);
+    scenario.at_phase(Phase::PreCombatMain);
+    let memnites = memnites
+        .iter()
+        .map(|&(player, zone)| scenario.add_real_card(player, MEMNITE, zone, db))
+        .collect();
+    for seat in [PlayerId(2), PlayerId(3)] {
+        scenario.with_library_top(seat, &["Top One", "Top Two", "Top Three"]);
+    }
+    let etali = scenario.add_real_card(P1, ETALI, Zone::Battlefield, db);
+    let celestus = scenario.add_real_card(P0, CELESTUS, Zone::Battlefield, db);
+    let mut runner = scenario.build();
+    let state = runner.state_mut();
+    state.active_player = P0;
+    state.priority_player = P0;
+    state.waiting_for = WaitingFor::Priority { player: P0 };
+    state.objects.get_mut(&etali).unwrap().summoning_sick = false;
+    state.day_night = Some(start);
+    (runner, etali, celestus, memnites)
+}
+
+/// Etali attacks P2 and P1 casts `picks` from among the exiled cards as Etali's resolving ability
+/// permits (CR 117.2e), then the stack resolves. Returns every event.
+fn etali_attacks_and_p1_casts(
+    runner: &mut GameRunner,
+    etali: ObjectId,
+    picks: &[ObjectId],
+) -> Vec<GameEvent> {
+    runner.advance_to_combat();
+    let mut events = runner
+        .act(GameAction::DeclareAttackers {
+            attacks: vec![(etali, AttackTarget::Player(PlayerId(2)))],
+            bands: vec![],
+        })
+        .expect("P1's Etali attacks P2")
+        .events;
+    let mut picks = picks.iter().copied();
+    for _ in 0..24 {
+        let action = match runner.state().waiting_for {
+            WaitingFor::CastOffer { player, .. } => {
+                assert_eq!(
+                    player, P1,
+                    "Etali's controller casts from among the exiled cards"
+                );
+                GameAction::FreeCastWindowChoice {
+                    selection: picks.next(),
+                }
+            }
+            WaitingFor::Priority { .. } if !runner.state().stack.is_empty() => {
+                GameAction::PassPriority
+            }
+            WaitingFor::Priority { .. } => return events,
+            ref other => panic!("unexpected prompt while Etali resolves: {other:?}"),
+        };
+        events.extend(runner.act(action).expect("Etali resolves").events);
+    }
+    panic!("Etali's trigger did not finish within twenty-four actions");
+}
+
+/// The cast count of each seat this turn, P0 to P3.
+fn casts_this_turn(runner: &GameRunner) -> [usize; 4] {
+    [0u8, 1, 2, 3].map(|seat| {
+        runner
+            .state()
+            .spells_cast_this_turn_by_player
+            .get(&PlayerId(seat))
+            .map_or(0, |spells| spells.len())
+    })
+}
+
+/// Passes to the other team's upkeep (P2 is its active player) and returns every event.
+fn pass_into_the_other_teams_upkeep(runner: &mut GameRunner) -> Vec<GameEvent> {
+    let events = pass_until(runner, |runner| {
+        runner.state().active_player == PlayerId(2) && runner.state().phase == Phase::Upkeep
+    });
+    assert_eq!(runner.state().active_player, PlayerId(2));
+    assert_eq!(runner.state().phase, Phase::Upkeep);
+    events
+}
+
+fn designation_changes(events: &[GameEvent]) -> Vec<(String, Option<DayNight>)> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            GameEvent::DayNightChanged {
+                new_state,
+                previous,
+            } => Some((new_state.clone(), *previous)),
+            _ => None,
+        })
+        .collect()
+}
+
+fn celestus_triggers(runner: &GameRunner, celestus: ObjectId) -> usize {
+    runner
+        .state()
+        .stack
+        .iter()
+        .filter(|entry| entry.source_id == celestus)
+        .count()
+        + runner
+            .state()
+            .deferred_triggers
+            .iter()
+            .filter(|context| context.pending.source_id == celestus)
+            .count()
+}
+
+/// CR 502.2a + CR 731.2a + CR 805.4a + CR 810.2: in Two-Headed Giant it stays day when a
+/// player on the previous turn's active team cast a spell. P0 represents the team and casts
+/// nothing; P1 casts one Memnite through Etali. The Celestus ("Whenever day becomes night or
+/// night becomes day, you gain 1 life. …") does not trigger.
+#[test]
+fn two_headed_giant_teammates_one_cast_keeps_it_day() {
+    let (mut runner, etali, celestus, memnites) = shared_turn_etali_board(
+        FormatConfig::two_headed_giant(),
+        DayNight::Day,
+        &[(P1, Zone::Library)],
+    );
+    etali_attacks_and_p1_casts(&mut runner, etali, &memnites);
+    assert_eq!(
+        casts_this_turn(&runner),
+        [0, 1, 0, 0],
+        "reach: only P1 cast, once"
+    );
+    assert_eq!(runner.state().objects[&memnites[0]].zone, Zone::Battlefield);
+    let events = pass_into_the_other_teams_upkeep(&mut runner);
+    assert_eq!(runner.state().day_night, Some(DayNight::Day));
+    assert_eq!(designation_changes(&events), vec![]);
+    assert_eq!(celestus_triggers(&runner, celestus), 0);
+}
+
+/// CR 502.2a + CR 731.2b + CR 731.1a: in Two-Headed Giant it becomes day when one player on
+/// the previous turn's active team cast two or more spells. P1 casts both exiled Memnites
+/// through Etali; night becomes day exactly once and The Celestus triggers exactly once.
+#[test]
+fn two_headed_giant_teammates_two_casts_make_it_day_once() {
+    let (mut runner, etali, celestus, memnites) = shared_turn_etali_board(
+        FormatConfig::two_headed_giant(),
+        DayNight::Night,
+        &[(P0, Zone::Library), (P1, Zone::Library)],
+    );
+    etali_attacks_and_p1_casts(&mut runner, etali, &memnites);
+    assert_eq!(
+        casts_this_turn(&runner),
+        [0, 2, 0, 0],
+        "reach: P1 cast both"
+    );
+    let events = pass_into_the_other_teams_upkeep(&mut runner);
+    assert_eq!(runner.state().day_night, Some(DayNight::Day));
+    assert_eq!(
+        designation_changes(&events),
+        vec![("Day".to_string(), Some(DayNight::Night))]
+    );
+    assert_eq!(
+        runner
+            .state()
+            .stack
+            .iter()
+            .filter(|entry| entry.source_id == celestus)
+            .count(),
+        1,
+        "The Celestus's trigger is on the stack once"
+    );
+    assert_eq!(celestus_triggers(&runner, celestus), 1);
+    let team_life = engine::game::players::team_life_total(runner.state(), P0);
+    let resolved = resolve_stack(&mut runner);
+    assert_settled(&runner);
+    assert_eq!(
+        engine::game::players::team_life_total(runner.state(), P0),
+        team_life + 1,
+        "The Celestus: you gain 1 life (CR 810.9: the team's shared total)"
+    );
+    assert_eq!(designation_changes(&resolved), vec![]);
+    assert_eq!(runner.state().day_night, Some(DayNight::Day));
+}
+
+/// CR 502.2a + CR 731.2b: one spell from each player on the active team is not two by any one
+/// of them, so night stays. P0 casts a Memnite from hand; P1 casts one through Etali.
+#[test]
+fn two_headed_giant_one_cast_from_each_teammate_keeps_it_night() {
+    let (mut runner, etali, celestus, memnites) = shared_turn_etali_board(
+        FormatConfig::two_headed_giant(),
+        DayNight::Night,
+        &[(P0, Zone::Hand), (P1, Zone::Library)],
+    );
+    runner.cast(memnites[0]).resolve();
+    etali_attacks_and_p1_casts(&mut runner, etali, &memnites[1..]);
+    assert_eq!(
+        casts_this_turn(&runner),
+        [1, 1, 0, 0],
+        "reach: one cast each"
+    );
+    let events = pass_into_the_other_teams_upkeep(&mut runner);
+    assert_eq!(runner.state().day_night, Some(DayNight::Night));
+    assert_eq!(designation_changes(&events), vec![]);
+    assert_eq!(celestus_triggers(&runner, celestus), 0);
+}
+
+/// Archenemy (CR 904.2: Team vs. Team on shared team turns) with P2 as the archenemy, so P0, P1
+/// and P3 are its heroes and P0 represents their turn.
+fn archenemy_against_p0s_team() -> FormatConfig {
+    let mut format = FormatConfig::archenemy();
+    format.archenemy_player = Some(PlayerId(2));
+    format
+}
+
+/// P1 concedes (CR 104.3a) and leaves the game (CR 800.4a) with its casts still recorded.
+fn p1_concedes(runner: &mut GameRunner) {
+    runner
+        .act(GameAction::Concede { player_id: P1 })
+        .expect("a player may concede at any time");
+    assert!(runner.state().players[1].is_eliminated, "reach: P1 left");
+    assert!(
+        !runner.state().players[0].is_eliminated,
+        "reach: the game goes on"
+    );
+}
+
+/// CR 502.2a + CR 731.2a + CR 800.4i: a player on the previous turn's active team who cast a
+/// spell during that turn and then left the game still cast it. P1, a hero, casts one Memnite
+/// through Etali and concedes before the turn ends; it stays day and The Celestus does not
+/// trigger.
+#[test]
+fn archenemy_teammate_who_cast_and_then_conceded_keeps_it_day() {
+    let (mut runner, etali, celestus, memnites) = shared_turn_etali_board(
+        archenemy_against_p0s_team(),
+        DayNight::Day,
+        &[(P1, Zone::Library)],
+    );
+    etali_attacks_and_p1_casts(&mut runner, etali, &memnites);
+    p1_concedes(&mut runner);
+    assert_eq!(
+        casts_this_turn(&runner),
+        [0, 1, 0, 0],
+        "reach: P1's cast outlives P1"
+    );
+    let events = pass_into_the_other_teams_upkeep(&mut runner);
+    assert_eq!(runner.state().day_night, Some(DayNight::Day));
+    assert_eq!(designation_changes(&events), vec![]);
+    assert_eq!(celestus_triggers(&runner, celestus), 0);
+}
+
+/// CR 502.2a + CR 731.2b + CR 800.4i: a hero who cast two spells during the turn and then left
+/// the game still makes it day from night, once, with one Celestus trigger.
+#[test]
+fn archenemy_teammate_who_cast_twice_and_then_conceded_makes_it_day() {
+    let (mut runner, etali, celestus, memnites) = shared_turn_etali_board(
+        archenemy_against_p0s_team(),
+        DayNight::Night,
+        &[(P0, Zone::Library), (P1, Zone::Library)],
+    );
+    etali_attacks_and_p1_casts(&mut runner, etali, &memnites);
+    p1_concedes(&mut runner);
+    assert_eq!(
+        casts_this_turn(&runner),
+        [0, 2, 0, 0],
+        "reach: P1's casts outlive P1"
+    );
+    let events = pass_into_the_other_teams_upkeep(&mut runner);
+    assert_eq!(runner.state().day_night, Some(DayNight::Day));
+    assert_eq!(
+        designation_changes(&events),
+        vec![("Day".to_string(), Some(DayNight::Night))]
+    );
+    assert_eq!(celestus_triggers(&runner, celestus), 1);
 }

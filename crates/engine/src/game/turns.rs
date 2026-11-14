@@ -1762,9 +1762,9 @@ pub fn start_next_turn(state: &mut GameState, events: &mut Vec<GameEvent>) {
         state.resolving_stack_entry,
         state.resolution_stack,
     );
-    // CR 502.2 + CR 731.2: the next untap step checks the turn ending here. Record its active
-    // player's spells before a skipped turn (CR 500.11 + CR 614.10) restarts the boundary below
-    // with another `active_player`.
+    // CR 502.2 + CR 502.2a + CR 731.2: the next untap step checks the turn ending here. Record
+    // the most spells any one of its active players cast before a skipped turn (CR 500.11 +
+    // CR 614.10) restarts the boundary below with another `active_player`.
     day_night::record_previous_turn(state);
     begin_next_turn(state, events);
 }
@@ -7047,7 +7047,10 @@ card into your hand at the beginning of your next end step.";
             "reach guard: the skip was consumed"
         );
         assert!(state.spells_cast_this_turn_by_player.is_empty());
-        assert_eq!(state.spells_cast_by_previous_active_player, Some(1));
+        assert_eq!(
+            state.most_spells_cast_by_one_previous_active_player,
+            Some(1)
+        );
     }
 
     #[test]

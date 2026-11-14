@@ -545,10 +545,11 @@ fn cast_has_relevant_payoff(
         .get(&caster)
         .map_or(0, |spells| spells.len());
 
-    // CR 502.2a: Day/Night counts the active TEAM's spells. The day/night
-    // transition reducer currently keys this on `active_player`, so do not
-    // treat any shared-team boundary as proven until that separate authority
-    // becomes team-aware.
+    // CR 502.2a + CR 731.2a + CR 731.2b: with shared team turns, Day/Night reads the most
+    // spells any one member of the active team cast (`day_night::record_previous_turn`).
+    // Whether this cast moves that across a threshold depends on the caster's team and the
+    // teammates' own counts, which this narrow check does not model, so a cast by a player
+    // with a teammate is never treated as proven unchanged.
     let caster_has_teammate = !engine::game::players::teammates(state, caster).is_empty();
     if state.day_night.is_some() && caster_has_teammate {
         return true;
@@ -2986,7 +2987,7 @@ mod tests {
 
             assert!(
                 cast_has_relevant_payoff(&state, PlayerId(1), None),
-                "a nonactive teammate's {day_night:?} boundary is retained until the transition authority is team-aware"
+                "a nonactive teammate's {day_night:?} boundary is retained: this check does not model the team's counts"
             );
 
             state.day_night = None;

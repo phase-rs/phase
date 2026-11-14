@@ -76,36 +76,60 @@ pub(crate) fn keep_faces_in_agreement(state: &mut GameState, events: &mut Vec<Ga
     transform_disagreeing_permanents(state, designation, events);
 }
 
-/// CR 502.2 + CR 731.2: records, as a turn ends, how many spells its active player cast during
-/// it, for the next untap step's day/night check (`check_day_night_transition`). CR 502.2 keys on
-/// the previous turn's ACTIVE player, not the table-wide `spells_cast_this_turn`: an opponent's
+/// CR 502.2 + CR 502.2a + CR 731.2: records, as a turn ends, the most spells any one of its
+/// active players cast during it, for the next untap step's day/night check
+/// (`check_day_night_transition`). Outside shared team turns that is the active player alone.
+/// With shared team turns (CR 805.4a) it is every player on the active team: the active
+/// player's whole side (`topology::side_of`), a player who left the game during the turn
+/// included, since leaving does not undo a spell they cast during it (CR 800.4a + CR 800.4i).
+/// CR 731.2a's "no player ... cast a spell" is a maximum of 0 and CR 731.2b's "any player ...
+/// cast two or more" a maximum of at least 2, so the one number decides both; a sum would not
+/// (one spell from each of two players is not two by one player). CR 502.2 keys on the previous
+/// turn's ACTIVE player or team, not the table-wide `spells_cast_this_turn`: an opponent's
 /// instant cast on that turn neither drives nor suppresses the change. `turns::start_next_turn`
 /// calls it before a skipped turn (CR 500.11) can move `active_player`, while the per-player
 /// tally is intact.
 pub(crate) fn record_previous_turn(state: &mut GameState) {
-    let spells = state
-        .spells_cast_this_turn_by_player
-        .get(&state.active_player)
-        .map_or(0, |records| records.len());
-    state.spells_cast_by_previous_active_player = Some(u32::try_from(spells).unwrap_or(u32::MAX));
+    let active = state.active_player;
+    // CR 502.2a + CR 805.4a: with shared team turns, every player on the active team took this
+    // turn. The side's seats include one who has since left (CR 800.4i), unlike the living-only
+    // `players::teammates`. CR 731.2a and CR 731.2b compare each player's own count, so the
+    // record is the largest.
+    let team = if super::topology::side_takes_shared_turn(state, active) {
+        super::topology::side_of(state, active).map_or_else(|| vec![active], |side| side.seats)
+    } else {
+        vec![active]
+    };
+    let most = team
+        .into_iter()
+        .map(|player| {
+            state
+                .spells_cast_this_turn_by_player
+                .get(&player)
+                .map_or(0, |records| records.len())
+        })
+        .fold(0, usize::max);
+    state.most_spells_cast_by_one_previous_active_player =
+        Some(u32::try_from(most).unwrap_or(u32::MAX));
 }
 
-/// CR 502.2 + CR 731.2: the untap step's second turn-based action. If it's day and the previous
-/// turn's active player cast no spells during that turn, it becomes night (CR 731.2a); if it's
-/// night and they cast two or more, it becomes day (CR 731.2b).
+/// CR 502.2 + CR 502.2a + CR 731.2: the untap step's second turn-based action. If it's day and
+/// no active player of the previous turn cast a spell during that turn, it becomes night
+/// (CR 731.2a); if it's night and one of them cast two or more, it becomes day (CR 731.2b).
+/// `record_previous_turn` stores the most spells any one of them cast.
 pub fn check_day_night_transition(state: &mut GameState, events: &mut Vec<GameEvent>) {
     // CR 731.2c: if it's neither day nor night, this check doesn't happen.
     let Some(current) = state.day_night else {
         return;
     };
     // The game's first untap step has no previous turn to check.
-    let Some(previous_spells) = state.spells_cast_by_previous_active_player else {
+    let Some(most_spells) = state.most_spells_cast_by_one_previous_active_player else {
         return;
     };
 
     let new_state = match current {
-        DayNight::Day if previous_spells == 0 => DayNight::Night,
-        DayNight::Night if previous_spells >= 2 => DayNight::Day,
+        DayNight::Day if most_spells == 0 => DayNight::Night,
+        DayNight::Night if most_spells >= 2 => DayNight::Day,
         _ => return, // No transition
     };
 
@@ -365,7 +389,10 @@ mod tests {
         // The global tally reflects the table total but must be irrelevant.
         state.spells_cast_this_turn = 2;
         record_previous_turn(&mut state);
-        assert_eq!(state.spells_cast_by_previous_active_player, Some(0));
+        assert_eq!(
+            state.most_spells_cast_by_one_previous_active_player,
+            Some(0)
+        );
 
         let mut events = Vec::new();
         check_day_night_transition(&mut state, &mut events);
@@ -382,7 +409,10 @@ mod tests {
         let mut state = GameState::new_two_player(42);
         assert_eq!(state.day_night, None);
         set_active_spells(&mut state, 0);
-        assert_eq!(state.spells_cast_by_previous_active_player, Some(0));
+        assert_eq!(
+            state.most_spells_cast_by_one_previous_active_player,
+            Some(0)
+        );
 
         let mut events = Vec::new();
         check_day_night_transition(&mut state, &mut events);
@@ -396,7 +426,7 @@ mod tests {
     fn no_transition_before_any_turn_has_ended() {
         let mut state = GameState::new_two_player(42);
         state.day_night = Some(DayNight::Day);
-        assert_eq!(state.spells_cast_by_previous_active_player, None);
+        assert_eq!(state.most_spells_cast_by_one_previous_active_player, None);
 
         let mut events = Vec::new();
         check_day_night_transition(&mut state, &mut events);
@@ -637,5 +667,117 @@ mod tests {
 
         assert_eq!(state.day_night, Some(DayNight::Night));
         assert!(events.is_empty());
+    }
+
+    /// Seeds `player`'s cast ledger with `n` spells.
+    fn seed_spells(state: &mut GameState, player: PlayerId, n: usize) {
+        state.spells_cast_this_turn_by_player.insert(
+            player,
+            (0..n)
+                .map(|_| crate::types::game_state::SpellCastRecord::default())
+                .collect(),
+        );
+    }
+
+    /// CR 502.2a + CR 731.2a + CR 731.2b + CR 805.4a: with shared team turns the record is the
+    /// most spells any one member of the previous turn's active team cast; the other team's
+    /// casts never count. Two-Headed Giant seats P0 and P1 against P2 and P3 (CR 810.1).
+    #[test]
+    fn shared_team_turn_records_the_most_spells_any_active_member_cast() {
+        use crate::types::format::FormatConfig;
+
+        for (spells, expected, start, after) in [
+            // A teammate's two casts make it day from night (CR 731.2b).
+            ([0, 2, 3, 0], 2, DayNight::Night, DayNight::Day),
+            // One each is not two by one player: night stays (CR 731.2b).
+            ([1, 1, 3, 3], 1, DayNight::Night, DayNight::Night),
+            // A teammate's one cast keeps it day (CR 731.2a).
+            ([0, 1, 0, 0], 1, DayNight::Day, DayNight::Day),
+            // No active member cast, whatever the other team did: day becomes night.
+            ([0, 0, 2, 3], 0, DayNight::Day, DayNight::Night),
+        ] {
+            let mut state = GameState::new(FormatConfig::two_headed_giant(), 4, 42);
+            state.active_player = PlayerId(0);
+            assert_eq!(
+                crate::game::players::teammates(&state, PlayerId(0)),
+                vec![PlayerId(1)],
+                "reach: P1 is P0's teammate"
+            );
+            for (seat, n) in spells.into_iter().enumerate() {
+                seed_spells(&mut state, PlayerId(seat as u8), n);
+            }
+            record_previous_turn(&mut state);
+            assert_eq!(
+                state.most_spells_cast_by_one_previous_active_player,
+                Some(expected),
+                "ledger {spells:?}"
+            );
+            state.day_night = Some(start);
+            let mut events = Vec::new();
+            check_day_night_transition(&mut state, &mut events);
+            assert_eq!(state.day_night, Some(after), "ledger {spells:?}");
+        }
+    }
+
+    /// The record's earlier serialized name (this change's earlier revisions) still decodes.
+    #[test]
+    fn a_save_naming_the_record_by_its_earlier_name_still_decodes_it() {
+        use crate::types::game_state::{PersistedGameState, PersistedRestoreFinalization};
+
+        let state = GameState::new_two_player(42);
+        let mut json = serde_json::to_value(PersistedGameState::capture(state)).unwrap();
+        let fields = json
+            .get_mut("state")
+            .unwrap_or_else(|| panic!("a capture wraps the state"))
+            .as_object_mut()
+            .unwrap();
+        assert!(
+            !fields.contains_key("most_spells_cast_by_one_previous_active_player"),
+            "reach: a `None` record is not serialized"
+        );
+        fields.insert(
+            "spells_cast_by_previous_active_player".to_string(),
+            serde_json::json!(2),
+        );
+        let restored = serde_json::from_value::<PersistedGameState>(json)
+            .unwrap()
+            .prepare_for_restore(PersistedRestoreFinalization::DeferUntilRehydrated)
+            .unwrap()
+            .finalize_after_rehydration(|_| Ok(()))
+            .unwrap();
+        assert_eq!(
+            restored.most_spells_cast_by_one_previous_active_player,
+            Some(2)
+        );
+    }
+
+    /// CR 502.2a + CR 800.4i: a player on the active team who left the game during the turn still
+    /// cast what they cast. Archenemy with P2 as the archenemy seats P0, P1 and P3 as its heroes
+    /// (CR 904.2a + CR 904.2b); P1 cast two spells and left.
+    #[test]
+    fn shared_team_turn_record_counts_a_member_who_left_the_game() {
+        use crate::types::format::FormatConfig;
+
+        let mut format = FormatConfig::archenemy();
+        format.archenemy_player = Some(PlayerId(2));
+        let mut state = GameState::new(format, 4, 42);
+        state.active_player = PlayerId(0);
+        seed_spells(&mut state, PlayerId(1), 2);
+        seed_spells(&mut state, PlayerId(2), 3);
+        state.players[1].is_eliminated = true;
+        assert_eq!(
+            crate::game::players::teammates(&state, PlayerId(0)),
+            vec![PlayerId(3)],
+            "reach: the living-only team query no longer lists P1"
+        );
+        record_previous_turn(&mut state);
+        assert_eq!(
+            state.most_spells_cast_by_one_previous_active_player,
+            Some(2)
+        );
+        state.day_night = Some(DayNight::Night);
+        let mut events = Vec::new();
+        check_day_night_transition(&mut state, &mut events);
+        assert_eq!(state.day_night, Some(DayNight::Day));
     }
 }
