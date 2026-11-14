@@ -57,9 +57,7 @@ pub(super) fn handle_ability_mode_choice(
     // is never finalized as a no-op entry, and no mode usage is recorded.
     if activated_ability_index.is_none() && indices.is_empty() {
         let produced = remove_modal_trigger_with_no_mode(state, player, events);
-        return Ok(triggers::finish_trigger_construction_action(
-            state, events, produced,
-        ));
+        return settle_triggered_mode_choice(state, events, produced);
     }
 
     // CR 400.7 + CR 700.2: record against the same incarnation the prompt's
@@ -112,12 +110,25 @@ pub(super) fn handle_ability_mode_choice(
             },
             events,
         )?;
-        Ok(triggers::finish_trigger_construction_action(
-            state, events, produced,
-        ))
+        settle_triggered_mode_choice(state, events, produced)
     }?;
 
     Ok(waiting_for)
+}
+
+/// CR 603.3c + CR 608.2c: a triggered ability's mode choice completes its
+/// construction. A reflexive trigger built mid-resolution (CR 603.12) then
+/// hands control back to the suspended parent resolution through the shared
+/// continuation boundary, which also retires the completed repeated-payment
+/// frame whose K sized the mode cap (CR 603.12a).
+fn settle_triggered_mode_choice(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+    produced: WaitingFor,
+) -> Result<WaitingFor, EngineError> {
+    state.waiting_for = triggers::finish_trigger_construction_action(state, events, produced);
+    super::engine::resume_pending_continuation_if_priority(state, events)?;
+    Ok(state.waiting_for.clone())
 }
 
 /// CR 400.7 + CR 603.10a: the modal history key of the trigger whose modes are

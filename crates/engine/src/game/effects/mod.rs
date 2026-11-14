@@ -2050,10 +2050,29 @@ pub(crate) fn resume_resolution_frames(state: &mut GameState, events: &mut Vec<G
         }
         ResolutionFrame::RepeatFor(_) => drain_active_repeat_for(state, events),
         ResolutionFrame::RepeatUntil(_) => drain_active_repeat_until(state, events),
-        ResolutionFrame::RepeatedOptionalPayment(_) => {
-            // The payment action owns the next offer and its reflexive tail.
-            // Its completed AfterChild form is settled by the reflexive mode
-            // action after that action has consumed the dynamic modal cap.
+        // The payment action owns the next offer and its reflexive tail.
+        ResolutionFrame::RepeatedOptionalPayment(RepeatedOptionalPaymentFrame {
+            pending: Some(_),
+            ..
+        }) => {}
+        // CR 603.12 + CR 603.12a: the completed frame only kept K readable for
+        // the reflexive's construction prompts (CR 700.2b: the "up to that
+        // many" mode cap is read as the trigger is put on the stack). Back at
+        // priority, that construction has settled — modes chosen, zero modes
+        // chosen, or no prompt needed — so retire the frame. Leaving it
+        // installed would keep `resolution_completion_can_settle`
+        // false, parking a deferred (non-modal) reflexive forever and leaving
+        // the parent resolution unsettled beneath a stacked modal reflexive.
+        ResolutionFrame::RepeatedOptionalPayment(RepeatedOptionalPaymentFrame {
+            pending: None,
+            ..
+        }) => {
+            if let Err(error) = state.take_active_repeated_optional_payment_frame() {
+                debug_assert!(false, "completed repeated-payment frame retire: {error}");
+                return;
+            }
+            // Retiring exposes the enclosing owner, which resumes in this pass.
+            resume_resolution_frames(state, events);
         }
         ResolutionFrame::BatchDelivery(_) => {
             crate::game::zone_pipeline::drain_pending_batch_deliveries(state, events);
@@ -17677,6 +17696,11 @@ fn finish_repeated_optional_payment(
         state.cost_payment_failed_flag = false;
         resolve_ability_chain(state, reflexive, events, 1)?;
     }
+    // CR 603.12a + CR 700.2b: the completed frame stays installed while the
+    // reflexive's construction prompts (mode choice, then targets) are open,
+    // so K stays readable as the modal's "up to that many" cap. It is retired
+    // by `resume_resolution_frames` at the first priority boundary after that
+    // construction settles — immediately, for a deferred non-modal reflexive.
     Ok(())
 }
 
@@ -21904,9 +21928,10 @@ fn reset_top_level_resolution_state(state: &mut GameState) {
     // the `engine.rs` apply() clear. (CR 706.2 + CR 706.4 + CR 603.12)
     state.last_effect_counts_by_player.clear();
     state.exiled_from_hand_this_resolution = 0;
-    // CR 603.12a: a completed repeated-payment frame retains K while its
-    // reflexive modal is open. The next top-level resolution no longer
-    // needs that cap, so discard only an owner whose driver is absent.
+    // CR 603.12a: a completed repeated-payment frame retains K only while its
+    // reflexive's construction is open; `resume_resolution_frames` retires it
+    // at the next priority boundary. Defensively discard any such owner whose
+    // driver is absent, since the next top-level resolution never needs K.
     if state
         .active_repeated_optional_payment_frame()
         .is_some_and(|frame| frame.pending.is_none())
