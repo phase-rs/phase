@@ -7039,17 +7039,10 @@ pub enum FilterProp {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         controller: Option<ControllerRef>,
     },
-    /// Matches any object that is NOT the reference object. When a `recipient_id`
-    /// is bound in the `FilterContext` (e.g., an attachment's host in
-    /// `effects/attach.rs`, the selected object in `effects/put_chosen_counter.rs`,
-    /// or a shared-quality compared object after #10081), it excludes that
-    /// recipient. Otherwise it excludes the ability source.
-    ///
-    /// In zone-change record evaluation (e.g., `restrictions.rs` entry snapshots),
-    /// and in spell-cost reduction predicates (e.g., `casting.rs` cost filters),
-    /// the check is source-relative only — no recipient context is available there.
-    /// Used for "another [type]" predicates (CR 109.1) and per-recipient layer
-    /// contexts (CR 613.4c).
+    /// Excludes a reference object for predicates such as "another creature."
+    /// Live object matching uses `FilterContext::recipient_id` when bound
+    /// (for example, an attachment's host), and otherwise uses the ability source.
+    /// Zone-change record and spell-cost matching compare against their source IDs.
     Another,
     /// CR 702.95b: Matches objects that are not paired with another creature.
     Unpaired,
