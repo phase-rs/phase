@@ -2437,6 +2437,10 @@ fn parse_companion_condition(text: &str) -> CompanionCondition {
         return CompanionCondition::MinDeckSizeOver(over);
     }
 
+    if parse_companion_singleton(&lower).is_ok() {
+        return CompanionCondition::Singleton;
+    }
+
     if lower.contains("even mana value") || lower.contains("even converted mana cost") {
         CompanionCondition::EvenManaValues
     } else if lower.contains("odd mana value") || lower.contains("odd converted mana cost") {
@@ -2471,20 +2475,56 @@ fn parse_companion_condition(text: &str) -> CompanionCondition {
 /// 60-card Constructed and 40-card Limited). Trailing punctuation and reminder
 /// text are left unconsumed.
 fn parse_companion_deck_size_over(input: &str) -> super::text_grammar::OracleResult<'_, u32> {
-    let (rest, _) = (
-        multispace0,
-        opt(alt((
-            tag::<_, _, OracleError<'_>>("\u{2014}"),
-            tag("\u{2013}"),
-            tag("-"),
-        ))),
-        multispace0,
-    )
-        .parse(input)?;
+    let (rest, _) = companion_condition_lead(input)?;
     preceded(
         tag("your starting deck contains at least "),
         terminated(parse_number, tag(" cards more than the minimum deck size")),
     )
+    .parse(rest)
+}
+
+/// CR 702.139a: the `Companion` keyword's separator (em dash, en dash or hyphen)
+/// and its surrounding whitespace, ahead of the condition proper.
+fn companion_condition_lead(input: &str) -> super::text_grammar::OracleResult<'_, ()> {
+    value(
+        (),
+        (
+            multispace0,
+            opt(alt((
+                tag::<_, _, OracleError<'_>>("\u{2014}"),
+                tag("\u{2013}"),
+                tag("-"),
+            ))),
+            multispace0,
+        ),
+    )
+    .parse(input)
+}
+
+/// CR 702.139a + CR 702.139b: the singleton companion condition, as Lutri, the
+/// Spellchaser prints it: "Each nonland card in your starting deck has a
+/// different name." The "no two nonland cards ... have the same name" phrasing
+/// names the same condition. Reads the lowercased condition after the keyword
+/// name. The nonland scope is part of the printed condition, so lands never
+/// count toward a repeat (the runtime evaluation skips them).
+fn parse_companion_singleton(input: &str) -> super::text_grammar::OracleResult<'_, ()> {
+    let (rest, _) = companion_condition_lead(input)?;
+    alt((
+        value(
+            (),
+            (
+                tag("each nonland card in your starting deck "),
+                tag("has a different name"),
+            ),
+        ),
+        value(
+            (),
+            (
+                tag("no two nonland cards in your starting deck "),
+                tag("have the same name"),
+            ),
+        ),
+    ))
     .parse(rest)
 }
 

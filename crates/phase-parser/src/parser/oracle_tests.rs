@@ -35761,6 +35761,49 @@ fn companion_deck_size_condition_parses_to_min_deck_size_over() {
         .contains(&Keyword::Companion(CompanionCondition::EvenManaValues)));
 }
 
+/// CR 702.139a: Lutri's printed condition (verified against Scryfall) is the singleton
+/// condition over NONLAND cards. It used to fall through to the `SharedCardType`
+/// fallback, so deck validation accepted repeated nonland names.
+#[test]
+fn companion_different_name_condition_parses_to_singleton() {
+    const LUTRI: &str = "Companion — Each nonland card in your starting deck has a different name. (If this card is your chosen companion, you may put it into your hand from outside the game for {3} as a sorcery.)\nFlash\nWhen Lutri enters, if you cast it, copy target instant or sorcery spell you control. You may choose new targets for the copy.";
+    let parsed = parse_oracle_text(
+        LUTRI,
+        "Lutri, the Spellchaser",
+        &["Companion".into(), "Flash".into()],
+        &["Creature".into()],
+        &["Elemental".into(), "Otter".into()],
+    );
+    let companions: Vec<_> = parsed
+        .extracted_keywords
+        .iter()
+        .filter_map(|keyword| match keyword {
+            Keyword::Companion(condition) => Some(condition.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(companions, vec![CompanionCondition::Singleton]);
+
+    // The separator spelling and the older phrasing do not change the condition, and a
+    // condition this grammar does not name still takes its own arm.
+    for fragment in [
+        "companion:- each nonland card in your starting deck has a different name.",
+        "companion:no two nonland cards in your starting deck have the same name",
+    ] {
+        assert_eq!(
+            fragment.parse::<Keyword>().unwrap(),
+            Keyword::Companion(CompanionCondition::Singleton),
+            "{fragment}"
+        );
+    }
+    assert_eq!(
+        "companion:each nonland card in your starting deck shares a card type"
+            .parse::<Keyword>()
+            .unwrap(),
+        Keyword::Companion(CompanionCondition::SharedCardType)
+    );
+}
+
 /// CR 202.3 + CR 601.3a: the FIXED odd/even mana-value conjunct must reach
 /// every call site the corpus exercises, and must stay away from the two
 /// printed shapes that only LOOK like it.

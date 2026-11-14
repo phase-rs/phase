@@ -1718,3 +1718,81 @@ fn commander_draft_pregame_counts_a_double_listed_commander_once_for_yorion() {
     }
 }
 
+/// Lutri, the Spellchaser's printed Oracle text (verified against Scryfall).
+const LUTRI_ORACLE: &str = "Companion \u{2014} Each nonland card in your starting deck has a different name. (If this card is your chosen companion, you may put it into your hand from outside the game for {3} as a sorcery.)\nFlash\nWhen Lutri enters, if you cast it, copy target instant or sorcery spell you control. You may choose new targets for the copy.";
+
+/// CR 702.139a: Lutri built from its real Oracle text through the production parser reads as
+/// the singleton condition, and Limited admission measures NONLAND names only: a repeated
+/// nonland name is refused, while distinct nonland names with repeated basic lands pass.
+#[test]
+fn limited_lutri_from_oracle_admission_requires_distinct_nonland_names() {
+    let parsed = engine::parser::oracle::parse_oracle_text(
+        LUTRI_ORACLE,
+        "Lutri, the Spellchaser",
+        &["Companion".into(), "Flash".into()],
+        &["Creature".into()],
+        &["Elemental".into(), "Otter".into()],
+    );
+    let keywords: Vec<Keyword> = parsed
+        .extracted_keywords
+        .into_iter()
+        .filter(|keyword| matches!(keyword, Keyword::Companion(_)))
+        .collect();
+    assert_eq!(
+        keywords,
+        vec![Keyword::Companion(CompanionCondition::Singleton)],
+        "Lutri's companion condition is the singleton condition"
+    );
+
+    let mut faces = vec![
+        CardFace {
+            name: "Lutri, the Spellchaser".to_string(),
+            keywords,
+            ..Default::default()
+        },
+        land("Plains", 1).card,
+    ];
+    faces.extend((0..23).map(|i| creature(&format!("Distinct Spell {i}"), 2).card));
+    let export: serde_json::Map<String, serde_json::Value> = faces
+        .iter()
+        .map(|face| {
+            (
+                face.name.to_lowercase(),
+                serde_json::to_value(face).expect("CardFace serializes"),
+            )
+        })
+        .collect();
+    let db = CardDatabase::from_json_str(&serde_json::Value::Object(export).to_string())
+        .expect("synthetic export parses");
+
+    let distinct: Vec<String> = (0..23).map(|i| format!("Distinct Spell {i}")).collect();
+    let mut repeated = distinct.clone();
+    repeated[1] = repeated[0].clone();
+    for (spells, compatible) in [(distinct, true), (repeated, false)] {
+        let mut main_deck = spells;
+        main_deck.extend(vec!["Plains".to_string(); 17]);
+        let request: DeckCompatibilityRequest = serde_json::from_value(serde_json::json!({
+            "main_deck": main_deck,
+            "companion": ["Lutri, the Spellchaser"],
+            "selected_format": "Limited",
+        }))
+        .expect("request deserializes");
+        let result = evaluate_deck_compatibility(&db, &request);
+        assert!(result.unknown_cards.is_empty(), "every card resolves");
+        assert_eq!(
+            result.selected_format_compatible,
+            Some(compatible),
+            "{:?}",
+            result.selected_format_reasons
+        );
+        assert_eq!(
+            result
+                .selected_format_reasons
+                .iter()
+                .any(|reason| reason.contains("not a legal companion")),
+            !compatible,
+            "{:?}",
+            result.selected_format_reasons
+        );
+    }
+}
