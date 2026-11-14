@@ -261,8 +261,8 @@ pub enum ObjectSelectionCardinality {
 }
 
 impl ObjectSelectionCardinality {
-    /// The single-object selection: the historical cardinality of a hand
-    /// reveal's post-reveal card choice (CR 701.20a "you choose a card").
+    /// A post-reveal choice of one card uses the printed instruction's
+    /// cardinality and is made during resolution (CR 608.2d).
     pub const SINGLE: Self = Self::Exactly { count: 1 };
 
     /// Serde default for fields whose historical shape was a single pick.
