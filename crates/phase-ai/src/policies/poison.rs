@@ -261,11 +261,11 @@ fn ability_delivery(
                 .map(|slot| match slot.chooser {
                     Some(chooser) if chooser != ai_player => None,
                     _ if slot.legal_targets.contains(&chosen) => Some(chosen.clone()),
-                    // The AI targets around Ward when the slot allows it.
+                    // CR 702.21a: the gate refuses a warded target whose cost the AI cannot pay.
                     _ => slot
                         .legal_targets
                         .iter()
-                        .find(|target| !has_ward(state, target))
+                        .find(|target| !has_ward(state, ai_player, target))
                         .or(slot.legal_targets.first())
                         .cloned(),
                 })
@@ -273,7 +273,7 @@ fn ability_delivery(
             // CR 601.2c: "Any abilities that trigger when those objects and/or players become the
             // target of a spell trigger at this point"; conservative: subjects and valid_source are
             // not evaluated because the spell isn't staged on the preview.
-            if !targets.is_empty() && targeting_may_trigger(state, &targets) {
+            if !targets.is_empty() && targeting_may_trigger(state, ai_player, &targets) {
                 return None;
             }
             if !targets.is_empty() {
@@ -300,9 +300,11 @@ fn ability_delivery(
 
 /// CR 702.21a: Ward on a targeted object, or a live becomes-target trigger on any permanent; an
 /// unsettled board may hide granted ones.
-fn targeting_may_trigger(state: &GameState, targets: &[TargetRef]) -> bool {
+fn targeting_may_trigger(state: &GameState, ai_player: PlayerId, targets: &[TargetRef]) -> bool {
     state.layers_dirty.is_dirty()
-        || targets.iter().any(|target| has_ward(state, target))
+        || targets
+            .iter()
+            .any(|target| has_ward(state, ai_player, target))
         || battlefield_active_triggers(state).any(|(_, active)| {
             matches!(
                 active.definition.mode,
@@ -311,9 +313,10 @@ fn targeting_may_trigger(state: &GameState, targets: &[TargetRef]) -> bool {
         })
 }
 
-fn has_ward(state: &GameState, target: &TargetRef) -> bool {
+/// CR 702.21a: Ward triggers only for a spell or ability its controller's opponent controls.
+fn has_ward(state: &GameState, ai_player: PlayerId, target: &TargetRef) -> bool {
     matches!(target, TargetRef::Object(id) if state.objects.get(id).is_some_and(|obj| {
-        obj.keywords.iter().any(|k| matches!(k, Keyword::Ward(_)))
+        obj.controller != ai_player && obj.keywords.iter().any(|k| matches!(k, Keyword::Ward(_)))
     }))
 }
 

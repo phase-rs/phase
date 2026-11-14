@@ -2016,19 +2016,15 @@ fn an_opponent_owned_choice_withholds_the_lethal_read() {
     }
 }
 
-/// The F1 board: the AI at five poison with Grizzly Bears, the opponent at nine with `creatures`,
-/// and Infectious Bite in hand.
-fn infectious_bite_board(creatures: &[&str]) -> (GameRunner, ObjectId) {
+/// The F1 board: the AI at five poison with `mine`, the opponent at nine with `creatures`, and
+/// Infectious Bite in hand.
+fn infectious_bite_board(mine: &str, creatures: &[&str]) -> (GameRunner, ObjectId) {
     let poison = [(OPPONENT, 9), (AI, 5)];
     let (runner, ids) = board(FormatConfig::standard(), 2, &poison, |s| {
-        grizzly_bears(s, AI);
+        let db = shared_integration_card_db();
+        s.add_real_card(AI, mine, Zone::Battlefield, db);
         for creature in creatures {
-            s.add_real_card(
-                OPPONENT,
-                creature,
-                Zone::Battlefield,
-                shared_integration_card_db(),
-            );
+            s.add_real_card(OPPONENT, creature, Zone::Battlefield, db);
         }
         vec![s
             .add_spell_to_hand_from_oracle(AI, "Infectious Bite", true, INFECTIOUS_BITE)
@@ -2058,7 +2054,7 @@ fn a_ward_trigger_on_a_target_withholds_the_lethal_read() {
         (&["Grizzly Bears"], lethal),
     ];
     let kinds = expected.map(|(creatures, _)| {
-        let (runner, bite) = infectious_bite_board(creatures);
+        let (runner, bite) = infectious_bite_board("Grizzly Bears", creatures);
         (
             creatures,
             verdict_on(runner.state(), &cast_candidate(bite)).1.kind,
@@ -2066,7 +2062,12 @@ fn a_ward_trigger_on_a_target_withholds_the_lethal_read() {
     });
     assert_eq!(kinds, expected);
 
-    let (mut unsettled, bite) = infectious_bite_board(&["Grizzly Bears"]);
+    // CR 702.21a: the AI's own Ward (Tolarian Terror) does not trigger on its own spell.
+    let (own_ward, bite) = infectious_bite_board("Tolarian Terror", &["Grizzly Bears"]);
+    let reason = verdict_on(own_ward.state(), &cast_candidate(bite)).1;
+    assert_eq!(reason.kind, lethal);
+
+    let (mut unsettled, bite) = infectious_bite_board("Grizzly Bears", &["Grizzly Bears"]);
     unsettled.state_mut().layers_dirty.mark_full();
     let reason = verdict_on(unsettled.state(), &cast_candidate(bite)).1;
     assert_eq!(
