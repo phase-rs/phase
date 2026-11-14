@@ -1602,14 +1602,33 @@ pub(crate) fn restore_legacy_cast_timing_routes(
         )
         .is_ok()
     });
-    match restrictions::open_flash_timing_routes(
+    // CR 601.2b + CR 601.3c: an energy debit made during this cast under a timing
+    // alternative-cost grant is that cost's election.
+    let paid_alternative = (pending.alternative_cost_election
+        == crate::types::game_state::SpellAlternativeCostElection::Undecided
+        && casting_energy_debited(state, &pending))
+    .then(|| {
+        casting_costs::spell_alternative_cost_for_timing(
+            state,
+            player,
+            pending.object_id,
+            pending.casting_variant,
+            crate::types::ability::CastTimingPermission::AsThoughHadFlash,
+        )
+    })
+    .flatten();
+    let route = restrictions::open_flash_timing_routes(
         state,
         player,
         pending.object_id,
         pending.casting_variant,
     )
     .first()
-    {
+    .copied()
+    .or(paid_alternative
+        .as_ref()
+        .map(|_| CastTimingRoute::AlternativeCost));
+    match route {
         None if proposal_open && !timing_open_without_flash => {
             // CR 601.3 + CR 733.1: nothing allows this cast to begin now, so the incomplete
             // proposal is reversed.
@@ -1625,15 +1644,51 @@ pub(crate) fn restore_legacy_cast_timing_routes(
         }
         route => {
             // `Permission` adds no route-specific cost or target requirement to a kept cast.
-            let route = route.copied().unwrap_or(CastTimingRoute::Permission);
+            let route = route.unwrap_or(CastTimingRoute::Permission);
             for owner in owners {
                 if let Some(live) = state.pending_cast_at_mut(owner) {
                     live.cast_timing_permission = Some(route);
+                    if let Some(grant) = &paid_alternative {
+                        casting_costs::record_elected_alternative_cost(
+                            live,
+                            grant.once_per_turn_source,
+                        );
+                    }
                 }
             }
         }
     }
     Ok(())
+}
+
+/// Whether the caster lost energy to a cost of `pending` within its reversal window.
+fn casting_energy_debited(state: &GameState, pending: &PendingCast) -> bool {
+    use crate::types::resolved_commands::{
+        ResolvedPlayerEdit, ResolvedPlayerEditCommand, ResolvedRulesCommand as C,
+        RulesExecutionNodeRef as N,
+    };
+    let Some(reversal) = state
+        .spell_cast_reversal
+        .as_ref()
+        .filter(|reversal| reversal.object_id == pending.object_id)
+    else {
+        return false;
+    };
+    state
+        .resolved_rules_journal
+        .entries_since(reversal.journal_start)
+        .iter()
+        .any(|entry| {
+            matches!(entry.node, N::Proposal(_) | N::Payment(_))
+                && matches!(
+                    entry.command,
+                    Some(C::PlayerEdit(ResolvedPlayerEditCommand {
+                        player,
+                        edit: ResolvedPlayerEdit::Energy { delta },
+                        ..
+                    })) if player == pending.ability.controller && delta < 0
+                )
+        })
 }
 
 pub(super) fn handle_target_selection_select_targets(

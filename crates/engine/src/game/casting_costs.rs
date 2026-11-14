@@ -694,11 +694,7 @@ fn apply_only_payable_alternative_cost(
     alt_cost: PayableSpellAlternativeCost,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
-    pending.alternative_cost_election =
-        crate::types::game_state::SpellAlternativeCostElection::Accepted;
-    pending.ability.context.alternative_mana_cost_paid = true;
-    pending.ability.context.alt_cost_grant_source = alt_cost.once_per_turn_source;
-    pending.alt_cost_grant_source = alt_cost.once_per_turn_source;
+    record_elected_alternative_cost(&mut pending, alt_cost.once_per_turn_source);
     match alt_cost.cost {
         AbilityCost::Mana { cost: alt_mana } => {
             pending.base_cost = Some(alt_mana);
@@ -719,6 +715,18 @@ fn apply_only_payable_alternative_cost(
             events,
         ),
     }
+}
+
+/// CR 601.2b: marks `pending` as cast with its granted alternative cost.
+pub(super) fn record_elected_alternative_cost(
+    pending: &mut PendingCast,
+    once_per_turn_source: Option<ObjectId>,
+) {
+    pending.alternative_cost_election =
+        crate::types::game_state::SpellAlternativeCostElection::Accepted;
+    pending.ability.context.alternative_mana_cost_paid = true;
+    pending.ability.context.alt_cost_grant_source = once_per_turn_source;
+    pending.alt_cost_grant_source = once_per_turn_source;
 }
 
 pub(crate) fn handle_decide_additional_cost(
@@ -1262,6 +1270,31 @@ pub(crate) fn payable_spell_alternative_cost_for_timing(
     casting_variant: CastingVariant,
     timing_permission: CastTimingPermission,
 ) -> Option<PayableSpellAlternativeCost> {
+    let granted = spell_alternative_cost_for_timing(
+        state,
+        player,
+        object_id,
+        casting_variant,
+        timing_permission,
+    )?;
+    spell_alternative_cost_is_payable(state, player, object_id, &granted.cost).then_some(
+        PayableSpellAlternativeCost {
+            cost: granted.cost,
+            timing_permission: granted.timing_permission,
+            once_per_turn_source: granted.once_per_turn_source,
+        },
+    )
+}
+
+/// The alternative cost granted to this Normal hand cast together with
+/// `timing_permission`, whether or not it is still payable.
+pub(super) fn spell_alternative_cost_for_timing(
+    state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    casting_variant: CastingVariant,
+    timing_permission: CastTimingPermission,
+) -> Option<super::casting::GrantedSpellAlternativeCost> {
     // CR 601.3c: the timing comes only with its alternative cost, which only a
     // Normal-method cast elects.
     if casting_variant != CastingVariant::Normal {
@@ -1271,18 +1304,8 @@ pub(crate) fn payable_spell_alternative_cost_for_timing(
     if obj.zone != Zone::Hand || obj.controller != player {
         return None;
     }
-
-    let granted = super::casting::granted_spell_alternative_cost(state, player, object_id)?;
-    if granted.timing_permission != Some(timing_permission) {
-        return None;
-    }
-    spell_alternative_cost_is_payable(state, player, object_id, &granted.cost).then_some(
-        PayableSpellAlternativeCost {
-            cost: granted.cost,
-            timing_permission: granted.timing_permission,
-            once_per_turn_source: granted.once_per_turn_source,
-        },
-    )
+    super::casting::granted_spell_alternative_cost(state, player, object_id)
+        .filter(|granted| granted.timing_permission == Some(timing_permission))
 }
 
 fn spell_alternative_cost_is_payable(

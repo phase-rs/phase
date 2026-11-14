@@ -13297,6 +13297,33 @@ fn migrate_legacy_pending_cast_timing(value: &mut serde_json::Value) {
     }
 }
 
+/// Rewrites every granted `CastWithKeyword { Flash }` static to `CastWithFlash`.
+fn migrate_legacy_as_though_flash_grants(value: &mut serde_json::Value) {
+    // CR 609.4: only the old "as though they had flash" writer granted
+    // CastWithKeyword { Flash } as an ability; genuine Flash grants are
+    // statics or keywords.
+    if value.get("type").and_then(serde_json::Value::as_str) == Some("GrantStaticAbility") {
+        if let Some(mode) = value
+            .pointer_mut("/definition/mode")
+            .filter(|mode| **mode == serde_json::json!({"CastWithKeyword": {"keyword": "Flash"}}))
+        {
+            *mode = serde_json::Value::from("CastWithFlash");
+        }
+    }
+    match value {
+        serde_json::Value::Object(object) => object
+            .values_mut()
+            .for_each(migrate_legacy_as_though_flash_grants),
+        serde_json::Value::Array(values) => values
+            .iter_mut()
+            .for_each(migrate_legacy_as_though_flash_grants),
+        serde_json::Value::Null
+        | serde_json::Value::Bool(_)
+        | serde_json::Value::Number(_)
+        | serde_json::Value::String(_) => {}
+    }
+}
+
 /// CR 400.7 + CR 603.10a: zone-change triggers use the exact source at the
 /// event, rather than a same-id object from a later zone change. Promotes
 /// legacy payload-only trigger lists carried by persisted zone-change snapshots
@@ -29079,6 +29106,7 @@ impl GameStateDecode {
         }
         migrate_legacy_batched_zone_change_trigger_fired(&mut value)?;
         migrate_legacy_pending_cast_timing(&mut value);
+        migrate_legacy_as_though_flash_grants(&mut value);
         if let Some(config) = value.get_mut("format_config") {
             crate::types::format::FormatConfig::migrate_persisted(config);
         }
