@@ -6749,6 +6749,7 @@ fn build_suspend_upkeep_removal_trigger() -> TriggerDefinition {
             counter_type: Some(CounterType::Time),
             count: QuantityExpr::Fixed { value: 1 },
             target: TargetFilter::SelfRef,
+            scope: EffectScope::Single,
         },
     );
     let mut trigger = TriggerDefinition::new(TriggerMode::Phase)
@@ -6876,6 +6877,7 @@ fn build_battlefield_upkeep_counter_removal_trigger(
             counter_type: Some(counter_type.clone()),
             count: QuantityExpr::Fixed { value: 1 },
             target: TargetFilter::SelfRef,
+            scope: EffectScope::Single,
         },
     );
     TriggerDefinition::new(TriggerMode::Phase)
@@ -6920,6 +6922,7 @@ fn build_fading_upkeep_trigger() -> TriggerDefinition {
             counter_type: Some(CounterType::Fade),
             count: QuantityExpr::Fixed { value: 1 },
             target: TargetFilter::SelfRef,
+            scope: EffectScope::Single,
         },
     )
     .sub_ability(sacrifice_if_none_removed);
@@ -9862,6 +9865,7 @@ pub fn synthesize_impending(face: &mut CardFace) {
             counter_type: Some(CounterType::Time),
             count: QuantityExpr::Fixed { value: 1 },
             target: TargetFilter::SelfRef,
+            scope: EffectScope::Single,
         },
     );
     // CR 702.176a: gated on impending cost paid AND has a time counter.
@@ -24331,6 +24335,7 @@ mod fading_vanishing_tests {
                 counter_type: Some(CounterType::Fade),
                 count: QuantityExpr::Fixed { value: 1 },
                 target: TargetFilter::SelfRef,
+                scope: crate::types::ability::EffectScope::Single,
             })
         ));
         let sacrifice = removal
@@ -24391,6 +24396,7 @@ mod fading_vanishing_tests {
                 counter_type: Some(CounterType::Time),
                 count: QuantityExpr::Fixed { value: 1 },
                 target: TargetFilter::SelfRef,
+                scope: crate::types::ability::EffectScope::Single,
             })
         ));
 

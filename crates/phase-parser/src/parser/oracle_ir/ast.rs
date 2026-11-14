@@ -2246,6 +2246,11 @@ pub(crate) enum ZoneCounterImperativeAst {
         counter_type: Option<CounterType>,
         count: QuantityExpr,
         target: TargetFilter,
+        /// CR 122.1 + CR 115.10a: `All` for a mass removal ("from all
+        /// permanents", "from each creature you control"); see
+        /// `Effect::RemoveCounter::scope`. Always `Single` when
+        /// `exact_selection` or `multi_target` is set.
+        scope: EffectScope,
         /// CR 115.1d + CR 122.1: A fixed `each of N <permanents>` phrase is
         /// an untargeted resolution-time selection, not N target slots.
         exact_selection: Option<u32>,

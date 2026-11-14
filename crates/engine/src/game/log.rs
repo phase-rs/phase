@@ -1667,7 +1667,9 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
             // not surfaced).
             ..
         } => vec![
-            num(*count as i32),
+            // CR 122.1: counter counts are `u32`; the log number saturates at
+            // `i32::MAX` (the event keeps the true count).
+            num(crate::game::arithmetic::u32_to_i32_saturating(*count)),
             text(" "),
             LogSegment::Keyword(counter_type.display_phrase().into_owned()),
             text(if *count == 1 {
@@ -1693,7 +1695,7 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
             counter_type,
             count,
         } => vec![
-            num(*count as i32),
+            num(crate::game::arithmetic::u32_to_i32_saturating(*count)),
             text(" "),
             LogSegment::Keyword(counter_type.display_phrase().into_owned()),
             text(if *count == 1 {
@@ -2154,7 +2156,9 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
             text(" stationed by "),
             card_seg(state, *creature_id),
             text(" (+"),
-            num(*counters_added as i32),
+            num(crate::game::arithmetic::u32_to_i32_saturating(
+                *counters_added,
+            )),
             text(" charge)"),
         ],
         GameEvent::Saddled {
@@ -4074,5 +4078,84 @@ mod tests {
             activation_cost: crate::types::events::BoundActivationCost::Unknown,
         };
         assert_eq!(lines(&[mana]), 0);
+    }
+}
+
+#[cfg(test)]
+mod counter_count_log_tests {
+    use super::*;
+    use crate::game::zones::create_object;
+    use crate::types::counter::CounterType;
+    use crate::types::identifiers::CardId;
+
+    fn charge() -> CounterType {
+        CounterType::Generic("charge".to_string())
+    }
+
+    fn relic(state: &mut GameState) -> ObjectId {
+        create_object(
+            state,
+            CardId(1),
+            PlayerId(0),
+            "Astral Cornucopia".to_string(),
+            Zone::Battlefield,
+        )
+    }
+
+    /// CR 122.1: a count above `i32::MAX` logs `i32::MAX`, never a wrapped
+    /// negative number; the event itself keeps the true count.
+    #[test]
+    fn counter_counts_past_i32_max_log_saturated() {
+        let mut state = GameState::new_two_player(7);
+        let id = relic(&mut state);
+        let removed = GameEvent::CounterRemoved {
+            object_id: id,
+            counter_type: charge(),
+            count: 1 << 31,
+        };
+        let segments = format_segments(&removed, &state);
+        assert_eq!(segments[0], LogSegment::Number(i32::MAX));
+        assert_eq!(segments[3], text(" counters removed from "));
+
+        let added = GameEvent::CounterAdded {
+            object_id: id,
+            counter_type: charge(),
+            count: u32::MAX,
+            actor: PlayerId(0),
+        };
+        let segments = format_segments(&added, &state);
+        assert_eq!(segments[0], LogSegment::Number(i32::MAX));
+        assert_eq!(segments[3], text(" counters on "));
+
+        let stationed = GameEvent::Stationed {
+            spacecraft_id: id,
+            creature_id: id,
+            counters_added: 1 << 31,
+        };
+        let segments = format_segments(&stationed, &state);
+        assert_eq!(segments[4], LogSegment::Number(i32::MAX));
+    }
+
+    #[test]
+    fn small_counter_counts_log_unchanged() {
+        let mut state = GameState::new_two_player(7);
+        let id = relic(&mut state);
+        let three = GameEvent::CounterRemoved {
+            object_id: id,
+            counter_type: charge(),
+            count: 3,
+        };
+        let segments = format_segments(&three, &state);
+        assert_eq!(segments[0], LogSegment::Number(3));
+        assert_eq!(segments[3], text(" counters removed from "));
+        let one = GameEvent::CounterRemoved {
+            object_id: id,
+            counter_type: charge(),
+            count: 1,
+        };
+        assert_eq!(
+            format_segments(&one, &state)[3],
+            text(" counter removed from ")
+        );
     }
 }

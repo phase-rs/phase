@@ -9101,7 +9101,7 @@ mod tests {
         let counter_removals = resume_priority_fixture(restore_v1_counter_removals_fixture(
             counter_removals,
             PendingCounterRemovalQueue {
-                remaining: Vec::new(),
+                remaining: std::collections::VecDeque::new(),
                 effect_kind: EffectKind::RemoveCounter,
                 source_ability_id: ObjectId(115),
                 total: 0,

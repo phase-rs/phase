@@ -6859,14 +6859,16 @@ impl EnclosingPostReplacementFrame {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct PendingCounterRemovalQueue {
-    /// Remaining per-object counter removals.
-    pub remaining: Vec<PendingCounterRemoval>,
+    /// Remaining per-object counter removals, consumed from the front. A
+    /// `VecDeque` serializes as the same JSON sequence a `Vec` did.
+    pub remaining: VecDeque<PendingCounterRemoval>,
     /// Effect kind for the terminating `EffectResolved` event.
     pub effect_kind: EffectKind,
     /// Ability source object for the terminating `EffectResolved` event.
     pub source_ability_id: ObjectId,
-    /// Total counters requested across all entries. Retained for diagnostics and
-    /// legacy wire compatibility; use `applied_total` for effect result context.
+    /// Total counters requested across all entries, saturating at `u32::MAX` (each
+    /// entry keeps its true count). Retained for diagnostics and legacy wire
+    /// compatibility; use `applied_total` for effect result context.
     pub total: u32,
     /// Counters actually removed so far, after clamping and replacements.
     #[serde(default, skip_serializing_if = "is_zero_u32")]
@@ -6919,7 +6921,7 @@ impl<'de> Deserialize<'de> for PendingCounterRemovalQueue {
                     })
                     .ok_or_else(|| serde::de::Error::missing_field("source_id")),
             })
-            .collect::<Result<Vec<_>, _>>()?;
+            .collect::<Result<VecDeque<_>, _>>()?;
         Ok(Self {
             remaining,
             effect_kind: wire.effect_kind,
@@ -44749,7 +44751,7 @@ mod tests {
     fn pending_counter_removal_queue_migrates_legacy_single_source_entries() {
         let source_id = ObjectId(17);
         let mut legacy_wire = serde_json::to_value(PendingCounterRemovalQueue {
-            remaining: Vec::new(),
+            remaining: VecDeque::new(),
             effect_kind: EffectKind::RemoveCounter,
             source_ability_id: ObjectId(18),
             total: 2,

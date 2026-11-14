@@ -420,8 +420,10 @@ pub fn resolve(
 /// and "each opponent loses all counters" (Final Act). Clears both the
 /// dedicated `poison_counters` field (CR 104.3d routing, mirrored here) and
 /// every entry in the generic `player_counters` map. One
-/// `PlayerCounterChanged` event is emitted per cleared kind so animations and
-/// logs see an atomic, itemized record of the removal.
+/// `PlayerCounterChanged` event is emitted per journaled edit so animations and
+/// logs see an itemized record of the removal; a kind above `i32::MAX` is
+/// drained in several edits of at most `i32::MAX` each (the edit delta is
+/// `i32`).
 pub fn resolve_lose_all(
     state: &mut GameState,
     ability: &ResolvedAbility,
@@ -473,9 +475,9 @@ pub fn resolve_lose_all(
 
 /// CR 122.1: Zero out every counter kind on a single player. Poison counters
 /// live in their own field (CR 104.3d state-based action routing); every other
-/// kind is tracked in the `player_counters` map. Both paths drain to zero and
-/// emit a per-kind `PlayerCounterChanged { delta: -count }` event so replay
-/// and UI can itemize what was removed.
+/// kind is tracked in the `player_counters` map. Both paths drain to zero
+/// through `drain_player_counter_kind`, which emits one `PlayerCounterChanged`
+/// event per journaled edit so replay and UI can itemize what was removed.
 fn clear_all_player_counters(
     state: &mut GameState,
     player_id: PlayerId,
@@ -487,23 +489,7 @@ fn clear_all_player_counters(
         .find(|player| player.id == player_id)
         .expect("counter target must be a live player")
         .poison_counters;
-    if poison > 0 {
-        let delta = -(poison as i32);
-        state
-            .resolve_and_apply_player_edit(
-                player_id,
-                ResolvedPlayerEdit::Counter {
-                    kind: PlayerCounterKind::Poison,
-                    delta,
-                },
-            )
-            .expect("live player counter removal must apply");
-        events.push(GameEvent::PlayerCounterChanged {
-            player: player_id,
-            counter_kind: PlayerCounterKind::Poison,
-            delta,
-        });
-    }
+    drain_player_counter_kind(state, player_id, PlayerCounterKind::Poison, poison, events);
 
     // Drain the generic map — collect kinds first to release the borrow before
     // mutating/emitting events.
@@ -518,20 +504,41 @@ fn clear_all_player_counters(
         .filter(|(_, count)| *count > 0)
         .collect();
     for (counter_kind, count) in drained {
+        drain_player_counter_kind(state, player_id, counter_kind, count, events);
+    }
+}
+
+/// CR 122.1 + CR 107.1: Remove all `count` counters of one kind from a player.
+/// Player counters are `u32` with no rules maximum, but a journaled edit's
+/// delta is an `i32`, so a kind holding more than `i32::MAX` counters is
+/// removed in several edits of at most `i32::MAX` each, one
+/// `PlayerCounterChanged` event per edit. The deltas sum to the true count.
+fn drain_player_counter_kind(
+    state: &mut GameState,
+    player_id: PlayerId,
+    counter_kind: PlayerCounterKind,
+    count: u32,
+    events: &mut Vec<GameEvent>,
+) {
+    let mut remaining = count;
+    while remaining > 0 {
+        let removed = crate::game::arithmetic::u32_to_i32_saturating(remaining);
+        let delta = -removed;
         state
             .resolve_and_apply_player_edit(
                 player_id,
                 ResolvedPlayerEdit::Counter {
                     kind: counter_kind,
-                    delta: -(count as i32),
+                    delta,
                 },
             )
             .expect("live player counter removal must apply");
         events.push(GameEvent::PlayerCounterChanged {
             player: player_id,
             counter_kind,
-            delta: -(count as i32),
+            delta,
         });
+        remaining -= removed.unsigned_abs();
     }
 }
 
@@ -929,6 +936,62 @@ mod tests {
         assert!(!events
             .iter()
             .any(|e| matches!(e, GameEvent::PlayerCounterChanged { .. })));
+    }
+
+    fn deltas(events: &[GameEvent], kind: PlayerCounterKind) -> Vec<i32> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                GameEvent::PlayerCounterChanged {
+                    counter_kind,
+                    delta,
+                    ..
+                } if *counter_kind == kind => Some(*delta),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// CR 122.1 + CR 107.1: a kind holding more than `i32::MAX` counters is
+    /// removed in edits of at most `i32::MAX` each, whose deltas sum to the
+    /// true count; a small kind is still removed in one edit.
+    #[test]
+    fn lose_all_drains_generic_counts_above_i32_max_in_bounded_edits() {
+        let mut state = GameState::default();
+        let mut events = Vec::new();
+        state.players[0]
+            .player_counters
+            .insert(PlayerCounterKind::Experience, 3_000_000_000);
+        state.players[0]
+            .player_counters
+            .insert(PlayerCounterKind::Rad, 3);
+
+        let ability = make_lose_all(TargetFilter::Controller, PlayerId(0));
+        resolve_lose_all(&mut state, &ability, &mut events).unwrap();
+
+        assert!(state.players[0].player_counters.is_empty());
+        assert_eq!(
+            deltas(&events, PlayerCounterKind::Experience),
+            vec![-i32::MAX, -852_516_353]
+        );
+        assert_eq!(deltas(&events, PlayerCounterKind::Rad), vec![-3]);
+    }
+
+    /// The dedicated poison field drains through the same bounded edits.
+    #[test]
+    fn lose_all_drains_poison_above_i32_max_in_bounded_edits() {
+        let mut state = GameState::default();
+        let mut events = Vec::new();
+        state.players[0].poison_counters = 1 << 31;
+
+        let ability = make_lose_all(TargetFilter::Controller, PlayerId(0));
+        resolve_lose_all(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(state.players[0].poison_counters, 0);
+        assert_eq!(
+            deltas(&events, PlayerCounterKind::Poison),
+            vec![-i32::MAX, -1]
+        );
     }
 
     /// A two-player state with a P0 `AddCounter` count replacement that applies

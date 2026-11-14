@@ -104,9 +104,9 @@ use crate::types::ability::FilterProp;
 use crate::types::ability::{
     AbilityCondition, AbilityDefinition, AttachCardinality, AttachSelection, AttachmentReferent,
     AttackSubject, AttackedYouScope, CardTypeSetSource, CombatRelationSubject,
-    ContinuousModification, ControllerRef, Duration, Effect, GuessSubject, KeeperConstraint,
-    LibraryInstructionActor, ModalChoice, MultiTargetSpec, NameStickerSet, ObjectProperty,
-    ObjectScope, PlayerFilter, PlayerScope, PtValue, QuantityExpr, QuantityRef,
+    ContinuousModification, ControllerRef, Duration, Effect, EffectScope, GuessSubject,
+    KeeperConstraint, LibraryInstructionActor, ModalChoice, MultiTargetSpec, NameStickerSet,
+    ObjectProperty, ObjectScope, PlayerFilter, PlayerScope, PtValue, QuantityExpr, QuantityRef,
     ReciprocalZoneChoiceRole, RepeatContinuation, ReplacementDefinition, ResolvedAbility,
     StaticCondition, StaticDefinition, TargetFilter, TokenAttackDestination, TriggerCondition,
     TriggerDefinition, TurnJournalKind, TypeFilter, TypedFilter, ZoneChoiceCandidateSource,
@@ -4381,6 +4381,169 @@ fn board_value_aggregate_read(filter: &TargetFilter, value: StateKind) -> RwProf
     p
 }
 
+/// CR 608.2h: the reads a filter's membership test makes through its own
+/// operands, wherever the filter grammar nests them — inside `AnyOf` / `Not`
+/// props, inside the `TargetFilter`s other props box, and across the player axis
+/// (`ControllerMatches` / `DealtDamageThisTurn` → `PlayerFilter`), the same reach
+/// `member_bound_filter_prop` classifies. The walk is `filter_grammar_any`; each
+/// node contributes only its own operand reads, and the walk visits the nodes it
+/// nests separately.
+fn filter_threshold_quantity_reads(filter: &TargetFilter) -> RwProfile {
+    use crate::types::ability::FilterGrammarNode;
+    let reads = std::cell::RefCell::new(RwProfile::empty());
+    crate::types::ability::filter_grammar_any(filter, &|node| {
+        let node_reads = match node {
+            FilterGrammarNode::Prop(prop) => filter_prop_operand_reads(prop),
+            // A player predicate reads its own operands
+            // (`ControlsCount { count }`, `PlayerAttribute { attr, value }`).
+            FilterGrammarNode::Player(player) => rw_player_filter(player),
+            // A `TargetFilter` node's reads are those of the props it carries,
+            // which the walk visits as `Prop` nodes.
+            FilterGrammarNode::Filter(_) => RwProfile::empty(),
+        };
+        reads.borrow_mut().merge(node_reads);
+        // Never stop early: every operand in the filter contributes.
+        false
+    });
+    reads.into_inner()
+}
+
+/// CR 608.2h: the reads ONE `FilterProp` makes through its own operands, not
+/// counting the props, filters and player filters it nests (the
+/// `filter_grammar_any` walk visits those as their own nodes). Exhaustive and
+/// wildcard-free, so a future operand-carrying prop must be classified here.
+fn filter_prop_operand_reads(prop: &FilterProp) -> RwProfile {
+    match prop {
+        // CR 122.1 + CR 202.3 + CR 208.1: a compared threshold is evaluated with
+        // the filter, so whatever it reads (e.g. the source's counters) is read.
+        FilterProp::Counters { count: value, .. }
+        | FilterProp::Cmc { value, .. }
+        | FilterProp::PtComparison { value, .. } => rw_quantity_expr(value),
+        // CR 208.1: "with power greater than this creature's" reads the source's
+        // power.
+        FilterProp::PowerGTSource => {
+            let mut p = reads_src_of(StateKind::ObjectPt);
+            p.current_pt_reads.add(PtReadScope::Source);
+            p
+        }
+        // Props whose only operands are nested filters / props / player filters,
+        // which the walk visits as their own nodes.
+        FilterProp::CanEnchant { .. }
+        | FilterProp::DifferentNameFrom { .. }
+        | FilterProp::DistinctFrom { .. }
+        | FilterProp::AttachedTo {
+            to: AttachmentReferent::Host { .. },
+        }
+        | FilterProp::SharesQuality { .. }
+        | FilterProp::Targets { .. }
+        | FilterProp::TargetsOnly { .. }
+        | FilterProp::Not { .. }
+        | FilterProp::AnyOf { .. }
+        | FilterProp::ControllerMatches { .. }
+        | FilterProp::DealtDamageThisTurn { .. } => RwProfile::empty(),
+        // No quantity or source operand. Other mutable predicates (tapped state,
+        // keywords, ...) are outside this profile's covered axes.
+        FilterProp::Token
+        | FilterProp::NonToken
+        | FilterProp::RepresentedByCard
+        | FilterProp::ControllerChoseLabel { .. }
+        | FilterProp::WasPlayed
+        | FilterProp::Attacking { .. }
+        | FilterProp::Blocking
+        | FilterProp::BlockingSource
+        | FilterProp::CombatRelation { .. }
+        | FilterProp::BlockStatus { .. }
+        | FilterProp::AttackingAlone
+        | FilterProp::BlockingAlone
+        | FilterProp::Tapped
+        | FilterProp::Untapped
+        | FilterProp::IsSaddled
+        | FilterProp::SaddledSource
+        | FilterProp::CrewedThisTurn { .. }
+        | FilterProp::ConvokedSource
+        | FilterProp::ProtectorMatches { .. }
+        | FilterProp::HasHasteOrControlledSinceTurnBegan
+        | FilterProp::WithKeyword { .. }
+        | FilterProp::HasKeywordKind { .. }
+        | FilterProp::WithoutKeyword { .. }
+        | FilterProp::WithoutKeywordKind { .. }
+        | FilterProp::ManaValueParity { .. }
+        | FilterProp::ManaCostIn { .. }
+        | FilterProp::InZone { .. }
+        | FilterProp::Owned { .. }
+        | FilterProp::Foretold
+        | FilterProp::HasAdventure
+        | FilterProp::EnchantedBy
+        | FilterProp::EquippedBy
+        | FilterProp::AttachedTo {
+            to: AttachmentReferent::Source,
+        }
+        | FilterProp::AttachedTo {
+            to: AttachmentReferent::Recipient,
+        }
+        | FilterProp::AttachedTo {
+            to: AttachmentReferent::Player { .. },
+        }
+        | FilterProp::AttachedTo {
+            to: AttachmentReferent::DeclaredTarget { .. },
+        }
+        | FilterProp::HasAttachment { .. }
+        | FilterProp::HasAnyAttachmentOf { .. }
+        | FilterProp::Another
+        | FilterProp::Unpaired
+        | FilterProp::OtherThanTriggerObject
+        | FilterProp::HasColor { .. }
+        | FilterProp::ColorCount { .. }
+        | FilterProp::ManaSymbolCount { .. }
+        | FilterProp::HasSupertype { .. }
+        | FilterProp::IsChosenCreatureType
+        | FilterProp::MostPrevalentCreatureTypeIn { .. }
+        | FilterProp::IsChosenColor
+        | FilterProp::IsChosenCardType
+        | FilterProp::MatchesLastChosenCardPredicate
+        | FilterProp::HasSingleTarget
+        | FilterProp::Modal
+        | FilterProp::PrepareSpell
+        | FilterProp::NotColor { .. }
+        | FilterProp::NotSupertype { .. }
+        | FilterProp::Suspected
+        | FilterProp::Prepared
+        | FilterProp::Renowned
+        | FilterProp::Goaded
+        | FilterProp::ToughnessGTPower
+        | FilterProp::PowerExceedsBase
+        | FilterProp::InTrackedSet { .. }
+        | FilterProp::Modified
+        | FilterProp::Historic
+        | FilterProp::NotHistoric
+        | FilterProp::InAnyZone { .. }
+        | FilterProp::WasDealtDamageThisTurn
+        | FilterProp::EnteredThisTurn
+        | FilterProp::ControlledContinuouslySinceTurnBegan
+        | FilterProp::ZoneChangedThisTurn { .. }
+        | FilterProp::AttackedThisTurn { .. }
+        | FilterProp::BlockedThisTurn
+        | FilterProp::AttackedOrBlockedThisTurn
+        | FilterProp::CountersPutOnThisTurn { .. }
+        | FilterProp::FaceDown
+        | FilterProp::Transformed
+        | FilterProp::CouldBeTargetedByTriggeringSpell
+        | FilterProp::HasXInManaCost
+        | FilterProp::HasXInActivationCost
+        | FilterProp::WasKicked
+        | FilterProp::HasManaAbility
+        | FilterProp::HasNoAbilities
+        | FilterProp::Named { .. }
+        | FilterProp::SameName
+        | FilterProp::SameNameAsParentTarget
+        | FilterProp::SameNameAsExiledBySource
+        | FilterProp::NameMatchesAnyPermanent { .. }
+        | FilterProp::IsCommander
+        | FilterProp::SharesCreatureTypeWithCommander
+        | FilterProp::Other { .. } => RwProfile::empty(),
+    }
+}
+
 /// Read an object characteristic at a given scope (§2 read-carrier closure):
 /// Source ⇒ `reads_src`; Recipient ⇒ nothing (read-modify-write); event objects
 /// ⇒ `reads_event_live`; other object scopes ⇒ `reads_board`.
@@ -5273,13 +5436,39 @@ fn rw_effect(
             p.merge(rw_quantity_expr(count));
             (p, sc)
         }
+        // CR 122.1: both scopes write the counters of the objects `target` names
+        // (one chosen object, or the population for scope:All). Unlike the
+        // PutCounter / PutCounterAll pair above, scope:All also records its
+        // population reads below.
         Effect::RemoveCounter {
             counter_type: _,
             count,
             target,
+            scope,
         } => {
             let (mut p, sc) = obj(StateKind::ObjectCounters, target);
             p.merge(rw_quantity_expr(count));
+            match scope {
+                EffectScope::Single => {}
+                // CR 608.2h + CR 609.3: a mass removal's population is every
+                // battlefield object the filter matches when it resolves (a live
+                // membership census), and what it removes from each is bounded by
+                // the counters that object has then. Both are reads a sibling's
+                // counter write feeds — the filter can test counters ("each artifact
+                // with two or more charge counters on it"). The covered axes are
+                // membership, counters and P/T (counters change P/T, CR 613.4c, as
+                // for a present-tense `TargetMatchesFilter`); other mutable filter
+                // predicates (e.g. tapped state) are not recorded here.
+                EffectScope::All => {
+                    p.merge(board_value_aggregate_read(target, StateKind::ObjectCounters));
+                    p.merge(board_value_aggregate_read(target, StateKind::ObjectPt));
+                    // CR 608.2h: the membership test also evaluates the filter's
+                    // own threshold operands ("each other artifact with at least as
+                    // many charge counters on it as its source" reads the source's
+                    // counters), so their reads are reads of this effect.
+                    p.merge(filter_threshold_quantity_reads(target));
+                }
+            }
             (p, sc)
         }
         Effect::MultiplyCounter {
@@ -8518,6 +8707,7 @@ mod tests {
             counter_type: None,
             count: qfix(1),
             target,
+            scope: crate::types::ability::EffectScope::Single,
         }
     }
     fn gain_life(amount: QuantityExpr) -> Effect {
@@ -9477,6 +9667,118 @@ mod tests {
             qcheck(counters_src(), 1),
         );
         assert!(conflicts(&rerooted, &se()));
+    }
+
+    /// CR 608.2h + CR 609.3: a mass counter removal (`scope: All`) reads its
+    /// population live — membership and each member's counters — so a same-event
+    /// sibling that also puts a counter on its own source feeds it. The single
+    /// scope keeps its write-only profile, and a source-independent mass removal
+    /// stays on the identical-function fast path.
+    #[test]
+    fn mass_counter_removal_records_population_reads() {
+        let charge = CounterType::Generic("charge".to_string());
+        let artifacts_with_two_charge =
+            TargetFilter::Typed(TypedFilter::new(TypeFilter::Artifact).properties(vec![
+                FilterProp::Counters {
+                    counters: crate::types::counter::CounterMatch::OfType(charge.clone()),
+                    comparator: Comparator::GE,
+                    count: qfix(2),
+                },
+            ]));
+        let removal = |scope| Effect::RemoveCounter {
+            counter_type: Some(charge.clone()),
+            count: qfix(1),
+            target: artifacts_with_two_charge.clone(),
+            scope,
+        };
+        let put_on_source = Effect::PutCounter {
+            count: qfix(1),
+            target: TargetFilter::SelfRef,
+            counter_type: charge.clone(),
+        };
+
+        let mass = ability_rw_profile(&ra(removal(EffectScope::All)));
+        assert!(mass.reads_board.object_counters, "{mass:?}");
+        assert!(mass.reads_board.set_membership, "{mass:?}");
+        assert!(mass.reads_board.object_pt, "{mass:?}");
+        let single = ability_rw_profile(&ra(removal(EffectScope::Single)));
+        assert!(
+            single.reads_board.is_empty(),
+            "the single scope's profile is unchanged: {single:?}"
+        );
+
+        // CodeRabbit's trace (A=2, B=1 charge): removing from each artifact with
+        // two or more, then charging its own source, ends differently by order.
+        let mass_then_charge = ra(removal(EffectScope::All)).sub_ability(ra(put_on_source));
+        assert!(conflicts(&mass_then_charge, &se_phase()));
+        // The bare mass removal is one shared function of the board.
+        assert!(!conflicts(&ra(removal(EffectScope::All)), &se_phase()));
+    }
+
+    /// CR 208.1 + CR 608.2h: a mass removal whose filter compares against the
+    /// source's power ("each creature with power greater than this creature's")
+    /// reads the source's P/T, through `AnyOf` / `Not` nesting too, so it is not
+    /// source-independent. The single scope's profile is unchanged.
+    #[test]
+    fn mass_counter_removal_power_gt_source_reads_source_pt() {
+        let removal = |prop: FilterProp, scope| Effect::RemoveCounter {
+            counter_type: Some(CounterType::Plus1Plus1),
+            count: qfix(1),
+            target: TargetFilter::Typed(TypedFilter::creature().properties(vec![prop])),
+            scope,
+        };
+        let nested = FilterProp::Not {
+            prop: Box::new(FilterProp::AnyOf {
+                props: vec![FilterProp::Tapped, FilterProp::PowerGTSource],
+            }),
+        };
+        for prop in [FilterProp::PowerGTSource, nested] {
+            let mass = ability_rw_profile(&ra(removal(prop.clone(), EffectScope::All)));
+            assert!(mass.reads_src.object_pt, "{prop:?}: {mass:?}");
+            assert!(!mass.source_independent(), "{prop:?}: {mass:?}");
+            let single = ability_rw_profile(&ra(removal(prop.clone(), EffectScope::Single)));
+            assert!(single.reads_src.is_empty(), "{prop:?}: {single:?}");
+        }
+        // Control: a source-free predicate in the same position reads no source.
+        let tapped = ability_rw_profile(&ra(removal(FilterProp::Tapped, EffectScope::All)));
+        assert!(tapped.reads_src.is_empty(), "{tapped:?}");
+    }
+
+    /// CR 608.2h: a mass removal whose counter threshold is read from its own
+    /// source ("each artifact with at least as many charge counters as this
+    /// permanent") reads the source's counters, so it is not
+    /// source-independent. The single scope's profile is unchanged, and a
+    /// fixed threshold reads no source.
+    ///
+    /// No printed card has a mass counter removal whose filter threshold reads
+    /// its source. This row guards the general `filter_threshold_quantity_reads`
+    /// merge that CodeRabbit asked to pin; the nearest printed card is Aether
+    /// Snap ("Remove all counters from all permanents and exile all tokens."),
+    /// a mass removal whose population has no source-relative threshold.
+    #[test]
+    fn mass_counter_removal_source_scoped_threshold_reads_source_counters() {
+        let charge = CounterType::Generic("charge".to_string());
+        let removal = |threshold: QuantityExpr, scope| Effect::RemoveCounter {
+            counter_type: Some(charge.clone()),
+            count: qfix(1),
+            target: TargetFilter::Typed(TypedFilter::new(TypeFilter::Artifact).properties(vec![
+                FilterProp::Counters {
+                    counters: crate::types::counter::CounterMatch::OfType(charge.clone()),
+                    comparator: Comparator::GE,
+                    count: threshold,
+                },
+            ])),
+            scope,
+        };
+
+        let mass = ability_rw_profile(&ra(removal(qref(counters_src()), EffectScope::All)));
+        assert!(mass.reads_src.object_counters, "{mass:?}");
+        assert!(!mass.source_independent(), "{mass:?}");
+        let single = ability_rw_profile(&ra(removal(qref(counters_src()), EffectScope::Single)));
+        assert!(single.reads_src.is_empty(), "{single:?}");
+        // Control: a fixed threshold in the same position reads no source.
+        let fixed = ability_rw_profile(&ra(removal(qfix(2), EffectScope::All)));
+        assert!(fixed.reads_src.is_empty(), "{fixed:?}");
     }
 
     // ===================== (vi) event-object disjointness =====================

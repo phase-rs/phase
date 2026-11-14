@@ -7794,6 +7794,7 @@ mod tests {
                 counter_type: None,
                 count: QuantityExpr::up_to(QuantityExpr::Fixed { value: -1 }),
                 target: TargetFilter::SelfRef,
+                scope: engine::types::ability::EffectScope::Single,
             },
             vec![TargetRef::Object(bearer)],
             bearer,

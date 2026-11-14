@@ -15007,6 +15007,7 @@ mod tests {
                     qty: QuantityRef::EventContextAmount,
                 },
                 target: TargetFilter::SelfRef,
+                scope: crate::types::ability::EffectScope::Single,
             },
         )));
 
@@ -15036,6 +15037,7 @@ mod tests {
                 counter_type: Some(CounterType::Time),
                 count: QuantityExpr::Fixed { value: 1 },
                 target: TargetFilter::SelfRef,
+                scope: crate::types::ability::EffectScope::Single,
             },
         );
         patch_choose_from_zone_counter_continuation_target(&mut def);
@@ -15213,6 +15215,7 @@ mod tests {
                 counter_type,
                 count,
                 target,
+                scope: crate::types::ability::EffectScope::Single,
             } => {
                 assert_eq!(*counter_type, Some(CounterType::Time));
                 assert!(

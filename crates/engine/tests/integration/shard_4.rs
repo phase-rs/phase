@@ -330,6 +330,7 @@ mod manifest_dread_that_creature_anaphor;
 mod maraxus_team_pump_anthem;
 mod martial_impetus_other_attacker_exclusion_6017;
 mod martyr_reveal_x_cost;
+mod mass_counter_removal;
 mod mass_library_order_restore;
 mod mass_phase_out_1792_repro;
 mod mass_unsuspect_701_60a;

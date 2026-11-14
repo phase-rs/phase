@@ -96,6 +96,7 @@ fn build_coalition_relic_drain(controller: PlayerId, source: ObjectId) -> Resolv
             counter_type: Some(CounterType::Generic("charge".to_string())),
             count: QuantityExpr::Fixed { value: -1 }, // CR 122.1: sentinel for "remove all"
             target: TargetFilter::SelfRef,
+            scope: engine::types::ability::EffectScope::Single,
         },
         vec![TargetRef::Object(source)],
         source,

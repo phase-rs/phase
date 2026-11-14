@@ -46801,6 +46801,283 @@ pub mod tests {
         }
     }
 
+    fn charge_counter() -> CounterType {
+        CounterType::Generic("charge".to_string())
+    }
+
+    /// "Remove a charge counter from each artifact with two or more charge
+    /// counters on it" (a mass removal, `EffectScope::All`), optionally followed
+    /// by "then put a charge counter on this artifact".
+    fn mass_charge_removal(then_charge_source: bool) -> ResolvedAbility {
+        let removal = ResolvedAbility::new(
+            Effect::RemoveCounter {
+                counter_type: Some(charge_counter()),
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Typed(TypedFilter::new(TypeFilter::Artifact).properties(
+                    vec![FilterProp::Counters {
+                        counters: crate::types::counter::CounterMatch::OfType(charge_counter()),
+                        comparator: Comparator::GE,
+                        count: QuantityExpr::Fixed { value: 2 },
+                    }],
+                )),
+                scope: crate::types::ability::EffectScope::All,
+            },
+            Vec::new(),
+            ObjectId(0),
+            PlayerId(0),
+        );
+        if !then_charge_source {
+            return removal;
+        }
+        removal.sub_ability(ResolvedAbility::new(
+            Effect::PutCounter {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::SelfRef,
+                counter_type: charge_counter(),
+            },
+            Vec::new(),
+            ObjectId(0),
+            PlayerId(0),
+        ))
+    }
+
+    /// Two artifacts on one upkeep event, A with two charge counters and B with
+    /// one, each the source of an identical trigger built by `ability`.
+    fn mass_charge_removal_group(
+        ability: fn() -> ResolvedAbility,
+    ) -> (GameState, Vec<PendingTriggerContext>) {
+        let mut state = setup();
+        let event = Some(GameEvent::PhaseChanged {
+            phase: crate::types::phase::Phase::Upkeep,
+        });
+        let group = vec![
+            pr625_no_input_trigger(
+                &mut state,
+                PlayerId(0),
+                "Artifact A",
+                ability(),
+                event.clone(),
+            ),
+            pr625_no_input_trigger(&mut state, PlayerId(0), "Artifact B", ability(), event),
+        ];
+        for (ctx, count) in group.iter().zip([2, 1]) {
+            let object = state.objects.get_mut(&ctx.pending.source_id).unwrap();
+            object.card_types.core_types.push(CoreType::Artifact);
+            object.counters.insert(charge_counter(), count);
+        }
+        (state, group)
+    }
+
+    /// Resolve the group's abilities in the given member order (each bound to its
+    /// own source) and read back `(A, B)` charge counters.
+    fn resolve_in_order(
+        mut state: GameState,
+        group: &[PendingTriggerContext],
+        order: [usize; 2],
+    ) -> (u32, u32) {
+        for index in order {
+            let pending = &group[index].pending;
+            let mut ability = (*pending.ability).clone();
+            ability.source_id = pending.source_id;
+            if let Some(sub) = ability.sub_ability.as_mut() {
+                sub.source_id = pending.source_id;
+            }
+            let mut events = Vec::new();
+            crate::game::effects::resolve_ability_chain(&mut state, &ability, &mut events, 0)
+                .expect("the mass removal resolves");
+        }
+        let charge_of = |index: usize| {
+            state.objects[&group[index].pending.source_id]
+                .counters
+                .get(&charge_counter())
+                .copied()
+                .unwrap_or(0)
+        };
+        (charge_of(0), charge_of(1))
+    }
+
+    /// CR 603.3b + CR 608.2h: two identical same-event triggers from different
+    /// sources, each removing a charge counter from each artifact with two or
+    /// more and then charging its own source, end differently by order (A=2 and
+    /// B=1 at the start). The mass removal's population reads are what make the
+    /// group prompt; before they were recorded it auto-ordered.
+    #[test]
+    fn same_event_mass_counter_removal_feeding_its_population_prompts() {
+        let (state, group) = mass_charge_removal_group(|| mass_charge_removal(true));
+        // Premise: the two orders really diverge.
+        assert_ne!(
+            resolve_in_order(state.clone(), &group, [0, 1]),
+            resolve_in_order(state.clone(), &group, [1, 0]),
+            "REACH-GUARD: the order must be observable for this group"
+        );
+        let mut state = state;
+        assert!(
+            !group_is_order_independent(&state, &group),
+            "an order-dependent mass removal group must not auto-order"
+        );
+        match begin_trigger_ordering(&mut state, group) {
+            TriggerOrderingDisposition::PromptForChoice(_) => {}
+            TriggerOrderingDisposition::NoChoiceNeeded(_) => {
+                panic!("the order-dependent mass removal group must prompt")
+            }
+        }
+    }
+
+    /// Control: the bare mass removal writes nothing that depends on its source,
+    /// so the identical same-event pair is one function applied twice and stays
+    /// auto-ordered.
+    #[test]
+    fn same_event_source_independent_mass_counter_removal_auto_orders() {
+        let (state, group) = mass_charge_removal_group(|| mass_charge_removal(false));
+        assert_eq!(
+            resolve_in_order(state.clone(), &group, [0, 1]),
+            resolve_in_order(state.clone(), &group, [1, 0]),
+        );
+        let mut state = state;
+        assert!(group_is_order_independent(&state, &group));
+        match begin_trigger_ordering(&mut state, group) {
+            TriggerOrderingDisposition::NoChoiceNeeded(_) => {}
+            TriggerOrderingDisposition::PromptForChoice(_) => {
+                panic!("the source-independent mass removal group must auto-order")
+            }
+        }
+    }
+
+    /// "Remove a charge counter from each other artifact with `threshold` or
+    /// more charge counters on it" (a mass removal, `EffectScope::All`).
+    ///
+    /// Synthetic witness: no printed card combines a mass counter removal with a
+    /// population threshold that reads the SOURCE's own counters, so the
+    /// source-relative threshold tests below cannot be built from a real card.
+    /// The closest printed analogues each cover one half of the shape:
+    /// Heartmender ("At the beginning of your upkeep, remove a -1/-1 counter from
+    /// each creature you control.") is the mass removal, and Corrosion ("destroy
+    /// each artifact with mana value less than or equal to the number of rust
+    /// counters on it") is a quantity-qualified population. These tests keep both
+    /// halves so the profile's threshold read is exercised on the exact shape a
+    /// future printing would take.
+    fn other_artifact_charge_removal(threshold: QuantityExpr) -> ResolvedAbility {
+        other_artifact_charge_removal_matching(FilterProp::Counters {
+            counters: crate::types::counter::CounterMatch::OfType(charge_counter()),
+            comparator: Comparator::GE,
+            count: threshold,
+        })
+    }
+
+    /// "Remove a charge counter from each other artifact [that satisfies
+    /// `condition`]" (a mass removal, `EffectScope::All`).
+    fn other_artifact_charge_removal_matching(condition: FilterProp) -> ResolvedAbility {
+        ResolvedAbility::new(
+            Effect::RemoveCounter {
+                counter_type: Some(charge_counter()),
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Typed(
+                    TypedFilter::new(TypeFilter::Artifact)
+                        .properties(vec![FilterProp::Another, condition]),
+                ),
+                scope: crate::types::ability::EffectScope::All,
+            },
+            Vec::new(),
+            ObjectId(0),
+            PlayerId(0),
+        )
+    }
+
+    /// The source's charge-counter count, as a quantity.
+    fn source_charge_count() -> QuantityExpr {
+        QuantityExpr::Ref {
+            qty: QuantityRef::CountersOn {
+                scope: crate::types::ability::ObjectScope::Source,
+                counter_type: Some(charge_counter()),
+            },
+        }
+    }
+
+    /// CR 603.3b + CR 608.2h + CR 109.4: the source-relative operand reached
+    /// through the player axis. Each trigger removes a charge counter from each
+    /// other artifact whose controller controls at least as many artifacts as its
+    /// source has charge counters. The one controller controls two artifacts;
+    /// with A=3 and B=2, A first leaves (2, 2) (A's threshold 3 fails, then B's
+    /// 2 holds), B first leaves (2, 1) (A's threshold drops to 2 and holds). The
+    /// `ControlsCount` operand read is what makes the group prompt.
+    #[test]
+    fn same_event_mass_counter_removal_with_source_relative_controls_count_prompts() {
+        let (mut state, group) = mass_charge_removal_group(|| {
+            other_artifact_charge_removal_matching(FilterProp::ControllerMatches {
+                player: Box::new(crate::types::ability::PlayerFilter::ControlsCount {
+                    relation: crate::types::ability::PlayerRelation::All,
+                    filter: TargetFilter::Typed(TypedFilter::new(TypeFilter::Artifact)),
+                    comparator: Comparator::GE,
+                    count: Box::new(source_charge_count()),
+                }),
+            })
+        });
+        for (ctx, count) in group.iter().zip([3, 2]) {
+            let object = state.objects.get_mut(&ctx.pending.source_id).unwrap();
+            object.counters.insert(charge_counter(), count);
+        }
+        // Premise: the two orders really diverge.
+        assert_eq!(resolve_in_order(state.clone(), &group, [0, 1]), (2, 2));
+        assert_eq!(resolve_in_order(state.clone(), &group, [1, 0]), (2, 1));
+        assert!(
+            !group_is_order_independent(&state, &group),
+            "a source-relative ControlsCount operand makes the mass removal order-dependent"
+        );
+        match begin_trigger_ordering(&mut state, group) {
+            TriggerOrderingDisposition::PromptForChoice(_) => {}
+            TriggerOrderingDisposition::NoChoiceNeeded(_) => {
+                panic!("the source-relative ControlsCount mass removal group must prompt")
+            }
+        }
+    }
+
+    /// CR 603.3b + CR 608.2h: two identical same-event triggers, each removing a
+    /// charge counter from each OTHER artifact with at least as many charge
+    /// counters as its source (A=2, B=1). The threshold reads the source's
+    /// counters, which the sibling's removal writes, so the order is observable:
+    /// A first leaves (1, 1), B first leaves (1, 0). The filter's threshold read
+    /// is what makes the group prompt; unrecorded, it auto-ordered.
+    #[test]
+    fn same_event_mass_counter_removal_with_source_relative_threshold_prompts() {
+        let (state, group) =
+            mass_charge_removal_group(|| other_artifact_charge_removal(source_charge_count()));
+        // Premise: the two orders really diverge (A=2, B=1 as set up above).
+        assert_eq!(resolve_in_order(state.clone(), &group, [0, 1]), (1, 1));
+        assert_eq!(resolve_in_order(state.clone(), &group, [1, 0]), (1, 0));
+        let mut state = state;
+        assert!(
+            !group_is_order_independent(&state, &group),
+            "a source-relative threshold makes the mass removal order-dependent"
+        );
+        match begin_trigger_ordering(&mut state, group) {
+            TriggerOrderingDisposition::PromptForChoice(_) => {}
+            TriggerOrderingDisposition::NoChoiceNeeded(_) => {
+                panic!("the source-relative mass removal group must prompt")
+            }
+        }
+    }
+
+    /// Control: the same removal with a fixed threshold reads no source state,
+    /// so the identical same-event pair commutes and stays auto-ordered.
+    #[test]
+    fn same_event_mass_counter_removal_with_fixed_threshold_auto_orders() {
+        let (state, group) = mass_charge_removal_group(|| {
+            other_artifact_charge_removal(QuantityExpr::Fixed { value: 1 })
+        });
+        assert_eq!(
+            resolve_in_order(state.clone(), &group, [0, 1]),
+            resolve_in_order(state.clone(), &group, [1, 0]),
+        );
+        let mut state = state;
+        assert!(group_is_order_independent(&state, &group));
+        match begin_trigger_ordering(&mut state, group) {
+            TriggerOrderingDisposition::NoChoiceNeeded(_) => {}
+            TriggerOrderingDisposition::PromptForChoice(_) => {
+                panic!("the fixed-threshold mass removal group must auto-order")
+            }
+        }
+    }
+
     /// Issue #610 — Kratos, Stoic Father. A YouAttack trigger carrying a
     /// `valid_card` attacker-type filter (`Subtype "God"`) must fire iff at least
     /// one *God* attacks (CR 508.1 + CR 506.2 + CR 603.2c). Drives the real
