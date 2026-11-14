@@ -118,15 +118,13 @@ pub(super) fn run_post_action_pipeline_after_resumed_resolution(
 
 /// CR 117.3c + CR 117.5 + CR 605.4a: the settled-Priority convergence wrapper.
 ///
-/// Caller families: a handler that returns its `ActionResult` directly,
+/// The one caller family is a handler that returns its `ActionResult` directly,
 /// bypassing the reducer's ordinary epilogue, after a sidecar-owned accepted
 /// triggered-mana occurrence resumed a **direct `ManaAbilityResume::Priority`
 /// root or a top-level special action** (CR 116.2) with no live
-/// cast/resolution/payment owner left; and
-/// [`settle_deferred_triggers_at_priority`], the shared convergence for a
-/// settled `Priority` that some answer path handed back without a post-action
-/// pass of its own. Callers supply that root's own exact Priority wait, and it
-/// is exhaustively validated here rather than trusted.
+/// cast/resolution/payment owner left. Its `settled_priority` is that root's own
+/// exact reconstructed wait, and it is exhaustively validated here rather than
+/// trusted.
 ///
 /// It differs from the ordinary wrappers in exactly three ways: its drain policy
 /// does not select the announced-cast batch; the carried recipient
@@ -164,52 +162,6 @@ pub(crate) fn run_post_action_pipeline_from_settled_priority(
     Ok(triggers::finish_trigger_construction_action(
         state, events, produced,
     ))
-}
-
-/// CR 603.3 + CR 603.3b: put the deferred-trigger queue on the stack at a
-/// settled `Priority` boundary, through the ordinary settled-priority pipeline.
-///
-/// Most answers reach their own post-action pass, which drains the queue. A few
-/// hand a settled `Priority` back without one — most visibly a successful
-/// unless payment whose paid branch has no successor instruction — and a
-/// triggered ability parked while the answered decision was open must not stay
-/// parked while players act on that priority.
-///
-/// The authority is deliberately event-agnostic: eligibility is the same
-/// [`triggers::should_drain_deferred_triggers_now`] rule every ordinary priority
-/// pass uses, and one call places the whole queue. Naming no event kind keeps
-/// every parked context converging through one path, so a new out-of-band event
-/// needs no rescue of its own and unrelated queues that meet at the same
-/// boundary cannot diverge.
-pub(crate) fn settle_deferred_triggers_at_priority(
-    state: &mut GameState,
-    events: &mut Vec<GameEvent>,
-) -> Result<(), EngineError> {
-    let WaitingFor::Priority { .. } = state.waiting_for else {
-        return Ok(());
-    };
-    // CR 104.1: once the game has ended nothing more triggers.
-    if state.game_end.is_some()
-        || state.deferred_triggers.is_empty()
-        || !triggers::should_drain_deferred_triggers_now(state)
-    {
-        return Ok(());
-    }
-    // A fresh event buffer: this pass places only the parked queue and must not
-    // rescan the caller's already-collected events for delayed triggers.
-    let settled_priority = state.waiting_for.clone();
-    let mut placed = Vec::new();
-    let stack_before = state.stack.len();
-    let settled =
-        run_post_action_pipeline_from_settled_priority(state, &mut placed, 0, &settled_priority)?;
-    state.waiting_for = settled;
-    // CR 117.4: a pass made before the new triggered ability joined the stack
-    // was not a pass on it, so the consecutive-pass record starts over.
-    if state.stack.len() > stack_before {
-        super::priority::clear_priority_passes(state);
-    }
-    events.extend(placed);
-    Ok(())
 }
 
 /// CR 608.2n + CR 117.5: the pass pipeline after `stack::resolve_top`'s net
@@ -934,26 +886,28 @@ fn place_priority_batch(
         .filter(|wf| !matches!(wf, WaitingFor::Priority { .. }))
 }
 
-/// CR 603.2 + CR 603.3: abilities triggered by `events` while no player is
-/// receiving priority wait in the deferred queue and are put on the stack the
-/// next time a player would receive priority — with the batch the current wait
-/// parks, exactly as that wait's own triggers would.
+/// CR 603.2 + CR 603.3: queue a batch of triggered abilities that an action
+/// collected itself, staged so it could be admitted or refused whole, with the
+/// batch the current wait parks. At a priority boundary that is the boundary's
+/// own batch, placed by the pass that follows; during any other decision the
+/// batch waits until a player would next receive priority, exactly as that
+/// wait's own triggers would.
 ///
-/// CR 603.2c: the events are claimed for the ordinary collector so that a
-/// paused announcement's carrier does not collect them a second time. The
-/// caller must ensure `events` is the exact slice that will be appended to the
-/// action's event buffer (as is the case for `UnAction::TouchObject`).
-pub(crate) fn park_triggers_until_priority(state: &mut GameState, events: &[GameEvent]) {
+/// CR 603.2c: `events` were collected once, here, so they are claimed for the
+/// ordinary collector: neither the following priority pass nor a paused
+/// announcement's carrier collects them again. `events` is the action's whole
+/// event buffer, so its indices are the occurrences the claim records.
+pub(crate) fn queue_collected_triggers(
+    state: &mut GameState,
+    events: &[GameEvent],
+    collection: triggers::PendingActivationTriggerCollection,
+) {
     let origin = parked_batch_origin(&state.waiting_for);
-    triggers::collect_parked_triggers_into_deferred(state, events, origin);
-    // Claim for the ordinary collector so a paused announcement carrier
-    // does not re-collect these events (CR 603.2c, CR 733.1).
-    // NOTE: This claim uses local indices (0..events.len()) which match the
-    // global buffer indices only for the first touch action in a sequence.
-    // Subsequent touches have mismatched occurrences, but the announcement
-    // carrier staging via `announcement_event_scope` prevents double-collection
-    // in practice for the common case. A proper fix would require global buffer
-    // access at claim time.
+    let mut contexts = Vec::new();
+    collection.commit_into(state, &mut contexts);
+    let first_new_context = state.deferred_triggers.len();
+    state.deferred_triggers.extend(contexts);
+    triggers::stamp_deferred_triggers_from(state, first_new_context, origin);
     super::announcement_triggers::claim_ordinary_collected_span(state, events, 0, events.len());
 }
 

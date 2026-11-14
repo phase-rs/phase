@@ -101,8 +101,7 @@ pub fn guard_state_snapshot_broadcast(parts: StateSnapshotParts<'_>) -> Result<(
 
 /// Validate a bare `GameState` before spectator `GameStarted` filtering.
 pub fn guard_game_state_for_broadcast(state: &GameState) -> Result<(), String> {
-    bound_count("state.objects", state.objects.len(), MAX_SNAPSHOT_OBJECTS)?;
-    Ok(())
+    bound_count("state.objects", state.objects.len(), MAX_SNAPSHOT_OBJECTS)
 }
 
 #[cfg(test)]

@@ -940,6 +940,17 @@ impl PendingActivationTriggerCollection {
         }
     }
 
+    /// Creates a collector for an action's own event batch that must be
+    /// admitted or refused whole before any of it reaches the live game: an
+    /// Un-card touch is bounded by the size of the batch it would add.
+    pub(crate) fn for_player_action() -> Self {
+        Self {
+            overlay: TriggerCollectionOverlay::default(),
+            operation_journal: Vec::new(),
+            pending_contexts: Vec::new(),
+        }
+    }
+
     /// Creates an activation-local collector with the complete in-flight
     /// ability available to source-filtered trigger predicates.
     pub(crate) fn for_prepared_activated_ability(
@@ -4770,43 +4781,6 @@ pub(crate) fn collect_logical_zone_trigger_segment(
         LogicalZoneTriggerCollection::Segment(group),
         &mut session,
     )
-}
-
-/// Provisionally collect triggers for a touch event and count how many touch
-/// triggers would be created for `player`, including trigger doubling
-/// (CR 603.2d). This is used to enforce the per-player touch trigger cap
-/// (MAX_PENDING_TOUCH_TRIGGERS) before committing the touch action.
-///
-/// The collection flushes layers (as the real collection does) but does not
-/// modify any persistent trigger state. The caller must still run the real
-/// collection through `park_triggers_until_priority` or `settle_triggers_at_priority`
-/// after the cap check passes.
-pub(crate) fn count_prospective_touch_triggers(
-    state: &mut GameState,
-    event: &GameEvent,
-    player: PlayerId,
-) -> usize {
-    use crate::game::triggers::TriggerCollectionOverlay;
-    let mut session = TriggerCollectionSession::new(TriggerCollectionOverlay::default());
-    let pending = collect_pending_triggers_with_collection(
-        state,
-        std::slice::from_ref(event),
-        LogicalZoneTriggerCollection::Ordinary,
-        &mut session,
-    );
-    // `collect_pending_triggers_with_collection` already applies trigger doubling
-    // (CR 603.2d) via `apply_trigger_doubling`, so Roaming Throne etc. are accounted for.
-    pending
-        .iter()
-        .filter(|ctx| {
-            ctx.pending.trigger_event.as_ref().is_some_and(
-                |e| matches!(e, GameEvent::ObjectTouched { player: p, .. } if *p == player),
-            ) || ctx
-                .trigger_events
-                .iter()
-                .any(|e| matches!(e, GameEvent::ObjectTouched { player: p, .. } if *p == player))
-        })
-        .count()
 }
 
 /// Retain one explicit zone-change delivery segment on its logical owner and

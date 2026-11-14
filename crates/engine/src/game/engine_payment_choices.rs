@@ -2643,26 +2643,18 @@ pub(crate) fn finish_successful_unless_payment(
             false,
             false,
         )?;
-    } else {
-        if let Some(payment_start) = payment_event_start {
-            if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
-                let default_wf = state.waiting_for.clone();
-                state.waiting_for = engine_priority::run_post_action_pipeline_from(
-                    state,
-                    events,
-                    payment_start,
-                    &default_wf,
-                    false,
-                    false,
-                )?;
-            }
+    } else if let Some(payment_start) = payment_event_start {
+        if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+            let default_wf = state.waiting_for.clone();
+            state.waiting_for = engine_priority::run_post_action_pipeline_from(
+                state,
+                events,
+                payment_start,
+                &default_wf,
+                false,
+                false,
+            )?;
         }
-        // CR 603.3 + CR 603.3b: a paid answer with no successor instruction ends
-        // here. There is no child whose own post-action pass would place what
-        // triggered while the decision was open, so hand the deferred queue to
-        // the shared settled-priority authority before anyone acts on this
-        // priority.
-        engine_priority::settle_deferred_triggers_at_priority(state, events)?;
     }
     Ok(state.waiting_for.clone())
 }

@@ -16,7 +16,7 @@
 //!   the stack through the ordinary trigger pipeline.
 
 use crate::game::game_object::{GameObject, ObjectIdentityBindingExt};
-use crate::game::triggers::{count_prospective_touch_triggers, PendingTriggerContext};
+use crate::game::triggers::{PendingActivationTriggerCollection, PendingTriggerContext};
 use crate::types::ability::{AbilityCost, Effect, TriggerDefinition};
 use crate::types::events::GameEvent;
 use crate::types::game_state::{ActionResult, GameState, StackEntryKind, WaitingFor};
@@ -578,31 +578,36 @@ fn touch_object(
             "Nothing happens when that object is touched".to_string(),
         ));
     }
-    // CR 603.2d: determine how many times the ability should trigger (including
-    // doubling from effects like Roaming Throne) before checking the cap.
-    let touch_event = GameEvent::ObjectTouched {
+    let mut events = vec![GameEvent::ObjectTouched {
         player: actor,
         object_id,
-    };
-    let prospective_touch_triggers = count_prospective_touch_triggers(state, &touch_event, actor);
-    let current_pending = pending_touch_triggers(state, actor);
-    if current_pending + prospective_touch_triggers > MAX_PENDING_TOUCH_TRIGGERS {
+    }];
+    // CR 603.2d: collect the touch's whole batch, with every additional time an
+    // ability triggers (Roaming Throne), on a staged copy of the game. The cap
+    // admits or refuses that batch as a unit, and a refused touch leaves the
+    // game exactly as it was.
+    let mut collection = PendingActivationTriggerCollection::for_player_action();
+    collection.collect(state, &events);
+    if pending_touch_triggers(state, actor) + collection.pending_contexts().len()
+        > MAX_PENDING_TOUCH_TRIGGERS
+    {
         return Err(EngineError::InvalidAction(
             "Too many of your touches are still waiting to resolve".to_string(),
         ));
     }
-    let mut events = vec![touch_event];
+    // CR 603.2c: the counted batch is the one committed, once. It joins the
+    // batch the current wait parks and the touch is claimed for the ordinary
+    // collector, so neither the priority pass below nor a spell or ability
+    // announcement paused under a pending decision collects it again. The touch
+    // is not part of that announcement either — cancelling the announcement
+    // (CR 733.1) must not undo it.
+    super::engine_priority::queue_collected_triggers(state, &events, collection);
     if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
         let settled = settle_triggers_at_priority(state, &mut events)?;
         Ok(ActionResult::applied(events, settled))
     } else {
-        // CR 603.2c: the touch triggers once. It parks in the deferred queue
-        // here, so it is claimed for the ordinary collector: a spell or ability
-        // announcement paused under this decision must not stage the same
-        // touch into its own carrier at the end of the action. The touch is
-        // not part of that announcement either — cancelling the announcement
-        // (CR 733.1) must not undo it.
-        super::engine_priority::park_triggers_until_priority(state, &events);
+        // CR 603.3: during any other decision the batch waits for the next
+        // time a player would receive priority; the decision stays untouched.
         Ok(ActionResult::applied(events, state.waiting_for.clone()))
     }
 }
