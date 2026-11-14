@@ -2041,7 +2041,7 @@ fn a_concession_by_the_active_player_mid_resolution_gives_priority_to_a_living_p
 /// concedes there, and P0 has the Metamorph enter as a copy of Sol Ring.
 /// Returns how many Vampire triggers wait or are on the stack.
 fn vampire_triggers_after_a_concession_mid_tooth_and_nail(
-    suppressor: bool,
+    suppressor_owner: Option<PlayerId>,
     vampire_owner: PlayerId,
 ) -> usize {
     let db = shared_card_db().expect("integration card fixture must load");
@@ -2049,9 +2049,9 @@ fn vampire_triggers_after_a_concession_mid_tooth_and_nail(
     scenario.at_phase(Phase::PreCombatMain);
     let vampire = scenario.add_real_card(vampire_owner, "Welcoming Vampire", Zone::Battlefield, db);
     scenario.add_real_card(P0, "Sol Ring", Zone::Battlefield, db);
-    if suppressor {
-        scenario.add_real_card(P2, "Hushbringer", Zone::Battlefield, db);
-    }
+    // P2 controls the Hushbringer; `suppressor_owner` owns it.
+    let suppressor =
+        suppressor_owner.map(|_| scenario.add_real_card(P2, "Hushbringer", Zone::Battlefield, db));
     let bears = scenario.add_real_card(P0, "Grizzly Bears", Zone::Hand, db);
     let metamorph = scenario.add_real_card(P0, "Phyrexian Metamorph", Zone::Hand, db);
     let tooth_and_nail = scenario.add_real_card(P0, "Tooth and Nail", Zone::Hand, db);
@@ -2061,6 +2061,14 @@ fn vampire_triggers_after_a_concession_mid_tooth_and_nail(
     pool.extend((0..4).map(|_| ManaUnit::new(ManaType::Green, ObjectId(0), false, vec![])));
     scenario.with_mana_pool(P0, pool);
     let mut runner = scenario.build();
+    if let (Some(hushbringer), Some(owner)) = (suppressor, suppressor_owner) {
+        runner
+            .state_mut()
+            .objects
+            .get_mut(&hushbringer)
+            .unwrap()
+            .owner = owner;
+    }
     if vampire_owner != P0 {
         runner.cast(turn_against).target_object(vampire).resolve();
         assert_eq!(runner.state().objects[&vampire].controller, P0);
@@ -2146,7 +2154,7 @@ fn vampire_triggers_after_a_concession_mid_tooth_and_nail(
 #[test]
 fn a_departed_suppressor_still_applies_to_the_hand_entry_completed_before_its_owner_left() {
     assert_eq!(
-        vampire_triggers_after_a_concession_mid_tooth_and_nail(true, P0),
+        vampire_triggers_after_a_concession_mid_tooth_and_nail(Some(P2), P0),
         0
     );
 }
@@ -2157,8 +2165,22 @@ fn a_departed_suppressor_still_applies_to_the_hand_entry_completed_before_its_ow
 #[test]
 fn a_hand_entry_completed_before_a_concession_triggers_the_survivors_observer_once() {
     assert_eq!(
-        vampire_triggers_after_a_concession_mid_tooth_and_nail(false, P0),
+        vampire_triggers_after_a_concession_mid_tooth_and_nail(None, P0),
         1
+    );
+}
+
+/// CR 800.4a + CR 603.6a + CR 603.10: a suppressor P0 owns that P2 controls
+/// (P2 returned it with Reanimate: "Put target creature card from a graveyard
+/// onto the battlefield under your control.") is exiled when P2 concedes, with
+/// the objects P2 controls, and still suppressed the entry completed before
+/// that: the Bears entered under Hushbringer, so Welcoming Vampire does not
+/// trigger for it.
+#[test]
+fn a_suppressor_exiled_under_the_leavers_control_still_applies_to_the_completed_entry() {
+    assert_eq!(
+        vampire_triggers_after_a_concession_mid_tooth_and_nail(Some(P0), P0),
+        0
     );
 }
 
@@ -2170,7 +2192,7 @@ fn a_hand_entry_completed_before_a_concession_triggers_the_survivors_observer_on
 #[test]
 fn a_stolen_observer_keeps_its_trigger_for_the_hand_entry_completed_before_its_owner_left() {
     assert_eq!(
-        vampire_triggers_after_a_concession_mid_tooth_and_nail(false, P2),
+        vampire_triggers_after_a_concession_mid_tooth_and_nail(None, P2),
         1
     );
 }

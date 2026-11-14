@@ -878,6 +878,12 @@ impl std::fmt::Debug for TriggerSourceContext {
 }
 
 impl TriggerSourceContext {
+    /// CR 800.4a: whether the source leaves the game with `player`: one they
+    /// own leaves it, and one they control but do not own is exiled.
+    pub fn leaves_with(&self, player: PlayerId) -> bool {
+        self.lki.owner == player || self.lki.controller == player
+    }
+
     /// Returns the exact definition reference for an entry captured with this
     /// source. No caller may infer provenance from definition payload bytes.
     pub fn definition_ref(&self, entry: &TriggerEntry) -> TriggerDefinitionRef {
@@ -4441,7 +4447,7 @@ impl LogicalZoneChangeGroup {
             .retain_mut(retained_latch);
         self.immediately_before_suppress_triggers
             .retain_mut(|suppress| {
-                if suppress.source_context.lki.owner != player {
+                if !suppress.source_context.leaves_with(player) {
                     return true;
                 }
                 if completed.is_empty() {
@@ -4454,7 +4460,7 @@ impl LogicalZoneChangeGroup {
             });
         self.immediately_after_suppress_triggers
             .retain_mut(|suppress| {
-                if suppress.source_context.lki.owner != player {
+                if !suppress.source_context.leaves_with(player) {
                     return true;
                 }
                 if completed.is_empty() {

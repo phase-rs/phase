@@ -2786,7 +2786,10 @@ pub(crate) fn departing_owner_after_authority(
             .collect(),
         suppress_triggers: suppress
             .into_iter()
-            .filter(|latch| latch.source_context.lki.owner == player)
+            // CR 800.4a: the objects a leaving player owns leave the game, and
+            // the ones they control but do not own are exiled, so both
+            // suppress no longer.
+            .filter(|latch| latch.source_context.leaves_with(player))
             .collect(),
     }
 }
