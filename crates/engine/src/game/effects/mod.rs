@@ -6805,8 +6805,8 @@ fn continuation_acts_on_moved_objects_after_entry(
 /// `install_transient`'s granter latch (CR 201.5a, an install-time binding, not a
 /// characteristic).
 ///
-/// Walks [`moved_objects_continuation`]. The walk also stops at any conditional or optional
-/// node, whatever its onset: the walk stops conservatively: a skipped node takes its
+/// Walks [`moved_objects_continuation`]. The walk stops conservatively at any conditional or
+/// optional node, whatever its onset (CR 608.2c): a skipped node takes its
 /// `ContinuationStep` descendants with it (`starts_independent_instruction`), but a later
 /// `SequentialSibling` rider of a guarded node without an alternative still resolves and is not
 /// carried (known gap; no printed with-entry return chain has a guarded node before a later

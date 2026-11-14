@@ -3953,7 +3953,9 @@ impl EntryObservation {
 ///
 /// Domain: only events inside an entry span reach it — a `ZoneChanged` to the battlefield and the
 /// same-object `CounterAdded` prefix before it (`entry_span_start`) — because only those visits
-/// carry `exists_from: ImmediatelyAfter` ([`EntryObservation::presence_at`]). Of the CR
+/// carry `exists_from: ImmediatelyAfter` ([`EntryObservation::presence_at`]), and
+/// `event_subject_observes`, whose complement it is, passes only a `ZoneChanged` to the battlefield.
+/// Of the CR
 /// 603.10a–g exceptions only CR 603.10a can arise there: a leaves-the-battlefield half, a
 /// sacrifice, a leaves-a-graveyard half, or a visible object put into a hand or library
 /// (`trigger_matchers::zone_change_observed_after`). The catch-all `true` arm is the CR 603.10
