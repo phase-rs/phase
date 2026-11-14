@@ -4392,7 +4392,9 @@ fn next_spell_without_paying_applies(
 /// CR 118.9a + CR 601.2b: a named permission or a prepared next-spell
 /// free cast has already elected its alternative. Do not scan sibling grants
 /// or offer another alternative over that exact choice. A cast's elected
-/// permission is asked what it makes the player pay, never matched by shape.
+/// permission is asked what non-mana cost it makes the player pay, never matched
+/// by shape; the arms below are the mana-cost permissions `prepare_spell_cast`
+/// overrides.
 pub(super) fn cast_has_elected_alternative_cost(
     state: &GameState,
     player: PlayerId,
