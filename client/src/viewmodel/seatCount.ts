@@ -2,10 +2,10 @@ import type { GameState } from "../adapter/types";
 
 // The game's seat count, stable across eliminations — the engine never
 // removes from `seat_order`. Single source of truth for layout decisions
-// like "is this 1v1?". Keep all callers (GameBoard, OpponentHud,
-// BlockAssignmentLines, AttackTargetLines) routed through here so they
-// cannot drift apart — the bug this helper exists to prevent is exactly
-// that drift.
+// like "is this 1v1?". Keep all callers (GameBoard, StackDisplay,
+// GamePage, ReplayPage via the `gameStateView` re-export, GameProvider via
+// this leaf) routed through here so they cannot drift apart — the bug this
+// helper exists to prevent is exactly that drift.
 //
 // This lives in its own leaf module (rather than `gameStateView`) so
 // non-rendering callers like `GameProvider` can count the installed
