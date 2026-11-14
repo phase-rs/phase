@@ -2046,20 +2046,24 @@ fn infectious_bite_board(mine: &str, creatures: &[&str]) -> (GameRunner, ObjectI
     (runner, ids[0])
 }
 
-/// CR 702.21a: the read's first legal answer declines the Ward cost (`PayUnlessCost { pay: false }`)
-/// and Bite is countered; paying would put the AI, at five poison, at ten (CR 704.5c). Bonecrusher
-/// Giant's 2 damage kills the AI only at 2 life (CR 704.5a); the AI targets around Ward when it can,
-/// in either order.
+/// CR 601.2c + CR 702.21a: a permanent that triggers when Infectious Bite targets the opponent's
+/// creature withholds lethal (Ward, Frost Titan, Bonecrusher Giant, Diffusion Sliver watching
+/// Muscle Sliver, Kira's granted trigger); the AI targets the first legal creature.
 #[test]
 fn a_ward_trigger_on_a_target_withholds_the_lethal_read() {
-    let no_loss = "poison_clock_no_poison_loss";
+    let pressure = "poison_clock_pressure";
     let lethal = "poison_clock_lethal";
-    let expected: [(&[&str], &str); 6] = [
-        (&["The Serpent Society"], no_loss),
+    let expected: [(&[&str], &str); 11] = [
+        (&["The Serpent Society"], pressure),
+        (&["Tolarian Terror"], pressure),
+        (&["Frost Titan"], pressure),
+        (&["Bonecrusher Giant"], pressure),
+        (&["Muscle Sliver", "Diffusion Sliver"], pressure),
+        (&["Kira, Great Glass-Spinner"], pressure),
         (&["Grizzly Bears", "The Serpent Society"], lethal),
-        (&["The Serpent Society", "Grizzly Bears"], lethal),
+        (&["The Serpent Society", "Grizzly Bears"], pressure),
         (&["Coppercoat Vanguard", "Elite Vanguard"], lethal),
-        (&["Elite Vanguard", "Coppercoat Vanguard"], lethal),
+        (&["Elite Vanguard", "Coppercoat Vanguard"], pressure),
         (&["Grizzly Bears"], lethal),
     ];
     let kinds = expected.map(|(creatures, _)| {
@@ -2071,16 +2075,14 @@ fn a_ward_trigger_on_a_target_withholds_the_lethal_read() {
     });
     assert_eq!(kinds, expected);
 
-    let bonecrusher = [2, 20].map(|life| {
-        let (mut runner, bite) = infectious_bite_board("Grizzly Bears", &["Bonecrusher Giant"]);
-        runner.state_mut().players[AI.0 as usize].life = life;
-        verdict_on(runner.state(), &cast_candidate(bite)).1.kind
-    });
-    assert_eq!(bonecrusher, [no_loss, lethal]);
-
     // CR 702.21a: the AI's own Ward (Tolarian Terror) does not trigger on its own spell.
     let (own_ward, bite) = infectious_bite_board("Tolarian Terror", &["Grizzly Bears"]);
     let reason = verdict_on(own_ward.state(), &cast_candidate(bite)).1;
+    assert_eq!(reason.kind, lethal);
+
+    let (mut unsettled, bite) = infectious_bite_board("Grizzly Bears", &["Grizzly Bears"]);
+    unsettled.state_mut().layers_dirty.mark_full();
+    let reason = verdict_on(unsettled.state(), &cast_candidate(bite)).1;
     assert_eq!(reason.kind, lethal);
 
     let unsettled = [Some(KAMBAL), None].map(|opposing| {
@@ -2088,7 +2090,27 @@ fn a_ward_trigger_on_a_target_withholds_the_lethal_read() {
         runner.state_mut().layers_dirty.mark_full();
         verdict_on(runner.state(), &cast_candidate(prologue)).1.kind
     });
-    assert_eq!(unsettled, [no_loss, lethal]);
+    assert_eq!(unsettled, [pressure, lethal]);
+}
+
+/// A spell with no target announces nothing, so Frost Titan does not withhold Prologue's lethal.
+#[test]
+fn an_untargeted_spell_ignores_becomes_target_triggers() {
+    let (_, reason) = cast_beside(
+        FormatConfig::standard(),
+        2,
+        &[(OPPONENT, 9)],
+        prologue_to_phyresis,
+        |s| {
+            s.add_real_card(
+                OPPONENT,
+                "Frost Titan",
+                Zone::Battlefield,
+                shared_integration_card_db(),
+            )
+        },
+    );
+    assert_eq!(reason.kind, "poison_clock_lethal");
 }
 
 /// The AI at 2 life with Prologue to Phyresis and {1}{U}, from two Islands when `islands` and
@@ -2155,10 +2177,7 @@ fn a_cast_trigger_that_can_eliminate_the_ai_withholds_the_lethal_read() {
         let (runner, prologue) = race_board(opposing, false);
         verdict_on(runner.state(), &cast_candidate(prologue)).1.kind
     });
-    assert_eq!(
-        kinds,
-        ["poison_clock_no_poison_loss", "poison_clock_lethal"]
-    );
+    assert_eq!(kinds, ["poison_clock_pressure", "poison_clock_lethal"]);
 }
 
 /// CR 601.2g + CR 704.5a: tapping both Islands for Prologue triggers Manabarbs twice, and those
@@ -2253,10 +2272,7 @@ fn a_tap_trigger_that_can_eliminate_the_ai_withholds_the_lethal_read() {
         let (runner, prologue) = royal_decree_board(swamp);
         verdict_on(runner.state(), &cast_candidate(prologue)).1.kind
     });
-    assert_eq!(
-        kinds,
-        ["poison_clock_no_poison_loss", "poison_clock_lethal"]
-    );
+    assert_eq!(kinds, ["poison_clock_pressure", "poison_clock_lethal"]);
 }
 
 /// CR 602.2b + CR 603.2: an opponent's Rings of Brighthearth and Crackdown Construct trigger only
@@ -2279,29 +2295,27 @@ fn an_opponents_own_activation_trigger_does_not_withhold_the_lethal_read() {
     assert_eq!(kinds, ["poison_clock_lethal"; 2]);
 }
 
-/// CR 601.2i + CR 704.5a: the AI's own Teval, Arbiter of Virtue makes it lose life equal to
-/// Prologue's mana value (2) before Prologue resolves, so lethal is withheld at 2 life, not at 3.
+const TREACHEROUS_BLESSING: &str = "When this enchantment enters, draw three cards.\nWhenever you cast a spell, you lose 1 life.\nWhen this enchantment becomes the target of a spell or ability, sacrifice it.";
+
+/// CR 601.2i + CR 603.3: the AI's own Teval, Arbiter of Virtue or Treacherous Blessing triggers
+/// as Prologue becomes cast and sits above it, so lethal is withheld even at 20 life.
 #[test]
-fn the_ais_own_cast_trigger_can_withhold_the_lethal_read() {
-    let kinds = [2, 3].map(|life| {
+fn the_ais_own_cast_trigger_withholds_the_lethal_read() {
+    let kinds = [true, false].map(|teval| {
         let (runner, ids) = board(FormatConfig::standard(), 2, &[(OPPONENT, 9)], |s| {
             s.at_phase(Phase::PreCombatMain);
-            s.with_life(AI, life);
             s.with_mana_pool(AI, floating(&[ManaType::Blue; 2]));
-            s.add_real_card(
-                AI,
-                "Teval, Arbiter of Virtue",
-                Zone::Battlefield,
-                shared_integration_card_db(),
-            );
+            if teval {
+                let db = shared_integration_card_db();
+                s.add_real_card(AI, "Teval, Arbiter of Virtue", Zone::Battlefield, db);
+            } else {
+                s.add_enchantment_from_oracle(AI, "Treacherous Blessing", TREACHEROUS_BLESSING);
+            }
             vec![prologue_to_phyresis(s)]
         });
         verdict_on(runner.state(), &cast_candidate(ids[0])).1.kind
     });
-    assert_eq!(
-        kinds,
-        ["poison_clock_no_poison_loss", "poison_clock_lethal"]
-    );
+    assert_eq!(kinds, ["poison_clock_pressure"; 2]);
 }
 
 /// CR 117.4 + CR 704.3: Prologue cast in response to Lightning Bolt aimed at the AI at 3 life
@@ -2364,4 +2378,42 @@ fn drawing_from_an_empty_library_withholds_the_lethal_read() {
         verdict_on(runner.state(), &cast_candidate(prologue)).1.kind
     });
     assert_eq!(kinds, ["poison_clock_pressure", "poison_clock_lethal"]);
+}
+
+/// CR 602.2b + CR 601.2h: Yawgmoth, Thran Physician's discard is a choice the AI makes while
+/// activating, so the read withholds; answering it on the real board proliferates to lethal.
+#[test]
+fn a_cost_choice_while_activating_withholds_the_lethal_read() {
+    let (mut runner, ids) = board(FormatConfig::standard(), 2, &[(OPPONENT, 9)], |s| {
+        let db = shared_integration_card_db();
+        s.at_phase(Phase::PreCombatMain);
+        s.with_mana_pool(AI, floating(&[ManaType::Black; 2]));
+        s.add_real_card(AI, "Grizzly Bears", Zone::Hand, db);
+        vec![s.add_real_card(AI, "Yawgmoth, Thran Physician", Zone::Battlefield, db)]
+    });
+    let last = runner.state().objects[&ids[0]].abilities.len() - 1;
+    let candidate = activate_ability_candidate(ids[0], last);
+    let reason = verdict_on(runner.state(), &candidate).1;
+    assert_eq!(reason.kind, "poison_clock_pressure");
+
+    runner.act(candidate.action).unwrap();
+    assert!(!matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+    for _ in 0..8 {
+        let action = match &runner.state().waiting_for {
+            WaitingFor::GameOver { .. } => break,
+            WaitingFor::Priority { .. } => GameAction::PassPriority,
+            WaitingFor::ProliferateChoice { eligible, .. } => GameAction::SelectTargets {
+                targets: eligible.clone(),
+            },
+            _ => engine::ai_support::legal_actions(runner.state())
+                .into_iter()
+                .next()
+                .unwrap(),
+        };
+        runner.act(action).unwrap();
+    }
+    assert!(!engine::game::players::is_alive(runner.state(), OPPONENT));
 }

@@ -57,9 +57,8 @@ use engine::game::players::{self, PoisonLossMeasure, PoisonLossScope};
 use engine::game::sba::check_state_based_actions;
 use engine::types::ability::{AbilityDefinition, Effect, QuantityExpr, ResolvedAbility, TargetRef};
 use engine::types::actions::GameAction;
-use engine::types::game_state::{GameState, WaitingFor};
+use engine::types::game_state::{CastPaymentMode, GameState, StackEntryKind, WaitingFor};
 use engine::types::identifiers::ObjectId;
-use engine::types::keywords::Keyword;
 use engine::types::player::{PlayerCounterKind, PlayerId};
 
 use crate::ability_chain::{collect_scoped_nodes, AbilityScope};
@@ -221,10 +220,10 @@ fn printed_poison(abilities: &[&AbilityDefinition]) -> Option<u32> {
 /// An answer that never moves its prompt forward would otherwise loop forever.
 const CANDIDATE_DELIVERY_MAX_STEPS: usize = 64;
 
-/// CR 601.2i + CR 603.3 + CR 117.4: the board after the candidate is cast or activated on a
-/// copy and every player passes until the stack is back to its depth, with the AI's own prompts
-/// answered and the seat targeted where it is legal; None when the engine refuses the action or
-/// another player owns a choice.
+/// CR 601.2i + CR 603.3 + CR 117.4: the board after the candidate, cast or activated on a copy
+/// with its mana paid automatically, resolves and every player passes until the stack is back to
+/// its depth. None when the cast asks the AI anything but its target, when it does not reach
+/// priority alone on top of the stack, or when another player owns a choice as it resolves.
 fn candidate_delivery(
     state: &GameState,
     ai_player: PlayerId,
@@ -238,32 +237,48 @@ fn candidate_delivery(
     let depth = pending_mode_source(&board.waiting_for)
         .and_then(|spell| board.stack.iter().position(|entry| entry.id == spell))
         .unwrap_or(board.stack.len());
-    apply_as_current_for_simulation(&mut board, action.clone()).ok()?;
+    let mut action = action.clone();
+    if let GameAction::CastSpell { payment_mode, .. }
+    | GameAction::ActivateAbility { payment_mode, .. } = &mut action
+    {
+        *payment_mode = CastPaymentMode::Auto;
+    }
+    apply_as_current_for_simulation(&mut board, action).ok()?;
+    let mut casting = true;
     for _ in 0..CANDIDATE_DELIVERY_MAX_STEPS {
         let answer = match &board.waiting_for {
             WaitingFor::GameOver { .. } => return Some(board),
+            // CR 601.2i + CR 603.3: a trigger the cast caused sits above the candidate and
+            // resolves first.
+            WaitingFor::Priority { .. } if casting => {
+                let alone = board.stack.len() == depth + 1
+                    && board.stack.last().is_some_and(|top| {
+                        !matches!(top.kind, StackEntryKind::TriggeredAbility { .. })
+                    });
+                if !alone {
+                    return None;
+                }
+                casting = false;
+                GameAction::PassPriority
+            }
             WaitingFor::Priority { .. } if board.stack.len() <= depth => return Some(board),
             WaitingFor::Priority { .. } => GameAction::PassPriority,
             waiting_for if waiting_for.acting_player() != Some(ai_player) => return None,
-            WaitingFor::ProliferateChoice { eligible, .. } if eligible.contains(&chosen) => {
-                GameAction::SelectTargets {
-                    targets: vec![chosen.clone()],
-                }
-            }
-            WaitingFor::TargetSelection { .. } | WaitingFor::TriggerTargetSelection { .. } => {
+            WaitingFor::TargetSelection { .. } if casting => {
                 let legal = current_target_selection_targets(&board)?;
                 let target = if legal.contains(&chosen) {
                     chosen.clone()
                 } else {
-                    // CR 702.21a: an opponent's Ward triggers on being targeted, so avoid it.
-                    legal
-                        .iter()
-                        .find(|target| !has_ward(&board, ai_player, target))
-                        .or(legal.first())?
-                        .clone()
+                    legal.first()?.clone()
                 };
                 GameAction::ChooseTarget {
                     target: Some(target),
+                }
+            }
+            _ if casting => return None,
+            WaitingFor::ProliferateChoice { eligible, .. } if eligible.contains(&chosen) => {
+                GameAction::SelectTargets {
+                    targets: vec![chosen.clone()],
                 }
             }
             _ => legal_actions(&board).into_iter().next()?,
@@ -271,13 +286,6 @@ fn candidate_delivery(
         apply_as_current_for_simulation(&mut board, answer).ok()?;
     }
     None
-}
-
-/// CR 702.21a: Ward triggers only for a spell or ability its controller's opponent controls.
-fn has_ward(state: &GameState, ai_player: PlayerId, target: &TargetRef) -> bool {
-    matches!(target, TargetRef::Object(id) if state.objects.get(id).is_some_and(|obj| {
-        obj.controller != ai_player && obj.keywords.iter().any(|k| matches!(k, Keyword::Ward(_)))
-    }))
 }
 
 /// CR 702.70a: a trigger whose instructions give poison counters (Poisonous).
