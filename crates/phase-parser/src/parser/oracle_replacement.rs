@@ -8563,8 +8563,9 @@ fn parse_graveyard_redirect_replacement(
     // * `CardOnly` — "a card" without an "or token" rider (Leyline of the Void)
     //   names only objects represented by a card (CR 108.2): it excludes tokens
     //   (CR 108.2b), so a dying token reaches the graveyard and its dies-triggers
-    //   fire, and it excludes a spell copy (CR 707.10), which goes to the
-    //   graveyard and then ceases to exist (CR 704.5e).
+    //   fire, and it excludes a cast copy of a card (CR 707.12, Mizzix's
+    //   Mastery), which goes to the graveyard and then ceases to exist
+    //   (CR 704.5e).
     // * `TokenOnly` — "a token" is card-EXCLUDING. Without this reading the
     //   subject was dropped on the floor: the bare token noun says nothing the
     //   OTHER two readings encode, so `filter_constrains_beyond_token_axis`
@@ -25289,8 +25290,8 @@ mod tests {
         // valid_card should scope to opponent-owned cards AND admit only objects
         // represented by a card: CR 108.2 + CR 108.2b — "a card" (no "or token")
         // excludes tokens, so a dying token reaches the graveyard (dies-triggers
-        // fire — Blood Artist class) instead of being wrongly exiled, and spell
-        // copies.
+        // fire — Blood Artist class) instead of being wrongly exiled. It also
+        // excludes a cast copy of a card (CR 707.12).
         match &def.valid_card {
             Some(TargetFilter::Typed(TypedFilter { properties, .. })) => {
                 assert!(properties.contains(&FilterProp::Owned {
@@ -25301,7 +25302,7 @@ mod tests {
                     "'a card' subject must admit only card-represented objects (CR 108.2)"
                 );
             }
-            other => panic!("Expected Typed filter with Owned + NonToken, got {other:?}"),
+            other => panic!("Expected Typed filter with Owned + RepresentedByCard, got {other:?}"),
         }
         assert!(matches!(
             *def.execute.as_ref().unwrap().effect,

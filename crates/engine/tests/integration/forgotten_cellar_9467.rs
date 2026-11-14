@@ -216,8 +216,8 @@ fn pass_until_prompt(runner: &mut GameRunner, events: &mut Vec<GameEvent>) {
     panic!("the stack did not settle: {:?}", runner.state().waiting_for);
 }
 
-/// CR 108.2 + CR 707.10 + CR 704.5e: "if a card would be put into your
-/// graveyard" does not cover a spell copy. A copy of Chaplain's Blessing cast
+/// CR 108.2 + CR 707.12 + CR 704.5e: "if a card would be put into your
+/// graveyard" does not cover a cast copy of a card. A copy of Chaplain's Blessing cast
 /// through Mizzix's Mastery is put into P0's graveyard as it resolves
 /// (CR 608.2n) and then ceases to exist; a Lightning Bolt card headed to the
 /// same graveyard is exiled instead.
