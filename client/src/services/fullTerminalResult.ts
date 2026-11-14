@@ -39,9 +39,8 @@ export function isValidFullTerminalDelivery(value: unknown): value is FullTermin
   const delivery = value as Partial<FullTerminalDelivery>;
   const key = delivery.key;
   const display = delivery.display;
-  return key !== undefined
-    && display !== undefined
-    && typeof key.game_code === "string"
+  if (!key || typeof key !== "object" || !display || typeof display !== "object") return false;
+  return typeof key.game_code === "string"
     && key.game_code.length > 0
     && typeof key.generation === "number"
     && Number.isSafeInteger(key.generation)

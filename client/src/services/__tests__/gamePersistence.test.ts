@@ -476,16 +476,33 @@ describe("game persistence", () => {
       expect(stored()).toEqual(replacement);
     });
 
-    it.each(clears)("%s leaves a terminal-only pointer to its acknowledgement", async (_name, clear) => {
+    it.each(clears)("%s keeps a same-ID replacement pointer saved while it awaits IndexedDB", async (_name, clear) => {
+      saveActiveGame(pointer);
+      let release!: () => void;
+      vi.mocked(idbDel).mockImplementationOnce(() => new Promise((resolve) => { release = () => resolve(); }));
+      const pending = clear("native-game");
+      const replacement = {
+        id: "native-game",
+        mode: "ai" as const,
+        difficulty: "Medium",
+        nativeSession: { ...session, gameCode: "REPLACEMENT", playerToken: "replacement-token" },
+      };
+      saveActiveGame(replacement);
+      release();
+      await pending;
+      expect(stored()).toEqual(replacement);
+    });
+
+    it.each(clears)("%s leaves any native session pointer to native terminal persistence", async (_name, clear) => {
       saveActiveGame(pointer);
       markNativeSoloSessionTerminal("native-game", session);
       expect(stored()).toEqual({ ...pointer, nativeSession: { ...session, terminalOnly: true } });
       await clear("native-game");
       expect(stored()).toEqual({ ...pointer, nativeSession: { ...session, terminalOnly: true } });
-      // Control: the same game's playable pointer is game cleanup's to remove.
+      // Playable native pointer is also preserved: native persistence owns identity-checked release.
       saveActiveGame(pointer);
       await clear("native-game");
-      expect(stored()).toBeNull();
+      expect(stored()).toEqual(pointer);
     });
 
     it("marks and clears only the pointer holding the same game and session", () => {

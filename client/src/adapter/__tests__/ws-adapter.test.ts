@@ -1395,7 +1395,13 @@ describe("WebSocketAdapter", () => {
         type: "AckTerminalDelivery",
         data: { delivery_id: nativeDelivery.deliveryId, credential: nativeDelivery.credential },
       })));
-      ackSocket.dispatchSynthetic("message", JSON.stringify({ type: "TerminalDeliveryAcknowledged" }));
+      ackSocket.dispatchSynthetic(
+        "message",
+        JSON.stringify({
+          type: "TerminalDeliveryAcknowledged",
+          data: { delivery_id: nativeDelivery.deliveryId },
+        }),
+      );
 
       await vi.waitFor(() => {
         expect(events).toContainEqual({ type: "sessionChanged", session: null });
@@ -1428,14 +1434,20 @@ describe("WebSocketAdapter", () => {
     });
 
     it.each([
-      ["an empty delivery", {}],
-      ["a delivery without a credential", { ...nativeDelivery, credential: "" }],
-      ["another generation's delivery", { ...nativeDelivery, key: { game_code: "NATIVE", generation: 2 } }],
-      ["another game's delivery", { ...nativeDelivery, key: { game_code: "OTHER", generation: 1 } }],
-    ])("leaves the live session's error and reconnect paths intact after %s", async (_case, delivery) => {
+      ["an absent data payload", { type: "TerminalResult" }],
+      ["a null data payload", { type: "TerminalResult", data: null }],
+      ["a null delivery", { type: "TerminalResult", data: { delivery: null } }],
+      ["an empty delivery", { type: "TerminalResult", data: { delivery: {} } }],
+      ["a delivery without a credential", { type: "TerminalResult", data: { delivery: { ...nativeDelivery, credential: "" } } }],
+      ["a delivery with a null key", { type: "TerminalResult", data: { delivery: { ...nativeDelivery, key: null } } }],
+      ["a delivery with a null display", { type: "TerminalResult", data: { delivery: { ...nativeDelivery, display: null } } }],
+      ["a delivery with a null finalView", { type: "TerminalResult", data: { delivery: { ...nativeDelivery, finalView: null } } }],
+      ["another generation's delivery", { type: "TerminalResult", data: { delivery: { ...nativeDelivery, key: { game_code: "NATIVE", generation: 2 } } } }],
+      ["another game's delivery", { type: "TerminalResult", data: { delivery: { ...nativeDelivery, key: { game_code: "OTHER", generation: 1 } } } }],
+    ])("leaves the live session's error and reconnect paths intact after %s", async (_case, frame) => {
       const { nativeAdapter, nativeSocket, socketFactory, events } = await liveNativeGame();
 
-      nativeSocket.dispatchSynthetic("message", JSON.stringify({ type: "TerminalResult", data: { delivery } }));
+      nativeSocket.dispatchSynthetic("message", JSON.stringify(frame));
       await Promise.resolve();
 
       // Nothing was retained, published or acknowledged.

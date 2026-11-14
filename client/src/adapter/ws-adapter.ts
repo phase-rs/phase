@@ -153,7 +153,10 @@ export async function bootstrapFullTerminalDelivery(
   if (response.type !== "TerminalBootstrapResult") {
     throw new Error("Unexpected terminal bootstrap response");
   }
-  return (response.data as { delivery?: FullTerminalDelivery }).delivery ?? null;
+  const data = response.data;
+  if (!data || typeof data !== "object") return null;
+  const delivery = (data as { delivery?: unknown }).delivery;
+  return isValidFullTerminalDelivery(delivery) ? delivery : null;
 }
 
 export async function readFullTerminalResult(
@@ -169,7 +172,10 @@ export async function readFullTerminalResult(
   if (response.type !== "TerminalResult") {
     throw new Error("Unexpected terminal result response");
   }
-  return (response.data as { delivery?: FullTerminalDelivery }).delivery ?? null;
+  const data = response.data;
+  if (!data || typeof data !== "object") return null;
+  const delivery = (data as { delivery?: unknown }).delivery;
+  return isValidFullTerminalDelivery(delivery) ? delivery : null;
 }
 
 export async function acknowledgeFullTerminalDelivery(
@@ -183,7 +189,10 @@ export async function acknowledgeFullTerminalDelivery(
     { type: "AckTerminalDelivery", data: { delivery_id: deliveryId, credential } },
     socketFactory,
   );
-  return response.type === "TerminalDeliveryAcknowledged";
+  if (response.type !== "TerminalDeliveryAcknowledged") return false;
+  const data = response.data;
+  if (!data || typeof data !== "object") return false;
+  return (data as { delivery_id?: string }).delivery_id === deliveryId;
 }
 
 /** AI seat configuration for the private native-engine host path. */
@@ -3401,7 +3410,9 @@ export class WebSocketAdapter implements EngineAdapter {
     if (this.gameEnded && !this.terminalCleanupPending) {
       this.emit({ type: "sessionChanged", session: null });
     }
-    this.listeners = [];
+    if (!this.terminalCleanupPending) {
+      this.listeners = [];
+    }
   }
 
   /** Attempt reconnection using stored session data. */
@@ -4716,7 +4727,9 @@ export class WebSocketAdapter implements EngineAdapter {
       }
 
       case "TerminalResult": {
-        const delivery = (msg.data as { delivery?: unknown }).delivery;
+        const data = msg.data;
+        if (!data || typeof data !== "object") break;
+        const delivery = (data as { delivery?: unknown }).delivery;
         // Only a well-formed delivery for this attachment's exact Full identity
         // ends the game. Anything else is ignored before it can claim terminal
         // ownership, so the live session keeps its error and reconnect paths.
@@ -4760,6 +4773,9 @@ export class WebSocketAdapter implements EngineAdapter {
           )) {
             this.terminalCleanupPending = false;
             this.emit({ type: "sessionChanged", session: null });
+            if (this.disposed) {
+              this.listeners = [];
+            }
           }
         })().catch((error: unknown) => {
           this.emit({

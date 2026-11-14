@@ -96,7 +96,10 @@ class ServerSocket extends EventTarget {
           else if (ackOutcome === "pending") pendingAcks.push(this);
           else {
             if (ackOutcome === "success") successfulAckResponses += 1;
-            this.receive({ type: ackOutcome === "success" ? "TerminalDeliveryAcknowledged" : "TerminalDeliveryRejected" });
+            this.receive({
+              type: ackOutcome === "success" ? "TerminalDeliveryAcknowledged" : "TerminalDeliveryRejected",
+              data: { delivery_id: delivery.deliveryId },
+            });
           }
           break;
         case "Reconnect":
@@ -215,7 +218,9 @@ describe("ordinary WebSocket terminal routing across real persistence and remoun
     };
     saveWsSession(replacement);
     expect(pendingAcks).toHaveLength(1);
-    await act(async () => { pendingAcks[0].receive({ type: "TerminalDeliveryAcknowledged" }); });
+    await act(async () => {
+      pendingAcks[0].receive({ type: "TerminalDeliveryAcknowledged", data: { delivery_id: delivery.deliveryId } });
+    });
     expect(loadWsSession()).toEqual(replacement);
   });
 
@@ -250,7 +255,9 @@ describe("ordinary WebSocket terminal routing across real persistence and remoun
     saveWsSession({ ...retained, timestamp: Date.now() - WS_SESSION_TTL_MS - 1 });
     expect(loadWsSession()).toMatchObject({ serverUrl: session.serverUrl, fullKey: session.fullKey, terminalOnly: true });
     expect(pendingAcks).toHaveLength(1);
-    await act(async () => { pendingAcks[0].receive({ type: "TerminalDeliveryAcknowledged" }); });
+    await act(async () => {
+      pendingAcks[0].receive({ type: "TerminalDeliveryAcknowledged", data: { delivery_id: delivery.deliveryId } });
+    });
     await waitFor(() => expect(loadWsSession()).toBeNull());
     expect(await loadFullTerminalDelivery(delivery.key)).toEqual(delivery);
   });
@@ -315,5 +322,57 @@ describe("ordinary WebSocket terminal routing across real persistence and remoun
     });
     expect.soft(controller.mock.calls.length).toBe(controllerCount);
     expect(await loadFullTerminalDelivery(delivery.key)).toEqual(delivery);
+  });
+
+  describe("terminal response identity binding", () => {
+    it("leaves the route and storage intact when the bootstrap key is foreign", async () => {
+      saveWsSession(session);
+      bootstrap = { ...delivery, key: { game_code: "FOREIGN", generation: 1 } };
+      mountProvider();
+
+      await waitFor(() => {
+        expect(requests.some(({ message }) => message.type === "BootstrapTerminalDelivery")).toBe(true);
+      });
+      // Mismatched bootstrap delivery is not committed.
+      expect(await loadFullTerminalDelivery(bootstrap.key)).toBeNull();
+      expect(await loadFullTerminalDelivery(delivery.key)).toBeNull();
+      // Route is left intact and not cleared.
+      expect(loadWsSession()).toMatchObject({ serverUrl: session.serverUrl, fullKey: session.fullKey });
+    });
+
+    it("leaves the retained delivery and route intact when a credential read mismatches", async () => {
+      await commitFullTerminalDelivery(delivery);
+      saveWsSession({ ...session, terminalOnly: true });
+      // Server returns delivery for another deliveryId / credential on the read request.
+      const mismatchedDelivery = { ...delivery, deliveryId: "foreign-id", credential: "foreign-cred" };
+      delivery = mismatchedDelivery;
+      mountProvider();
+
+      await waitFor(() => {
+        expect(requests.some(({ message }) => message.type === "ReadTerminalResult")).toBe(true);
+      });
+      // The original delivery is preserved and not replaced with the mismatched one.
+      const stored = await loadFullTerminalDelivery(session.fullKey);
+      expect(stored?.deliveryId).toBe("recipient-delivery");
+      expect(loadWsSession()).toMatchObject({ serverUrl: session.serverUrl, fullKey: session.fullKey });
+    });
+
+    it("leaves the recovery route intact when the server ACKs a different delivery ID", async () => {
+      ackOutcome = "pending";
+      saveWsSession({ ...session, terminalOnly: true });
+      await commitFullTerminalDelivery(delivery);
+      mountProvider();
+
+      await waitFor(() => expect(pendingAcks).toHaveLength(1));
+      await act(async () => {
+        pendingAcks[0].receive({
+          type: "TerminalDeliveryAcknowledged",
+          data: { delivery_id: "other-delivery-id" },
+        });
+      });
+
+      // Mismatched ACK does not release the route.
+      expect(loadWsSession()).toMatchObject({ serverUrl: session.serverUrl, fullKey: session.fullKey });
+    });
   });
 });

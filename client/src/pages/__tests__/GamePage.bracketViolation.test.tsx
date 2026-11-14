@@ -1918,6 +1918,65 @@ describe("GamePage — rematch preserves the format the game was played with", (
     expect(screen.getByText("Connection lost")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Return to Menu" })).toBeInTheDocument();
   });
+
+  it("shows actual final life totals on reopen when terminal delivery carries an authoritative final view", async () => {
+    mockSetGameState.mockImplementation((update: Record<string, unknown>) => {
+      Object.assign(storeOverrides, update);
+    });
+    storeOverrides.gameState = null;
+    storeOverrides.waitingFor = null;
+    renderGamePage("/game/reopened-authoritative?mode=ai");
+
+    act(() => {
+      capturedOnWsEvent?.({
+        type: "terminalDelivery",
+        delivery: {
+          key: { game_code: "AUTH01", generation: 1 },
+          terminalRevision: 1,
+          deliveryId: "del-auth",
+          credential: "cred-auth",
+          display: { winner: 0, reason: "Victory" },
+          finalView: gameStateFactory.withPlayers(
+            { id: 0, life: 12 },
+            { id: 1, life: 0 },
+          ).build({
+            waiting_for: { type: "GameOver", data: { winner: 0 } },
+          }),
+        },
+      });
+    });
+
+    expect(await screen.findByText("Victory")).toBeInTheDocument();
+    expect(screen.getByText("12")).toBeInTheDocument();
+    expect(screen.getByText("0")).toBeInTheDocument();
+  });
+
+  it("omits the life summary on summary-only terminal reopen when no final view is available", async () => {
+    mockSetGameState.mockImplementation((update: Record<string, unknown>) => {
+      Object.assign(storeOverrides, update);
+    });
+    storeOverrides.gameState = null;
+    storeOverrides.waitingFor = null;
+    renderGamePage("/game/reopened-summary-only?mode=ai");
+
+    act(() => {
+      capturedOnWsEvent?.({
+        type: "terminalDelivery",
+        delivery: {
+          key: { game_code: "SUMM01", generation: 1 },
+          terminalRevision: 1,
+          deliveryId: "del-summ",
+          credential: "cred-summ",
+          display: { winner: 0, reason: "Commander victory" },
+          finalView: undefined,
+        },
+      });
+    });
+
+    expect(await screen.findByText("Commander victory")).toBeInTheDocument();
+    expect(screen.queryByText(/You:/)).toBeNull();
+    expect(screen.queryByText(/Opponent:/)).toBeNull();
+  });
 });
 
 describe("GamePage — join origin", () => {

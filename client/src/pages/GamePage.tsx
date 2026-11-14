@@ -540,6 +540,7 @@ export function GamePage() {
         setTerminalReason(event.delivery.display.reason);
         useGameStore.setState({
           waitingFor: { type: "GameOver", data: { winner: event.delivery.display.winner } },
+          ...(event.delivery.finalView ? { gameState: event.delivery.finalView } : {}),
         });
         break;
       case "terminalUnavailable":
@@ -3120,10 +3121,10 @@ function GameOverScreen({
 
   const activePlayerId = useMultiplayerStore((s) => s.activePlayerId) ?? 0;
 
-  const playerLife = formatLifeReadout(lifeReadout(gameState, activePlayerId));
+  const playerLife = gameState ? formatLifeReadout(lifeReadout(gameState, activePlayerId)) : null;
   const opponentId = players?.find((p) => p.id !== activePlayerId)?.id;
   const opponentLife =
-    opponentId === undefined ? "0" : formatLifeReadout(lifeReadout(gameState, opponentId));
+    gameState && opponentId !== undefined ? formatLifeReadout(lifeReadout(gameState, opponentId)) : null;
 
   const isVictory = winner === activePlayerId;
   const isDraw = winner == null;
@@ -3259,18 +3260,20 @@ function GameOverScreen({
             transition={{ duration: 0.4 }}
           >
             {terminalReason && <p className="mb-2 text-sm text-slate-300">{terminalReason}</p>}
-            <p className="text-base text-gray-200 sm:text-lg">
-              <Trans
-                i18nKey="gamePage.gameOver.lifeSummary"
-                t={t}
-                values={{ playerLife, opponentLife }}
-                components={{
-                  player: <span className="font-bold text-white" />,
-                  sep: <span className="mx-3 text-gray-500" />,
-                  opponent: <span className="font-bold text-white" />,
-                }}
-              />
-            </p>
+            {gameState && playerLife !== null && opponentLife !== null && (
+              <p className="text-base text-gray-200 sm:text-lg">
+                <Trans
+                  i18nKey="gamePage.gameOver.lifeSummary"
+                  t={t}
+                  values={{ playerLife, opponentLife }}
+                  components={{
+                    player: <span className="font-bold text-white" />,
+                    sep: <span className="mx-3 text-gray-500" />,
+                    opponent: <span className="font-bold text-white" />,
+                  }}
+                />
+              </p>
+            )}
             {(turnCount > 0 || gameDuration !== null) && (
               <p className="mt-2 text-xs text-gray-400 sm:text-sm">
                 {turnCount > 0 && <span>{t("gamePage.gameOver.turns", { count: turnCount })}</span>}

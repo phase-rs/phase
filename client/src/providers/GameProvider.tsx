@@ -2164,9 +2164,11 @@ export function GameProvider({
           // The identity this game's pointer holds. The adapter decides when
           // the session becomes terminal-only and when it ends; the pointer is
           // the durable copy of that decision, so a result whose ACK never
-          // completed is recovered on the next open.
+          // completed is recovered on the next open. This listener is owned by
+          // the adapter's persistent session lifecycle and survives unmount
+          // while terminal cleanup is pending.
           let pointerSession: NativeSoloSessionIdentity | null = nativeResume ?? null;
-          const handleNativeEvent = (event: WsAdapterEvent) => {
+          nativeAdapter.onEvent((event: WsAdapterEvent) => {
             if (event.type === "sessionChanged") {
               if (event.session) {
                 pointerSession = event.session;
@@ -2176,6 +2178,9 @@ export function GameProvider({
                 pointerSession = null;
               }
             }
+          });
+
+          const handleNativeEvent = (event: WsAdapterEvent) => {
             if (event.type === "stateDelivery") {
               useMultiplayerStore.getState().setStateWithheld(event.withheld);
             }
@@ -2200,6 +2205,7 @@ export function GameProvider({
             if (event.type === "terminalDelivery") {
               useGameStore.setState({
                 waitingFor: { type: "GameOver", data: { winner: event.delivery.display.winner } },
+                ...(event.delivery.finalView ? { gameState: event.delivery.finalView } : {}),
               });
               controller?.dispose();
               controller = null;

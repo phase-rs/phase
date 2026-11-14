@@ -13,7 +13,11 @@ import {
   type ActiveGameMeta,
   type NativeSoloSession,
 } from "../../services/gamePersistence";
-import { loadFullTerminalDelivery, type FullTerminalDelivery } from "../../services/fullTerminalResult";
+import {
+  commitFullTerminalDelivery,
+  loadFullTerminalDelivery,
+  type FullTerminalDelivery,
+} from "../../services/fullTerminalResult";
 
 // Real Provider, ordinary WebSocketAdapter over the native-engine factory,
 // real terminal helpers, localStorage pointer and IndexedDB result ledger. The
@@ -223,7 +227,7 @@ describe("native solo terminal recovery across real persistence and reopen", () 
     });
     await waitFor(() => expect(pointer()).toBeNull());
     expect(reopened.after()).toEqual(["ReadTerminalResult", "AckTerminalDelivery"]);
-    expect(requests.at(-1)).toEqual({
+    expect(requests[requests.length - 1]).toEqual({
       type: "AckTerminalDelivery",
       data: { delivery_id: delivery.deliveryId, credential: delivery.credential },
     });
@@ -237,19 +241,79 @@ describe("native solo terminal recovery across real persistence and reopen", () 
       id: GAME_ID, mode: "ai", difficulty: "Medium",
       nativeSession: { gameCode: "NEXT", playerId: 0, playerToken: "next-token", fullKey: { game_code: "NEXT", generation: 1 } },
     }],
-  ] as const)("a successful ACK on the live game clears %s only if it is this game's", async (_case, replacement) => {
+  ] as const)("preserves %s written while display cleanup is pending and clears matching pointer after navigation", async (_case, replacement) => {
     ackOutcome = "pending";
-    const { live, events, displayCleared } = await resumeLiveGame();
+    const { live, events, unmount, displayCleared } = await resumeLiveGame();
     await act(async () => { live.receive({ type: "TerminalResult", data: { delivery } }); });
     await waitFor(() => expect(events).toHaveBeenCalledWith({ type: "terminalDelivery", delivery }));
     await waitFor(() => expect(pendingAcks).toHaveLength(1));
-    await displayCleared();
-    expect(pointer()?.nativeSession).toEqual({ ...session, terminalOnly: true });
+
+    // Install replacement while display cleanup is pending.
     if (replacement) saveActiveGame(replacement);
+    await displayCleared();
+    // Replacement is preserved while display cleanup resolves.
+    if (replacement) {
+      expect(pointer()).toEqual(replacement);
+    } else {
+      expect(pointer()?.nativeSession).toEqual({ ...session, terminalOnly: true });
+    }
+
+    // Unmount before ACK lands to simulate navigation away from the game page.
+    unmount();
 
     await act(async () => {
       pendingAcks[0]!.receive({ type: "TerminalDeliveryAcknowledged", data: { delivery_id: delivery.deliveryId } });
     });
+    // Matching pointer is cleared after navigation; replacement pointer is kept.
     await waitFor(() => expect(pointer()).toEqual(replacement));
+  });
+
+  describe("terminal response identity binding", () => {
+    it("leaves the route and storage intact when the bootstrap key is foreign", async () => {
+      bootstrap = { ...delivery, key: { game_code: "FOREIGN", generation: 1 } };
+      const reopened = await reopen();
+
+      await waitFor(() => {
+        expect(requests.some(({ type }) => type === "BootstrapTerminalDelivery")).toBe(true);
+      });
+      expect(reopened.events).not.toHaveBeenCalledWith(expect.objectContaining({ type: "terminalDelivery" }));
+      expect(await loadFullTerminalDelivery(bootstrap.key)).toBeNull();
+      expect(await loadFullTerminalDelivery(delivery.key)).toBeNull();
+      expect(pointer()).toEqual({ id: GAME_ID, mode: "ai", difficulty: "Medium", nativeSession: session });
+    });
+
+    it("leaves the retained delivery and pointer intact when a credential read mismatches", async () => {
+      await commitFullTerminalDelivery(delivery);
+      saveActiveGame({ id: GAME_ID, mode: "ai", difficulty: "Medium", nativeSession: { ...session, terminalOnly: true } });
+
+      const mismatchedDelivery = { ...delivery, deliveryId: "foreign-id", credential: "foreign-cred" };
+      delivery = mismatchedDelivery;
+      await reopen();
+
+      await waitFor(() => {
+        expect(requests.some(({ type }) => type === "ReadTerminalResult")).toBe(true);
+      });
+      const stored = await loadFullTerminalDelivery(session.fullKey);
+      expect(stored?.deliveryId).toBe("native-delivery");
+      expect(pointer()?.nativeSession).toMatchObject({ gameCode: session.gameCode, terminalOnly: true });
+    });
+
+    it("leaves the recovery pointer intact when the server ACKs a different delivery ID", async () => {
+      ackOutcome = "pending";
+      await commitFullTerminalDelivery(delivery);
+      saveActiveGame({ id: GAME_ID, mode: "ai", difficulty: "Medium", nativeSession: { ...session, terminalOnly: true } });
+
+      await reopen();
+      await waitFor(() => expect(pendingAcks).toHaveLength(1));
+
+      await act(async () => {
+        pendingAcks[0]!.receive({
+          type: "TerminalDeliveryAcknowledged",
+          data: { delivery_id: "other-delivery-id" },
+        });
+      });
+
+      expect(pointer()?.nativeSession).toMatchObject({ gameCode: session.gameCode, terminalOnly: true });
+    });
   });
 });

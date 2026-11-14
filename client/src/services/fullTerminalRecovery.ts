@@ -76,7 +76,7 @@ export async function recoverFullTerminal(
       delivery.credential,
       route.socketFactory,
     ).then((acknowledged) => {
-      if (acknowledged && !owner.isCancelled()) owner.releaseTerminalRoute();
+      if (acknowledged) owner.releaseTerminalRoute();
     }).catch(() => {});
   };
 
@@ -97,16 +97,19 @@ export async function recoverFullTerminal(
     try {
       const refreshed = await readFullTerminalResult(route.serverUrl, retained.credential, route.socketFactory);
       if (owner.isCancelled()) return "settled";
-      const retainsLocalFinalView = refreshed !== null
-        && refreshed.key.game_code === retained.key.game_code
-        && refreshed.key.generation === retained.key.generation
+      const matchesRetained = refreshed !== null
+        && refreshed.key.game_code === route.fullKey.game_code
+        && refreshed.key.generation === route.fullKey.generation
         && refreshed.deliveryId === retained.deliveryId
-        && refreshed.credential === retained.credential
-        && refreshed.finalView === undefined
-        && retained.finalView !== undefined;
-      const effectiveRefresh = retainsLocalFinalView
-        ? { ...refreshed, finalView: retained.finalView }
-        : refreshed;
+        && refreshed.credential === retained.credential;
+      if (refreshed !== null && !matchesRetained) {
+        throw new Error("Mismatched terminal delivery read");
+      }
+      const effectiveRefresh = matchesRetained
+        ? ((refreshed.finalView === undefined && retained.finalView !== undefined)
+            ? { ...refreshed, finalView: retained.finalView }
+            : refreshed)
+        : null;
       if (effectiveRefresh && !(await replaceFullTerminalDelivery(effectiveRefresh))) {
         throw new Error("Failed to retain terminal delivery");
       }
@@ -134,6 +137,13 @@ export async function recoverFullTerminal(
   }
   if (owner.isCancelled()) return "settled";
   if (!bootstrap) return "reconnect";
+  if (
+    bootstrap.key.game_code !== route.fullKey.game_code
+    || bootstrap.key.generation !== route.fullKey.generation
+  ) {
+    fail(new Error("Mismatched terminal delivery key"), "Terminal result is unavailable");
+    return "settled";
+  }
   if (!(await commitFullTerminalDelivery(bootstrap))) {
     fail(null, "Failed to retain terminal delivery");
     return "settled";

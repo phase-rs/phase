@@ -432,6 +432,7 @@ export async function loadGameStrict(gameId: string): Promise<PersistedGameState
 }
 
 export async function clearGame(gameId: string): Promise<void> {
+  const activeBefore = loadActiveGame();
   try {
     await withGameWriteLock(gameId, async () => {
       await del(GAME_KEY_PREFIX + gameId, getGameStore());
@@ -442,20 +443,25 @@ export async function clearGame(gameId: string): Promise<void> {
       await del(P2P_HOST_KEY_PREFIX + gameId, getGameStore());
     });
   } catch { /* best effort */ }
-  if (loadActiveGame()?.id !== gameId) return;
+  const activeCurrent = loadActiveGame();
+  if (activeCurrent?.id !== gameId) return;
+  if (activeBefore && JSON.stringify(activeCurrent) !== JSON.stringify(activeBefore)) return;
   if (await hasTerminalCleanup(gameId).catch(() => true)) return;
   clearReleasedActiveGame(gameId);
 }
 
 /** Remove every game-scoped record before reusing a game ID for a fresh start. */
 export async function clearGameStrict(gameId: string): Promise<void> {
+  const activeBefore = loadActiveGame();
   await withGameWriteLock(gameId, async () => {
     const store = getGameStore();
     await del(GAME_CHECKPOINTS_PREFIX + gameId, store);
     await del(P2P_HOST_KEY_PREFIX + gameId, store);
     await del(GAME_KEY_PREFIX + gameId, store);
   });
-  if (loadActiveGame()?.id !== gameId) return;
+  const activeCurrent = loadActiveGame();
+  if (activeCurrent?.id !== gameId) return;
+  if (activeBefore && JSON.stringify(activeCurrent) !== JSON.stringify(activeBefore)) return;
   if (await hasTerminalCleanup(gameId)) return;
   clearReleasedActiveGame(gameId);
 }
@@ -596,12 +602,12 @@ export function clearActiveGame(): void {
 /**
  * Game cleanup's pointer release. The pointer is read here, after the caller's
  * awaits, so one saved meanwhile for another game survives. A native pointer
- * still recovering its terminal result is owned by that recovery and is
- * released only by `clearNativeSoloSession` once the server acknowledges.
+ * is owned solely by native terminal persistence and is released only by
+ * `clearNativeSoloSession` once the server acknowledges.
  */
 function clearReleasedActiveGame(gameId: string): void {
   const active = loadActiveGame();
-  if (active?.id === gameId && active.nativeSession?.terminalOnly !== true) clearActiveGame();
+  if (active?.id === gameId && active.nativeSession === undefined) clearActiveGame();
 }
 
 function holdsNativeSoloSession(
