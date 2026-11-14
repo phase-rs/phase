@@ -40560,6 +40560,9 @@ impl GameState {
             pending_replacement: _,
             pending_combat_lifelink: _,
             replacement_may_cost_paused: _,
+            // CR 608.2c: a logical zone-change group id and a stack depth, no
+            // object or incarnation id, so it is out of this class.
+            staged_population_parent: _,
             post_replacement_token_choice_applied: _,
             pending_token_battlefield_entry: _,
             layers_dirty: _,
