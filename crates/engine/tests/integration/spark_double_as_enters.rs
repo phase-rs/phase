@@ -2959,18 +2959,17 @@ mod feldon_tokens {
 
     /// The same batch delivered in two segments, each Servant's counter stopping on the order of
     /// Hardened Scales and Doubling Season. Both orders must be reached and answered, and Ever
-    /// After must still end as the bottom card of its owner's library. BASELINE LIMITATION, not
-    /// correct batching: the logical zone-change owner collects each completed slice
-    /// (`zone_pipeline.rs` hands it to `append_and_collect_logical_zone_trigger_segment`), so
-    /// Satoru triggers once per segment and draws two cards for the one event (CR 603.2c asks
-    /// for one). The same setup and answers draw two on main, outside this change.
+    /// After must still end as the bottom card of its owner's library. This sequence draws
+    /// two cards on main and here, outside this change. The segment collector skips batched
+    /// observers such as Satoru; this test pins the observed count, without attributing the
+    /// second draw to a particular collector. CR 603.2c calls for one firing.
     #[test]
     fn a_counter_order_answer_inside_a_card_batch_keeps_the_card_batch_owners_collection() {
         let (draws, orders) = ever_after_satoru_draws(true);
         assert_eq!(orders, 2, "one counter order per Servant, both answered");
         assert_eq!(
             draws, 2,
-            "baseline limitation: the card-batch owner draws once per delivered segment"
+            "baseline limitation: the paused sequence draws two cards"
         );
     }
 
