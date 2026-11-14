@@ -14654,6 +14654,7 @@ this spell's mana cost.\nDestroy target attacking creature without flying.",
                 selection: crate::types::ability::CardSelectionMode::Chosen,
                 choice_optional: false,
                 reveal: true,
+                cardinality: crate::types::ability::ObjectSelectionCardinality::SINGLE,
             },
         );
         reveal.player_scope = Some(reveal_scope);

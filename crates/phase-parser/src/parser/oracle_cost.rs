@@ -1417,6 +1417,7 @@ fn parse_single_cost_in(text: &str, channel: CostChannel) -> AbilityCost {
                 selection: crate::types::ability::CardSelectionMode::Chosen,
                 choice_optional: false,
                 reveal: true,
+                cardinality: crate::types::ability::ObjectSelectionCardinality::SINGLE,
             }),
         };
     }

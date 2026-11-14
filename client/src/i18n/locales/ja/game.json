@@ -1584,7 +1584,9 @@
       "titleReveal": "手札から公開",
       "titleOpponentHand": "対戦相手の手札",
       "subtitleReveal": "公開するカードを選択するか、断る",
-      "subtitleChoose": "カードを選択"
+      "subtitleChoose": "カードを選択",
+      "subtitleRevealAnyNumber": "公開するカードを好きな枚数選択",
+      "subtitleChooseCount": "{{count}}枚のカードを選択"
     },
     "search": {
       "title": "ライブラリーを検索",

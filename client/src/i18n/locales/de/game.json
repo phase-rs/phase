@@ -1546,7 +1546,9 @@
       "titleReveal": "Von der Hand aufdecken",
       "titleOpponentHand": "Hand des Gegners",
       "subtitleReveal": "Wähle eine Karte zum Aufdecken oder lehne ab",
-      "subtitleChoose": "Wähle eine Karte"
+      "subtitleChoose": "Wähle eine Karte",
+      "subtitleRevealAnyNumber": "Wähle beliebig viele Karten zum Aufdecken",
+      "subtitleChooseCount": "Wähle {{count}} Karten"
     },
     "search": {
       "title": "Bibliothek durchsuchen",

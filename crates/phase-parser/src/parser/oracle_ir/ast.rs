@@ -1777,7 +1777,16 @@ pub(crate) enum HandRevealImperativeAst {
     RevealAll {
         target: TargetFilter,
         card_filter: TargetFilter,
+        /// CR 608.2d + CR 107.1c: how many `card_filter` cards are selected
+        /// (`AnyNumber` for "reveal any number of [type] cards").
+        cardinality: crate::types::ability::ObjectSelectionCardinality,
     },
+    /// CR 107.1c + CR 701.20a: "reveal any number of [type] cards" whose card
+    /// type phrase the parser cannot read (Sacellum Godspeaker's "creature cards
+    /// with power 5 or greater", Rosheen's "cards with {X} in their mana cost").
+    /// Without a filter the selection could reveal nothing, so it lowers to an
+    /// explicit unimplemented gap rather than a silently empty reveal.
+    UnreadableAnyNumberFilter { fragment: String },
     /// CR 701.20a: a counted reveal from a hand — "reveals X cards from their
     /// hand, where X is …", "reveals a card at random from their hand". `target`
     /// is the hand's owner; `selection` is `Random` exactly when the text says

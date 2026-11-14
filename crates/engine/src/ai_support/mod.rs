@@ -823,6 +823,7 @@ fn cheap_reject_candidate(state: &GameState, action: &GameAction) -> bool {
                 player: _,
                 cards,
                 optional,
+                cardinality,
                 ..
             },
             GameAction::SelectCards { cards: chosen },
@@ -831,7 +832,15 @@ fn cheap_reject_candidate(state: &GameState, action: &GameAction) -> bool {
             if *optional && chosen.is_empty() {
                 false
             } else {
-                selection_mismatch(chosen, cards, Some(1))
+                // CR 608.2d: the published cardinality bounds the selection —
+                // exactly `count` cards, or (CR 107.1c) any subset for "any number".
+                let exact_count = match cardinality {
+                    crate::types::ability::ObjectSelectionCardinality::Exactly { count } => {
+                        Some(*count as usize)
+                    }
+                    crate::types::ability::ObjectSelectionCardinality::AnyNumber => None,
+                };
+                selection_mismatch(chosen, cards, exact_count)
             }
         }
         (

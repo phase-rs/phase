@@ -4898,14 +4898,34 @@ pub(crate) fn deterministic_choice(
         return Some(GameAction::SelectCards { cards: top_cards });
     }
 
-    if let WaitingFor::RevealChoice { cards, .. } = &state.waiting_for {
-        let mut scored: Vec<_> = cards
-            .iter()
-            .map(|&id| (id, intrinsic_value(state, id)))
+    // CR 608.2d: rank the selections the engine issued for the prompt's
+    // cardinality rather than restating it — a locally built pick outside that
+    // domain is discarded by the final contract gate. The largest issued
+    // selection wins (a post-reveal pick over declining; every card for a
+    // CR 107.1c "any number" reveal such as Metalworker, whose mana scales with
+    // the cards revealed), then the highest-value cards. Stable sorting keeps
+    // the enumerator's `cmp_stable` order on ties.
+    if matches!(state.waiting_for, WaitingFor::RevealChoice { .. }) {
+        let mut scored: Vec<_> = issued_selections(actions)
+            .map(|selection| {
+                let value = selection
+                    .iter()
+                    .map(|id| intrinsic_value(state, *id))
+                    .sum::<f64>();
+                (selection, value)
+            })
             .collect();
-        scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-        if let Some((best, _)) = scored.first() {
-            return Some(GameAction::SelectCards { cards: vec![*best] });
+        scored.sort_by(|(left_cards, left_value), (right_cards, right_value)| {
+            right_cards.len().cmp(&left_cards.len()).then_with(|| {
+                right_value
+                    .partial_cmp(left_value)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+        });
+        if let Some((chosen, _)) = scored.first() {
+            return Some(GameAction::SelectCards {
+                cards: chosen.to_vec(),
+            });
         }
     }
 
@@ -6655,6 +6675,100 @@ mod tests {
             runner.state().waiting_for
         );
         runner
+    }
+
+    /// CR 605.3b + CR 107.1c + CR 701.20a: Metalworker (verified Oracle text,
+    /// Scryfall: "{T}: Reveal any number of artifact cards in your hand. Add
+    /// {C}{C} for each card revealed this way.") with two artifacts in hand. The
+    /// AI must answer the any-number reveal prompt with an engine-issued
+    /// multi-card selection — a locally built singleton outside the issued
+    /// domain is discarded by the contract gate and leaves the AI with no
+    /// action — and that answer must complete the activation through the
+    /// public action path.
+    #[test]
+    fn ai_answers_the_two_artifact_metalworker_reveal_with_a_legal_multi_card_action() {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let metalworker = scenario
+            .add_creature_from_oracle(
+                P0,
+                "Metalworker",
+                1,
+                2,
+                "{T}: Reveal any number of artifact cards in your hand. Add {C}{C} for each card revealed this way.",
+            )
+            .as_artifact()
+            .id();
+        let artifacts: Vec<ObjectId> = ["Ornithopter", "Memnite"]
+            .into_iter()
+            .map(|name| {
+                scenario
+                    .add_creature_to_hand(P0, name, 1, 1)
+                    .as_artifact()
+                    .id()
+            })
+            .collect();
+        let mut runner = scenario.build();
+        runner
+            .act(GameAction::ActivateAbility {
+                source_id: metalworker,
+                ability_index: 0,
+                payment_mode: engine::types::game_state::CastPaymentMode::Auto,
+            })
+            .expect("Metalworker activation is legal");
+        assert!(
+            matches!(
+                runner.state().waiting_for,
+                WaitingFor::RevealChoice {
+                    cardinality: engine::types::ability::ObjectSelectionCardinality::AnyNumber,
+                    ..
+                }
+            ),
+            "premise: the activation opens the any-number reveal, got {:?}",
+            runner.state().waiting_for
+        );
+
+        let config = create_config(AiDifficulty::VeryHard, Platform::Native);
+        let contract = AiDecisionContract::issue(runner.state(), P0);
+        let action = choose_action(
+            runner.state(),
+            P0,
+            &config,
+            &mut SmallRng::seed_from_u64(9497),
+        )
+        .expect("the AI must answer the reveal prompt");
+        let GameAction::SelectCards { cards } = &action else {
+            panic!("expected a SelectCards answer, got {action:?}");
+        };
+        let mut chosen = cards.clone();
+        chosen.sort();
+        let mut expected = artifacts.clone();
+        expected.sort();
+        assert_eq!(chosen, expected, "revealing both artifacts maximizes mana");
+        assert!(
+            contract
+                .candidates
+                .iter()
+                .any(|candidate| candidate.action == action),
+            "the answer must be inside the engine-issued domain"
+        );
+
+        runner.act(action).expect("the AI's answer is accepted");
+        let state = runner.state();
+        assert_eq!(
+            state.players[P0.0 as usize]
+                .mana_pool
+                .count_color(ManaType::Colorless),
+            4,
+            "{{C}}{{C}} for each of the two revealed artifacts"
+        );
+        assert!(
+            matches!(state.waiting_for, WaitingFor::Priority { player } if player == P0),
+            "the activation completes to P0's priority, got {:?}",
+            state.waiting_for
+        );
+        assert!(state.stack.is_empty());
+        assert!(state.objects[&metalworker].tapped, "the {{T}} cost is paid");
     }
 
     /// CR 508.1j: the rollout driver (`deterministic_choice`) and the deadlock-safe
@@ -18172,6 +18286,8 @@ mod tests {
             filter: TargetFilter::Any,
             optional: false,
             decline_runs_continuation: false,
+            cardinality: engine::types::ability::ObjectSelectionCardinality::SINGLE,
+            pending_mana_ability: None,
         });
         push("SearchChoice", &|state| WaitingFor::SearchChoice {
             player: PlayerId(0),
