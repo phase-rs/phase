@@ -5749,8 +5749,8 @@ fn collect_pending_triggers_with_collection(
                 }
             }
 
-            // CR 702.21a: Ward triggers when this permanent becomes the target
-            // of a spell or ability an opponent controls. Each ward instance
+            // CR 702.21a + CR 102.3: Ward triggers when this permanent becomes the
+            // target of a spell or ability an opponent (not a teammate) controls. Each ward instance
             // triggers independently. Only fires for permanents (battlefield scan).
             if !ward_costs.is_empty() {
                 if let GameEvent::BecomesTarget {
@@ -5782,7 +5782,9 @@ fn collect_pending_triggers_with_collection(
                             &active_suppress_triggers,
                         );
                         if let Some(src_ctrl) = source_controller {
-                            if src_ctrl != controller && !ward_suppressed {
+                            if super::players::is_opponent(state, controller, src_ctrl)
+                                && !ward_suppressed
+                            {
                                 for ward in &ward_costs {
                                     // CR 702.21a + CR 118.12: Ward generates a counter
                                     // effect with an unless-pay modifier. Post-fold, the
@@ -9858,7 +9860,8 @@ pub(crate) fn seed_event_context_parent_targets(
         return;
     };
     if timing == EventContextSeedTiming::StackPush {
-        // CR 400.7 + CR 608.2k: capture non-targeted operands before responses.
+        // CR 400.7 + CR 608.2k: non-targeted event operands need their original
+        // identities before opponents can respond, not a resolution-time lookup.
         super::effects::phase_out::seed_event_context_pins(state, ability, event);
     }
     if !effect_uses_parent_target(&ability.effect) || parent_target_seeding_blocked(ability) {
@@ -52629,6 +52632,7 @@ pub mod tests {
             conditional_enter_with_counters: vec![],
             count_param: 0,
             library_position: None,
+            library_shuffle: crate::types::ability::LibraryShuffleMode::PerObject,
             mass_library_order: None,
             is_cost_payment: false,
             enters_modified_if: None,

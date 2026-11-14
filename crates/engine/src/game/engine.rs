@@ -25474,6 +25474,415 @@ mod stage2_injector_tests {
         assert!(published.may.is_some(), "the matched positive mints `may`");
     }
 
+    /// The CR 603.5 prompt sites in ONE source text: `(producers, readers, in_test)`.
+    ///
+    /// A producer's key is `file::fn {fields}` — its enclosing column-0 `fn` plus the
+    /// whitespace-stripped field text of the construction minted there, so a REPLACEMENT
+    /// inside an already-pinned function moves the key. A reader keys as `file::fn`. An
+    /// in-test site keys as its FILE, because the fixture that parks a prompt may live in an
+    /// indented `#[cfg(test)] mod` body where the column-0 tracker names no function of its
+    /// own — the file is the coordinate that does not churn.
+    fn cr_603_5_sites(rel: &str, text: &str) -> (Vec<String>, Vec<String>, Vec<String>) {
+        use crate::source_census::code as code_of;
+
+        /// The `#[cfg(test)]`-attributed column-0 `mod … {` … column-0 `}` spans.
+        fn cfg_test_spans(lines: &[&str]) -> Vec<(usize, usize)> {
+            let mut spans = Vec::new();
+            let mut i = 0;
+            while i < lines.len() {
+                if lines[i].trim() == "#[cfg(test)]" {
+                    let mut j = i + 1;
+                    while j < lines.len()
+                        && (lines[j].trim_start().starts_with("#[") || lines[j].trim().is_empty())
+                    {
+                        j += 1;
+                    }
+                    let is_mod = j < lines.len()
+                        && lines[j].starts_with(['m', 'p'])
+                        && lines[j].contains("mod ")
+                        && lines[j].trim_end().ends_with('{');
+                    if is_mod {
+                        let mut k = j + 1;
+                        while k < lines.len() && lines[k] != "}" {
+                            k += 1;
+                        }
+                        spans.push((j, k));
+                        i = k;
+                    }
+                }
+                i += 1;
+            }
+            spans
+        }
+
+        /// The construction's field text, brace-matched over the CODE half from `after` —
+        /// just past its opening `{` on line `n` — to the matching `}`, with ALL whitespace
+        /// removed so re-indenting or re-breaking a field expression cannot move it.
+        /// Unbalanced input runs to EOF and yields a key nothing matches: red, never a
+        /// silent pass.
+        fn fields(lines: &[&str], n: usize, after: usize) -> String {
+            let mut body = String::new();
+            let mut depth = 1usize;
+            let mut rest = &code_of(lines[n])[after..];
+            let mut i = n;
+            loop {
+                for ch in rest.chars() {
+                    match ch {
+                        '{' => depth += 1,
+                        '}' => {
+                            depth -= 1;
+                            if depth == 0 {
+                                return body;
+                            }
+                        }
+                        _ => {}
+                    }
+                    if !ch.is_whitespace() {
+                        body.push(ch);
+                    }
+                }
+                i += 1;
+                let Some(line) = lines.get(i) else {
+                    return body;
+                };
+                rest = code_of(line);
+            }
+        }
+
+        let lines: Vec<&str> = text.lines().collect();
+        let spans = cfg_test_spans(&lines);
+        // A whole file whose stem ends `_tests` is test-only (its parent declares it under
+        // `#[cfg(test)]`).
+        let test_file = rel.trim_end_matches(".rs").ends_with("_tests");
+
+        // The needle is ASSEMBLED so this row's own source cannot be counted by its own
+        // instrument. `..` excludes multi-line READ destructures whose rest-pattern sits on
+        // a later line — the inflation the raw grep suffers from.
+        let needle = format!("WaitingFor::{}Choice {{", "OptionalEffect");
+        let (mut producers, mut readers, mut in_test) = (Vec::new(), Vec::new(), Vec::new());
+        // Enclosing-function tracker for this file: `enclosing` names each site and
+        // `fn_start` bounds the qualifying look-back below, so no coordinate is minted.
+        // Column-0 `fn` headers only — a producer inside an `impl` method would take the
+        // preceding free function's name; all four producers today are free functions.
+        let (mut enclosing, mut fn_start) = (String::new(), 0usize);
+        for (n, line) in lines.iter().enumerate() {
+            let code = code_of(line);
+            if !line.starts_with([' ', '\t']) {
+                let tokens: Vec<&str> = code.split_whitespace().collect();
+                if let Some(at) = tokens.iter().position(|token| *token == "fn") {
+                    enclosing = tokens
+                        .get(at + 1)
+                        .and_then(|token| token.split(['(', '<']).next())
+                        .unwrap_or_default()
+                        .to_string();
+                    fn_start = n;
+                }
+            }
+            let Some(open) = code.find(&needle) else {
+                continue;
+            };
+            if code.contains("..") {
+                continue;
+            }
+            if test_file || spans.iter().any(|(a, b)| (*a..=*b).contains(&n)) {
+                in_test.push(rel.to_string());
+            } else if code.contains("waiting_for = ")
+                || code.contains("Ok(Some(")
+                // `install_direct_choice_frame` owns the actual `state.waiting_for`
+                // write, so its typed prompt argument is a mint, not a read. The
+                // window is the enclosing fn; `code_of` keeps prose out of it.
+                || lines[fn_start..n]
+                    .iter()
+                    .any(|prior| code_of(prior).contains(".install_direct_choice_frame("))
+            {
+                let body = fields(&lines, n, open + needle.len());
+                let trimmed = body.trim_end_matches(',');
+                producers.push(format!("{rel}::{enclosing} {{{trimmed}}}"));
+            } else {
+                readers.push(format!("{rel}::{enclosing}"));
+            }
+        }
+        (producers, readers, in_test)
+    }
+
+    /// **The PRODUCER census, so a new producer is a COUNTED event.** What bounds the mint
+    /// conjunct's reach is how many things PRODUCE `WaitingFor::OptionalEffectChoice`: the
+    /// conjunct is a fail-closed pre-filter on ONE of them, and `inject_pinned_answer` refuses
+    /// a template whose owner is not the seat the prompt names. Exactly one of the four sits
+    /// inside the CR 603.5 gate that consults the recipient authority (the repeated-payment
+    /// offer consults it too, but mints no may-trigger key), so if a fifth appears this row
+    /// fails and whoever added it must decide where its recipient is bound.
+    ///
+    /// A producer is identified by its ENCLOSING FUNCTION and the CONSTRUCTION it mints
+    /// (`file::fn {fields}`, whitespace stripped), and the qualifying
+    /// `.install_direct_choice_frame(` look-back is bounded by that same function. NO line
+    /// coordinate is asserted, so movement above a producer is not an event and a REPLACEMENT
+    /// inside a pinned function is. The pin is a sorted MULTISET, so a sixth mint in one of them
+    /// still fails here; comment text is never a site (`source_census::code`).
+    ///
+    /// **NOT THE SAME BOUNDARY AS THE CONJUNCT CENSUS.** The retained
+    /// `f2c_the_cr_603_5_conjunct_set_has_one_production_assembler` row below counts CONSUMERS
+    /// of the five gate predicates (`has_kind_driven_repeat`, `optional_prompt_player`, …) and
+    /// pins that they are assembled in one place. It cannot see who MINTS
+    /// `WaitingFor::OptionalEffectChoice`, which is what this row counts — so neither row
+    /// subsumes the other.
+    ///
+    /// **THE PARTITION DELTA IS ACCOUNTED, NOT ABSORBED.** This row was first pinned at
+    /// `4 / 11 / 44`; the in-test column is now 45. The single added site is
+    /// `game/effects/phase_out.rs`'s `restore_phase_state` suspension fixture, which parks a
+    /// typed optional prompt on two cloned states to keep a continuation legitimately
+    /// suspended. It is `#[cfg(test)]`-only: it mints no production producer and changes no
+    /// production key. The producer multiset below is byte-identical to the original pin, so
+    /// no producer moved; the assertion that the phase_out file contributes exactly one
+    /// in-test site is what makes that delta an explicit adjudication instead of a number
+    /// bump.
+    #[test]
+    fn the_cr_603_5_prompt_census_is_pinned_so_a_sixth_producer_is_a_counted_event() {
+        /// Every `.rs` under the crate's `src`.
+        fn rs_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+            for entry in std::fs::read_dir(dir).expect("readable source dir") {
+                let path = entry.expect("readable dir entry").path();
+                if path.is_dir() {
+                    rs_files(&path, out);
+                } else if path.extension().is_some_and(|e| e == "rs") {
+                    out.push(path);
+                }
+            }
+        }
+
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut files = Vec::new();
+        rs_files(&root, &mut files);
+        files.sort();
+        assert!(files.len() > 100, "reach-guard: the walker found the crate");
+
+        let (mut producers, mut readers, mut in_test) = (Vec::new(), Vec::new(), Vec::new());
+        for path in &files {
+            let text = std::fs::read_to_string(path).expect("readable source file");
+            let rel = path
+                .strip_prefix(&root)
+                .expect("under src")
+                .display()
+                .to_string()
+                // Canonicalize to forward slashes so the census pins below are
+                // platform-independent: `Path::display()` emits the OS-native
+                // separator (backslash on Windows), but the pins are written in
+                // the crate's forward-slash convention. No-op on Unix/CI.
+                .replace('\\', "/");
+            let (file_producers, file_readers, file_in_test) = cr_603_5_sites(&rel, &text);
+            producers.extend(file_producers);
+            readers.extend(file_readers);
+            in_test.extend(file_in_test);
+        }
+        producers.sort();
+
+        assert_eq!(
+            producers.len() + readers.len() + in_test.len(),
+            60,
+            "CR 603.5 prompt census drifted. A new PRODUCER must have its recipient bound \
+             somewhere — the mint's conjunct (a) covers exactly ONE of them. A new READER is \
+             the benign case (U4's own consumption arm was one).\n\
+             producers={producers:#?}\nreaders={readers:#?}"
+        );
+        assert_eq!(
+            (producers.len(), readers.len(), in_test.len()),
+            (4, 11, 45),
+            "the partition, not just the total: four PRODUCTION producers, eleven PRODUCTION \
+             readers (including the two new optional-subject projection reads), and 45 \
+             `#[cfg(test)]` sites, including the ChooseOneOf, retained optional/outer, \
+             retained repeat/choice restore fixtures, and the `phase_out` suspension fixture \
+             that parks a typed prompt on a clone (test-only: it mints no producer).\n\
+             producers={producers:#?}\nreaders={readers:#?}"
+        );
+        // The one delta against the first pin, named rather than counted away: the `phase_out`
+        // `restore_phase_state` fixture parks an `OptionalEffectChoice` on each of two cloned
+        // states. A SECOND in-test site in that file (or this one disappearing) is an event.
+        assert_eq!(
+            in_test
+                .iter()
+                .filter(|rel| rel.as_str() == "game/effects/phase_out.rs")
+                .count(),
+            1,
+            "the accounted in-test delta is exactly the `restore_phase_state` suspension \
+             fixture's parked prompt; a second parked prompt in that file (or its removal) \
+             changes the in-test column for a reason this row has not adjudicated"
+        );
+        assert_eq!(
+            producers,
+            vec![
+                "game/effects/mod.rs::offer_repeated_payment {player,decision_subject_id:None,source_id:payment_unit.source_id,description:payment_unit.description.clone(),may_trigger_key:None,same_card_may_trigger_choice_available:false}".to_string(),
+                "game/effects/mod.rs::resolve_chain_body {player:prompt_player,decision_subject_id,source_id:ability.source_id,description,may_trigger_key,same_card_may_trigger_choice_available}".to_string(),
+                "game/effects/scoped_library_search.rs::advance_acceptance {player,decision_subject_id:None,source_id,description,may_trigger_key:None,same_card_may_trigger_choice_available:false}".to_string(),
+                "game/engine.rs::begin_pending_trigger_target_selection {player,decision_subject_id:None,source_id,description:trigger_description,may_trigger_key,same_card_may_trigger_choice_available}".to_string(),
+            ],
+            "the four production producers, each keyed by its ENCLOSING FUNCTION and the \
+             CONSTRUCTION it mints, compared as a sorted MULTISET, so a fifth mint inside one \
+             of these functions still fails here. Two of the four choose `player` WITHOUT \
+             consulting the recipient authority, which is exactly why the mint conjunct is a \
+             fail-closed pre-filter and not a soundness proof. A CR 603.5 producer's \
+             construction changed — if that was intended, update this literal; if it was not, \
+             you changed who or how the optional choice is offered."
+        );
+
+        // Exactly ONE of them routes through the recipient authority: the CR 603.5 gate.
+        let effects_src = std::fs::read_to_string(root.join("game/effects/mod.rs"))
+            .expect("readable effects module");
+        let authority = format!("{}_prompt_player", "optional");
+        // Counted over the CODE HALF of each line, via `crate::source_census::code`: a prose
+        // mention of the authority is not a call. A real second call still trips this, because
+        // a call cannot live in comment text.
+        let authority_code_hits = effects_src
+            .lines()
+            .map(crate::source_census::code)
+            .filter(|l| l.contains(&authority))
+            .count();
+        assert_eq!(
+            authority_code_hits, 3,
+            "one definition + two calls — the CR 603.5 gate's `let prompt_player = ..` and the \
+             repeated-payment offer, which asks the named player per iteration. A third call \
+             inside `effects/mod.rs` means another producer started consulting the authority \
+             and this row's partition needs re-deriving"
+        );
+    }
+
+    /// The producer key's discrimination, on PLANTED input: the real tree cannot exhibit both
+    /// polarities at once, so a repo-scanning assertion for this property is vacuous BY
+    /// CONSTRUCTION. Each arm feeds `cr_603_5_sites` a synthetic source and states what the
+    /// key must and must not move with. The mint spelling is ASSEMBLED, so none of these
+    /// sources is itself a census site.
+    #[test]
+    fn a_producer_key_moves_with_the_construction_and_not_with_its_position() {
+        let mint = format!("WaitingFor::{}Choice {{", "OptionalEffect");
+        let rel = "game/planted.rs";
+        let keys = |lines: &[&str]| cr_603_5_sites(rel, &lines.join("\n")).0;
+        let base_key = format!(
+            "{rel}::mint_one {{player:prompt_player,source_id:ability.source_id,may_trigger_key}}"
+        );
+        let assign = format!("    state.waiting_for = {mint}");
+
+        // BASELINE — the paired positive for the bare negative below: the same scanner,
+        // through the same helpers, returns exactly one key for one construction.
+        let baseline = keys(&[
+            "fn mint_one() {",
+            assign.as_str(),
+            "        player: prompt_player,",
+            "        source_id: ability.source_id,",
+            "        may_trigger_key,",
+            "    };",
+            "}",
+        ]);
+        assert_eq!(
+            baseline,
+            vec![base_key.clone()],
+            "one construction in one function keys as `file::fn {{fields}}`"
+        );
+
+        let moved = keys(&[
+            "// text above the producer",
+            "// more text above the producer",
+            "// and more",
+            "fn mint_one() {",
+            "    let _ = ();",
+            assign.as_str(),
+            "        player: prompt_player,",
+            "        source_id: ability.source_id,",
+            "        may_trigger_key,",
+            "    };",
+            "}",
+        ]);
+        assert_eq!(
+            moved, baseline,
+            "inserting lines above a producer must not move its key"
+        );
+
+        let nested_assign = format!("        state.waiting_for = {mint}");
+        let renested = keys(&[
+            "fn mint_one() {",
+            "    if gate {",
+            nested_assign.as_str(),
+            "            player: prompt_player,",
+            "            source_id: ability",
+            "                .source_id,",
+            "            may_trigger_key,",
+            "        };",
+            "    }",
+            "}",
+        ]);
+        assert_eq!(
+            renested, baseline,
+            "re-indenting the construction and breaking a field expression across lines is \
+             what `rustfmt` does; neither may move the key"
+        );
+
+        let twice = keys(&[
+            "fn mint_one() {",
+            assign.as_str(),
+            "        player: prompt_player,",
+            "        source_id: ability.source_id,",
+            "        may_trigger_key,",
+            "    };",
+            assign.as_str(),
+            "        player: prompt_player,",
+            "        source_id: ability.source_id,",
+            "        may_trigger_key,",
+            "    };",
+            "}",
+        ]);
+        assert_eq!(
+            twice,
+            vec![base_key.clone(), base_key.clone()],
+            "a second mint inside an already-pinned function is a counted event: the keys are \
+             a MULTISET, not a set"
+        );
+
+        let removed = keys(&["fn mint_one() {", "    let _ = ();", "}"]);
+        assert!(
+            removed.is_empty(),
+            "a function that mints nothing yields no key, got {removed:?}"
+        );
+
+        let rebound = keys(&[
+            "fn mint_one() {",
+            assign.as_str(),
+            "        player: ability.controller,",
+            "        source_id: ability.source_id,",
+            "        may_trigger_key,",
+            "    };",
+            "}",
+        ]);
+        assert_eq!(
+            rebound,
+            vec![format!(
+                "{rel}::mint_one {{player:ability.controller,source_id:ability.source_id,may_trigger_key}}"
+            )],
+            "the recipient expression is part of the key"
+        );
+
+        let second_authority = keys(&[
+            "fn mint_one() {",
+            assign.as_str(),
+            "        player: prompt_player,",
+            "        source_id: ability.source_id,",
+            "        may_trigger_key: None,",
+            "    };",
+            "}",
+        ]);
+        assert_eq!(
+            second_authority,
+            vec![format!(
+                "{rel}::mint_one {{player:prompt_player,source_id:ability.source_id,may_trigger_key:None}}"
+            )],
+            "the stored-choice authority is part of the key, with the recipient HELD"
+        );
+
+        assert!(
+            rebound != baseline && second_authority != baseline,
+            "a construction REPLACED inside an already-pinned function must move its key — \
+             recipient rebound: {rebound:?}; stored-choice authority changed: \
+             {second_authority:?}; unchanged construction: {baseline:?}"
+        );
+    }
+
     /// R25 — **a stored `may` auto-choice is a SECOND authority on the same CR 603.5
     /// question, and the mint must refuse to it.**
     ///

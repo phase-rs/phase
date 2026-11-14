@@ -3257,78 +3257,55 @@ enum AnaphorConsumer {
     Other,
 }
 
-/// CR 115.1 + CR 115.10a: distinguish an announced object from an untargeted possessor.
+/// CR 108.3 + CR 608.2c: the owner-subject roles this parser recognizes,
+/// classified ONCE through the typed subject authority so the source-owner
+/// shuffle branch and the selected-owner placement route cannot drift.
 pub(super) enum OwnerSubject {
-    Declared {
-        target: TargetFilter,
-        multi_target: Option<MultiTargetSpec>,
-    },
-    Possessive {
-        object: TargetFilter,
-    },
+    /// "~'s owner" names the ability source's owner (Cerulean Sphinx); it
+    /// declares no target.
+    Source,
+    /// "the owner of target X" / "target X's owner" carries the announced
+    /// object whose owner acts.
+    Selected(TargetFilter),
+    /// "that creature's owner" / "Enchanted creature's owner" is a possessive
+    /// noun anaphor: no declared target, and the moved object is the printed
+    /// noun phrase.
+    Anaphoric(TargetFilter),
 }
 
-/// CR 108.3 + CR 601.2c: one authority for owner actors and their object declarations.
 pub(super) fn parse_owner_subject(subject: &str, ctx: &mut ParseContext) -> Option<OwnerSubject> {
-    let lower = subject.to_lowercase();
-    let (owner_of, object_text) = if let Some(((), object_text)) =
-        nom_on_lower(subject, &lower, |i| {
-            value((), tag::<_, _, OracleError<'_>>("the owner of ")).parse(i)
-        }) {
-        (true, object_text)
-    } else {
-        let (_, (_, owner_suffix)) = all_consuming(pair(
-            alt((
-                take_until::<_, _, OracleError<'_>>("'s owner"),
-                take_until("\u{2019}s owner"),
-            )),
-            alt((tag("'s owner"), tag("\u{2019}s owner"))),
-        ))
-        .parse(lower.as_str())
-        .ok()?;
-        // allow-noncombinator: TextPair dual-string mapping of the suffix already recognized by nom above, not parsing dispatch.
-        let object = TextPair::new(subject, &lower).strip_suffix(owner_suffix)?;
-        (false, object.original)
-    };
-    let (declared_text, multi_target) = super::strip_optional_target_prefix(object_text);
-    let declared_lower = declared_text.to_lowercase();
-    let declared = peek(super::nom_target::parse_declared_target_prefix)
-        .parse(declared_lower.as_str())
-        .is_ok();
-    if declared {
-        let mut trial = ctx.clone();
-        let (target, remainder) = parse_target_with_ctx(declared_text, &mut trial);
-        if !remainder.trim().is_empty()
-            || super::target_filter_can_target_player(&target)
-            || matches!(target, TargetFilter::Any)
-        {
-            return None;
+    let mut trial = ctx.clone();
+    if let Some(application) = parse_subject_application(subject, &mut trial) {
+        if application.multi_target.is_none() {
+            if application.affected == TargetFilter::Owner && application.target.is_none() {
+                *ctx = trial;
+                return Some(OwnerSubject::Source);
+            }
+            if application.affected == TargetFilter::ParentTargetOwner {
+                if let Some(target) = application.target {
+                    *ctx = trial;
+                    return Some(OwnerSubject::Selected(target));
+                }
+            }
         }
-        *ctx = trial;
-        return Some(OwnerSubject::Declared {
-            target,
-            multi_target,
-        });
     }
-    if owner_of || multi_target.is_some() {
+    // A possessive-anaphor actor declares no target of its own; the moved
+    // object is the printed noun phrase, parsed through the shared type-phrase
+    // entry point so attached-host and parent-anaphor nouns keep their filters.
+    let idx = subject
+        .find("'s owner") // allow-noncombinator: possessive boundary scan on an already-tokenized subject
+        .or_else(|| subject.find("\u{2019}s owner"))?; // allow-noncombinator: the same scan for the typographic apostrophe
+    let noun = subject[..idx].trim();
+    if nom_primitives::scan_contains(&noun.to_ascii_lowercase(), "target ") {
         return None;
     }
-    let mut trial = ctx.clone();
-    let object_lower = object_text.to_lowercase();
-    let object = if let Ok((_, object)) =
-        all_consuming(super::nom_target::parse_self_reference).parse(object_lower.as_str())
-    {
-        object
-    } else {
-        let (object, remainder) =
-            trial.with_player_antecedents(|scoped| parse_target_with_ctx(object_text, scoped));
-        if !remainder.trim().is_empty() || matches!(object, TargetFilter::Any) {
-            return None;
-        }
-        object
-    };
-    *ctx = trial;
-    Some(OwnerSubject::Possessive { object })
+    let (filter, remainder) = ctx.with_player_antecedents(|scoped| {
+        crate::parser::oracle_target::parse_target_with_ctx(noun, scoped)
+    });
+    if !remainder.trim().is_empty() {
+        return None;
+    }
+    Some(OwnerSubject::Anaphoric(filter))
 }
 
 pub(super) fn parse_subject_application(
@@ -3369,16 +3346,26 @@ fn parse_subject_application_for(
 
     // CR 108.3 + CR 115.1: the owner is the actor, while the printed object
     // (including its optional cardinality) is the only announced target.
-    let mut owner_trial = ctx.clone();
-    if let Some(OwnerSubject::Declared {
-        target,
-        multi_target,
-    }) = parse_owner_subject(subject, &mut owner_trial)
-    {
-        *ctx = owner_trial;
+    if let Some(((), object_text)) = nom_on_lower(subject, &lower, |i| {
+        value((), tag::<_, _, OracleError<'_>>("the owner of ")).parse(i)
+    }) {
+        let (object_text, multi_target) = super::strip_optional_target_prefix(object_text);
+        let object_lower = object_text.to_lowercase();
+        parse_declared_target_prefix
+            .parse(object_lower.as_str())
+            .ok()?;
+        let mut trial = ctx.clone();
+        let (filter, remainder) = parse_target_with_ctx(object_text, &mut trial);
+        if !remainder.trim().is_empty()
+            || super::target_filter_can_target_player(&filter)
+            || matches!(filter, TargetFilter::Any)
+        {
+            return None;
+        }
+        *ctx = trial;
         return Some(SubjectApplication {
             affected: TargetFilter::ParentTargetOwner,
-            target: Some(target),
+            target: Some(filter),
             multi_target,
             inherits_parent: false,
             is_optional: false,
@@ -3417,20 +3404,27 @@ fn parse_subject_application_for(
         // the Red Reaper) silently bound the target to the trigger
         // controller's own creatures.
         let (filter, rest) = parse_target_with_ctx(subject, ctx);
-        // CR 608.2c + CR 109.4: "target <filter>'s controller <verb>s it"
-        // (Arcum Dagsson) — the ability TARGETS <filter>; its controller
-        // performs the verb on it ("it" = that target). Preserve <filter> as
-        // the ability's object target while shifting the acting subject to its
-        // controller, so the imperative lowering declares a `TargetOnly` slot
-        // against which `ParentTarget`/`ParentTargetController` resolve.
-        // Owner subjects are classified only by `parse_owner_subject` above.
-        if let Ok((_, actor)) = all_consuming(value(
-            TargetFilter::ParentTargetController,
-            alt((
-                tag::<_, _, OracleError<'_>>("'s controller"),
-                tag("\u{2019}s controller"),
-            )),
-        ))
+        // CR 608.2c + CR 109.4: "target <filter>'s controller/owner <verb>s it"
+        // (Arcum Dagsson, Mercy Killing) — the ability TARGETS <filter>; its
+        // controller/owner performs the verb on it ("it" = that target). Preserve
+        // <filter> as the ability's object target while shifting the acting
+        // subject to the target's controller/owner, so the imperative lowering
+        // declares a `TargetOnly{<filter>}` slot (see `lower_subject_predicate_ast`)
+        // against which `ParentTarget`/`ParentTargetController` resolve. Only the
+        // exact possessive-controller/owner suffix (nothing else) qualifies.
+        if let Ok((_, actor)) = all_consuming(alt((
+            value(
+                TargetFilter::ParentTargetController,
+                alt((
+                    tag::<_, _, OracleError<'_>>("'s controller"),
+                    tag("\u{2019}s controller"),
+                )),
+            ),
+            value(
+                TargetFilter::ParentTargetOwner,
+                alt((tag("'s owner"), tag("\u{2019}s owner"))),
+            ),
+        )))
         .parse(rest.trim())
         {
             return Some(SubjectApplication {
@@ -3479,13 +3473,25 @@ fn parse_subject_application_for(
         let (target_text, multi_target) = super::strip_optional_target_prefix(subject);
         if multi_target.is_some() {
             let (filter, rest) = parse_target_with_ctx(target_text, ctx);
-            // CR 115.1d (issue #8581): the target parser consumes plural nouns,
-            // but "players other than that player" leaves an exclusion this arm
-            // cannot express (no player-scoped counterpart to
-            // `FilterProp::Another` exists yet). Refuse that remainder rather
-            // than report a bare player target as fully supported. Keep the
-            // optional plural suffix guard conservatively; this branch no
-            // longer depends on it for plural-player targets.
+            // CR 115.1d (issue #8581): "any number of target players other
+            // than that player" (Curse of Surveillance) is not silently
+            // dropped here. The plural-noun coordinated-player arm inside
+            // `parse_target_with_ctx` matches the singular "player" tag
+            // against "players", so `rest` routinely carries a benign
+            // leftover "s" even on the fully-supported "any number of target
+            // players"/"target creatures" shapes (see
+            // `parse_subject_any_number_of_target_players`) -- a bare
+            // non-empty-rest guard would fail those too. The actual signal
+            // for an unexpressed exclusion is that leftover, once the "s"
+            // pluralization artifact is stripped, starting with "other than
+            // " -- the one shape this arm cannot express (no player-scoped
+            // counterpart to `FilterProp::Another` exists yet). Failing
+            // closed here (returning None) sends the caller back to
+            // Effect::unimplemented instead of reporting a bare
+            // target=player as fully supported. The general "exclude the
+            // enchanted/reference player from a player-targeted count" shape
+            // is tracked separately (issue #8581); this guard only refuses to
+            // fabricate a wrong AST for it.
             if (
                 opt(nom::character::complete::char::<_, OracleError<'_>>('s')),
                 multispace0,
@@ -4187,6 +4193,28 @@ fn parse_subject_application_for(
     {
         return Some(SubjectApplication {
             affected: TargetFilter::SourceController,
+            target: None,
+            multi_target: None,
+            inherits_parent: false,
+            is_optional: false,
+            player_anaphor: None,
+        });
+    }
+    // CR 108.3: "~'s owner" names the owner of the ability's SOURCE object
+    // (Cerulean Sphinx, Etrata, Fblthp), the owner-side sibling of "~'s
+    // controller" above. Distinct from the anaphoric "its owner" / "[the|that]
+    // <noun>'s owner", which resolve to the PARENT TARGET's owner
+    // (`TargetFilter::ParentTargetOwner`). Lowered to `TargetFilter::Owner`,
+    // whose resolver reads the owner of the object referenced by the source id
+    // — the same filter the source-owner shuffle/put recognizers emit. Modeling
+    // it here keeps the source-owner and selected-object-owner subject grammar
+    // on one typed authority instead of a text-tagged branch beside it.
+    if tag::<_, _, OracleError<'_>>("~'s owner")
+        .parse(lower.as_str())
+        .is_ok_and(|(rest, _)| rest.trim().is_empty())
+    {
+        return Some(SubjectApplication {
+            affected: TargetFilter::Owner,
             target: None,
             multi_target: None,
             inherits_parent: false,
@@ -9408,45 +9436,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn owner_subject_failed_probe_preserves_diagnostics() {
-        let mut ctx = ParseContext::default();
-        assert!(matches!(
-            parse_owner_subject("target creature's owner", &mut ctx),
-            Some(OwnerSubject::Declared { .. })
-        ));
-        for subject in [
-            "unclassifiable object's owner",
-            "creature with nonsense's owner",
-        ] {
-            let mut ctx = ParseContext::default();
-            assert!(
-                parse_owner_subject(subject, &mut ctx).is_none(),
-                "{subject}"
-            );
-            assert!(
-                ctx.diagnostics.is_empty(),
-                "{subject}: {:?}",
-                ctx.diagnostics
-            );
-        }
-    }
-
-    #[test]
-    fn declared_owner_probe_does_not_commit_ignored_possessive() {
-        let mut expected = ParseContext::default();
-        let _ = parse_subject_application_for(
-            "that creature's owner",
-            &mut expected,
-            AnaphorConsumer::Other,
-        );
-        assert!(
-            expected.diagnostics.is_empty(),
-            "{:?}",
-            expected.diagnostics
-        );
-    }
-
-    #[test]
     fn r2_owner_anaphor_requires_prior_object_declaration() {
         let app = parse_subject_application("its owner", &mut ParseContext::default())
             .expect("owner subject");
@@ -9468,17 +9457,38 @@ mod tests {
         assert_eq!(owner_subject_seed(&subject, &ctx), None);
     }
 
+    /// SHAPE: owner actor, object exclusion, and optional count are independent
+    /// axes of the declared-target subject grammar.
     #[test]
     fn declared_owner_subject_seed_accepts_only_one_pinned_object() {
-        for phrase in [
-            "the owner of target creature",
-            "the owner of up to one target creature",
-            "target creature's owner",
+        for (phrase, expected_multi, another) in [
+            ("the owner of target creature", None, false),
+            (
+                "the owner of up to one target creature",
+                Some(MultiTargetSpec::fixed(0, 1)),
+                false,
+            ),
+            (
+                "the owner of up to one other target nonland permanent",
+                Some(MultiTargetSpec::fixed(0, 1)),
+                true,
+            ),
+            ("the owner of another target creature", None, true),
+            ("target creature's owner", None, false),
         ] {
             let app =
                 parse_subject_application(phrase, &mut ParseContext::default()).expect(phrase);
             assert_eq!(app.affected, TargetFilter::ParentTargetOwner);
             assert_eq!(app.player_anaphor, None);
+            assert_eq!(app.multi_target, expected_multi, "{phrase}");
+            let Some(TargetFilter::Typed(filter)) = app.target.as_ref() else {
+                panic!("{phrase}: expected a typed object target: {:?}", app.target);
+            };
+            assert_eq!(
+                filter.properties.contains(&FilterProp::Another),
+                another,
+                "{phrase}"
+            );
             let mut subject = subject_phrase_ast(Some(app));
             assert_eq!(
                 subject_player_antecedent(&subject),
@@ -9504,16 +9514,19 @@ mod tests {
                 assert_eq!(subject_possessive_object_antecedent(&subject), None);
             }
         }
-        assert!(parse_subject_application(
+        for phrase in [
             "the owner of target player",
-            &mut ParseContext::default()
-        )
-        .is_none());
-        assert!(parse_subject_application(
+            "the owner of up to one other target player",
             "the owner of target creature nonsense",
-            &mut ParseContext::default()
-        )
-        .is_none());
+            "the owner of another target creature nonsense",
+            "the owner of target",
+            "the owner of any target",
+        ] {
+            assert!(
+                parse_subject_application(phrase, &mut ParseContext::default()).is_none(),
+                "{phrase}"
+            );
+        }
     }
 
     #[test]
@@ -12065,6 +12078,20 @@ mod tests {
             parse_subject_application("its owner", &mut ctx).expect("should recognize 'its owner'");
         assert_eq!(app.affected, TargetFilter::ParentTargetOwner);
         assert!(!app.is_optional, "no 'may' modal → not optional");
+    }
+
+    // CR 108.3: "~'s owner" is the SOURCE's owner, not the parent target's
+    // owner — the shared typed subject authority models it as
+    // `TargetFilter::Owner` so the source-owner shuffle recognizer no longer
+    // needs a text-tagged route beside it.
+    #[test]
+    fn parse_subject_source_owner_routes_to_source_owner_filter() {
+        let mut ctx = ParseContext::default();
+        let app = parse_subject_application("~'s owner", &mut ctx)
+            .expect("should recognize \"~'s owner\"");
+        assert_eq!(app.affected, TargetFilter::Owner);
+        assert_eq!(app.target, None);
+        assert!(!app.is_optional);
     }
 
     #[test]

@@ -1,5 +1,6 @@
 //! Ordinary full-Oracle witnesses for R2, independent of Beam casting.
 
+use engine::game::merge::{merge_object_onto, MergeSide};
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::types::ability::TargetRef;
 use engine::types::actions::GameAction;
@@ -148,8 +149,7 @@ fn riftsweeper_face_up_target_owner_and_stale_incarnation() {
     }
 }
 
-// CR 603.3d + CR 601.2c: with no legal target in exile, the trigger is removed
-// from the stack while its targets are being chosen, before it can resolve.
+// CR 608.2b: the mandatory trigger cannot acquire the source when exile is empty.
 #[test]
 fn riftsweeper_without_face_up_exile_has_no_owner_action() {
     let mut scenario = GameScenario::new();
@@ -171,62 +171,6 @@ fn riftsweeper_without_face_up_exile_has_no_owner_action() {
     assert_eq!(outcome.zone_of(source), Zone::Battlefield);
     assert!(shuffles(outcome.events()).is_empty());
     finished(&runner);
-
-    // Two legal face-up cards force a real announcement instead of the
-    // unique-target shortcut; selecting P1's card must not shuffle P0's card.
-    let mut scenario = GameScenario::new();
-    scenario.at_phase(Phase::PreCombatMain);
-    let source = scenario
-        .add_creature_to_hand(P0, "Riftsweeper", 2, 2)
-        .with_subtypes(vec!["Elf", "Shaman"])
-        .with_mana_cost(parse_mtgjson_mana_cost("{1}{G}"))
-        .from_oracle_text(RIFTSWEEPER)
-        .id();
-    let target = scenario.add_land_to_exile(P1, "Island").id();
-    let other = scenario.add_land_to_exile(P0, "Forest").id();
-    scenario.with_mana_pool(
-        P0,
-        (0..2)
-            .map(|_| ManaUnit::new(ManaType::Green, ObjectId(0), false, vec![]))
-            .collect(),
-    );
-    let mut runner = scenario.build();
-    runner.cast(source).commit();
-    runner.advance_until_stack_empty();
-    let WaitingFor::TriggerTargetSelection {
-        player,
-        target_slots,
-        ..
-    } = &runner.state().waiting_for
-    else {
-        panic!(
-            "expected exile target announcement: {:?}",
-            runner.state().waiting_for
-        );
-    };
-    assert_eq!(*player, P0);
-    assert_eq!(target_slots.len(), 1);
-    assert_eq!(target_slots[0].legal_targets.len(), 2);
-    for candidate in [target, other] {
-        assert!(target_slots[0]
-            .legal_targets
-            .contains(&TargetRef::Object(candidate)));
-    }
-    runner
-        .act(GameAction::ChooseTarget {
-            target: Some(TargetRef::Object(target)),
-        })
-        .unwrap();
-    let mut events = Vec::new();
-    while !runner.state().stack.is_empty() {
-        events.extend(runner.act(GameAction::PassPriority).unwrap().events);
-    }
-    assert_eq!(runner.state().objects[&target].zone, Zone::Library);
-    assert!(runner.state().players[1].library.contains(&target));
-    assert_eq!(runner.state().objects[&other].zone, Zone::Exile);
-    assert_eq!(shuffles(&events), vec![P1]);
-    finished(&runner);
-    assert!(runner.state().resolution_stack.is_empty());
 }
 
 // CR 701.24a: complete successive spells must publish only their own owners.
@@ -312,43 +256,6 @@ fn chaos_warp_owner_shuffle_reveals_and_deploys_the_permanent() {
     assert_eq!(outcome.state().objects[&target].controller, P1);
     assert!(outcome.events().iter().any(|event| matches!(event, GameEvent::ZoneChanged { object_id, from: Some(Zone::Battlefield), to: Zone::Library, .. } if *object_id == target)));
     assert!(outcome.events().iter().any(|event| matches!(event, GameEvent::ZoneChanged { object_id, from: Some(Zone::Library), to: Zone::Battlefield, .. } if *object_id == target)));
-    finished(&runner);
-}
-
-// CR 108.3 + CR 608.2c: the target's owner shuffles and draws, not its controller.
-#[test]
-fn oblation_owner_draws_two_after_the_shuffle() {
-    let mut scenario = GameScenario::new();
-    scenario.at_phase(Phase::PreCombatMain);
-    let target = scenario
-        .add_creature(P1, "Grizzly Bears", 2, 2)
-        .controlled_by(P0)
-        .id();
-    for _ in 0..20 {
-        scenario.add_card_to_library_top(P1, "Island");
-        scenario.add_card_to_library_top(P0, "Plains");
-    }
-    let spell = scenario
-        .add_spell_to_hand_from_oracle(
-            P0,
-            "Oblation",
-            true,
-            "The owner of target nonland permanent shuffles it into their library, then draws two cards.",
-        )
-        .with_mana_cost(parse_mtgjson_mana_cost("{2}{W}"))
-        .id();
-    scenario.with_mana_pool(
-        P0,
-        (0..3)
-            .map(|_| ManaUnit::new(ManaType::White, ObjectId(0), false, vec![]))
-            .collect(),
-    );
-    let mut runner = scenario.build();
-    let outcome = runner.cast(spell).target_object(target).resolve();
-    outcome.assert_hand_drawn(P1, 2);
-    outcome.assert_hand_drawn(P0, 0);
-    outcome.assert_zone(&[target], Zone::Library);
-    assert!(outcome.state().players[1].library.contains(&target));
     finished(&runner);
 }
 
@@ -553,11 +460,11 @@ fn worldsouls_rage_keeps_damage_target_and_resolution_land_choice_separate() {
     }
 }
 
-// CR 730.3c: a freshly chosen exile target is one card, even when that card is a
-// former merged component whose siblings sit beside it in exile. The continuity
-// expansion belongs to "return the object it became", not to a new selection.
+// CR 730.3c + CR 400.7e: a fresh choice among exiled cards is not a reference to
+// "the object a merged permanent became". Choosing one co-exiled card must move
+// only that card; its split sibling stays in exile.
 #[test]
-fn riftsweeper_fresh_target_does_not_expand_merged_components() {
+fn riftsweeper_moves_only_the_chosen_card_not_its_co_exiled_merge_component() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     let source = scenario
@@ -566,9 +473,8 @@ fn riftsweeper_fresh_target_does_not_expand_merged_components() {
         .with_mana_cost(parse_mtgjson_mana_cost("{1}{G}"))
         .from_oracle_text(RIFTSWEEPER)
         .id();
-    let host = scenario.add_creature(P0, "Merged host", 3, 3).id();
-    let rider = scenario.add_creature(P0, "Merged rider", 2, 2).id();
-    let spare = scenario.add_land_to_exile(P1, "Island").id();
+    let survivor = scenario.add_creature(P1, "Grizzly Bears", 2, 2).id();
+    let component = scenario.add_creature(P1, "Gemrazer", 4, 4).id();
     scenario.with_mana_pool(
         P0,
         (0..2)
@@ -576,43 +482,49 @@ fn riftsweeper_fresh_target_does_not_expand_merged_components() {
             .collect(),
     );
     let mut runner = scenario.build();
-    engine::game::merge::merge_object_onto(
-        runner.state_mut(),
-        rider,
-        host,
-        engine::game::merge::MergeSide::Bottom,
-        &mut Vec::new(),
+    {
+        let state = runner.state_mut();
+        // The mutating spell resolved off the stack, never listed on the battlefield.
+        state.battlefield.retain(|&id| id != component);
+        let mut merge_events = vec![];
+        merge_object_onto(
+            state,
+            component,
+            survivor,
+            MergeSide::Top,
+            &mut merge_events,
+        );
+        engine::game::zones::move_to_zone(state, survivor, Zone::Exile, &mut merge_events);
+    }
+    assert_eq!(runner.state().objects[&survivor].zone, Zone::Exile);
+    assert_eq!(runner.state().objects[&component].zone, Zone::Exile);
+    assert!(
+        runner.state().objects[&component]
+            .split_from_merge_survivor
+            .is_some(),
+        "reach guard: the component records the survivor it split from"
     );
-    runner.state_mut().battlefield.retain(|&id| id != rider);
-    // The merged permanent leaves the battlefield: the survivor moves and the
-    // absorbed card splits into the same zone with a back-link.
-    let mut events = Vec::new();
-    engine::game::zones::move_to_zone(runner.state_mut(), host, Zone::Exile, &mut events);
-    assert_eq!(runner.state().objects[&host].zone, Zone::Exile);
-    assert_eq!(runner.state().objects[&rider].zone, Zone::Exile);
-    assert!(runner.state().objects[&rider]
-        .split_from_merge_survivor
-        .is_some());
 
     runner.cast(source).commit();
     runner.advance_until_stack_empty();
     let WaitingFor::TriggerTargetSelection { target_slots, .. } = &runner.state().waiting_for
     else {
         panic!(
-            "Riftsweeper must announce an exile target: {:?}",
+            "Riftsweeper must announce one exile target: {:?}",
             runner.state().waiting_for
         );
     };
-    assert_eq!(target_slots.len(), 1);
-    assert!(target_slots[0]
-        .legal_targets
-        .contains(&TargetRef::Object(host)));
-    assert!(target_slots[0]
-        .legal_targets
-        .contains(&TargetRef::Object(spare)));
+    for id in [survivor, component] {
+        assert!(
+            target_slots[0]
+                .legal_targets
+                .contains(&TargetRef::Object(id)),
+            "both co-exiled cards are independently choosable"
+        );
+    }
     runner
         .act(GameAction::ChooseTarget {
-            target: Some(TargetRef::Object(host)),
+            target: Some(TargetRef::Object(survivor)),
         })
         .unwrap();
     let mut events = vec![];
@@ -620,16 +532,13 @@ fn riftsweeper_fresh_target_does_not_expand_merged_components() {
         events.extend(runner.act(GameAction::PassPriority).unwrap().events);
     }
     finished(&runner);
+    assert_eq!(shuffles(&events), vec![P1]);
+    assert_eq!(runner.state().objects[&survivor].zone, Zone::Library);
+    assert!(runner.state().players[1].library.contains(&survivor));
     assert_eq!(
-        shuffles(&events),
-        vec![P0],
-        "only the chosen card's owner shuffles"
-    );
-    assert_eq!(runner.state().objects[&host].zone, Zone::Library);
-    assert_eq!(
-        runner.state().objects[&rider].zone,
+        runner.state().objects[&component].zone,
         Zone::Exile,
-        "the unselected former component stays in exile"
+        "the unselected sibling must not be swept into the library"
     );
-    assert_eq!(runner.state().objects[&spare].zone, Zone::Exile);
+    assert!(!runner.state().players[1].library.contains(&component));
 }

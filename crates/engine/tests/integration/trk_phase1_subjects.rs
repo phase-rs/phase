@@ -2,9 +2,8 @@
 
 use engine::game::ability_utils::{build_resolved_from_def, build_target_slots};
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
-use engine::types::ability::{
-    ControllerRef, Effect, MultiTargetSpec, TargetFilter, TargetRef, TypedFilter,
-};
+use engine::types::ability::TargetRef;
+use engine::types::ability::{ControllerRef, Effect, MultiTargetSpec, TargetFilter, TypedFilter};
 use engine::types::actions::GameAction;
 use engine::types::counter::CounterType;
 use engine::types::events::{GameEvent, PlayerActionKind};
@@ -240,7 +239,7 @@ fn kim_intervening_if_rechecks_after_growth() {
     assert!(runner.state().objects[&source].counters.is_empty());
 }
 
-// CR 602.2b + CR 601.2h: the activation draws only after its whole cost is paid.
+// CR 121.1: the unchanged activation draws only after its whole cost is paid.
 #[test]
 fn kim_activation_pays_counters_from_two_creatures() {
     let mut scenario = GameScenario::new();
@@ -330,20 +329,10 @@ fn scientists_full_multiline_reminder_draws_then_discards() {
     assert_eq!(runner.state().objects[&second].zone, Zone::Hand);
     // The live full-card parse must not leave the reminder as a rules ability.
     let object = &runner.state().objects[&source];
-    let mut implemented = |effect: &engine::types::ability::Effect| {
-        assert!(!matches!(
-            effect,
-            engine::types::ability::Effect::Unimplemented { .. }
-        ));
-        std::ops::ControlFlow::Continue(())
-    };
-    for ability in object.abilities.iter() {
-        let _ = phase_ast::types::ability_visit::visit_ability_def(ability, &mut implemented);
-    }
-    for trigger in object.trigger_definitions.iter_all() {
-        let _ =
-            phase_ast::types::ability_visit::visit_trigger(&trigger.definition, &mut implemented);
-    }
+    assert!(
+        !format!("{:?} {:?}", object.abilities, object.trigger_definitions)
+            .contains("Unimplemented")
+    );
     runner
         .act(GameAction::SelectCards {
             cards: vec![keep, second],
@@ -520,7 +509,7 @@ fn unification_empty_and_illegal_targets_do_not_draw() {
     }
 }
 
-// CR 702.26b + CR 702.26d + CR 702.26g: the source and optional target phase as one batch, keeping
+// CR 702.26b/d/g: the source and optional target phase as one batch, keeping
 // their identities and counters; attachments follow their host.
 #[test]
 fn defiant_optional_target_and_attachments_phase_and_return() {
@@ -795,7 +784,7 @@ fn defiant_returned_source_does_not_replace_queued_source_identity() {
     assert!(!runner.state().objects[&source].is_phased_out());
 }
 
-// CR 205.1b + CR 611.2a + CR 611.2c: the resolved chosen population gains an additive
+// CR 205.1b + CR 611.2a/c: the resolved chosen population gains an additive
 // canonical subtype, and every temporary part expires at cleanup.
 #[test]
 fn worf_two_opponents_keep_original_types_and_expire() {
@@ -1167,7 +1156,7 @@ fn reality_ripple_preserves_target_selection_and_legality() {
     finished(&runner);
 }
 
-// CR 115.10a + CR 702.26a + CR 702.26g: mass phasing affects shrouded permanents and
+// CR 115.10a + CR 702.26a/g: mass phasing affects shrouded permanents and
 // attached Equipment without targeting, then restores them on the next turn.
 #[test]
 fn teferis_protection_preserves_mass_phasing_and_empty_population() {

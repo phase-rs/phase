@@ -522,37 +522,6 @@ mod tests {
     }
 
     #[test]
-    fn ordinary_phase_out_union_phases_only_the_announced_object() {
-        let mut state = GameState::new_two_player(42);
-        let source = add_creature(&mut state, PlayerId(0), "Source");
-        let chosen = add_creature(&mut state, PlayerId(0), "Chosen");
-        let bystander = add_creature(&mut state, PlayerId(0), "Bystander");
-        let effect = Effect::PhaseOut {
-            target: TargetFilter::Or {
-                filters: vec![
-                    TargetFilter::SelfRef,
-                    TargetFilter::Typed(TypedFilter::creature()),
-                ],
-            },
-        };
-        assert!(crate::types::ability::effect_has_stack_target_declaration(
-            &effect
-        ));
-        let ability =
-            ResolvedAbility::new(effect, vec![TargetRef::Object(chosen)], source, PlayerId(0));
-        let mut events = Vec::new();
-        resolve(&mut state, &ability, &mut events).unwrap();
-        assert!(state.objects[&chosen].is_phased_out());
-        assert!(state.objects[&source].is_phased_in());
-        assert!(state.objects[&bystander].is_phased_in());
-        assert!(events.iter().any(|event| matches!(
-            event,
-            GameEvent::EffectResolved { kind: EffectKind::PhaseOut, source_id, .. }
-                if *source_id == source
-        )));
-    }
-
-    #[test]
     fn compound_phase_out_collects_source_and_announced_set_without_fallback() {
         let mut state = GameState::new_two_player(42);
         let source = add_creature(&mut state, PlayerId(0), "Source");
@@ -591,6 +560,41 @@ mod tests {
             vec![chosen],
             "standalone explicit-target precedence is unchanged"
         );
+    }
+
+    // Synthetic consumer contract: no printed Oracle producer is known for
+    // this ordinary Or(SelfRef, TypedCreature) AST. Unlike Dream Fighter's
+    // all-context union, it declares a target and must affect only that choice.
+    // CR 115.1 + CR 608.2c: SelfRef is an eligible alternative, not extra work.
+    #[test]
+    fn ordinary_phase_out_union_phases_only_the_announced_object() {
+        let mut state = GameState::new_two_player(42);
+        let source = add_creature(&mut state, PlayerId(0), "Source");
+        let chosen = add_creature(&mut state, PlayerId(0), "Chosen");
+        let bystander = add_creature(&mut state, PlayerId(0), "Bystander");
+        let effect = Effect::PhaseOut {
+            target: TargetFilter::Or {
+                filters: vec![
+                    TargetFilter::SelfRef,
+                    TargetFilter::Typed(TypedFilter::creature()),
+                ],
+            },
+        };
+        assert!(crate::types::ability::effect_has_stack_target_declaration(
+            &effect
+        ));
+        let ability =
+            ResolvedAbility::new(effect, vec![TargetRef::Object(chosen)], source, PlayerId(0));
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+        assert!(state.objects[&chosen].is_phased_out());
+        assert!(state.objects[&source].is_phased_in());
+        assert!(state.objects[&bystander].is_phased_in());
+        assert!(events.iter().any(|event| matches!(
+            event,
+            GameEvent::EffectResolved { kind: EffectKind::PhaseOut, source_id, .. }
+                if *source_id == source
+        )));
     }
 
     // Existing AST consumer contract, not a verified printed slot-union producer.
@@ -724,18 +728,21 @@ mod tests {
     fn compound_phase_out_batches_an_attachment_with_its_host_indirectly() {
         let mut state = GameState::new_two_player(42);
         let host = add_creature(&mut state, PlayerId(0), "Host");
-        let attachment = add_creature(&mut state, PlayerId(0), "Animated attachment");
+        let attachment = add_creature(&mut state, PlayerId(0), "Animated Equipment");
+        // CR 702.26g: only Auras, Equipment and Fortifications are cascaded, so
+        // the fixture must be an ELIGIBLE attachment or its `Indirectly`
+        // assertion cannot follow from the printing. It stays a creature (the
+        // host relation is what is under test): an animated Equipment —
+        // Creature + Artifact with the Equipment subtype.
+        //
         // Raw collector fixture: ordinary creature attachments are detached by
         // SBAs before a public priority boundary. This isolates batch precedence.
-        // An animated Equipment keeps its artifact type, so CR 702.26g cascades it.
-        state
-            .objects
-            .get_mut(&attachment)
-            .unwrap()
-            .card_types
-            .core_types
-            .push(crate::types::card_type::CoreType::Artifact);
-        state.objects.get_mut(&attachment).unwrap().attached_to = Some(host.into());
+        {
+            let obj = state.objects.get_mut(&attachment).unwrap();
+            obj.card_types.core_types.push(CoreType::Artifact);
+            obj.card_types.subtypes.push("Equipment".to_string());
+            obj.attached_to = Some(host.into());
+        }
         state
             .objects
             .get_mut(&host)
@@ -1117,8 +1124,8 @@ mod tests {
             .pending
             .chain
             .set_target_incarnations_recursive(Vec::new());
-        // Keep a real typed decision above the parked instruction: exposing a
-        // ready continuation at Priority is deliberately invalid persistence.
+        // Infrastructure: a typed optional decision keeps the continuation
+        // legitimately suspended; an exposed ready chain at Priority is not a save.
         for parked in [&mut state, &mut unbound] {
             parked.push_optional_effect_frame(OptionalEffectFrame {
                 ability: Box::new(ResolvedAbility::new(Effect::NoOp, Vec::new(), fighter, P1)),
@@ -1145,7 +1152,12 @@ mod tests {
                 .unwrap();
             assert!(runner.state().objects[&fighter].is_phased_out());
             assert!(runner.state().objects[&partner].is_phased_out());
+            assert!(runner.state().stack.is_empty());
             assert!(runner.state().resolution_stack.is_empty());
+            assert!(matches!(
+                runner.state().waiting_for,
+                WaitingFor::Priority { .. }
+            ));
             assert!(
                 restore_phase_state(&unbound, trusted).is_err(),
                 "the entry's pin cannot repair a different resumed ability copy"

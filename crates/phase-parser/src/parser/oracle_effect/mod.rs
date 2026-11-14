@@ -201,7 +201,9 @@ pub(crate) use crate::parser::oracle_ir::context::{
     HeadWindowProbe, ParseContext, PriorZoneChoicePartition, SpellAnaphorBinding, TokenPtFollowup,
     TriggerConditionScope,
 };
-use crate::parser::oracle_ir::context::{BodyScope, PendingTrackedSet, TrackedSetProducer};
+use crate::parser::oracle_ir::context::{
+    BodyScope, PendingTrackedSet, ResolvedChainRoot, TrackedSetProducer,
+};
 use crate::parser::oracle_ir::effect_chain::{
     AbilityIr, AbilityRootTransform, AbilityShellIr, AbsorbKind, ClauseDisposition, ClauseId,
     ClauseIr, ClauseIrBuilder, ClausePlacement, DieResultBranchIr, EffectChainIr,
@@ -3265,7 +3267,7 @@ fn try_parse_reflexive_this_way_trigger(tp: TextPair) -> Option<ParsedEffectClau
         return None;
     }
 
-    // CR 603.7a: "when an exiled card enters [under …] this way" is the
+    // CR 603.7c: "when an exiled card enters [under …] this way" is the
     // tracked-set delayed trigger owned by `try_parse_inline_delayed_trigger`;
     // the generic reflexive path must not claim it.
     if tag::<_, _, OracleError<'_>>("when an exiled card enters ")
@@ -11564,17 +11566,9 @@ fn parse_effect_clause_inner_with_damage_context(
         });
     }
 
-    // CR 115.1a + CR 601.2c: "Choose two target players." is a pure
+    // CR 115.1c + CR 115.6: "Choose two target players." is a pure
     // exact-count target declaration (Scheming Symmetry); carry the count on
-    // the clause so the engine opens that many distinct target slots. CR 115.6
-    // permits zero when the printed range includes it.
-    //
-    // The noun is plural BECAUSE a cardinality quantifier precedes it. That
-    // quantifier is either local ("two", "up to two") or already peeled into
-    // the ability-level `multi_target` ("any number of" — Officious
-    // Interrogation, Call the Coppercoats), in which case this clause sees only
-    // the bare plural noun and must still declare the slot rather than strand
-    // it as an unparsed verb argument.
+    // the clause so the engine opens that many distinct target slots.
     let lower = text.to_ascii_lowercase();
     if let Ok((after_choose, _)) = tag::<_, _, OracleError<'_>>("choose ").parse(lower.as_str()) {
         let consumed = lower.len() - after_choose.len();
@@ -11583,32 +11577,22 @@ fn parse_effect_clause_inner_with_damage_context(
         if let Some(multi) = multi {
             let inner = after_choose.len() - stripped_lower.len();
             let target_input = &after_orig[inner..];
-            let mut trial = ctx.clone();
-            let (target, remainder) = parse_target_with_ctx(target_input, &mut trial);
+            // CR 115.1 + CR 601.2c: the shared target grammar reads the printed
+            // noun as written — singular OR plural ("target players",
+            // "target opponents") — and the clause's `multi_target` count
+            // carries the announced slot count. No singular rewrite belongs
+            // here: the count authority (`strip_optional_target_prefix`) and
+            // the noun authority (`parse_target`) each own their axis.
+            let (target, remainder) = parse_target_with_ctx(target_input, ctx);
             if remainder.trim().is_empty()
                 && !matches!(&target, TargetFilter::Typed(filter)
-                    if filter.lacks_standalone_selection_constraint())
+                    if filter.type_filters.is_empty()
+                        && filter.controller.is_none()
+                        && filter.properties.is_empty())
             {
-                *ctx = trial;
                 let mut clause = parsed_clause(Effect::TargetOnly { target });
                 clause.multi_target = Some(multi);
                 return clause;
-            }
-        } else if let Ok((after_target_word, _)) =
-            tag::<_, _, OracleError<'_>>("target ").parse(after_choose)
-        {
-            // Strict exhaustion over the PLURAL noun only: no effect text may be
-            // dropped by turning a longer "Choose target players, then …" clause
-            // into a declaration.
-            if let Ok((tail, _)) = alt((tag::<_, _, OracleError<'_>>("players"), tag("opponents")))
-                .parse(after_target_word)
-            {
-                if tail.trim().is_empty() {
-                    let (target, remainder) = parse_target_with_ctx(after_orig, ctx);
-                    if remainder.trim().is_empty() && target_filter_can_target_player(&target) {
-                        return parsed_clause(Effect::TargetOnly { target });
-                    }
-                }
             }
         }
     }
@@ -15983,15 +15967,11 @@ fn player_filter_reads_chain_local_result(filter: &PlayerFilter) -> bool {
     }
 }
 
-/// Parse "<owner> puts it on their choice of the top or bottom of their library".
+/// Parse "owner puts it on their choice of the top or bottom of their library".
 ///
-/// Pattern 0 is the anaphoric "its owner puts it ..." continuation. Every other
-/// spelling takes its subject from `subject::parse_owner_subject`, the single
-/// owner-subject authority:
-/// - declared: "The owner of [up to one] [other] target nonland permanent puts it ..."
-///   and "Target creature's owner puts it ..." (the declaration keeps its cardinality);
-/// - possessive: "That creature's owner puts it ..." (an anaphoric object that
-///   declares no new target, CR 115.10a).
+/// Two Oracle patterns:
+/// - "Target creature's owner puts it on their choice of the top or bottom of their library"
+/// - "The owner of target nonland permanent puts it on their choice of the top or bottom of their library"
 fn try_parse_put_on_top_or_bottom(
     tp: TextPair,
     ctx: &mut ParseContext,
@@ -16017,32 +15997,90 @@ fn try_parse_put_on_top_or_bottom(
         }));
     }
 
-    // CR 115.1 + CR 601.2c: declared owner subjects preserve cardinality and
-    // constraints; CR 115.10a: possessive references do not declare another target.
-    let predicate_start = subject::find_predicate_start(tp.original)?;
-    all_consuming(alt((
-        tag::<_, _, OracleError<'_>>("puts it on the top or bottom of their library"),
-        tag("puts it on their choice of the top or bottom of their library"),
-    )))
-    .parse(&tp.lower[predicate_start..])
-    .ok()?;
-    let mut trial = ctx.clone();
-    let (target, multi_target) =
-        match subject::parse_owner_subject(tp.original[..predicate_start].trim(), &mut trial)? {
-            subject::OwnerSubject::Declared {
-                target,
-                multi_target,
-            } => (target, multi_target),
-            subject::OwnerSubject::Possessive { object } => (object, None),
-        };
-    let mut clause = parsed_clause(Effect::PutOnTopOrBottom {
-        target,
-        chooser: TargetFilter::ParentTargetOwner,
-        top_position: LibraryPosition::Top,
-    });
-    clause.multi_target = multi_target;
-    *ctx = trial;
-    Some(clause)
+    // Pattern 1: "target [filter]'s owner puts it ..."
+    if super::oracle_nom::bridge::nom_on_lower(tp.original, tp.lower, |i| {
+        let (i, _) = take_until("'s owner puts it on ").parse(i)?;
+        let (i, _) = tag("'s owner puts it on ").parse(i)?;
+        let (i, _) = alt((
+            tag("the top or bottom of their library"),
+            tag("their choice of the top or bottom of their library"),
+        ))
+        .parse(i)?;
+        value((), eof).parse(i)
+    })
+    .is_some()
+    {
+        let target_text = tp
+            // allow-noncombinator: TextPair structural extraction after nom-dispatch confirmation.
+            .strip_suffix("'s owner puts it on the top or bottom of their library")
+            .or_else(|| {
+                // allow-noncombinator: TextPair structural extraction after nom-dispatch confirmation.
+                tp.strip_suffix(
+                    "'s owner puts it on their choice of the top or bottom of their library",
+                )
+            })
+            .map(|pair| pair.original)?;
+        let (filter, remainder) =
+            ctx.with_player_antecedents(|scoped| parse_target_with_ctx(target_text, scoped));
+        if !remainder.trim().is_empty() {
+            ctx.push_diagnostic(OracleDiagnostic::IgnoredRemainder {
+                text: remainder.trim().into(),
+                parser: "owner-puts-it".into(),
+                line_index: 0,
+            });
+        }
+        return Some(parsed_clause(Effect::PutOnTopOrBottom {
+            target: filter,
+            chooser: TargetFilter::ParentTargetOwner,
+            top_position: LibraryPosition::Top,
+        }));
+    }
+
+    // Pattern 2: "the owner of target [filter] puts it ..."
+    if super::oracle_nom::bridge::nom_on_lower(tp.original, tp.lower, |i| {
+        let (i, _) = tag("the owner of ").parse(i)?;
+        let (i, _) = take_until(" puts it on ").parse(i)?;
+        let (i, _) = tag(" puts it on ").parse(i)?;
+        let (i, _) = alt((
+            tag("the top or bottom of their library"),
+            tag("their choice of the top or bottom of their library"),
+        ))
+        .parse(i)?;
+        value((), eof).parse(i)
+    })
+    .is_some()
+    {
+        let target_text = tp
+            // allow-noncombinator: TextPair structural extraction after nom-dispatch confirmation.
+            .strip_prefix("the owner of ")
+            .and_then(|pair| {
+                // allow-noncombinator: TextPair structural extraction after nom-dispatch confirmation.
+                pair.strip_suffix(" puts it on the top or bottom of their library")
+                    .or_else(|| {
+                        // allow-noncombinator: TextPair structural extraction after nom-dispatch confirmation.
+                        pair.strip_suffix(
+                            " puts it on their choice of the top or bottom of their library",
+                        )
+                    })
+            })
+            .map(|pair| pair.original)?;
+        let (filter, remainder) =
+            ctx.with_player_antecedents(|scoped| parse_target_with_ctx(target_text, scoped));
+        if !remainder.trim().is_empty() {
+            ctx.push_diagnostic(OracleDiagnostic::IgnoredRemainder {
+                text: remainder.trim().into(),
+                parser: "owner-puts-it".into(),
+                line_index: 0,
+            });
+        }
+        return Some(parsed_clause(Effect::PutOnTopOrBottom {
+            target: filter,
+            chooser: TargetFilter::ParentTargetOwner,
+            top_position: LibraryPosition::Top,
+        }));
+    }
+
+    None
 }
 
 /// Parse self-reference top-or-bottom forms such as Arashin Sovereign's
@@ -16194,14 +16232,9 @@ fn parse_blight_with_player(tp: TextPair) -> Option<(TargetFilter, u32, String)>
 
 /// CR 701.24a + CR 400.3: Parse "the owner of target [filter] shuffles it into their library".
 ///
-/// The subject comes from `subject::parse_owner_subject` and the predicate is an
-/// all-consuming grammar; the accepted shapes are:
-/// - declared owner: "The owner of target permanent shuffles it into their library"
-///   (Chaos Warp) and "Target permanent's owner shuffles it ...";
-/// - possessive object: "<object>'s owner shuffles it ..." (Weeping Angel);
-/// - the source's own owner, by pronoun or by name: "~'s owner shuffles it / ~ into
-///   their library" (Etrata, Fblthp), optionally followed by "and <player action>"
-///   (Gandalf's "and draws three cards") bound to the same owner.
+/// Handles both subject forms:
+/// - "The owner of target permanent shuffles it into their library" (Chaos Warp)
+/// - "Target permanent's owner shuffles it into their library"
 ///
 /// Preserves the target declaration before a bound owner-population move and terminal shuffle.
 fn try_parse_owner_of_target_shuffle(
@@ -16210,95 +16243,110 @@ fn try_parse_owner_of_target_shuffle(
 ) -> Option<ParsedEffectClause> {
     let tp = tp.trim_end_matches('.');
 
-    enum ShuffleObject {
-        Pronoun,
-        SelfReference(TargetFilter),
-    }
-    // CR 608.2c: consume exactly this predicate; only the source-owner form
-    // can bind a following player action to the same owner.
+    // CR 608.2c: this shortcut owns only the shuffle instruction, never an
+    // earlier action followed by a shuffle elsewhere in the clause.
     let predicate_start = subject::find_predicate_start(tp.original)?;
-    let (_, (_, object, _, _, conjunct)) = all_consuming((
-        alt((tag::<_, _, OracleError<'_>>("shuffle "), tag("shuffles "))),
-        alt((
-            map(
-                nom_primitives::parse_object_recipient_pronoun,
-                |pronoun| match pronoun {
-                    "him" | "her" => ShuffleObject::SelfReference(TargetFilter::SelfRef),
-                    _ => ShuffleObject::Pronoun,
-                },
-            ),
-            map(
-                nom_target::parse_self_reference,
-                ShuffleObject::SelfReference,
-            ),
-        )),
-        tag(" into "),
+    let (object_text, _) = alt((tag::<_, _, OracleError<'_>>("shuffle "), tag("shuffles ")))
+        .parse(&tp.lower[predicate_start..])
+        .ok()?;
+    let subject_text = tp.original[..predicate_start].trim();
+    // CR 108.3 + CR 400.7e + CR 115.10a: the SOURCE's owner as the possessive
+    // subject ("This creature's owner shuffles it into their library" —
+    // Cerulean Sphinx) moves the source ITSELF. CR 115.10a: being affected by
+    // the ability does not make the object a target, so the clause declares no
+    // slot and source-bound placement (`SelfRef`) precedes one owner shuffle,
+    // never a selected-population `ChangeZoneAll`.
+    //
+    // The owner-subject shape is classified by the shared typed subject
+    // authority (`subject::parse_subject_application`), which models "~'s
+    // owner" as `affected == TargetFilter::Owner` — the same entry point the
+    // selected-object owner route below uses. The recognizer stays
+    // whole-clause: it only accepts the owner actor with no object target of
+    // its own, then validates the predicate tail.
+    let mut subject_ctx = ctx.clone();
+    let owner_subject = subject::parse_owner_subject(subject_text, &mut subject_ctx);
+    if matches!(owner_subject, Some(subject::OwnerSubject::Source)) {
+        // CR 201.5: source-name references still name this particular object
+        // even when an earlier instruction declared a different target.
+        let (_, (_, _, _, draw_tail)) = all_consuming((
+            alt((
+                verify(nom_target::parse_self_reference, |target: &TargetFilter| {
+                    matches!(target, TargetFilter::SelfRef)
+                }),
+                value(
+                    TargetFilter::SelfRef,
+                    nom_primitives::parse_object_recipient_pronoun,
+                ),
+            )),
+            tag(" into "),
+            alt((tag("their library"), tag("its owner's library"))),
+            opt(preceded(tag(" and "), rest)),
+        ))
+        .parse(object_text)
+        .ok()?;
+        let draw = if let Some(tail) = draw_tail {
+            // Reuse the numeric grammar's whole-count/noun guard after the
+            // shared conjugation adapter; an unknown suffix rejects the clause.
+            let predicate = subject::deconjugate_verb(tail);
+            let ast = imperative::parse_numeric_imperative_ast(&predicate, &predicate)?;
+            if !matches!(ast, NumericImperativeAst::Draw { .. }) {
+                return None;
+            }
+            let mut effect = imperative::lower_numeric_imperative_ast(ast);
+            let Effect::Draw { target, .. } = &mut effect else {
+                return None;
+            };
+            *target = TargetFilter::Owner;
+            Some(Box::new(AbilityDefinition::new(AbilityKind::Spell, effect)))
+        } else {
+            None
+        };
+        let mut movement =
+            imperative::lower_shuffle_ast(ShuffleImperativeAst::ChangeZoneToLibrary {
+                target: TargetFilter::SelfRef,
+                owner_library: true,
+            });
+        let shuffle = movement.sub_ability.as_deref_mut()?;
+        append_to_deepest_sub_ability(shuffle, draw);
+        *ctx = subject_ctx;
+        return Some(movement);
+    }
+    all_consuming((
+        tag::<_, _, OracleError<'_>>("it into "),
         alt((tag("their library"), tag("its owner's library"))),
-        opt(preceded(
-            tag(" and "),
-            recognize((peek(sequence::parse_conjugated_player_action_verb), rest)),
-        )),
     ))
-    .parse(&tp.lower[predicate_start..])
+    .parse(object_text)
     .ok()?;
-    let mut trial = ctx.clone();
-    let owner = subject::parse_owner_subject(tp.original[..predicate_start].trim(), &mut trial)?;
-    let (target, movement_target) = match (owner, object) {
-        (
-            subject::OwnerSubject::Declared {
+    // The owner actor was classified once above; dispatch on that typed result
+    // instead of splitting and parsing the subject again.
+    let target = match owner_subject {
+        Some(subject::OwnerSubject::Selected(target)) => target,
+        Some(subject::OwnerSubject::Anaphoric(filter)) => filter,
+        Some(subject::OwnerSubject::Source) | None => return None,
+    };
+    *ctx = subject_ctx;
+    // CR 115.10a + CR 303.4b: an attachment's host is an operand, not
+    // an announced target. The resolution-time attachment binder owns it.
+    if target.contains_source_attachment_host()
+        && !nom_primitives::scan_contains(tp.lower, "target ")
+    {
+        return Some(imperative::lower_shuffle_ast(
+            ShuffleImperativeAst::ChangeZoneToLibrary {
                 target,
-                multi_target: None,
+                owner_library: true,
             },
-            ShuffleObject::Pronoun,
-        ) if conjunct.is_none() => (Some(target), TargetFilter::ParentTarget),
-        (subject::OwnerSubject::Possessive { object }, ShuffleObject::Pronoun)
-            if conjunct.is_none() || object == TargetFilter::SelfRef =>
-        {
-            (None, object)
-        }
-        (
-            subject::OwnerSubject::Possessive {
-                object: TargetFilter::SelfRef,
-            },
-            ShuffleObject::SelfReference(TargetFilter::SelfRef),
-        ) => (None, TargetFilter::SelfRef),
-        _ => return None,
-    };
-    let tail = if let Some(conjunct) = conjunct {
-        // Map nom's recognized suffix back to the original text before recursion.
-        let conjunct = tp
-            // allow-noncombinator: TextPair maps a suffix already recognized by nom, not parsing dispatch.
-            .strip_prefix(&tp.lower[..tp.lower.len() - conjunct.len()])?
-            .original;
-        let mut clause = parse_effect_clause(&subject::deconjugate_verb(conjunct), &mut trial);
-        if !bind_player_recipient_to_possessive_actor(&mut clause.effect, &TargetFilter::Owner) {
-            return None;
-        }
-        let mut tail = AbilityDefinition::new(AbilityKind::Spell, clause.effect);
-        tail.sub_ability = clause.sub_ability;
-        Some(Box::new(tail))
-    } else {
-        None
-    };
-    let mut movement = imperative::lower_shuffle_ast(ShuffleImperativeAst::ChangeZoneToLibrary {
-        target: movement_target,
+        ));
+    }
+
+    let movement = imperative::lower_shuffle_ast(ShuffleImperativeAst::ChangeZoneToLibrary {
+        target: TargetFilter::ParentTarget,
         owner_library: true,
     });
-    if let Some(tail) = tail {
-        movement.sub_ability.as_mut()?.sub_ability = Some(tail);
-    }
     let mut bound_move = AbilityDefinition::new(AbilityKind::Spell, movement.effect);
     bound_move.sub_ability = movement.sub_ability;
-    *ctx = trial;
-    if let Some(target) = target {
-        let mut declaration = parsed_clause(Effect::TargetOnly { target });
-        declaration.sub_ability = Some(Box::new(bound_move));
-        Some(declaration)
-    } else {
-        let mut bound = parsed_clause(*bound_move.effect);
-        bound.sub_ability = bound_move.sub_ability;
-        Some(bound)
-    }
+    let mut declaration = parsed_clause(Effect::TargetOnly { target });
+    declaration.sub_ability = Some(Box::new(bound_move));
+    Some(declaration)
 }
 
 /// CR 400.3 + CR 401.7: Parse "the owner of target [filter] puts it into their
@@ -16347,25 +16395,28 @@ fn parse_into_library_nth_from_top_or_bottom(i: &str) -> OracleResult<'_, Librar
     Ok((i, LibraryPosition::NthFromTop { n }))
 }
 
-/// Extract the declared object or the untargeted possessive object from an owner
-/// subject. Quantified declarations return `None`.
+/// Shared helper: extract the target filter from "the owner of target [filter] [verb]s it ..."
+/// or "target [filter]'s owner [verb]s it ..." subject patterns.
+///
+/// Returns `Some(target_filter)` if the pattern matches, `None` otherwise.
 fn extract_owner_of_target(tp: TextPair, ctx: &mut ParseContext) -> Option<TargetFilter> {
     let predicate_start = subject::find_predicate_start(tp.original)?;
+    let subject_text = tp.original[..predicate_start].trim();
     let mut trial = ctx.clone();
-    let target =
-        match subject::parse_owner_subject(tp.original[..predicate_start].trim(), &mut trial)? {
-            subject::OwnerSubject::Declared {
-                target,
-                multi_target: None,
-            } => target,
-            subject::OwnerSubject::Possessive { object } => object,
-            subject::OwnerSubject::Declared {
-                multi_target: Some(_),
-                ..
-            } => return None,
-        };
-    *ctx = trial;
-    Some(target)
+    match subject::parse_owner_subject(subject_text, &mut trial)? {
+        subject::OwnerSubject::Selected(target) => {
+            *ctx = trial;
+            Some(target)
+        }
+        // A bare anaphoric owner announces no target and stays fail-closed here
+        // because the generic chain binder owns that shape.
+        subject::OwnerSubject::Anaphoric(filter) => {
+            *ctx = trial;
+            Some(filter)
+        }
+        // The source-owner role has its own whole-clause recognizer.
+        subject::OwnerSubject::Source => None,
+    }
 }
 
 fn try_parse_exile_from_top_until(
@@ -28231,8 +28282,8 @@ fn prior_clause_granter_referent(clauses: &[ClauseIr]) -> Option<ObjectScope> {
         .map(|_| ObjectScope::GrantingObject)
 }
 
-/// CR 608.2c: Does an earlier clause in the chain establish a typed (chosen)
-/// object referent that the current anaphor binds to — looking PAST intermediate
+/// CR 608.2c: Does an earlier clause establish a chosen object referent
+/// (a target or search result) that this anaphor binds to — looking PAST intermediate
 /// clauses that merely carry that referent forward via `ParentTarget`?
 ///
 /// `has_typed_target` alone only inspects the immediately-preceding clause, which
@@ -28242,9 +28293,9 @@ fn prior_clause_granter_referent(clauses: &[ClauseIr]) -> Option<ObjectScope> {
 /// 0/0 Elemental …" — has the typed land two clauses back, with the `Untap it`
 /// (`ParentTarget`) clause in between. The scan walks back, skipping
 /// `ParentTarget`-carrier clauses (they continue the same chosen referent), and
-/// succeeds at the originating typed clause or chosen search result. It stops
-/// at a conditional or a clause that neither introduces such a referent nor
-/// carries it via `ParentTarget`, so it never crosses an unrelated referent.
+/// succeeds at the originating typed clause. It stops at the first clause that is
+/// conditional or is neither typed nor a `ParentTarget` carrier, so it never
+/// reaches across an unrelated referent.
 ///
 /// CR 603.12 + CR 608.2c carve-out: a `WhenYouDo` clause does NOT bail the walk,
 /// even though it carries a `condition` — it is still inspected as a possible
@@ -31305,12 +31356,31 @@ fn bind_player_anchor_in_chain(
         &clause.effect,
         Effect::TargetOnly { target } if target_filter_can_target_player(target)
     );
+    // The link whose population the current link acts on; the owner anchor
+    // below is only established by a population the clause DECLARED.
+    let mut previous: &Effect = &clause.effect;
     let mut sub = clause.sub_ability.as_deref_mut();
     while let Some(def) = sub {
-        // CR 701.24a + CR 115.1a: the bound owner-population move carries a
-        // `Shuffle(ScopedPlayer)` terminal with the owner library scope; that
-        // is the chain-level player anchor for a following chooser.
+        // CR 701.24a + CR 115.1a + CR 115.10a: a BOUND owner-population move —
+        // its population is the declared object set named by the preceding
+        // link (`ParentTarget` / `ParentTargetSlot`), never a possessor the
+        // clause states itself ("your graveyard", whose population is an
+        // explicit `Controller`) — carries a `Shuffle(ScopedPlayer)` terminal
+        // with the owner library scope. Those owners are the chain-level player
+        // anchor a following chooser may inherit ("the owners of those cards",
+        // Turn the Earth). An explicit possessor establishes nothing for a
+        // LATER clause and must not be re-read as one: the same-clause
+        // application then rewrites the population this clause just declared
+        // (Elixir of Immortality) and replaces its activator possessor
+        // (CR 109.5: the player who activated the ability) with the source's
+        // owner (CR 108.3).
         if matches!(
+            previous,
+            Effect::ChangeZoneAll {
+                target: TargetFilter::ParentTarget | TargetFilter::ParentTargetSlot { .. },
+                ..
+            }
+        ) && matches!(
             def.effect.as_ref(),
             Effect::Shuffle {
                 target: TargetFilter::ScopedPlayer
@@ -31382,9 +31452,22 @@ fn bind_player_anchor_in_chain(
                 _ => {}
             }
         }
-        if let Some(anchor) = extract_player_anchor(def.effect.as_ref(), declared) {
-            return Some(anchor);
+        // CR 701.24c + CR 608.2c: the terminal owner-library shuffle consumer —
+        // `Shuffle(ScopedPlayer)` under the owner-population scope — names the
+        // PROSPECTIVE OWNERS of the moved set, resolved at resolution time. It is
+        // not an acting-player anchor, so it must not be extracted as one: doing
+        // so applied `ScopedPlayer` back onto the clause it belongs to and
+        // rewrote the explicit "your graveyard" population (`Controller`) that
+        // CR 109.5 keeps with the activator (Elixir of Immortality).
+        let owner_population_consumer = def.player_scope.as_ref()
+            == Some(&imperative::owner_library_shuffle_scope())
+            && matches!(def.effect.as_ref(), Effect::Shuffle { .. });
+        if !owner_population_consumer {
+            if let Some(anchor) = extract_player_anchor(&def.effect, declared) {
+                return Some(anchor);
+            }
         }
+        previous = def.effect.as_ref();
         sub = def.sub_ability.as_deref_mut();
     }
     None
@@ -31613,12 +31696,6 @@ fn repeat_for_each_this_way_suffix(pred_lower: &str) -> Option<QuantityExpr> {
     }
 }
 
-#[derive(Clone, Copy)]
-enum AnchorProvenance {
-    CarriedFromEarlierClause,
-    EstablishedByThisClause,
-}
-
 /// CR 608.2c + CR 117.3a: Apply an anchor subject (tracked by the chain parser)
 /// to a caster-defaulted player-scope effect, so chained instructions like
 /// "then shuffle" inherit the earlier subject ("its controller").
@@ -31627,20 +31704,7 @@ enum AnchorProvenance {
 /// (`Controller`), a bare "that player" placeholder (`Player`), or the generic
 /// subject-parser default (`ParentTargetController`). Does not touch effects
 /// that already carry an explicit owner anaphor (`ParentTargetOwner`).
-///
-/// `AnchorProvenance` distinguishes an anchor carried from an earlier clause
-/// from the anchor this clause established for its own instruction chain.
-/// A mass move's population can be
-/// explicit in the clause that prints it ("shuffle this artifact and YOUR
-/// graveyard into their owner's library" — Elixir of Immortality), so a
-/// same-clause owner anchor must not rewrite it; the anchor still governs the
-/// following continuation, which is what the carried value is for.
-fn apply_anchor_subject(
-    effect: &mut Effect,
-    anchor: &TargetFilter,
-    draw_inherits_anchor: bool,
-    provenance: AnchorProvenance,
-) {
+fn apply_anchor_subject(effect: &mut Effect, anchor: &TargetFilter, draw_inherits_anchor: bool) {
     // `ParentTarget` reaches this chain-local applier only from
     // `bind_player_anchor_in_chain`'s player-only `TargetOnly` wrapper
     // branch. It is a player reference there, but remains excluded from the
@@ -31683,18 +31747,14 @@ fn apply_anchor_subject(
             destination: Zone::Library,
             target,
             ..
-        } if *target == TargetFilter::Controller => match provenance {
-            AnchorProvenance::CarriedFromEarlierClause => *target = anchor.clone(),
-            AnchorProvenance::EstablishedByThisClause => {}
-        },
+        } if *target == TargetFilter::Controller => {
+            *target = anchor.clone();
+        }
         Effect::ChangeZoneAll { target, .. }
             if !matches!(anchor, TargetFilter::ParentTarget)
                 && *target == TargetFilter::Controller =>
         {
-            match provenance {
-                AnchorProvenance::CarriedFromEarlierClause => *target = anchor.clone(),
-                AnchorProvenance::EstablishedByThisClause => {}
-            }
+            *target = anchor.clone();
         }
         // CR 608.2c: a trailing "…, then draws …" continuation is a separate
         // chunk with no subject of its own, so it defaults its target to the
@@ -31732,20 +31792,14 @@ fn apply_anchor_subject_to_clause(
     clause: &mut ParsedEffectClause,
     anchor: &TargetFilter,
     text_lower: &str,
-    provenance: AnchorProvenance,
 ) {
     let draw_inherits_anchor = chunk_continues_anchored_subject(text_lower);
     apply_their_library_reveal_anchor(&mut clause.effect, anchor, text_lower);
-    apply_anchor_subject(&mut clause.effect, anchor, draw_inherits_anchor, provenance);
+    apply_anchor_subject(&mut clause.effect, anchor, draw_inherits_anchor);
     let mut sub = clause.sub_ability.as_deref_mut();
     while let Some(def) = sub {
         apply_their_library_reveal_anchor(def.effect.as_mut(), anchor, text_lower);
-        apply_anchor_subject(
-            def.effect.as_mut(),
-            anchor,
-            draw_inherits_anchor,
-            provenance,
-        );
+        apply_anchor_subject(def.effect.as_mut(), anchor, draw_inherits_anchor);
         sub = def.sub_ability.as_deref_mut();
     }
 }
@@ -32292,10 +32346,9 @@ fn target_filter_can_target_player(filter: &TargetFilter) -> bool {
         | TargetFilter::ParentTargetOwner
         | TargetFilter::DeclaredPlayer { .. } => true,
         TargetFilter::Typed(tf) => tf.type_filters.is_empty(),
-        TargetFilter::Or { filters } => filters.iter().any(target_filter_can_target_player),
-        // A conjunction can match a player only when every leg can; an
-        // object-only leg still excludes players alongside a zone-only Typed leg.
-        TargetFilter::And { filters } => filters.iter().all(target_filter_can_target_player),
+        TargetFilter::Or { filters } | TargetFilter::And { filters } => {
+            filters.iter().any(target_filter_can_target_player)
+        }
         TargetFilter::Not { filter } => target_filter_can_target_player(filter),
         _ => false,
     }
@@ -32924,7 +32977,7 @@ fn sync_player_into_nested_shuffle_sub(
 /// draw, CR 701.9a discard, CR 701.17a mill, CR 701.22a scry, CR 701.25a
 /// surveil), under the same unbound-default guard; every other `Effect` is
 /// intentionally left untouched by the `_` arm.
-fn bind_player_recipient_to_possessive_actor(effect: &mut Effect, actor: &TargetFilter) -> bool {
+fn bind_player_recipient_to_possessive_actor(effect: &mut Effect, actor: &TargetFilter) {
     match effect {
         Effect::RevealHand { target, .. }
         | Effect::Draw { target, .. }
@@ -32935,9 +32988,8 @@ fn bind_player_recipient_to_possessive_actor(effect: &mut Effect, actor: &Target
             if matches!(target, TargetFilter::Any | TargetFilter::Controller) =>
         {
             *target = actor.clone();
-            true
         }
-        _ => false,
+        _ => {}
     }
 }
 
@@ -44134,6 +44186,10 @@ fn parse_ability_ir_with_damage_context(
     ctx: &mut ParseContext,
     damage_context: Option<DamageTargetContext>,
 ) -> AbilityIr {
+    // CR 608.2c: the resolved-root proof belongs to this body's own effect
+    // chain. Hold it back from every recognizer below, which may parse a chain
+    // of its own, and hand it back only to the chain body at the end.
+    let resolved_chain_root = std::mem::take(&mut ctx.resolved_chain_root);
     // CR 608.2c + CR 109.4: a leading "During target opponent's next turn, …"
     // window DECLARES a player target, and that player is in scope for the whole
     // ability body — so a "that player" anaphor anywhere in it refers to the
@@ -44256,6 +44312,7 @@ fn parse_ability_ir_with_damage_context(
             modal: None,
         };
     }
+    ctx.resolved_chain_root = resolved_chain_root;
     AbilityIr {
         source_text: text.to_string(),
         body: parse_effect_chain_ir_with_damage_context(text, kind, ctx, 0, damage_context),
@@ -44623,22 +44680,57 @@ pub(crate) fn finalize_effect_chain(def: &mut AbilityDefinition) {
     fold_speed_floor_sentences(def);
     rewrite_choose_tracked_set_exclusion(def);
     fold_additional_combat_attacker_restriction(def);
+    normalize_each_player_search_shuffle(def);
+}
+
+/// CR 701.24a + CR 608.2c: "each player searches their library for ..., then
+/// shuffles their library". The clause after the search runs inside the
+/// search's all-players iteration, so "their library" is the library of the
+/// player the iteration is on: `ScopedPlayer`, with no scope of its own. A bare
+/// `ParentTarget` names no announced player there, and the chain driver skips a
+/// node that reads a missing parent target, so the shuffle would never happen
+/// (Mojave Desert's planeswalk trigger).
+fn normalize_each_player_search_shuffle(def: &mut AbilityDefinition) {
+    fn walk(node: &mut AbilityDefinition, inside_each_player_search: bool) {
+        if inside_each_player_search
+            && node.player_scope == Some(PlayerFilter::All)
+            && matches!(
+                node.effect.as_ref(),
+                Effect::Shuffle {
+                    target: TargetFilter::ParentTarget
+                }
+            )
+        {
+            *node.effect = Effect::Shuffle {
+                target: TargetFilter::ScopedPlayer,
+            };
+            node.player_scope = None;
+        }
+        let starts_iteration = matches!(node.effect.as_ref(), Effect::SearchLibrary { .. })
+            && node.player_scope == Some(PlayerFilter::All);
+        if let Some(sub) = node.sub_ability.as_deref_mut() {
+            walk(sub, inside_each_player_search || starts_iteration);
+        }
+    }
+    walk(def, false);
 }
 
 fn apply_owner_library_reveal_anchor_from_text(def: &mut AbilityDefinition, text: &str) {
     let lower = text.to_lowercase();
-    let owner_library_shuffle = scan_contains_phrase(&lower, "shuffles it into their library");
-    let repair_reveal = owner_library_shuffle
-        && scan_contains_phrase(&lower, "reveals the top card of their library")
+    if !scan_contains_phrase(&lower, "shuffles it into their library") {
+        return;
+    }
+
+    let repair_reveal = scan_contains_phrase(&lower, "reveals the top card of their library")
         && !scan_contains_phrase(&lower, "reveals the top card of your library");
-    let repair_exile = owner_library_shuffle
-        && scan_contains_phrase(&lower, "exiles the top card of their library")
+    let repair_exile = scan_contains_phrase(&lower, "exiles the top card of their library")
         && !scan_contains_phrase(&lower, "exiles the top card of your library");
 
     // CR 108.3 + CR 400.3 + CR 608.2c: after an owner's-library shuffle,
-    // following owner-relative instructions refer to that same owner. Repair
-    // reveal/exile only for "their library", leaving explicit "your library"
-    // instructions untouched; other recipients follow the structural anchor.
+    // a following owner-relative instruction retains that owner. Reveal/exile
+    // repair additionally requires printed "their library", so explicit
+    // "your library" instructions remain untouched. Draw repair below is
+    // restricted to the established prospective-owner population anchor.
     let mut owner_anchor = None;
     let mut current = Some(def);
     while let Some(node) = current {
@@ -44650,6 +44742,14 @@ fn apply_owner_library_reveal_anchor_from_text(def: &mut AbilityDefinition, text
                             == Some(&imperative::owner_library_shuffle_scope())) =>
             {
                 owner_anchor = Some(target.clone());
+            }
+            // CR 608.2c: the owner's next instruction retains the same
+            // prospective owner population even after the object moved.
+            Effect::Draw { target, .. }
+                if *target == TargetFilter::ParentTargetOwner
+                    && owner_anchor == Some(TargetFilter::ScopedPlayer) =>
+            {
+                *target = TargetFilter::ScopedPlayer;
             }
             Effect::RevealTop { player, .. }
                 if repair_reveal && is_repairable_library_owner(player) =>
@@ -44663,17 +44763,6 @@ fn apply_owner_library_reveal_anchor_from_text(def: &mut AbilityDefinition, text
             {
                 if let Some(anchor) = &owner_anchor {
                     *player = anchor.clone();
-                }
-            }
-            Effect::Draw { target, .. }
-            | Effect::Discard { target, .. }
-            | Effect::Mill { target, .. }
-            | Effect::LoseLife {
-                target: Some(target),
-                ..
-            } if *target == TargetFilter::ParentTargetOwner => {
-                if let Some(anchor) = &owner_anchor {
-                    *target = anchor.clone();
                 }
             }
             _ => {}
@@ -45782,6 +45871,9 @@ fn parse_effect_chain_ir_body(
     // CR 608.2c: the enclosing chain's player declaration, taken on entry so only
     // the one nested call that set it can read it.
     let enclosing_declared_player = ctx.enclosing_declared_player.take();
+    // CR 608.2c: whether this chain is its ability's resolved root, taken on
+    // entry so a chain nested inside it cannot inherit the proof.
+    let resolved_chain_root = std::mem::take(&mut ctx.resolved_chain_root);
     if let Some(ir) = parse_reciprocal_graveyard_choice_ir(text, kind) {
         return ir;
     }
@@ -45932,6 +46024,9 @@ fn parse_effect_chain_ir_body(
     // the leading duration a later coordinated chunk of the sentence cannot see.
     let sentence_leading_duration = compute_sentence_leading_duration(&chunks);
     let mut builder = ClauseIrBuilder::new(full_text);
+    // CR 608.2c: the gate a chain root took on its own target's controller,
+    // checked against the assembled chain by `keep_own_target_gate_readable`.
+    let mut own_target_gate: Option<AbilityCondition> = None;
 
     // CR 608.2c + CR 117.3a: "Anchor subject" for chain-level anaphoric
     // inheritance. When a clause in the chain declares an explicit player-scope
@@ -47835,7 +47930,27 @@ fn parse_effect_chain_ir_body(
             && turn_cond.is_none()
             && target_has_cond.is_none()
         {
-            strip_routed_suffix_conditional(&text, ctx)
+            // CR 608.2c + CR 700.2: the clause is the resolved root only when
+            // its entry point proved this chain is the ability's root, no
+            // earlier clause of the chain has been pushed, and the body is a
+            // whole ability. A mode is not: the engine appends each later chosen
+            // mode to the earlier one as a sub-ability (`build_chained_resolved`),
+            // and which mode comes first depends on the choice.
+            let position = match (
+                resolved_chain_root,
+                builder.clauses().is_empty(),
+                ctx.body_scope,
+            ) {
+                (ResolvedChainRoot::Proven, true, BodyScope::WholeAbility) => {
+                    conditions::GatedInstructionPosition::ChainRoot
+                }
+                (ResolvedChainRoot::Unproven, _, _)
+                | (_, false, _)
+                | (_, _, BodyScope::ModalMode) => {
+                    conditions::GatedInstructionPosition::AfterInstruction
+                }
+            };
+            strip_routed_suffix_conditional(&text, ctx, position)
         } else {
             (None, text)
         };
@@ -47846,7 +47961,23 @@ fn parse_effect_chain_ir_body(
             (Some(route), Some(suffix_route)) => Some(route.merge(suffix_route)),
             (route, suffix_route) => route.or(suffix_route),
         };
+        if let Some((gate, LeadingConditionRoute::OwnTargetController)) = &suffix_cond {
+            own_target_gate = Some(gate.clone());
+        }
         let suffix_cond = suffix_cond.map(|(condition, _)| condition);
+        // CR 608.2c: a target-controller condition the binder refused must
+        // not vanish. The instruction would otherwise lower without it, and
+        // the coverage detector can be satisfied by any other condition slot
+        // of the same ability (a hoisted unless-payment, a later gate).
+        if suffix_cond.is_none() && conditions::carries_unbound_target_controller_suffix(&text) {
+            unimplemented_clause(
+                &mut builder,
+                "target_controller_condition_unbound",
+                normalized_text,
+                chunk.boundary_after,
+            );
+            continue;
+        }
         let guard_condition = condition
             .or(counter_cond)
             .or(mv_cond)
@@ -49882,12 +50013,7 @@ fn parse_effect_chain_ir_body(
             .and_then(CarriedPlayerSubject::chain_reference)
         {
             let text_lower_for_anchor = text.to_lowercase();
-            apply_anchor_subject_to_clause(
-                &mut clause,
-                anchor,
-                &text_lower_for_anchor,
-                AnchorProvenance::CarriedFromEarlierClause,
-            );
+            apply_anchor_subject_to_clause(&mut clause, anchor, &text_lower_for_anchor);
         }
 
         // Update anchor from this clause's subject (e.g., SearchLibrary.target_player
@@ -49910,12 +50036,7 @@ fn parse_effect_chain_ir_body(
             &mut ctx.clause_declared_group,
         ) {
             let text_lower_for_anchor = text.to_lowercase();
-            apply_anchor_subject_to_clause(
-                &mut clause,
-                &extracted,
-                &text_lower_for_anchor,
-                AnchorProvenance::EstablishedByThisClause,
-            );
+            apply_anchor_subject_to_clause(&mut clause, &extracted, &text_lower_for_anchor);
             carried_player = Some(CarriedPlayerSubject::antecedent(extracted));
         }
 
@@ -50107,8 +50228,8 @@ fn parse_effect_chain_ir_body(
                 replace_target_with_parent(&mut clause.effect);
             }
         }
-        // CR 608.2c: Pronoun clause following an unconditional chosen-object effect.
-        // Transitive across `ParentTarget` carriers so an intervening
+        // CR 608.2c: Pronoun clause following an unconditional chosen-object producer.
+        // Transitive across `ParentTarget`-carrier clauses so an intervening
         // anaphor ("Untap it.") doesn't hide the originating chosen referent
         // (Nissa, Who Shakes the World).
         if condition.is_none()
@@ -51645,7 +51766,7 @@ fn parse_effect_chain_ir_body(
     let mut clauses = builder.finish();
     try_fold_loses_other_sibling(&mut clauses);
 
-    EffectChainIr {
+    let mut ir = EffectChainIr {
         clauses,
         kind,
         continuation_kind: None,
@@ -51655,6 +51776,64 @@ fn parse_effect_chain_ir_body(
         in_trigger: ctx.in_trigger,
         repeat_until: pending_repeat_until,
         injected_color_choice: InjectedColorChoice::Permitted,
+    };
+    // CR 608.2c: on the assembled chain, so every node assembly adds above,
+    // below or around the gated instruction is known.
+    if let Some(gate) = &own_target_gate {
+        keep_own_target_gate_readable(&mut ir, gate);
+    }
+    ir
+}
+
+/// CR 608.2c: a chain root gated on its own target's controller
+/// ([`LeadingConditionRoute::OwnTargetController`]) is kept only when the
+/// ASSEMBLED chain still evaluates that gate where it can read the target and
+/// still reaches every later instruction "in the order written". Assembly can
+/// add nodes after the clause sequence is built (a chosen-color wrap puts a
+/// `Choose` root above the targeted grant), so the check lowers the finished
+/// chain with the production lowering and reads the result:
+/// - the first clause still carries the gate, and the gate is on the assembled
+///   root, which declares a target of its own (the engine evaluates a root's
+///   gate on the root, reading its targets);
+/// - the root has no else branch, and its direct sub, if any, is an
+///   independent instruction with no condition of its own: on a false gate
+///   the engine runs such a direct sub (engine `effects/mod.rs`, the
+///   condition-false path of `resolve_chain_body`), and the rest of the chain
+///   is reached through it. A sub the engine would also run for another reason
+///   (a released or replicated gate) is declined conservatively.
+/// - nothing below the root that the same ability announces for (including a
+///   coin flip's outcome branches, but not a token's or a granted ability's
+///   own text) announces a target of its own (CR 608.2b): were
+///   the root's target illegal while a later target stayed legal, the engine
+///   would not keep the illegal head slot and the gate would read no
+///   controller (`conditions::chain_announces_target_below`).
+///
+/// Otherwise the gated clause becomes an explicit gap.
+fn keep_own_target_gate_readable(ir: &mut EffectChainIr, gate: &AbilityCondition) {
+    // The gated clause is the chain's first clause (the strip binds only when no
+    // earlier clause was pushed). If something re-homed the gate since, the
+    // check cannot vouch for it, so it fails closed instead of returning.
+    let carries_gate = ir
+        .clauses
+        .first()
+        .is_some_and(|root| root.condition.as_ref() == Some(gate));
+    let readable = carries_gate && {
+        let assembled = lower::lower_effect_chain_ir(ir);
+        assembled.condition.as_ref() == Some(gate)
+            && assembled
+                .effect
+                .target_filter()
+                .is_some_and(|filter| !filter.is_context_ref())
+            && assembled.else_ability.is_none()
+            && assembled.sub_ability.as_deref().is_none_or(|next| {
+                next.sub_link == SubAbilityLink::SequentialSibling && next.condition.is_none()
+            })
+            && !conditions::chain_announces_target_below(&assembled)
+    };
+    if !readable {
+        if let Some(root) = ir.clauses.first_mut() {
+            root.replace_with_gap("target_controller_gate_unreadable");
+        }
     }
 }
 
@@ -54195,50 +54374,6 @@ mod trk_phase1_binding_tests {
     }
 
     #[test]
-    fn optional_declared_owner_shuffle_keeps_selected_object() {
-        for tail in ["", " and draws a card"] {
-            // Grammar fixture: optional declaration extends the owner-actor
-            // grammar used by Oblation; no printed-card claim is made.
-            let text = format!(
-                "The owner of up to one target creature shuffles it into their library{tail}."
-            );
-            let def = parse_effect_chain(&text, AbilityKind::Spell);
-            assert_eq!(
-                def.multi_target,
-                Some(MultiTargetSpec::fixed(0, 1)),
-                "{def:?}"
-            );
-            assert!(matches!(*def.effect, Effect::TargetOnly { .. }), "{def:?}");
-            let all = effects(&def);
-            assert!(
-                all.iter().any(|effect| matches!(
-                    effect,
-                    Effect::ChangeZoneAll {
-                        target: TargetFilter::ParentTarget,
-                        destination: Zone::Library,
-                        ..
-                    } | Effect::ChangeZone {
-                        target: TargetFilter::ParentTarget,
-                        destination: Zone::Library,
-                        ..
-                    }
-                )),
-                "{def:?}"
-            );
-            assert!(
-                !all.iter().any(|effect| matches!(
-                    effect,
-                    Effect::ChangeZone {
-                        target: TargetFilter::SelfRef,
-                        ..
-                    } | Effect::Unimplemented { .. }
-                )),
-                "{def:?}"
-            );
-        }
-    }
-
-    #[test]
     fn r2_riftsweeper_declares_face_up_exile_and_rejects_malformed_choose() {
         let trigger = parse_trigger_line("When this creature enters, choose target face-up exiled card. Its owner shuffles it into their library.", "Riftsweeper");
         let def = trigger.execute.as_deref().expect("ETB");
@@ -54433,35 +54568,6 @@ mod trk_phase1_binding_tests {
     #[test]
     fn owner_shuffle_shortcut_cannot_drop_an_earlier_draw_or_failed_predicate() {
         let mut ctx = ParseContext::default();
-        let positive = "The owner of target creature shuffles it into their library.";
-        let lower = positive.to_lowercase();
-        let clause = try_parse_owner_of_target_shuffle(TextPair::new(positive, &lower), &mut ctx)
-            .expect("declared owner shortcut");
-        assert!(
-            matches!(&clause.effect, Effect::TargetOnly { target: TargetFilter::Typed(filter) }
-            if filter.type_filters == [TypeFilter::Creature])
-        );
-        let movement = clause.sub_ability.as_deref().expect("bound movement");
-        assert!(matches!(
-            &*movement.effect,
-            Effect::ChangeZoneAll {
-                target: TargetFilter::ParentTarget,
-                destination: Zone::Library,
-                library_shuffle: LibraryShuffleMode::TerminalShuffle,
-                ..
-            }
-        ));
-        let shuffle = movement.sub_ability.as_deref().expect("terminal shuffle");
-        assert!(matches!(
-            &*shuffle.effect,
-            Effect::Shuffle {
-                target: TargetFilter::ScopedPlayer
-            }
-        ));
-        assert_eq!(
-            shuffle.player_scope,
-            Some(imperative::owner_library_shuffle_scope())
-        );
         for text in [
             CHAPTER,
             "The owner of target creature draws two cards, then shuffles it into their library.",

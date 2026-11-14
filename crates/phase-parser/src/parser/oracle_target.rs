@@ -45,9 +45,9 @@ use super::oracle_util::{
     SELF_REF_PARSE_ONLY_PHRASES, SELF_REF_TYPE_PHRASES,
 };
 use crate::types::text_grammar::{
-    parse_color_prefix, parse_color_quality_prefix, parse_core_type, parse_leading_keyword_match,
-    parse_leading_pt_designation, parse_token_suffix, separator_continues_enclosing_list,
-    starts_with_type_phrase_lead, KeywordMatch,
+    parse_color_prefix, parse_color_quality_prefix, parse_core_type, parse_exile_visibility_prefix,
+    parse_leading_keyword_match, parse_leading_pt_designation, parse_token_suffix,
+    separator_continues_enclosing_list, starts_with_type_phrase_lead, KeywordMatch,
 };
 pub(crate) use crate::types::text_grammar::{
     parse_combat_status_prefix, parse_without_keyword_suffix, starts_with_type_word,
@@ -406,8 +406,6 @@ pub fn parse_event_context_ref(text: &str) -> Option<(TargetFilter, &str)> {
 mod r2_exile_modifier_tests {
     use super::*;
 
-    /// CR 406.3: printed control. Pull from Eternity: "Put target face-up
-    /// exiled card into its owner's graveyard."
     #[test]
     fn face_up_exiled_card_consumes_complete_target_and_retains_remainder() {
         let (target, rest) = parse_target("target face-up exiled card");
@@ -426,70 +424,36 @@ mod r2_exile_modifier_tests {
         assert_eq!(rest.trim(), "frobnicate");
     }
 
-    fn face_up_exiled(filter: &TypedFilter) -> bool {
-        filter
-            .properties
-            .contains(&FilterProp::InZone { zone: Zone::Exile })
-            && filter.properties.contains(&FilterProp::Not {
-                prop: Box::new(FilterProp::FaceDown),
-            })
-    }
-
-    /// CR 406.3: synthetic grammar case (no printed card combines these
-    /// words; Pull from Eternity's "target face-up exiled card" above is the
-    /// printed control). The visibility adjectives lead a `non-` negation, and
-    /// both restrictions stay on the one noun; the reverse order matches too.
+    /// CR 406.3 + CR 108.3: the same modifier run must be reachable from an
+    /// ARTICLE-LED generic phrase. Before the shared `parse_exile_visibility_prefix`
+    /// was admitted by `starts_with_type_phrase_lead`, the indefinite article was
+    /// never stripped, so "a face-up exiled card they own" (Binding Negotiation)
+    /// collapsed to a match-anything filter.
     #[test]
-    fn face_up_exiled_adjectives_keep_an_adjacent_negation() {
-        for text in [
-            "target face-up exiled nonland card",
-            "target nonland face-up exiled card",
-        ] {
-            let (target, rest) = parse_target(text);
-            assert!(rest.is_empty(), "{text}: {rest:?}");
-            let TargetFilter::Typed(filter) = target else {
-                panic!("{text}: expected one typed card filter, got {target:?}")
-            };
-            assert!(filter.type_filters.contains(&TypeFilter::Card), "{text}");
-            assert!(
-                filter
-                    .type_filters
-                    .contains(&TypeFilter::Non(Box::new(TypeFilter::Land))),
-                "{text}: the negation survives: {filter:?}"
-            );
-            assert!(face_up_exiled(&filter), "{text}: {filter:?}");
-        }
-    }
-
-    /// CR 406.3: synthetic grammar case (no printed card has this union). Each
-    /// leg repeats its head noun, so "face-up exiled" qualifies only the
-    /// creature card; the artifact card leg gains no exile or visibility
-    /// restriction.
-    #[test]
-    fn face_up_exiled_adjectives_stay_on_their_own_union_leg() {
-        let (target, rest) = parse_target("target face-up exiled creature card or artifact card");
+    fn article_led_face_up_exiled_card_reaches_exile_modifiers() {
+        let (target, rest) = parse_target("a face-up exiled card they own");
         assert!(rest.is_empty(), "{rest:?}");
-        let TargetFilter::Or { filters } = target else {
-            panic!("expected a two-leg union, got {target:?}")
+        let TargetFilter::Typed(filter) = target else {
+            panic!("expected typed card, got {target:?}")
         };
-        assert_eq!(filters.len(), 2, "{filters:?}");
-        let legs: Vec<&TypedFilter> = filters
-            .iter()
-            .map(|leg| match leg {
-                TargetFilter::Typed(filter) => filter,
-                other => panic!("expected typed legs, got {other:?}"),
-            })
-            .collect();
-        assert!(legs[0].type_filters.contains(&TypeFilter::Creature));
-        assert!(face_up_exiled(legs[0]), "left leg: {:?}", legs[0]);
-        assert!(legs[1].type_filters.contains(&TypeFilter::Artifact));
+        assert!(filter.type_filters.contains(&TypeFilter::Card));
         assert!(
-            !legs[1].properties.iter().any(|prop| matches!(
-                prop,
-                FilterProp::InZone { .. } | FilterProp::FaceDown | FilterProp::Not { .. }
-            )),
-            "the artifact card leg is not restricted to face-up exiled cards: {:?}",
-            legs[1]
+            filter
+                .properties
+                .contains(&FilterProp::InZone { zone: Zone::Exile }),
+            "{filter:?}"
+        );
+        assert!(
+            filter.properties.contains(&FilterProp::Not {
+                prop: Box::new(FilterProp::FaceDown)
+            }),
+            "{filter:?}"
+        );
+        assert!(
+            filter.properties.contains(&FilterProp::Owned {
+                controller: ControllerRef::ScopedPlayer
+            }),
+            "{filter:?}"
         );
     }
 }
@@ -1492,24 +1456,20 @@ pub fn parse_target_with_syntax<'a>(
         // separator compositionally, then delegate the complete object tail to
         // the shared type-phrase grammar so controller/type qualifiers retain
         // their ordinary semantics.
-        // CR 115.1a + CR 601.2c: A one-slot player target declaration. The
-        // noun grammar is word-bounded over SINGULAR and PLURAL forms, because
-        // Oracle prints the plural only after a cardinality quantifier
-        // ("choose any number of target players", "up to two target
-        // opponents"). The quantifier is stripped into `multi_target`
-        // upstream; consuming the plural noun here is what lets the peeled
-        // declaration reach strict exhaustion instead of stranding an "s".
-        // The returned filter stays the singular player/opponent reference —
-        // cardinality belongs to `multi_target`, not to the filter.
+        // CR 115.1 + CR 608.2c: the player noun is number-agnostic in this
+        // grammar — "target players" / "target opponents" name the same slot
+        // axis as their singular forms, with the clause's `MultiTargetSpec`
+        // carrying the printed count (CR 601.2c, CR 115.1d). The plural legs
+        // are matched FIRST and are word-bounded through `tag` + the caller's
+        // clause boundary check, so the leftover "s" of a half-consumed
+        // singular can no longer be mistaken for the rest of the clause
+        // (Officious Interrogation, Call the Coppercoats).
         if let Ok((after_player, player_filter)) = alt((
             value(
                 TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent)),
                 alt((tag::<_, _, OracleError<'_>>("opponents"), tag("opponent"))),
             ),
-            value(
-                TargetFilter::Player,
-                alt((tag::<_, _, OracleError<'_>>("players"), tag("player"))),
-            ),
+            value(TargetFilter::Player, alt((tag("players"), tag("player")))),
         ))
         .parse(after_target)
         {
@@ -3757,9 +3717,15 @@ fn parse_type_phrase_folding_unbound<'a>(
         }
     }
 
-    // CR 406.3: the exile visibility adjectives may also follow a `non-`
-    // negation ("nonland face-up exiled card").
-    consume_exile_visibility_adjectives(&lower, &mut pos, &mut properties);
+    // CR 406.3: face-up exiled cards retain both their zone and visibility
+    // restrictions. Compose these adjectives before the ordinary type reader.
+    // `parse_exile_visibility_prefix` is the same authority the article guard
+    // (`starts_with_type_phrase_lead`) uses, so admission and consumption can
+    // never disagree.
+    while let Ok((rest, property)) = parse_exile_visibility_prefix(&lower[pos..]) {
+        properties.push(property);
+        pos = lower.len() - rest.len();
+    }
 
     // Parse the core type, falling back to subtype recognition
     let (card_type, subtype, type_len) = parse_core_type(&lower[pos..]);

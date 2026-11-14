@@ -248,7 +248,6 @@ pub(crate) fn change_zone_all_player_scope(
 ) -> Option<PlayerId> {
     match target_filter {
         TargetFilter::Controller => Some(ability.controller),
-        // CR 400.3: "its owner's" resolves to the owner of source_id.
         TargetFilter::Owner => {
             crate::game::targeting::resolve_effect_player_ref(state, ability, target_filter)
         }
@@ -453,6 +452,14 @@ fn resolution_zone_candidates(
         ability,
         filter_controller,
     );
+    let terminal_shuffle_move = matches!(
+        ability.effect,
+        Effect::ChangeZone {
+            destination: Zone::Library,
+            library_shuffle: LibraryShuffleMode::TerminalShuffle,
+            ..
+        }
+    );
     state
         .objects
         .iter()
@@ -462,6 +469,12 @@ fn resolution_zone_candidates(
                 // CR 108.2 + CR 109.1: a zone scan chooses among the cards in
                 // the zone; the CR 722.3c retained prepare copy is not one.
                 && object.is_card_population_member()
+                // CR 730.2: a merged component is part of one permanent, not a
+                // permanent the player can choose by itself.
+                // Applied to the move component of a terminal shuffle, whose
+                // chosen merged permanent this branch delivers whole; every
+                // other scan keeps the merge-base population (#10759).
+                && !(terminal_shuffle_move && state.is_absorbed_merge_component(**id))
                 && crate::game::filter::matches_target_filter_for_zone(
                     state,
                     **id,
@@ -914,9 +927,14 @@ fn bound_move_members(
     // CR 730.3c: when this effect references the object that just left the
     // battlefield (a flicker/blink's "return it") and that object was a merged
     // permanent's survivor, act on the component cards it split into as well, so
-    // the whole pile is moved — not just the survivor. A no-op for ordinary
-    // (freshly chosen) targets.
-    crate::game::merge::expand_returned_merge_components(state, targeted_objects, target_filter)
+    // the whole pile is moved — not just the survivor. Only a referent whose own
+    // departure is recorded expands; a fresh choice (one exiled card) does not.
+    crate::game::merge::expand_returned_merge_components(
+        state,
+        ability,
+        targeted_objects,
+        target_filter,
+    )
 }
 
 /// The single per-member test for "this object can no longer undergo the
@@ -1495,6 +1513,7 @@ pub fn resolve(
                 ability.context.face_down_in_exile,
                 track_exiled_by_source,
                 library_placement.clone(),
+                library_shuffle,
                 None,
                 Some(ability.controller),
                 // CR 608.2c: the subject of the instruction ("that player
@@ -1578,6 +1597,7 @@ pub fn resolve(
                 ability.context.face_down_in_exile,
                 track_exiled_by_source,
                 library_placement.clone(),
+                library_shuffle,
                 None,
                 Some(ability.controller),
                 // CR 608.2c: the subject of the instruction ("that player
@@ -1658,6 +1678,7 @@ pub fn resolve(
             conditional_enter_with_counters: effect_conditional_enter_with_counters.clone(),
             count_param: 0,
             library_position: library_placement.clone(),
+            library_shuffle,
             mass_library_order: None,
             is_cost_payment: false,
             // CR 614.12: carry the moved-object type gate across the
@@ -1701,6 +1722,7 @@ pub fn resolve(
         face_down_in_exile: ability.context.face_down_in_exile,
         face_down_profile: face_down_profile.clone(),
         library_placement,
+        library_shuffle,
         enter_attached_to: forward_result_search_attach_host(state, ability),
     };
     let _ = owner_library; // routing handled by move_to_zone (CR 400.7)
@@ -1914,6 +1936,7 @@ pub fn resolve(
                         // enter face down.
                         face_down_profile: ctx.face_down_profile.clone(),
                         library_placement: ctx.library_placement,
+                        library_shuffle: ctx.library_shuffle,
                         enter_attached_to: ctx.enter_attached_to,
                         effect_kind: EffectKind::from(&ability.effect),
                     },
@@ -1967,6 +1990,7 @@ pub fn resolve(
                         // enter face down.
                         face_down_profile: ctx.face_down_profile.clone(),
                         library_placement: ctx.library_placement,
+                        library_shuffle: ctx.library_shuffle,
                         enter_attached_to: ctx.enter_attached_to,
                         effect_kind: EffectKind::from(&ability.effect),
                     },
@@ -2291,6 +2315,9 @@ pub(crate) struct ChangeZoneIterationCtx {
     /// CR 401.4 + CR 701.24a: When `Some`, suppresses auto-shuffle and places
     /// each object at the specified library position.
     pub library_placement: Option<LibraryPosition>,
+    /// CR 701.24a + CR 730.3: `TerminalShuffle` when `library_placement` is the
+    /// transient position of a "shuffle [set] into [library]" move.
+    pub library_shuffle: LibraryShuffleMode,
     /// CR 303.4f: Pre-resolved Aura host for search/tutor "enters attached" wiring.
     pub enter_attached_to: Option<AttachTarget>,
 }
@@ -2390,6 +2417,7 @@ pub(crate) fn process_one_zone_move_with_terminal(
         ctx.face_down_in_exile,
         ctx.track_exiled_by_source,
         ctx.library_placement.clone(),
+        ctx.library_shuffle,
         ctx.enter_attached_to,
         Some(ctx.controller),
         // CR 608.2c: attribution follows the captured instruction performer,
@@ -2501,6 +2529,7 @@ fn mass_library_order_effect_zone_choice(
         conditional_enter_with_counters: vec![],
         count_param: 0,
         library_position: Some(library_position),
+        library_shuffle: crate::types::ability::LibraryShuffleMode::PerObject,
         mass_library_order: Some(batch),
         is_cost_payment: false,
         enters_modified_if: None,
@@ -3210,6 +3239,84 @@ fn reconcile_emptied_owner_batch(
     }
 }
 
+/// CR 608.2b-c + CR 730.3c: the objects the selected-object owner-library move
+/// acts on (`effects::is_selected_owner_library_shuffle_operation`): its bound
+/// selection, with a merged permanent's recorded successors. `Ok(None)` when
+/// the node is not that operation, or its binding names the library's player
+/// rather than objects. Shared by the resolver and the stack reader
+/// (`stack_reach`), so both act on the same population.
+pub(crate) fn selected_owner_move_objects(
+    state: &GameState,
+    ability: &ResolvedAbility,
+) -> Result<Option<Vec<ObjectId>>, EffectError> {
+    if !super::is_selected_owner_library_shuffle_operation(ability) {
+        return Ok(None);
+    }
+    let Effect::ChangeZoneAll { target, .. } = &ability.effect else {
+        return Ok(None);
+    };
+    let target_filter = target;
+    let player_scope = change_zone_all_player_scope(state, ability, target_filter);
+    // CR 608.2b-c: discriminate player entries before filtering objects.
+    // Qualified slots are indexed in the original declaration, before
+    // illegal or stale entries are removed.
+    match target_filter {
+        TargetFilter::ParentTarget if player_scope.is_some() => {
+            if ability.targets.iter().any(|target| match target {
+                TargetRef::Object(_) => true,
+                TargetRef::Player(player) => Some(*player) != player_scope,
+            }) {
+                return Err(EffectError::InvalidParam(
+                    "ambiguous owner-library parent binding".to_string(),
+                ));
+            }
+            Ok(None)
+        }
+        TargetFilter::ParentTargetSlot { index }
+            if matches!(
+                crate::game::targeting::resolve_live_parent_slot_from_root(state, ability, *index),
+                Some(TargetRef::Player(_))
+            ) =>
+        {
+            Err(EffectError::InvalidParam(
+                "owner-library object slot names a player".to_string(),
+            ))
+        }
+        _ => {
+            let objects = if ability.parent_target_missing_reason.is_some() {
+                Vec::new()
+            } else if matches!(target_filter, TargetFilter::PostReplacementDamageTarget) {
+                // CR 615.5 + CR 608.2c: the replacement continuation's own
+                // bound targets may name the damaging source; the prevented
+                // event's live object referent is the moved permanent.
+                state
+                    .post_replacement_event_target()
+                    .and_then(|target| match target {
+                        TargetRef::Object(id) => Some(*id),
+                        TargetRef::Player(_) => None,
+                    })
+                    .into_iter()
+                    .collect()
+            } else {
+                crate::game::targeting::resolved_object_ids_for_filter(
+                    state,
+                    ability,
+                    target_filter,
+                )
+            };
+            // CR 730.3c: expand merged components only after binding the
+            // actual referent; absent selections never fall back to source,
+            // and a fresh selection (Riftsweeper) is not a departure.
+            Ok(Some(crate::game::merge::expand_returned_merge_components(
+                state,
+                ability,
+                objects,
+                target_filter,
+            )))
+        }
+    }
+}
+
 /// Move all objects matching the filter from `Origin` zone to `Destination` zone.
 pub fn resolve_all(
     state: &mut GameState,
@@ -3303,87 +3410,8 @@ pub fn resolve_all(
 
     // CR 608.2c: only the explicit selected-object operation binds these
     // references as a population; other mass/player instructions keep their
-    // established zone scan. The terminal owner consumer must be immediate.
-    let selected_owner_operation = super::is_selected_owner_library_shuffle_operation(ability);
-    let selected_objects = if selected_owner_operation {
-        // CR 608.2b-c: discriminate player entries before filtering objects.
-        // Qualified slots are indexed in the original declaration, before
-        // illegal or stale entries are removed.
-        match &target_filter {
-            TargetFilter::ParentTarget if player_scope.is_some() => {
-                if ability.targets.iter().any(|target| match target {
-                    TargetRef::Object(_) => true,
-                    TargetRef::Player(player) => Some(*player) != player_scope,
-                }) {
-                    return Err(EffectError::InvalidParam(
-                        "ambiguous owner-library parent binding".to_string(),
-                    ));
-                }
-                None
-            }
-            TargetFilter::ParentTargetSlot { index }
-                if matches!(
-                    crate::game::targeting::resolve_live_parent_slot_from_root(
-                        state, ability, *index
-                    ),
-                    Some(TargetRef::Player(_))
-                ) =>
-            {
-                return Err(EffectError::InvalidParam(
-                    "owner-library object slot names a player".to_string(),
-                ));
-            }
-            _ => {
-                let objects = if ability.parent_target_missing_reason.is_some() {
-                    Vec::new()
-                } else if matches!(target_filter, TargetFilter::PostReplacementDamageTarget) {
-                    // CR 615.5 + CR 608.2c: the replacement continuation's own
-                    // bound targets may name the damaging source; the prevented
-                    // event's live object referent is the moved permanent.
-                    state
-                        .post_replacement_event_target()
-                        .and_then(|target| match target {
-                            TargetRef::Object(id) => Some(*id),
-                            TargetRef::Player(_) => None,
-                        })
-                        .into_iter()
-                        .collect()
-                } else {
-                    crate::game::targeting::resolved_object_ids_for_filter(
-                        state,
-                        ability,
-                        &target_filter,
-                    )
-                };
-                // CR 730.3c: expand merged components only after binding the
-                // actual referent; absent selections never fall back to source.
-                //
-                // A `ParentTarget` slot here names an announced choice (the
-                // owner-library object of "its owner shuffles it into their
-                // library"), not the object a merged permanent became as it
-                // left the battlefield: the leave itself was performed by the
-                // parent instruction, which already carried the survivor's
-                // components. Expanding a freshly chosen card would move its
-                // unselected former siblings too.
-                let expandable = crate::game::merge::references_object_that_left(&target_filter)
-                    && !matches!(
-                        target_filter,
-                        TargetFilter::ParentTarget | TargetFilter::ParentTargetSlot { .. }
-                    );
-                Some(if expandable {
-                    crate::game::merge::expand_returned_merge_components(
-                        state,
-                        objects,
-                        &target_filter,
-                    )
-                } else {
-                    objects
-                })
-            }
-        }
-    } else {
-        None
-    };
+    // established zone scan.
+    let selected_objects = selected_owner_move_objects(state, ability)?;
     let selected_object_population = selected_objects.is_some();
 
     let filter_controller =
@@ -3558,9 +3586,12 @@ pub fn resolve_all(
     matching.retain(|id| !state.is_absorbed_merge_component(*id));
     // CR 607.2a + CR 730.3c: the linked return finds every object an exiled merged permanent became.
     let matching = match &target_filter {
-        TargetFilter::ExiledBySource => {
-            crate::game::merge::expand_returned_merge_components(state, matching, &target_filter)
-        }
+        TargetFilter::ExiledBySource => crate::game::merge::expand_returned_merge_components(
+            state,
+            ability,
+            matching,
+            &target_filter,
+        ),
         _ => matching,
     };
     let matching: Vec<_> = if dest_zone == Zone::Exile {
@@ -3686,6 +3717,7 @@ pub fn resolve_all(
             face_down_in_exile: ability.context.face_down_in_exile,
             face_down_profile: face_down_profile.clone(),
             library_placement: member_library_placement.clone(),
+            library_shuffle,
             enter_attached_to: None,
         };
         let member_entries: Vec<ChangeZoneMemberEntry> = matching
@@ -3787,6 +3819,7 @@ pub fn resolve_all(
             ability.context.face_down_in_exile,
             track_exiled_by_source,
             member_library_placement.clone(),
+            library_shuffle,
             None,
             // CR 610.3: the return duration remains relative to the resolving
             // controller, independently of the subject performing the exile.
@@ -3880,6 +3913,7 @@ pub fn resolve_all(
                         moved_count: Some(moved_count + i32::from(entry_target_choice)),
                         face_down_profile: face_down_profile.clone(),
                         library_placement: member_library_placement.clone(),
+                        library_shuffle,
                         enter_attached_to: None,
                         effect_kind: EffectKind::from(&ability.effect),
                     },
@@ -3946,6 +3980,7 @@ pub fn resolve_all(
                         // face down.
                         face_down_profile: face_down_profile.clone(),
                         library_placement: member_library_placement.clone(),
+                        library_shuffle,
                         enter_attached_to: None,
                         effect_kind: EffectKind::from(&ability.effect),
                     },
@@ -4570,6 +4605,7 @@ mod tests {
             face_down_in_exile: Default::default(),
             face_down_profile: None,
             library_placement: None,
+            library_shuffle: crate::types::ability::LibraryShuffleMode::PerObject,
             enter_attached_to: None,
         };
         let member = ChangeZoneMemberEntry {
@@ -7206,6 +7242,7 @@ mod tests {
                 moved_count: None,
                 face_down_profile: None,
                 library_placement: owner.library_placement,
+                library_shuffle: crate::types::ability::LibraryShuffleMode::PerObject,
                 enter_attached_to: None,
                 effect_kind: EffectKind::ChangeZone,
             }),
@@ -11315,6 +11352,7 @@ mod tests {
             moved_count: None,
             face_down_profile: None,
             library_placement: None,
+            library_shuffle: crate::types::ability::LibraryShuffleMode::PerObject,
             enter_attached_to: None,
             effect_kind: EffectKind::ChangeZone,
         });
@@ -15912,6 +15950,7 @@ mod tests {
             conditional_enter_with_counters: vec![],
             count_param: 0,
             library_position: None,
+            library_shuffle: crate::types::ability::LibraryShuffleMode::PerObject,
             mass_library_order: None,
             is_cost_payment: false,
             enters_modified_if: None,

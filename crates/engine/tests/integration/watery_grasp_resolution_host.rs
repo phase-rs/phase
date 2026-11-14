@@ -71,22 +71,25 @@ fn watery_grasp_shuffles_its_shrouded_host_into_the_owners_library() {
     assert_eq!(state.objects[&host].zone, Zone::Library);
     assert!(state.players[P1.0 as usize].library.contains(&host));
     assert!(!state.players[P0.0 as usize].library.contains(&host));
-    assert!(outcome.events().iter().any(|event| matches!(
-        event,
-        GameEvent::PlayerPerformedAction {
-            player_id,
-            action: PlayerActionKind::ShuffledLibrary,
-            ..
-        } if *player_id == P1
-    )));
-    assert!(!outcome.events().iter().any(|event| matches!(
-        event,
-        GameEvent::PlayerPerformedAction {
-            player_id,
-            action: PlayerActionKind::ShuffledLibrary,
-            ..
-        } if *player_id == P0
-    )));
+    // CR 701.24a + CR 701.24d: delivery must not randomize as well; the terminal
+    // instruction owns the single owner shuffle.
+    let shuffled_players: Vec<_> = outcome
+        .events()
+        .iter()
+        .filter_map(|event| match event {
+            GameEvent::PlayerPerformedAction {
+                player_id,
+                action: PlayerActionKind::ShuffledLibrary,
+                ..
+            } => Some(*player_id),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        shuffled_players,
+        vec![P1],
+        "exactly one shuffle, performed by the owner, not the controller"
+    );
     assert!(state.stack.is_empty());
     assert!(state.resolution_stack.is_empty());
     assert!(matches!(

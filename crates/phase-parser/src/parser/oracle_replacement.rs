@@ -18062,6 +18062,17 @@ mod tests {
         assert!(
             matches!(
                 &*execute.effect,
+                Effect::TargetOnly {
+                    target: TargetFilter::PostReplacementDamageTarget
+                }
+            ),
+            "the follow-up must declare the damaged creature as its target, got {:?}",
+            execute.effect
+        );
+        let movement = execute.sub_ability.as_ref().expect("owner-library move");
+        assert!(
+            matches!(
+                &*movement.effect,
                 Effect::ChangeZoneAll {
                     destination: Zone::Library,
                     target: TargetFilter::PostReplacementDamageTarget,
@@ -18070,9 +18081,9 @@ mod tests {
                 }
             ),
             "the move must return the damaged creature to its owner's library, got {:?}",
-            execute.effect
+            movement.effect
         );
-        let shuffle = execute.sub_ability.as_ref().expect("shuffle sub-ability");
+        let shuffle = movement.sub_ability.as_ref().expect("shuffle sub-ability");
         assert!(
             matches!(
                 &*shuffle.effect,

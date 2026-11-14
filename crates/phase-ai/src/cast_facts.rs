@@ -570,6 +570,11 @@ fn effect_requires_targets(effect: &Effect) -> bool {
         | Effect::GainActivatedAbilitiesOfTarget { target, .. }
         | Effect::PutCounter { target, .. } => !matches!(target, TargetFilter::None),
         Effect::RevealHand { target, .. } => !matches!(target, TargetFilter::None),
+        // CR 115.1: a `TargetOnly` node declares the target a later instruction
+        // acts on ("choose target face-up exiled card", Riftsweeper).
+        Effect::TargetOnly { target } => {
+            !matches!(target, TargetFilter::None) && !target.is_context_ref()
+        }
         // CR 701.26a/b: only single-permanent tap/untap declares a target. The
         // mass (`All`) scope falls through to `false`, matching the legacy
         // `TapAll`/`UntapAll`.
@@ -770,6 +775,22 @@ mod tests {
             ))
             .valid_card(TargetFilter::SelfRef)
             .destination_zone(Zone::Battlefield)
+    }
+
+    /// CR 115.1: Riftsweeper's "choose target face-up exiled card. Its owner
+    /// shuffles it into their library." declares its target on a `TargetOnly`
+    /// root and hands it to the bound move, so the definition requires a target.
+    #[test]
+    fn target_only_declaration_requires_a_target() {
+        let definition = engine::parser::oracle_effect::parse_effect_chain(
+            "Choose target face-up exiled card. Its owner shuffles it into their library.",
+            AbilityKind::Spell,
+        );
+        assert!(
+            matches!(&*definition.effect, Effect::TargetOnly { .. }),
+            "reach guard: the root only declares the target"
+        );
+        assert!(definition_requires_targets(&definition));
     }
 
     #[test]

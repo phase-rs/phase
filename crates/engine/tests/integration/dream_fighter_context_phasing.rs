@@ -97,7 +97,6 @@ fn dream_fighter_combat_partners_phase_out_without_announced_targets() {
 
         runner.advance_until_stack_empty();
         assert!(runner.state().stack.is_empty());
-        assert!(runner.state().resolution_stack.is_empty());
         assert!(matches!(
             runner.state().waiting_for,
             WaitingFor::Priority { .. }
@@ -984,6 +983,12 @@ fn dream_fighter_restore_refuses_an_unbound_live_combat_partner() {
             let mut control = GameRunner::from_state(restored);
             control.advance_until_stack_empty();
             assert!(control.state().objects[&fighter].is_phased_out());
+            assert!(control.state().stack.is_empty());
+            assert!(control.state().resolution_stack.is_empty());
+            assert!(matches!(
+                control.state().waiting_for,
+                WaitingFor::Priority { .. }
+            ));
             if partner_zone == Zone::Battlefield {
                 assert!(control.state().objects[&partner].is_phased_out());
             } else {
@@ -1022,6 +1027,11 @@ fn dream_fighter_restore_refuses_an_unbound_live_combat_partner() {
                         assert_eq!(restored.state().objects[&partner].zone, Zone::Exile);
                     }
                     assert!(restored.state().stack.is_empty());
+                    assert!(restored.state().resolution_stack.is_empty());
+                    assert!(matches!(
+                        restored.state().waiting_for,
+                        WaitingFor::Priority { .. }
+                    ));
                 }
             }
         }

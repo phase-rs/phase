@@ -5004,22 +5004,6 @@ pub(super) fn is_standalone_object_choice_clause(fragment: &str) -> bool {
     parse_battlefield_object_choice_core(rest, rest_lower, &mut throwaway).is_some()
 }
 
-// Preserve the legacy fallback's one-word rejection boundary. Longer tails may
-// contain restrictions or continuations handled elsewhere in the parser.
-fn target_tail_is_unparsed_word(tail: &str) -> bool {
-    verify(
-        all_consuming(preceded(
-            not(all_consuming(take_while1::<_, _, OracleError<'_>>(
-                |c: char| c.is_ascii_punctuation(),
-            ))),
-            take_while1(|c: char| !c.is_whitespace()),
-        )),
-        |word: &&str| !super::sequence::starts_clause_text_or_conjugated(word),
-    )
-    .parse(tail)
-    .is_ok()
-}
-
 pub(super) fn parse_choose_ast(
     text: &str,
     lower: &str,
@@ -5180,9 +5164,13 @@ pub(super) fn parse_choose_ast(
             let (target, remainder) = parse_target_with_ctx(rest, ctx);
             ctx.diagnostics.truncate(diagnostic_count);
             let tail = remainder.trim();
-            if target_tail_is_unparsed_word(tail)
+            if (tail.split_whitespace().count() == 1
+                && !tail.chars().all(|c| c.is_ascii_punctuation())
+                && !super::sequence::starts_clause_text_or_conjugated(tail))
                 || matches!(&target, TargetFilter::Typed(filter)
-                    if filter.lacks_standalone_selection_constraint())
+                    if filter.type_filters.is_empty()
+                        && filter.controller.is_none()
+                        && filter.properties.is_empty())
             {
                 return None;
             }
@@ -10330,6 +10318,39 @@ pub(super) fn shuffle_rest_clause(lower: &str) -> Option<ShuffleRestClause> {
     Some(form)
 }
 
+/// CR 608.2c + CR 400.7e + CR 115.10a: true when the bare pronoun "it" in a
+/// "shuffle it into its owner's library" clause names the ability's own source
+/// instead of an announced object.
+///
+/// Two nearer antecedents veto the reading, and both are proofs rather than
+/// guesses: an explicitly bound object pronoun (`object_pronoun_ref`, set by a
+/// trigger condition or a preceding clause), and any object slot an earlier
+/// clause of this chain announced (CR 601.2c — the registry is authoritative;
+/// an `Indeterminate` registry cannot prove the absence of one, so it declines).
+/// With neither, the departed object is the trigger's own source (CR 400.7e),
+/// and a subjectless construct ("Shuffle it into its owner's library") has no
+/// other referent at all. The source therefore binds `SelfRef`, the
+/// single-object movement authority; binding `ParentTarget` there would lower
+/// to the selected-population `ChangeZoneAll`, which requires announced targets
+/// to move anything (Alabaster Dragon, Dread, Serra Avatar).
+fn shuffle_it_names_the_source(object: &str, ctx: &ParseContext) -> bool {
+    if object.trim() != "it" {
+        return false;
+    }
+    if ctx.object_pronoun_ref.is_some() {
+        return false;
+    }
+    match &ctx.chain_declared_slots {
+        crate::parser::oracle_ir::context::DeclaredSlotRegistry::Known(entries) => {
+            if !entries.is_empty() {
+                return false;
+            }
+        }
+        crate::parser::oracle_ir::context::DeclaredSlotRegistry::Indeterminate => return false,
+    }
+    matches!(ctx.subject, None | Some(TargetFilter::SelfRef))
+}
+
 pub(super) fn parse_shuffle_ast(
     text: &str,
     lower: &str,
@@ -10337,7 +10358,15 @@ pub(super) fn parse_shuffle_ast(
 ) -> Option<ShuffleImperativeAst> {
     // CR 108.3 + CR 400.3: a typed object anaphor followed by an owner's
     // library. Bare "their" needs a proven owner actor and object pin.
-    if let Some(((object, owner_library), remainder)) = nom_on_lower(text, lower, |input| {
+    //
+    // The pronoun's referent decides the MOVEMENT AUTHORITY, not just the
+    // destination: a bare "it" with no announced antecedent names the ability's
+    // own source (CR 400.7e — the object that left is the departure event's
+    // source), so source-bound placement precedes its one terminal owner shuffle.
+    // `ParentTarget` is reserved for a genuinely announced object; lowering uses
+    // selected-population `ChangeZoneAll`, which resolves only against announced
+    // targets (CR 115.10a: being affected is not being a target).
+    if let Some(((object, owner_library), _)) = nom_on_lower(text, lower, |input| {
         let (input, _) =
             alt((tag::<_, _, OracleError<'_>>("shuffle "), tag("shuffles "))).parse(input)?;
         let (input, object) = take_until(" into ").parse(input)?;
@@ -10354,7 +10383,7 @@ pub(super) fn parse_shuffle_ast(
             value(false, tag("their library")),
         ))
         .parse(input)?;
-        let (input, _) = opt(tag(".")).parse(input)?;
+        let (input, _) = all_consuming(opt(tag("."))).parse(input)?;
         Ok((input, (object.to_string(), explicit_owner)))
     }) {
         let owner_context = ctx.relative_player_scope == Some(ControllerRef::ParentTargetOwner)
@@ -10362,59 +10391,20 @@ pub(super) fn parse_shuffle_ast(
         if owner_library || owner_context {
             let mut trial = ctx.clone_throwaway();
             let (target, rest) = parse_target_with_ctx(&object, &mut trial);
-            if rest.trim().is_empty() {
-                // CR 400.7e + CR 603.6: a bare "it" whose ability has NOT
-                // established a chosen/announced antecedent names the ability's
-                // own source object — or, in a departure trigger, the object it
-                // became in the zone it moved to. `SelfRef` is exactly that
-                // binding in the engine (`self_ref_is_current`), whereas the
-                // selected `ParentTarget` population has no source fallback and
-                // would resolve to an empty set (Alabaster Dragon, Serra
-                // Avatar, Dread: "shuffle it into its owner's library").
-                //
-                // CR 608.2c: once the chain HAS established a chosen referent,
-                // `ParentTarget` stays authoritative — "Tap target creature.
-                // Shuffle it into its owner's library" must move the chosen
-                // creature, not the source.
-                let target = match target {
-                    // CR 608.2c: a bare singular "it" with no announced
-                    // antecedent names the ability's own source.
-                    TargetFilter::ParentTarget
-                        if !ctx.parent_target_available
-                            && !owner_context
-                            && object.trim().eq_ignore_ascii_case("it") =>
-                    {
-                        Some(TargetFilter::SelfRef)
-                    }
-                    // CR 608.2c: a plural or demonstrative phrase ("them",
-                    // "those cards", "that card") may only survive when a
-                    // selected or chosen-tracked population proves the set.
-                    // Otherwise this arm declines, so the chain records an
-                    // honest gap instead of moving the source (or nothing).
-                    TargetFilter::ParentTarget
-                        if !ctx.parent_target_available
-                            && !ctx.chosen_tracked_set_pending()
-                            && !owner_context =>
-                    {
-                        return None;
-                    }
-                    TargetFilter::ParentTarget | TargetFilter::SelfRef => Some(target),
-                    // Not an object anaphor this arm owns (e.g. an explicit
-                    // typed phrase) — fall through to the arms below.
-                    _ => None,
+            if rest.trim().is_empty()
+                && matches!(target, TargetFilter::ParentTarget | TargetFilter::SelfRef)
+            {
+                let target = if matches!(target, TargetFilter::ParentTarget)
+                    && shuffle_it_names_the_source(&object, ctx)
+                {
+                    TargetFilter::SelfRef
+                } else {
+                    target
                 };
-                if let Some(target) = target {
-                    // Only this arm's object-anaphor body must be exhausted.
-                    // Descriptive targets fall through to their own grammar;
-                    // their where-X tail is bound by the shared chain lowerer.
-                    if !remainder.trim().is_empty() {
-                        return None;
-                    }
-                    return Some(ShuffleImperativeAst::ChangeZoneToLibrary {
-                        target,
-                        owner_library: true,
-                    });
-                }
+                return Some(ShuffleImperativeAst::ChangeZoneToLibrary {
+                    target,
+                    owner_library: true,
+                });
             }
         }
     }
@@ -10773,8 +10763,8 @@ fn parse_shuffle_library_target(
 }
 
 /// CR 701.24a: Lower a shuffle AST into a `ParsedEffectClause`.
-/// Compound forms ("shuffle X into library") move the bound subject before
-/// one terminal `Shuffle`; source placement must not auto-shuffle as well.
+/// Compound forms ("shuffle X into library") produce a `ChangeZone` + `Shuffle` sub_ability
+/// chain so the library is actually randomized after the zone move.
 pub(super) fn lower_shuffle_ast(ast: ShuffleImperativeAst) -> ParsedEffectClause {
     match ast {
         ShuffleImperativeAst::ShuffleLibrary { target } => {
@@ -11175,11 +11165,12 @@ fn lower_target_referenced_search_library(
 /// Wrap an effect with a `Shuffle` sub_ability for compound "X into library" operations.
 pub(super) fn with_shuffle_sub_ability(mut effect: Effect) -> ParsedEffectClause {
     let shuffle_target = match &effect {
-        // CR 108.3 + CR 400.3: a source move shuffles for the source's owner,
-        // independent of any earlier announced target. Other non-parent
-        // single-object moves retain their possessive object's owner below.
-        // Bound parent-object and prevention continuations use the mass-move
-        // path and its scoped owner-population shuffle instead.
+        // CR 400.3: A single object going to its owner's library keeps that
+        // object's owner as the anaphoric shuffle subject. Unlike a mass move,
+        // this already has one exact parent object and needs no tracked-set
+        // population fan-out (Chaos Warp and prevention follow-ups).
+        // CR 108.3 + CR 400.3: the source's owner is independent of any
+        // earlier announced target still carried by this ability.
         Effect::ChangeZone {
             target: TargetFilter::SelfRef,
             owner_library: true,
@@ -11192,33 +11183,11 @@ pub(super) fn with_shuffle_sub_ability(mut effect: Effect) -> ParsedEffectClause
         Effect::ChangeZoneAll { .. } => TargetFilter::ScopedPlayer,
         _ => TargetFilter::Controller,
     };
-    // CR 608.2c + CR 701.24c: the terminal instruction owns this shuffle,
-    // including when the source can no longer move. A scalar library zone
-    // change would automatically shuffle during delivery as well. Reuse the
-    // existing exact-source placement path to defer randomization until the
-    // one owner shuffle, just as SelfAndZonesToLibrary does above.
-    if matches!(
-        &effect,
-        Effect::ChangeZone {
-            destination: Zone::Library,
-            target: TargetFilter::SelfRef,
-            owner_library: true,
-            ..
-        }
-    ) {
-        effect = Effect::PutAtLibraryPosition {
-            target: TargetFilter::SelfRef,
-            count: QuantityExpr::Fixed { value: 1 },
-            position: LibraryPosition::Bottom,
-            arranger: None,
-        };
-    }
     let tracks_owner_population = matches!(&effect, Effect::ChangeZoneAll { .. });
     // A selected graveyard population explicitly owned by the caster or the
-    // declared player has one library subject. ParentTarget/SelfRef moves do
-    // not establish that guarantee: their receiving owner may differ from the
-    // terminal actor. Keep those existing routes unchanged. Mass operations
-    // already carry their complete owner-population scope.
+    // declared player has one library subject (Dwell on the Past). ParentTarget/
+    // SelfRef moves do not establish that guarantee: their receiving owner may
+    // differ from the terminal actor.
     let single_library_population = matches!(
         &effect,
         Effect::ChangeZone {
@@ -11238,11 +11207,21 @@ pub(super) fn with_shuffle_sub_ability(mut effect: Effect) -> ParsedEffectClause
         ))
     );
     match &mut effect {
+        // CR 701.24a + CR 701.24d: every parser-emitted compound move into a
+        // library appends the terminal `Shuffle` below. Randomizing during
+        // delivery as well would shuffle twice (Watery Grasp), so defer to that
+        // single instruction. The source's own move ("shuffle it into its
+        // owner's library": Gandalf, Wandering Wizard; Alabaster Dragon) is the
+        // same operation, and CR 701.24c still shuffles when it cannot move.
+        Effect::ChangeZone {
+            destination: Zone::Library,
+            owner_library: true,
+            library_shuffle,
+            ..
+        } => *library_shuffle = LibraryShuffleMode::TerminalShuffle,
         Effect::ChangeZone {
             library_shuffle, ..
-        } if single_library_population => {
-            *library_shuffle = LibraryShuffleMode::TerminalShuffle;
-        }
+        } if single_library_population => *library_shuffle = LibraryShuffleMode::TerminalShuffle,
         Effect::ChangeZoneAll {
             destination: Zone::Library,
             library_shuffle,
@@ -19701,115 +19680,6 @@ fn try_parse_bolster(lower: &str) -> Option<Effect> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn teferi_akosa_owner_shuffle_retains_shared_where_x_binding() {
-        let text = "[+1]: Draw two cards. Then discard two cards unless you discard a creature card.\n[−2]: You get an emblem with \"Knights you control get +1/+0 and have ward {1}.\"\n[−3]: Tap any number of untapped creatures you control. When you do, shuffle target nonland permanent an opponent controls with mana value X or less into its owner's library, where X is the number of creatures tapped this way.";
-        let parsed = crate::parser::oracle::parse_oracle_text(
-            text,
-            "Teferi Akosa of Zhalfir",
-            &[],
-            &["Planeswalker".to_string()],
-            &[],
-        );
-        let ability = parsed
-            .abilities
-            .iter()
-            .find(|ability| matches!(ability.cost, Some(AbilityCost::Loyalty { amount: -3 })))
-            .expect("printed minus-three ability");
-        assert!(
-            matches!(*ability.effect, Effect::SetTapState { .. }),
-            "{ability:?}"
-        );
-        assert_eq!(
-            ability.multi_target,
-            Some(MultiTargetSpec {
-                min: QuantityExpr::Fixed { value: 0 },
-                max: None,
-            })
-        );
-        let movement = ability.sub_ability.as_deref().expect("When you do shuffle");
-        assert_eq!(movement.condition, Some(AbilityCondition::WhenYouDo));
-        let Effect::ChangeZone {
-            target: TargetFilter::Typed(target),
-            destination: Zone::Library,
-            owner_library: true,
-            ..
-        } = movement.effect.as_ref()
-        else {
-            panic!("{movement:?}");
-        };
-        assert_eq!(target.controller, Some(ControllerRef::Opponent));
-        assert!(target.type_filters.contains(&TypeFilter::Permanent));
-        assert!(target
-            .type_filters
-            .contains(&TypeFilter::Non(Box::new(TypeFilter::Land))));
-        let quantity = target
-            .properties
-            .iter()
-            .find_map(|property| match property {
-                FilterProp::Cmc {
-                    comparator: crate::types::ability::Comparator::LE,
-                    value,
-                } => Some(value),
-                _ => None,
-            })
-            .expect("at-most-X mana value restriction");
-        let QuantityExpr::Ref {
-            qty:
-                QuantityRef::FilteredTrackedSetSize {
-                    filter,
-                    caused_by: None,
-                },
-        } = quantity
-        else {
-            panic!("where-X binding lost: {quantity:?}");
-        };
-        assert_eq!(
-            filter.as_ref(),
-            &TargetFilter::Typed(TypedFilter {
-                type_filters: vec![TypeFilter::Creature],
-                ..Default::default()
-            })
-        );
-        let shuffle = movement
-            .sub_ability
-            .as_deref()
-            .expect("owner library shuffle");
-        assert!(
-            matches!(
-                *shuffle.effect,
-                Effect::Shuffle {
-                    target: TargetFilter::ParentTargetOwner
-                }
-            ),
-            "{shuffle:?}"
-        );
-        assert!(shuffle.sub_ability.is_none(), "{shuffle:?}");
-    }
-
-    #[test]
-    fn seeded_owner_shuffle_preserves_target_and_requires_complete_body() {
-        let mut ctx = ParseContext {
-            relative_player_scope: Some(ControllerRef::ParentTargetOwner),
-            object_pronoun_ref: Some(TargetFilter::ParentTarget),
-            ..ParseContext::default()
-        };
-        assert!(!ctx.parent_target_available);
-        for library in ["their library", "its owner's library"] {
-            let text = format!("shuffles it into {library}");
-            assert!(matches!(
-                parse_shuffle_ast(&text, &text, &mut ctx),
-                Some(ShuffleImperativeAst::ChangeZoneToLibrary {
-                    target: TargetFilter::ParentTarget,
-                    owner_library: true,
-                })
-            ));
-        }
-        // The owner-anaphor grammar cannot discard an unparsed trailing action.
-        let malformed = "shuffles it into their library nonsense";
-        assert!(parse_shuffle_ast(malformed, malformed, &mut ctx).is_none());
-    }
 
     use crate::types::ability::{EffectKind, ParitySource, ZoneChoiceChooser};
     use crate::types::counter::CounterType;

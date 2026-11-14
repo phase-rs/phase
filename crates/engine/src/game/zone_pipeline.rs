@@ -12,7 +12,8 @@ use crate::game::zones;
 use crate::types::ability::{
     AdditionalCostInstancePayment, AttachCardinality, AttachSelection, CastTimingPermission,
     CostPaidObjectSnapshot, DigRestSplitScope, Duration, Effect, EffectKind, ExileConcealment,
-    KickerVariant, LibraryPosition, ResolvedAbility, StaticDefinition, TargetFilter, TargetRef,
+    KickerVariant, LibraryPosition, LibraryShuffleMode, ResolvedAbility, StaticDefinition,
+    TargetFilter, TargetRef,
 };
 use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
@@ -213,6 +214,11 @@ pub struct ZoneMoveRequest {
     /// `LibraryPosition` enum (`move_to_library_position` is its documented
     /// executor) rather than a parallel index convention.
     pub placement: Option<LibraryPosition>,
+    /// CR 701.24a + CR 730.3: `TerminalShuffle` when this move is the move
+    /// component of a "shuffle [set] into [library]" operation, whose chained
+    /// `Shuffle` randomizes the library afterwards. Carried onto the proposed
+    /// event so a merged permanent's components share the transient placement.
+    pub library_shuffle: LibraryShuffleMode,
     /// Exile-link context (duration-bound returns + exiled-by-source tracking).
     pub exile_links: ExileLinkSpec,
     /// CR 614.5: replacement definitions already applied to the event or
@@ -264,6 +270,7 @@ impl ZoneMoveRequest {
             attach_to: self.mods.attach_to,
             performed_by: self.mods.performed_by,
             library_placement: self.placement,
+            library_shuffle: self.library_shuffle,
             exile_duration: self.exile_links.duration,
             exile_controller: self.exile_links.controller,
             exile_tracking: self.exile_links.tracking,
@@ -316,6 +323,7 @@ impl ZoneMoveRequest {
             attach_to: self.mods.attach_to,
             performed_by: self.mods.performed_by,
             library_placement: self.placement.clone(),
+            library_shuffle: self.library_shuffle,
             exile_duration: self.exile_links.duration.clone(),
             exile_controller: self.exile_links.controller,
             exile_tracking: self.exile_links.tracking,
@@ -364,6 +372,7 @@ impl ZoneMoveRequest {
                 performed_by: pending.performed_by,
             },
             placement: pending.library_placement,
+            library_shuffle: pending.library_shuffle,
             exile_links: ExileLinkSpec {
                 duration: pending.exile_duration,
                 controller: pending.exile_controller,
@@ -382,6 +391,7 @@ impl ZoneMoveRequest {
             cause: ZoneChangeCause::Effect { source },
             mods: EntryMods::default(),
             placement: None,
+            library_shuffle: LibraryShuffleMode::PerObject,
             exile_links: ExileLinkSpec::default(),
             replacement_applied: HashSet::new(),
             face_down_in_exile: ExileConcealment::Public,
@@ -396,6 +406,7 @@ impl ZoneMoveRequest {
             cause: ZoneChangeCause::Cost { source },
             mods: EntryMods::default(),
             placement: None,
+            library_shuffle: LibraryShuffleMode::PerObject,
             exile_links: ExileLinkSpec::default(),
             replacement_applied: HashSet::new(),
             face_down_in_exile: ExileConcealment::Public,
@@ -414,6 +425,7 @@ impl ZoneMoveRequest {
             cause: ZoneChangeCause::SpellResolutionDefault,
             mods: EntryMods::default(),
             placement: None,
+            library_shuffle: LibraryShuffleMode::PerObject,
             exile_links: ExileLinkSpec::default(),
             replacement_applied: HashSet::new(),
             face_down_in_exile: ExileConcealment::Public,
@@ -428,6 +440,7 @@ impl ZoneMoveRequest {
             cause: ZoneChangeCause::StateBasedAction,
             mods: EntryMods::default(),
             placement: None,
+            library_shuffle: LibraryShuffleMode::PerObject,
             exile_links: ExileLinkSpec::default(),
             replacement_applied: HashSet::new(),
             face_down_in_exile: ExileConcealment::Public,
@@ -460,6 +473,7 @@ impl ZoneMoveRequest {
                 ..EntryMods::default()
             },
             placement: None,
+            library_shuffle: LibraryShuffleMode::PerObject,
             exile_links: ExileLinkSpec::default(),
             replacement_applied: seed_applied,
             face_down_in_exile: ExileConcealment::Public,
@@ -479,6 +493,7 @@ impl ZoneMoveRequest {
                 ..EntryMods::default()
             },
             placement: None,
+            library_shuffle: LibraryShuffleMode::PerObject,
             exile_links: ExileLinkSpec::default(),
             replacement_applied: HashSet::new(),
             face_down_in_exile: ExileConcealment::Public,
@@ -496,6 +511,7 @@ impl ZoneMoveRequest {
             cause: ZoneChangeCause::PregameProcedure,
             mods: EntryMods::default(),
             placement: None,
+            library_shuffle: LibraryShuffleMode::PerObject,
             exile_links: ExileLinkSpec::default(),
             replacement_applied: HashSet::new(),
             face_down_in_exile: ExileConcealment::Public,
@@ -511,6 +527,7 @@ impl ZoneMoveRequest {
             cause: ZoneChangeCause::PlayerLeftGame,
             mods: EntryMods::default(),
             placement: None,
+            library_shuffle: LibraryShuffleMode::PerObject,
             exile_links: ExileLinkSpec::default(),
             replacement_applied: HashSet::new(),
             face_down_in_exile: ExileConcealment::Public,
@@ -521,13 +538,19 @@ impl ZoneMoveRequest {
     /// replacement pipeline. The delivery recognizes its split marker and
     /// preserves `ZoneChanged { from: None }`, so this is not an independent
     /// battlefield exit even though its would-move event is replaceable.
-    pub(crate) fn merged_component(object_id: ObjectId, to: Zone) -> Self {
+    pub(crate) fn merged_component(
+        object_id: ObjectId,
+        to: Zone,
+        placement: Option<LibraryPosition>,
+        library_shuffle: LibraryShuffleMode,
+    ) -> Self {
         Self {
             object_id,
             to,
             cause: ZoneChangeCause::MergedComponentRouting,
             mods: EntryMods::default(),
-            placement: None,
+            placement,
+            library_shuffle,
             exile_links: ExileLinkSpec::default(),
             replacement_applied: HashSet::new(),
             face_down_in_exile: ExileConcealment::Public,
@@ -542,6 +565,7 @@ impl ZoneMoveRequest {
             cause: ZoneChangeCause::DebugCommand,
             mods: EntryMods::default(),
             placement: None,
+            library_shuffle: LibraryShuffleMode::PerObject,
             exile_links: ExileLinkSpec::default(),
             replacement_applied: HashSet::new(),
             face_down_in_exile: ExileConcealment::Public,
@@ -599,6 +623,13 @@ impl ZoneMoveRequest {
     /// `NthFromTop`). Only meaningful when `to == Zone::Library`.
     pub fn at_library_position(mut self, position: LibraryPosition) -> Self {
         self.placement = Some(position);
+        self
+    }
+
+    /// CR 701.24a: mark this library delivery as the move component of a
+    /// terminal-shuffle operation (see [`Self::library_shuffle`]).
+    pub fn with_library_shuffle(mut self, library_shuffle: LibraryShuffleMode) -> Self {
+        self.library_shuffle = library_shuffle;
         self
     }
 
@@ -1083,6 +1114,7 @@ fn move_batch_member_with_terminal(
                 library_placement,
                 chain_referent,
                 performed_by,
+                library_shuffle,
                 ..
             } = &mut proposed
             {
@@ -1091,6 +1123,7 @@ fn move_batch_member_with_terminal(
                 *performed_by = req.mods.performed_by;
                 *applied = req.replacement_applied.clone();
                 *conceal_in_exile = req.face_down_in_exile;
+                *library_shuffle = req.library_shuffle;
             }
             return match replacement::replace_event(state, proposed, events) {
                 ReplacementResult::Execute(event) => {
@@ -1161,6 +1194,7 @@ fn move_batch_member_with_terminal(
             face_down_in_exile: conceal_in_exile,
             chain_referent,
             performed_by,
+            library_shuffle,
             ..
         } = &mut proposed
         {
@@ -1169,6 +1203,7 @@ fn move_batch_member_with_terminal(
             *applied = req.replacement_applied;
             applied.extend(seed_applied);
             *conceal_in_exile = req.face_down_in_exile;
+            *library_shuffle = req.library_shuffle;
         }
         return match replacement::replace_event(state, proposed, events) {
             ReplacementResult::Execute(event) => {
@@ -1282,10 +1317,12 @@ fn move_batch_member_with_terminal(
             face_down_in_exile: conceal_in_exile,
             chain_referent,
             performed_by,
+            library_shuffle,
             applied,
             ..
         } = &mut proposed
         {
+            *library_shuffle = req.library_shuffle;
             *performed_by = req.mods.performed_by;
             *enter_transformed = req.mods.enter_transformed;
             if !req.mods.enter_tapped.is_unspecified() {
@@ -1339,6 +1376,7 @@ fn move_batch_member_with_terminal(
         req.mods.chain_referent,
         track_exiled_by_source,
         None,
+        req.library_shuffle,
         None,
         exile_links.controller,
         req.mods.performed_by,
@@ -1948,6 +1986,7 @@ fn prepared_batch_member_event(
         request.face_down_in_exile,
         request.mods.chain_referent,
         request.placement.clone(),
+        request.library_shuffle,
         request.mods.attach_to,
         request.mods.performed_by,
         request.replacement_applied.clone(),
@@ -3557,9 +3596,13 @@ pub(crate) fn staged_arrangement_groups(
         ) {
             continue;
         }
+        // CR 701.24a: a terminal-shuffle move's position is transient, since the
+        // chained `Shuffle` randomizes the library; only a per-object
+        // placement is an arrangement.
         let Some(ProposedEvent::ZoneChange {
             to: Zone::Library,
             library_placement: Some(position),
+            library_shuffle: LibraryShuffleMode::PerObject,
             ..
         }) = member.approved_event.as_ref()
         else {
@@ -5508,10 +5551,12 @@ fn anticipated_zone_change_delivery(
         chain_referent,
         attach_to,
         performed_by,
+        library_shuffle,
         applied,
         ..
     } = &mut expected_event
     {
+        *library_shuffle = request.library_shuffle;
         *performed_by = request.mods.performed_by;
         *enter_tapped = request.mods.enter_tapped;
         *enters_attacking = request.mods.enters_attacking;
@@ -8148,6 +8193,7 @@ fn deliver_replaced_batch_member(
         enter_with_choices,
         discard_frame,
         performed_by,
+        library_shuffle,
         applied,
         ..
     } = event
@@ -8198,6 +8244,7 @@ fn deliver_replaced_batch_member(
                 object_id,
                 to,
                 library_placement.as_ref(),
+                library_shuffle,
                 &applied,
                 component_parent,
                 events,
@@ -8937,6 +8984,7 @@ pub(crate) fn execute_zone_move_with_controller(
     face_down_in_exile: ExileConcealment,
     track_exiled_by_source: bool,
     library_placement: Option<LibraryPosition>,
+    library_shuffle: LibraryShuffleMode,
     enter_attached_to: Option<AttachTarget>,
     exile_controller: Option<PlayerId>,
     performed_by: Option<PlayerId>,
@@ -8958,6 +9006,7 @@ pub(crate) fn execute_zone_move_with_controller(
         face_down_in_exile,
         track_exiled_by_source,
         library_placement,
+        library_shuffle,
         enter_attached_to,
         exile_controller,
         performed_by,
@@ -9001,6 +9050,7 @@ pub(crate) fn execute_zone_move_with_terminal(
         ExileConcealment::Public,
         track_exiled_by_source,
         library_placement,
+        LibraryShuffleMode::PerObject,
         enter_attached_to,
         None,
         None,
@@ -9025,6 +9075,7 @@ pub(crate) fn execute_zone_move_with_terminal_and_controller(
     face_down_in_exile: ExileConcealment,
     track_exiled_by_source: bool,
     library_placement: Option<LibraryPosition>,
+    library_shuffle: LibraryShuffleMode,
     enter_attached_to: Option<AttachTarget>,
     exile_controller: Option<PlayerId>,
     performed_by: Option<PlayerId>,
@@ -9047,6 +9098,7 @@ pub(crate) fn execute_zone_move_with_terminal_and_controller(
         crate::types::zones::ChainReferentIntent::Silent,
         track_exiled_by_source,
         library_placement,
+        library_shuffle,
         enter_attached_to,
         exile_controller,
         performed_by,
@@ -9150,6 +9202,9 @@ fn prepare_zone_move_proposal(
     face_down_in_exile: ExileConcealment,
     chain_referent: crate::types::zones::ChainReferentIntent,
     library_placement: Option<LibraryPosition>,
+    // CR 701.24a + CR 730.3: whether `library_placement` is the transient
+    // position of a terminal-shuffle operation.
+    library_shuffle: LibraryShuffleMode,
     enter_attached_to: Option<AttachTarget>,
     performed_by: Option<PlayerId>,
     replacement_applied: HashSet<AppliedReplacementKey>,
@@ -9205,6 +9260,7 @@ fn prepare_zone_move_proposal(
         face_down_in_exile: ref mut conceal_in_exile,
         chain_referent: ref mut intent,
         performed_by: ref mut performer,
+        library_shuffle: ref mut shuffle_mode,
         ..
     } = &mut proposed
     {
@@ -9213,6 +9269,7 @@ fn prepare_zone_move_proposal(
         *conceal_in_exile = face_down_in_exile;
         *intent = chain_referent;
         *performer = performed_by;
+        *shuffle_mode = library_shuffle;
     }
 
     // CR 712.14a: Set enter_transformed on the proposed event so replacement
@@ -9319,6 +9376,9 @@ fn execute_zone_move_with_applied_terminal(
     chain_referent: crate::types::zones::ChainReferentIntent,
     track_exiled_by_source: bool,
     library_placement: Option<LibraryPosition>,
+    // CR 701.24a + CR 730.3: whether `library_placement` is the transient
+    // position of a terminal-shuffle operation.
+    library_shuffle: LibraryShuffleMode,
     enter_attached_to: Option<AttachTarget>,
     exile_controller: Option<PlayerId>,
     performed_by: Option<PlayerId>,
@@ -9348,6 +9408,7 @@ fn execute_zone_move_with_applied_terminal(
         face_down_in_exile,
         chain_referent,
         library_placement.clone(),
+        library_shuffle,
         enter_attached_to,
         performed_by,
         replacement_applied,
@@ -9681,6 +9742,7 @@ mod w3_library_placement_tests {
                     ExileConcealment::Public,
                     false,
                     Some(position.clone()),
+                    LibraryShuffleMode::PerObject,
                     None,
                     None,
                     None,
@@ -10363,6 +10425,40 @@ mod w3_library_placement_tests {
         }
         assert_eq!(empty, before);
         assert!(events.is_empty());
+    }
+
+    /// CR 701.24a + CR 730.3 + CR 616.1: a terminal-shuffle library delivery
+    /// keeps its mode through the parked batch request and onto the proposed
+    /// event a resumed delivery replays, so a merged permanent's components
+    /// still share the transient position after a replacement pause.
+    #[test]
+    fn terminal_shuffle_mode_survives_the_parked_request_round_trip() {
+        let mut state = GameState::new_two_player(42);
+        let card = create_object(
+            &mut state,
+            CardId(90101),
+            PlayerId(0),
+            "Shuffled Card".to_string(),
+            Zone::Graveyard,
+        );
+        for mode in [
+            LibraryShuffleMode::PerObject,
+            LibraryShuffleMode::TerminalShuffle,
+        ] {
+            let request = ZoneMoveRequest::effect(card, Zone::Library, card)
+                .at_library_position(LibraryPosition::Bottom)
+                .with_library_shuffle(mode);
+            let parked = request.into_pending();
+            assert_eq!(parked.library_shuffle, mode);
+            let resumed = ZoneMoveRequest::from_pending(parked);
+            assert_eq!(resumed.library_shuffle, mode);
+            let delivery =
+                anticipated_zone_change_delivery(&state, &resumed).expect("the card exists");
+            assert!(matches!(
+                delivery.expected_event,
+                ProposedEvent::ZoneChange { library_shuffle, .. } if library_shuffle == mode
+            ));
+        }
     }
 
     /// Install a board-wide `Moved` replacement: "any object that would be put
@@ -14004,8 +14100,12 @@ mod staged_batch_tests {
         let reqs: Vec<_> = [host, rider]
             .into_iter()
             .map(|id| {
-                ZoneMoveRequest::merged_component(id, Zone::Library)
-                    .at_library_position(LibraryPosition::Bottom)
+                ZoneMoveRequest::merged_component(
+                    id,
+                    Zone::Library,
+                    Some(LibraryPosition::Bottom),
+                    LibraryShuffleMode::PerObject,
+                )
             })
             .collect();
         let group =

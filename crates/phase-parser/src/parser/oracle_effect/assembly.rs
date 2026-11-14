@@ -4691,12 +4691,24 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
     fold_token_it_has_grants_into_token_statics(&mut result);
     fold_copy_spell_gains_haste_and_quoted_grant(&mut result);
     nest_whenever_this_turn_token_cleanup_delayed_trigger(&mut result);
-    // CR 303.4f + CR 301.5b + CR 400.7j: forward the returned-object
-    // referent needed by an attachment or later result-bound instruction.
-    // Emperor of Bones' grant and delayed sacrifice keep that referent
-    // separate from the creating ability's source (CR 603.7d + CR 603.7e).
-    // A primary SelfRef names the original source; it does not by itself
-    // request result forwarding or replace that source with the moved card.
+    // CR 303.4f + CR 301.5b + CR 603.7d: Wire `forward_result: true` on a
+    // parent zone-change to Battlefield when the chained sub-ability is an
+    // `Attach` gated by `ZoneChangedThisWay`. Without this, the runtime
+    // resolves the sub-ability with `source_id` = the original ability source
+    // (the trigger source / Saga / activated permanent), so the Attach tries
+    // to equip *that* object to the chosen creature — wrong for Armored
+    // Skyhunter (Skyhunter cannot equip itself), wrong for Vault 101: Birthday
+    // Party (a Saga is not Equipment), wrong for Quest for the Holy Relic and
+    // Stonehewer Giant (the searcher is not the moved Equipment).
+    //
+    // CR 608.2c: the same flag supplies a returned-object context to ParentTarget
+    // anaphora and legacy embedded generic grants (Emperor of Bones' "It gains
+    // haste. Sacrifice it at the beginning of the next end step"). Those operands
+    // bind the moved card separately from the ability's printed source.
+    //
+    // The runtime retains its legacy moved-object binding for attachment roles,
+    // but a primary SelfRef names the creating source and cannot be rebound by
+    // this flag. Delayed triggers likewise retain their creating source.
     rewire_result_anchored_subchain(&mut result);
     fold_enters_this_way_counter_rider(&mut result);
     // CR 608.2c + CR 701.9a + CR 701.21a: a discard/sacrifice-this-way gated

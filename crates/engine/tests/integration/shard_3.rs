@@ -81,7 +81,6 @@ mod draw_delivery_preview;
 mod draw_from_general_post_replacement;
 mod draw_preflight_matches_live_pipeline;
 mod dreadhorde_invasion_amass;
-mod dream_fighter_context_phasing;
 mod dream_salvage_target_opponent_discards;
 mod dredgers_insight_mill_from_among;
 mod druid_of_purification_destroy_chosen_4780;

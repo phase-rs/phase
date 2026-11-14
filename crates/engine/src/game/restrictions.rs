@@ -5268,9 +5268,13 @@ mod tests {
         );
         state.objects.get_mut(&blocker).unwrap().controller = PlayerId(1);
         for id in [effect_blocked, normally_blocked, blocker] {
-            let object = state.objects.get_mut(&id).unwrap();
-            object.card_types.core_types.push(CoreType::Creature);
-            object.base_card_types = object.card_types.clone();
+            state
+                .objects
+                .get_mut(&id)
+                .unwrap()
+                .card_types
+                .core_types
+                .push(CoreType::Creature);
         }
 
         let mut combat = CombatState::default();

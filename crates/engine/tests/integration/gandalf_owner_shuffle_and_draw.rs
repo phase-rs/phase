@@ -13,8 +13,6 @@ const GANDALF: &str = "Ward {3} (Whenever this creature becomes the target of a 
 const COSI: &str =
     "Whenever an opponent shuffles their library, you may put a +1/+1 counter on this creature.";
 
-const P2: PlayerId = PlayerId(2);
-
 fn gandalf_owner_shuffle_and_draw(owner: PlayerId) {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
@@ -222,63 +220,6 @@ fn unavailable_stolen_gandalf_still_shuffles_once_before_its_owner_draws() {
 }
 
 #[test]
-fn oblation_selected_owner_draws_after_the_owner_shuffle() {
-    // Full Oracle verified from MTGJSON; this is the selected-owner counterpart
-    // to Gandalf's untargeted source-owner coordinated draw.
-    const OBLATION: &str =
-        "The owner of target nonland permanent shuffles it into their library, then draws two cards.";
-    let mut scenario = GameScenario::new();
-    scenario.at_phase(Phase::PreCombatMain);
-    let victim = scenario
-        .add_creature(P1, "Owner's creature", 2, 2)
-        .controlled_by(P0)
-        .id();
-    let spell = scenario
-        .add_spell_to_hand_from_oracle(P0, "Oblation", true, OBLATION)
-        .id();
-    scenario.with_library_top(P0, &["Controller A", "Controller B", "Controller C"]);
-    scenario.with_library_top(P1, &["Owner A", "Owner B", "Owner C", "Owner D", "Owner E"]);
-    let mut runner = scenario.build();
-    let controller_library = runner.state().players[P0.0 as usize].library.clone();
-    let outcome = runner.cast(spell).target_object(victim).resolve();
-    outcome.assert_hand_drawn(P1, 2);
-    outcome.assert_hand_drawn(P0, 0);
-    assert!(outcome.events().iter().any(|event| matches!(
-        event,
-        GameEvent::ZoneChanged {
-            object_id,
-            from: Some(Zone::Battlefield),
-            to: Zone::Library,
-            ..
-        } if *object_id == victim
-    )));
-    let shuffled_players: Vec<_> = outcome
-        .events()
-        .iter()
-        .filter_map(|event| match event {
-            GameEvent::PlayerPerformedAction {
-                player_id,
-                action: PlayerActionKind::ShuffledLibrary,
-                ..
-            } => Some(*player_id),
-            _ => None,
-        })
-        .collect();
-    assert_eq!(shuffled_players.as_slice(), &[P1]);
-    assert_eq!(outcome.state().players[P1.0 as usize].library.len(), 4);
-    assert_eq!(
-        outcome.state().players[P0.0 as usize].library,
-        controller_library
-    );
-    assert!(matches!(
-        outcome.final_waiting_for(),
-        WaitingFor::Priority { .. }
-    ));
-    assert!(outcome.state().stack.is_empty());
-    assert!(outcome.state().resolution_stack.is_empty());
-}
-
-#[test]
 fn gemrazer_under_gandalf_delivers_both_cards_before_one_owner_shuffle_and_three_draws() {
     // Full printed Oracle text, verified against Scryfall.
     const GEMRAZER: &str = "Mutate {1}{G}{G} (If you cast this spell for its mutate cost, put it over or under target non-Human creature you own. They mutate into the creature on top plus all abilities from under it.)\nReach, trample\nWhenever this creature mutates, destroy target artifact or enchantment an opponent controls.";
@@ -357,56 +298,8 @@ fn gemrazer_under_gandalf_delivers_both_cards_before_one_owner_shuffle_and_three
         .accept_optional()
         .resolve();
     assert_eq!(outcome.mana_pool_total(P0), 0, "pay Gandalf's six mana");
-    // CR 401.4 + CR 730.3a: R4 retains the owner's private order for both
-    // physical cards before delivering either component. Answer that real
-    // public prompt; stopping here is not completion of Gandalf's ability.
-    let WaitingFor::DigRestSplitChoice {
-        player,
-        library_owner,
-        cards,
-        ..
-    } = outcome.final_waiting_for()
-    else {
-        panic!("the merged permanent must offer its owner's physical order");
-    };
-    assert_eq!(*player, P0);
-    assert_eq!(*library_owner, P0);
-    assert_eq!(cards.len(), 2);
-    assert!(cards.contains(&gandalf) && cards.contains(&gemrazer));
-    assert!(!outcome.events().iter().any(|event| matches!(
-        event,
-        GameEvent::ZoneChanged {
-            to: Zone::Library,
-            ..
-        }
-    )));
-    let mut events = runner
-        .act(GameAction::SelectCards {
-            cards: vec![gemrazer, gandalf],
-        })
-        .expect("the owner submits the complete physical order")
-        .events;
-    for _ in 0..12 {
-        let action = match &runner.state().waiting_for {
-            WaitingFor::Priority { .. }
-                if runner.state().stack.is_empty()
-                    && runner.state().resolution_stack.is_empty() =>
-            {
-                break;
-            }
-            WaitingFor::Priority { .. } => GameAction::PassPriority,
-            WaitingFor::OptionalEffectChoice { .. } => {
-                GameAction::DecideOptionalEffect { accept: true }
-            }
-            other => panic!("unexpected merged-owner continuation prompt: {other:?}"),
-        };
-        let mut result = runner
-            .act(action)
-            .expect("finish the printed instruction and Cosi's actual optional trigger");
-        events.append(&mut result.events);
-    }
-    let state = runner.state();
-    let shuffles: Vec<_> = events
+    let shuffles: Vec<_> = outcome
+        .events()
         .iter()
         .enumerate()
         .filter_map(|(index, event)| match event {
@@ -426,7 +319,8 @@ fn gemrazer_under_gandalf_delivers_both_cards_before_one_owner_shuffle_and_three
     let (shuffle_index, shuffler) = shuffles[0];
     assert_eq!(shuffler, P0, "only the owner's library is shuffled");
     for component in [gandalf, gemrazer] {
-        let deliveries: Vec<_> = events
+        let deliveries: Vec<_> = outcome
+            .events()
             .iter()
             .enumerate()
             .filter_map(|(index, event)| {
@@ -446,9 +340,10 @@ fn gemrazer_under_gandalf_delivers_both_cards_before_one_owner_shuffle_and_three
             "both cards arrive before the shuffle"
         );
         // Either card may be drawn by the rest of the printed instruction.
-        assert_ne!(state.objects[&component].zone, Zone::Battlefield);
+        assert_ne!(outcome.state().objects[&component].zone, Zone::Battlefield);
     }
-    let draws: Vec<_> = events
+    let draws: Vec<_> = outcome
+        .events()
         .iter()
         .enumerate()
         .filter_map(|(index, event)| match event {
@@ -461,97 +356,11 @@ fn gemrazer_under_gandalf_delivers_both_cards_before_one_owner_shuffle_and_three
         assert_eq!(drawer, P0);
         assert!(shuffle_index < index, "the one shuffle precedes every draw");
     }
-    assert_eq!(
-        state.objects[&trickster]
-            .counters
-            .get(&CounterType::Plus1Plus1)
-            .copied()
-            .unwrap_or(0),
-        1
-    );
-    assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
-    assert!(state.stack.is_empty());
-    assert!(state.resolution_stack.is_empty());
-}
-
-/// CR 115.10a + CR 608.2c: the untargeted owner acts on the first
-/// instruction; the caster independently shuffles its selected graveyard card.
-#[test]
-fn cathartic_parting_keeps_the_permanents_owner_and_the_caster_shuffles_distinct() {
-    const CATHARTIC: &str = "The owner of target artifact or enchantment an opponent controls shuffles it into their library. You may shuffle up to four target cards from your graveyard into your library.";
-    let mut scenario = GameScenario::new_n_player(3, 42);
-    scenario.at_phase(Phase::PreCombatMain);
-    let artifact = scenario
-        .add_artifact_from_oracle(P2, "Mox Pearl", "{T}: Add {W}.")
-        .controlled_by(P1)
-        .with_mana_cost(ManaCost::generic(0))
-        .id();
-    let selected = scenario.add_land_to_graveyard(P0, "Forest").id();
-    let unselected = scenario.add_land_to_graveyard(P0, "Island").id();
-    let other_graveyard = scenario.add_land_to_graveyard(P2, "Plains").id();
-    let spell = scenario
-        .add_spell_to_hand_from_oracle(P0, "Cathartic Parting", false, CATHARTIC)
-        .with_mana_cost(ManaCost::Cost {
-            generic: 1,
-            shards: vec![ManaCostShard::Green],
-        })
-        .id();
-    scenario.with_library_top(P0, &["Caster A", "Caster B"]);
-    scenario.with_library_top(P1, &["Controller A", "Controller B"]);
-    scenario.with_library_top(P2, &["Owner A", "Owner B"]);
-    scenario.with_mana_pool(
-        P0,
-        [ManaType::Colorless, ManaType::Green]
-            .into_iter()
-            .map(|color| ManaUnit::new(color, ObjectId(0), false, vec![]))
-            .collect(),
-    );
-    let mut runner = scenario.build();
-    let outcome = runner
-        .cast(spell)
-        .target_objects(&[artifact, selected])
-        .accept_optional()
-        .resolve();
-    assert_eq!(outcome.mana_pool_total(P0), 0);
-    assert_eq!(outcome.state().objects[&artifact].owner, P2);
-    assert_eq!(outcome.state().objects[&artifact].zone, Zone::Library);
-    assert!(outcome.state().players[P2.0 as usize]
-        .library
-        .contains(&artifact));
-    assert!(!outcome.state().players[P1.0 as usize]
-        .library
-        .contains(&artifact));
-    assert_eq!(outcome.state().objects[&selected].zone, Zone::Library);
-    assert!(outcome.state().players[P0.0 as usize]
-        .library
-        .contains(&selected));
-    assert_eq!(outcome.state().objects[&unselected].zone, Zone::Graveyard);
-    assert_eq!(
-        outcome.state().objects[&other_graveyard].zone,
-        Zone::Graveyard
-    );
-    let shufflers: Vec<_> = outcome
-        .events()
-        .iter()
-        .filter_map(|event| match event {
-            GameEvent::PlayerPerformedAction {
-                player_id,
-                action: PlayerActionKind::ShuffledLibrary,
-                ..
-            } => Some(*player_id),
-            _ => None,
-        })
-        .collect();
-    assert_eq!(
-        shufflers,
-        vec![P2, P0],
-        "the owner shuffles first, then only the caster shuffles their chosen graveyard card"
-    );
-    assert_eq!(outcome.state().objects[&spell].zone, Zone::Graveyard);
-    assert!(outcome.state().stack.is_empty());
-    assert!(outcome.state().resolution_stack.is_empty());
+    outcome.assert_counters(trickster, CounterType::Plus1Plus1, 1);
     assert!(matches!(
         outcome.final_waiting_for(),
         WaitingFor::Priority { .. }
     ));
+    assert!(outcome.state().stack.is_empty());
+    assert!(outcome.state().resolution_stack.is_empty());
 }

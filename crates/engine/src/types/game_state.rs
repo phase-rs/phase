@@ -4953,6 +4953,13 @@ pub struct PendingChangeZoneIteration {
     /// library" still suppresses auto-shuffle on resume.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub library_placement: Option<crate::types::ability::LibraryPosition>,
+    /// CR 701.24a + CR 730.3: whether `library_placement` is the transient
+    /// position of a terminal-shuffle operation, carried across the pause.
+    #[serde(
+        default,
+        skip_serializing_if = "crate::types::ability::LibraryShuffleMode::is_per_object"
+    )]
+    pub library_shuffle: crate::types::ability::LibraryShuffleMode,
     /// CR 303.4f: Pre-resolved Aura host carried across a paused ChangeZone loop.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub enter_attached_to: Option<AttachTarget>,
@@ -7612,6 +7619,7 @@ impl PendingBatchDeliveries {
                     Some(ProposedEvent::ZoneChange {
                         to: Zone::Library,
                         library_placement: Some(position),
+                        library_shuffle: crate::types::ability::LibraryShuffleMode::PerObject,
                         ..
                     }) if *position == arrangement.position
                 )
@@ -7696,6 +7704,8 @@ impl PendingBatchDeliveries {
                                 Some(ProposedEvent::ZoneChange {
                                     to: Zone::Library,
                                     library_placement: Some(position),
+                                    library_shuffle:
+                                        crate::types::ability::LibraryShuffleMode::PerObject,
                                     ..
                                 }) if *position == arrangement.position
                             )
@@ -7794,6 +7804,13 @@ pub struct PendingBatchZoneMoveRequest {
     pub performed_by: Option<PlayerId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub library_placement: Option<LibraryPosition>,
+    /// CR 701.24a + CR 730.3: the parked move is part of a terminal-shuffle
+    /// operation (see `ProposedEvent::ZoneChange::library_shuffle`).
+    #[serde(
+        default,
+        skip_serializing_if = "crate::types::ability::LibraryShuffleMode::is_per_object"
+    )]
+    pub library_shuffle: crate::types::ability::LibraryShuffleMode,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exile_duration: Option<Duration>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -19621,6 +19638,14 @@ pub enum WaitingFor {
         /// preserves bottom/nth placement across the choice round-trip.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         library_position: Option<LibraryPosition>,
+        /// CR 701.24a + CR 730.3: the choice is the move component of a
+        /// terminal-shuffle operation, so `library_position` is transient and a
+        /// chosen merged permanent's components share it on resume.
+        #[serde(
+            default,
+            skip_serializing_if = "crate::types::ability::LibraryShuffleMode::is_per_object"
+        )]
+        library_shuffle: crate::types::ability::LibraryShuffleMode,
         /// Exact origin/identity snapshot for a fresh CR 401.4 owner
         /// library-order prompt: a `ChangeZoneAll` mass placement or an
         /// announced target set placed by `PutAtLibraryPosition`. The prompt's
@@ -44764,6 +44789,7 @@ mod tests {
             moved_count: None,
             face_down_profile: None,
             library_placement: None,
+            library_shuffle: crate::types::ability::LibraryShuffleMode::PerObject,
             enter_attached_to: None,
             effect_kind: EffectKind::ChangeZone,
         });
@@ -54820,6 +54846,7 @@ mod tests {
                 attach_to: None,
                 performed_by: None,
                 library_placement: None,
+                library_shuffle: crate::types::ability::LibraryShuffleMode::PerObject,
                 exile_duration: None,
                 exile_controller: None,
                 exile_tracking: ZoneDeliveryExileTracking::None,
@@ -54877,6 +54904,7 @@ mod tests {
                 attach_to: None,
                 performed_by: None,
                 library_placement: None,
+                library_shuffle: crate::types::ability::LibraryShuffleMode::PerObject,
                 exile_duration: None,
                 exile_controller: None,
                 exile_tracking: ZoneDeliveryExileTracking::None,
@@ -56116,6 +56144,7 @@ mod tests {
             conditional_enter_with_counters: vec![],
             count_param: 0,
             library_position: None,
+            library_shuffle: crate::types::ability::LibraryShuffleMode::PerObject,
             mass_library_order: None,
             is_cost_payment: false,
             enters_modified_if: None,
@@ -57030,6 +57059,7 @@ mod tests {
             conditional_enter_with_counters: vec![],
             count_param: 0,
             library_position: None,
+            library_shuffle: crate::types::ability::LibraryShuffleMode::PerObject,
             mass_library_order: Some(mass_library_order.clone()),
             is_cost_payment: false,
             enters_modified_if: None,
@@ -57394,6 +57424,7 @@ mod tests {
                 cause: crate::types::ability::FaceDownCause::Manifest,
             }),
             library_placement: None,
+            library_shuffle: crate::types::ability::LibraryShuffleMode::PerObject,
             effect_kind: crate::types::ability::EffectKind::ChangeZone,
             enter_attached_to: None,
         };
@@ -57920,6 +57951,7 @@ mod tests {
             conditional_enter_with_counters: vec![],
             count_param: 0,
             library_position: None,
+            library_shuffle: crate::types::ability::LibraryShuffleMode::PerObject,
             mass_library_order: None,
             is_cost_payment: false,
             enters_modified_if: None,

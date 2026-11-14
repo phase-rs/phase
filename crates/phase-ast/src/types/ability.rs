@@ -8630,15 +8630,15 @@ pub enum TargetFilter {
     OriginalController,
     /// CR 613.1f + CR 608.2c: Resolves to the ability's *original*, pre-rebind
     /// source identity — the object that put this ability on the stack — even
-    /// inside a `ChangeZone { forward_result: true }` sub-ability chain where
-    /// the runtime has rebound `ResolvedAbility::source_id` to the just-moved
-    /// object.
+    /// inside a `ChangeZone { forward_result: true }` chain whose legacy
+    /// object-relative child has rebound `ResolvedAbility::source_id` to the
+    /// just-moved object.
     ///
     /// Motivation (reanimator-Aura class: Animate Dead / Dance of the Dead):
     /// the ETB effect returns the enchanted creature card to the battlefield
-    /// via `ChangeZone { forward_result: true }`, which rebinds `source_id` to
-    /// the reanimated creature so trailing `SelfRef`/`ParentTarget` anaphora
-    /// (the attach, the leaves-battlefield sacrifice) bind to that creature.
+    /// via `ChangeZone { forward_result: true }`. Its legacy immediate generic
+    /// grant reads the reanimated object, while returned-object anaphora use the
+    /// forwarded context. A primary `SelfRef` still names the creating source.
     /// But the same effect ALSO rewrites the Aura's OWN enchant restriction
     /// ("it loses \"enchant creature card in a graveyard\" and gains \"enchant
     /// creature put onto the battlefield with this Aura\""). That keyword swap
@@ -8652,8 +8652,9 @@ pub enum TargetFilter {
     /// `effects/mod.rs`, at the one point where the pre-rebind `source_id` and
     /// the about-to-be-mutated sub-ability clone coexist.
     ///
-    /// Distinct from `SelfRef` (rebound to the moved object under
-    /// `forward_result`) and from `OriginalController` (a player reference).
+    /// Unlike the current ability's primary `SelfRef` or a moved-object
+    /// `ParentTarget`, this pins the pre-rebind producer for legacy grants.
+    /// `OriginalController` is the separate player reference.
     OriginalSource,
     /// CR 615.5 + CR 609.7: Resolves to the controller of the *prevented event's*
     /// damage source. Used by prevention follow-up sentences such as "the source's
@@ -20737,8 +20738,15 @@ pub enum LibraryShuffleMode {
     TerminalShuffle,
 }
 
+impl LibraryShuffleMode {
+    /// Serde skip-helper: `PerObject` is the default and is omitted from JSON.
+    pub fn is_per_object(&self) -> bool {
+        matches!(self, Self::PerObject)
+    }
+}
+
 fn is_default_library_shuffle_mode(mode: &LibraryShuffleMode) -> bool {
-    matches!(mode, LibraryShuffleMode::PerObject)
+    mode.is_per_object()
 }
 
 /// CR 701.20a + CR 608.2c: How the *set* of matching cards found by an
@@ -26223,26 +26231,22 @@ fn effect_introduces_per_player_chosen_card_referent(effect: &Effect) -> bool {
     effect_parks_reveal_card_choice(effect)
 }
 
-/// CR 608.2c: exiling a single top card introduces the object referent for
-/// subsequent instructions in the same player iteration.
-fn effect_introduces_per_player_exiled_card_referent(effect: &Effect) -> bool {
-    matches!(
-        effect,
-        Effect::ExileTop {
-            count: QuantityExpr::Fixed { value: 1 },
-            position: LibraryPosition::Top,
-            ..
-        }
-    )
-}
-
 /// CR 608.2c: single authority for "this clause introduces a per-iteration object
 /// referent" — consumed by the player-scope co-scope split and by the swallow
 /// audit's per-player-iteration evidence.
 pub fn effect_introduces_per_iteration_referent(effect: &Effect) -> bool {
     effect_introduces_per_player_object_referent(effect)
         || effect_introduces_per_player_chosen_card_referent(effect)
-        || effect_introduces_per_player_exiled_card_referent(effect)
+        // CR 608.2c: a single exiled top card is also an iteration-local
+        // referent for the following land-deploy or optional-cast instruction.
+        || matches!(
+            effect,
+            Effect::ExileTop {
+                count: QuantityExpr::Fixed { value: 1 },
+                position: LibraryPosition::Top,
+                ..
+            }
+        )
 }
 
 pub fn generic_effect_affected_uses_inherited_targets(filter: &TargetFilter) -> bool {
@@ -29826,7 +29830,8 @@ impl TargetFilter {
                 // the source's live-or-LKI incarnation, never chosen while
                 // announcing the ability.
                 | TargetFilter::SourceController
-                // CR 108.3 + CR 115.10a: "~'s owner" is read at resolution, never announced.
+                // CR 108.3 + CR 115.10a: the source's owner is fixed by
+                // ownership, not selected when announcing this ability.
                 | TargetFilter::Owner
                 | TargetFilter::OriginalController
                 // CR 608.2c: the reanimator-Aura's pre-rebind source identity is
@@ -36003,9 +36008,11 @@ pub struct AbilityDefinition {
     /// CR 601.2f: Self-referential cost reduction applied before activation.
     /// "This ability costs {N} less to activate for each [condition]"
     pub cost_reduction: Option<CostReduction>,
-    /// When true, after this ability's effect resolves, moved/created objects are forwarded
-    /// to the sub_ability: the moved object becomes sub's source_id, and the original source
-    /// becomes a target. Used for "put onto the battlefield attached to [source]" patterns.
+    /// Forward the settled moved/created objects to the sub-ability's result context.
+    /// Legacy object-relative children may also rebind their source to the moved
+    /// object; a primary `SelfRef`, delayed trigger, or repeat directive keeps its
+    /// creating source instead. Use the forwarded-object operands for the result,
+    /// independently of the printed source identity.
     pub forward_result: bool,
     /// Player scope for "each player/opponent [effect]" patterns.
     /// When set, the effect iterates over matching players (each becomes the acting player).
@@ -43502,38 +43509,6 @@ mod tests {
     use super::*;
     use crate::types::mana::ZoneSpendPolarity;
     use crate::types::zones::Zone;
-
-    #[test]
-    fn typed_filter_standalone_selection_constraint() {
-        for (filter, lacks_constraint) in [
-            (TypedFilter::default(), true),
-            (
-                TypedFilter::default().properties(vec![FilterProp::Another]),
-                true,
-            ),
-            (
-                TypedFilter::default()
-                    .properties(vec![FilterProp::Another, FilterProp::IsCommander]),
-                false,
-            ),
-            (
-                TypedFilter::default().properties(vec![FilterProp::IsCommander]),
-                false,
-            ),
-            (TypedFilter::default().controller(ControllerRef::You), false),
-            (TypedFilter::creature(), false),
-            (
-                TypedFilter::default().properties(vec![FilterProp::Another, FilterProp::Another]),
-                true,
-            ),
-        ] {
-            assert_eq!(
-                filter.lacks_standalone_selection_constraint(),
-                lacks_constraint,
-                "{filter:?}"
-            );
-        }
-    }
 
     #[test]
     fn phase_out_context_union_extracts_no_new_target() {

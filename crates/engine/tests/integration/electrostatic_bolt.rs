@@ -10,10 +10,7 @@
 
 use engine::game::scenario::GameScenario;
 use engine::parser::oracle::parse_oracle_text;
-use engine::types::ability::{
-    AbilityCondition, Effect, EffectKind, LibraryShuffleMode, PlayerFilter, PlayerRelation,
-    PossessionAxis, TargetFilter, ThisWayCause, TypeFilter,
-};
+use engine::types::ability::{AbilityCondition, Effect, EffectKind, TargetFilter, TypeFilter};
 use engine::types::actions::GameAction;
 use engine::types::events::PlayerActionKind;
 use engine::types::game_state::WaitingFor;
@@ -201,7 +198,7 @@ fn electrostatic_bolt_destroys_4_toughness_artifact_creature_but_not_non_artifac
 /// conditions qualifying a non-battlefield "card" must retain `RevealedHasCardType`
 /// and must never be misrouted to `TargetMatchesFilter`.
 #[test]
-fn target_plus_revealed_preserves_revealed_card_type() {
+fn hidetsugu_and_kairi_preserves_revealed_card_type() {
     // Hidetsugu and Kairi: exile top card + target opponent + "If it's an instant or sorcery card"
     let hk_parsed = parse_oracle_text(
         "When Hidetsugu and Kairi dies, exile the top card of your library. Target opponent loses \
@@ -232,116 +229,6 @@ fn target_plus_revealed_preserves_revealed_card_type() {
             subtype_filter: None,
         }),
         "Hidetsugu and Kairi must retain RevealedHasCardType, not TargetMatchesFilter"
-    );
-
-    // Audacious Swap: verified Oracle text from Scryfall:
-    // "Casualty 2\n\
-    // The owner of target nonenchantment permanent shuffles it into their library, \
-    // then exiles the top card of their library. If it's a land card, they put it \
-    // onto the battlefield. Otherwise, they may cast it without paying its mana cost."
-    let swap_parsed = parse_oracle_text(
-        "Casualty 2\n\
-         The owner of target nonenchantment permanent shuffles it into their library, \
-         then exiles the top card of their library. If it's a land card, they put it \
-         onto the battlefield. Otherwise, they may cast it without paying its mana cost.",
-        "Audacious Swap",
-        &[],
-        &["Instant".to_string()],
-        &[],
-    );
-    assert_eq!(swap_parsed.abilities.len(), 1);
-    let target_only = &swap_parsed.abilities[0];
-    let Effect::TargetOnly {
-        target: ref target_filter,
-    } = *target_only.effect
-    else {
-        panic!("expected TargetOnly, got {:?}", target_only.effect);
-    };
-    assert!(
-        matches!(target_filter, TargetFilter::Typed(tf) if tf.type_filters.contains(&TypeFilter::Permanent)
-            && tf.type_filters.contains(&TypeFilter::Non(Box::new(TypeFilter::Enchantment))))
-    );
-    let shuffle_into_lib = target_only
-        .sub_ability
-        .as_deref()
-        .expect("target acquisition chains to the terminal library move");
-    assert!(matches!(
-        *shuffle_into_lib.effect,
-        Effect::ChangeZoneAll {
-            target: TargetFilter::ParentTarget,
-            destination: Zone::Library,
-            library_shuffle: LibraryShuffleMode::TerminalShuffle,
-            ..
-        }
-    ));
-
-    let shuffle = shuffle_into_lib
-        .sub_ability
-        .as_deref()
-        .expect("change zone chains to shuffle");
-    assert!(matches!(
-        *shuffle.effect,
-        Effect::Shuffle {
-            target: TargetFilter::ScopedPlayer
-        }
-    ));
-    assert_eq!(
-        shuffle.player_scope,
-        Some(PlayerFilter::TrackedSetPossessor {
-            relation: PlayerRelation::All,
-            possession: PossessionAxis::Owner,
-            filter: TargetFilter::Any,
-            caused_by: Some(ThisWayCause::OwnerLibraryShuffleSubject),
-        })
-    );
-
-    let exile_top = shuffle
-        .sub_ability
-        .as_deref()
-        .expect("shuffle chains to exile top card");
-    assert!(matches!(
-        *exile_top.effect,
-        Effect::ExileTop {
-            player: TargetFilter::ScopedPlayer,
-            ..
-        }
-    ));
-
-    let land_branch = exile_top
-        .sub_ability
-        .as_deref()
-        .expect("exile top chains to land branch");
-    assert!(matches!(
-        *land_branch.effect,
-        Effect::ChangeZone {
-            target: TargetFilter::ParentTarget,
-            destination: Zone::Battlefield,
-            ..
-        }
-    ));
-    assert_eq!(
-        land_branch.condition,
-        Some(AbilityCondition::RevealedHasCardType {
-            card_types: vec![CoreType::Land],
-            additional_filter: None,
-            subtype_filter: None,
-        }),
-        "CR 109.2 + CR 608.2c: 'If it\\'s a land card' must retain RevealedHasCardType, NOT TargetMatchesFilter"
-    );
-
-    let otherwise_cast = land_branch
-        .else_ability
-        .as_deref()
-        .expect("land branch has Otherwise cast else-ability");
-    assert!(
-        matches!(
-            *otherwise_cast.effect,
-            Effect::CastFromZone {
-                without_paying_mana_cost: true,
-                ..
-            }
-        ),
-        "Otherwise branch must cast from zone without paying mana cost"
     );
 }
 

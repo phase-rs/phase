@@ -3429,7 +3429,7 @@ fn starts_each_player_predicate_clause_lower(s: &str) -> OracleResult<'_, ()> {
 /// discarding (CR 701.9a), milling (CR 701.17a), sacrificing (CR 701.21a),
 /// exiling (CR 701.13a) — so ending a bare-`" and "` conjunct with one of them is
 /// unambiguous: a player-subject predicate, never a noun-phrase continuation.
-pub(super) fn parse_conjugated_player_action_verb(input: &str) -> OracleResult<'_, ()> {
+fn parse_conjugated_player_action_verb(input: &str) -> OracleResult<'_, ()> {
     value(
         (),
         alt((
@@ -9154,8 +9154,12 @@ fn is_anaphoric_entry_counters_clause(sentence: &str) -> bool {
     if let (Some(cond), body) = super::conditions::strip_card_type_conditional(sentence) {
         return represented(&cond, &body);
     }
-    match super::conditions::strip_routed_suffix_conditional(sentence, &mut ParseContext::default())
-    {
+    // The entry-counter rider follows the instruction that moved the permanent.
+    match super::conditions::strip_routed_suffix_conditional(
+        sentence,
+        &mut ParseContext::default(),
+        super::conditions::GatedInstructionPosition::AfterInstruction,
+    ) {
         (Some((cond, _)), body) => represented(&cond, &body),
         (None, _) => false,
     }
