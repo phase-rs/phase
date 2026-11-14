@@ -501,7 +501,7 @@ pub(crate) enum CostSourceRole {
     AbilitySource,
 }
 
-/// CR 406.6 + CR 614.12a: which zone population an exile cost leg may draw its
+/// CR 118.1 + CR 614.12a: which zone population an exile cost leg may draw its
 /// candidates from. Casting/activation costs use the payer's own zones; a
 /// replacement cost is paid during resolution and may exile an unrestricted
 /// card from any graveyard.
@@ -781,7 +781,7 @@ fn object_leg_demand_and_candidates(
             }
             let effective_zone = exile_cost_effective_zone(*zone, *filter);
             let effective_filter = cost_filter_before_x_announcement(*filter);
-            // CR 406.6 + CR 614.12a: an unrestricted graveyard leg paid during
+            // CR 118.1 + CR 614.12a: an unrestricted graveyard leg paid during
             // resolution may use any player's graveyard, exactly like the
             // per-leg replacement gate. Activation/casting keep the payer's
             // population.
