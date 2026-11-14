@@ -5348,6 +5348,7 @@ fn filter_prop_reads_life(prop: &FilterProp) -> bool {
         | FilterProp::ZoneChangedThisTurn { .. }
         | FilterProp::AttackedThisTurn { .. }
         | FilterProp::BlockedThisTurn
+        | FilterProp::FoughtThisTurn
         | FilterProp::AttackedOrBlockedThisTurn
         | FilterProp::CountersPutOnThisTurn { .. }
         | FilterProp::FaceDown

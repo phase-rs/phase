@@ -1911,6 +1911,8 @@ pub fn start_next_turn(state: &mut GameState, events: &mut Vec<GameEvent>) {
     state.crew_resolved_this_turn.clear();
     // CR 702.122c: "crewed ... this turn" — the per-turn crew-payment relation.
     state.crew_history_this_turn.clear();
+    // CR 701.14a: "fought this turn" is per-turn history.
+    state.creatures_fought_this_turn.clear();
     // Belt-and-suspenders: these transient replacement-continuation seeds are
     // normally nulled by the full-drain clear (effects/mod.rs) on the next
     // action, but EventContextAmount reads

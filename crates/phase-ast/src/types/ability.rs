@@ -7568,6 +7568,10 @@ pub enum FilterProp {
     /// CR 509.1a: Creature was declared as a blocker this turn.
     /// Checks `creatures_blocked_this_turn` tracking set on GameState.
     BlockedThisTurn,
+    /// CR 701.14a + CR 701.14b: Creature fought this turn (a fight that didn't
+    /// happen doesn't count). Checks the incarnation-keyed
+    /// `creatures_fought_this_turn` set on GameState.
+    FoughtThisTurn,
     /// CR 508.1a + CR 509.1a: Creature attacked or blocked this turn.
     /// Compound check used by "that attacked or blocked this turn" Oracle text.
     AttackedOrBlockedThisTurn,
@@ -7840,6 +7844,7 @@ impl FilterProp {
             | FilterProp::ZoneChangedThisTurn { .. }
             | FilterProp::AttackedThisTurn { .. }
             | FilterProp::BlockedThisTurn
+            | FilterProp::FoughtThisTurn
             | FilterProp::AttackedOrBlockedThisTurn
             | FilterProp::CountersPutOnThisTurn { .. }
             | FilterProp::FaceDown
@@ -9045,6 +9050,7 @@ fn filter_prop_binds_prior_target(prop: &FilterProp) -> bool {
         | FilterProp::ZoneChangedThisTurn { .. }
         | FilterProp::AttackedThisTurn { .. }
         | FilterProp::BlockedThisTurn
+        | FilterProp::FoughtThisTurn
         | FilterProp::AttackedOrBlockedThisTurn
         | FilterProp::CountersPutOnThisTurn { .. }
         | FilterProp::FaceDown
@@ -9302,6 +9308,7 @@ pub fn filter_prop_contains(prop: &FilterProp, leaf: &dyn Fn(&TargetFilter) -> b
         | FilterProp::ZoneChangedThisTurn { .. }
         | FilterProp::AttackedThisTurn { .. }
         | FilterProp::BlockedThisTurn
+        | FilterProp::FoughtThisTurn
         | FilterProp::AttackedOrBlockedThisTurn
         | FilterProp::CountersPutOnThisTurn { .. }
         | FilterProp::FaceDown
@@ -9598,6 +9605,7 @@ pub fn filter_prop_grammar_any(
             | FilterProp::ZoneChangedThisTurn { .. }
             | FilterProp::AttackedThisTurn { .. }
             | FilterProp::BlockedThisTurn
+            | FilterProp::FoughtThisTurn
             | FilterProp::AttackedOrBlockedThisTurn
             | FilterProp::CountersPutOnThisTurn { .. }
             | FilterProp::FaceDown
@@ -10259,6 +10267,7 @@ pub fn rewrite_filter_prop<C>(
         | FilterProp::ZoneChangedThisTurn { .. }
         | FilterProp::AttackedThisTurn { .. }
         | FilterProp::BlockedThisTurn
+        | FilterProp::FoughtThisTurn
         | FilterProp::AttackedOrBlockedThisTurn
         | FilterProp::CountersPutOnThisTurn { .. }
         | FilterProp::FaceDown
@@ -12609,6 +12618,7 @@ fn filter_prop_has_unsupported_selected_ref(prop: &FilterProp, nested: bool) -> 
         | FilterProp::ControlledContinuouslySinceTurnBegan
         | FilterProp::ZoneChangedThisTurn { .. }
         | FilterProp::BlockedThisTurn
+        | FilterProp::FoughtThisTurn
         | FilterProp::AttackedOrBlockedThisTurn
         | FilterProp::CountersPutOnThisTurn { .. }
         | FilterProp::FaceDown
@@ -28766,6 +28776,7 @@ fn filter_prop_recipient_read(prop: &FilterProp) -> RecipientRead {
         | FilterProp::ZoneChangedThisTurn { .. }
         | FilterProp::AttackedThisTurn { .. }
         | FilterProp::BlockedThisTurn
+        | FilterProp::FoughtThisTurn
         | FilterProp::AttackedOrBlockedThisTurn
         | FilterProp::CountersPutOnThisTurn { .. }
         | FilterProp::FaceDown

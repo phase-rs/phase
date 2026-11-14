@@ -1,13 +1,14 @@
 use crate::game::ability_utils::append_to_sub_chain;
 use crate::game::effects::deal_damage::{apply_damage_to_target, DamageContext, DamageResult};
 use crate::game::effects::{append_to_pending_continuation, mark_pending_continuation_parent};
+use crate::game::game_object::ObjectIncarnationRefExt;
 use crate::types::ability::{
     Effect, EffectError, EffectKind, QuantityExpr, ResolvedAbility, TargetFilter, TargetRef,
 };
 use crate::types::card_type::CoreType;
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
-use crate::types::identifiers::ObjectId;
+use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
 use crate::types::zones::Zone;
 
 /// CR 701.14a: Resolve the subject creature for a fight effect.
@@ -192,6 +193,15 @@ pub fn resolve(
             subject: None,
         });
         return Ok(());
+    }
+
+    // CR 701.14a + CR 120.8: past the CR 701.14b checks both creatures fight,
+    // even one that deals no damage.
+    for id in [source_id, target_id] {
+        if let Some(obj) = state.objects.get(&id) {
+            let fighter = ObjectIncarnationRef::from_object(obj);
+            state.creatures_fought_this_turn.insert(fighter);
+        }
     }
 
     // Read power and controller for both creatures before mutable damage phase.

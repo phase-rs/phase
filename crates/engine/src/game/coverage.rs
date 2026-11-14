@@ -1269,6 +1269,7 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
                 Some(_) => parts.push("attacked scoped player this turn".into()),
             },
             FilterProp::BlockedThisTurn => parts.push("blocked this turn".into()),
+            FilterProp::FoughtThisTurn => parts.push("fought this turn".into()),
             FilterProp::AttackedOrBlockedThisTurn => {
                 parts.push("attacked or blocked this turn".into());
             }
