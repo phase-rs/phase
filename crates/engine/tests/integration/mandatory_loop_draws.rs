@@ -150,6 +150,9 @@ struct Board {
     synthetic_shield: bool,
     /// Gibbering Fiend on P0's battlefield and Shieldmate's Blessing cast at P1 before kickoff.
     finite_prevention: bool,
+    /// Two Shocks P0 casts at P1 before kickoff, so the turn's damage journal holds two real
+    /// rows when the loop begins.
+    shocks: bool,
 }
 
 #[derive(Debug, PartialEq)]
@@ -363,8 +366,16 @@ fn build(board: Board, mode: LoopDetectionMode) -> Option<Built> {
             scenario.add_real_card(seat, "Swamp", Zone::Library, db);
         }
     }
+    let shocks: Vec<ObjectId> = (0..if board.shocks { 2 } else { 0 })
+        .map(|_| scenario.add_real_card(P0, "Shock", Zone::Hand, db))
+        .collect();
     let mut runner = scenario.build();
     runner.state_mut().loop_detection = mode;
+    for shock in shocks {
+        add_mana(&mut runner, P0, &[ManaType::Red]);
+        drop(runner.cast(shock).target_player(P1).commit());
+        settle(&mut runner, |state| holds_priority(state, P0));
+    }
     if let Some((sink, counters)) = sink.filter(|&(_, counters)| counters > 0) {
         runner
             .state_mut()
@@ -702,6 +713,7 @@ const PLAIN: Board = Board {
     tremors: false,
     synthetic_shield: false,
     finite_prevention: false,
+    shocks: false,
 };
 
 const ANCHOR: Board = Board {
@@ -3481,6 +3493,27 @@ fn a_shuffle_is_offered(board: Board) {
 #[test]
 fn a_shuffle_no_player_observes_is_offered() {
     a_shuffle_is_offered(WOOD_ELVES);
+}
+
+/// CR 701.24a + CR 732.2a + CR 732.4: the same shuffle over damage history play wrote earlier
+/// in the turn: P0 cast Shock ("Shock deals 2 damage to any target.") at P1 twice before the
+/// loop began. The mandatory replay settles the same performing take, over a journal of real
+/// rows.
+#[test]
+fn a_shuffle_over_real_damage_history_is_offered() {
+    let board = Board {
+        shocks: true,
+        ..WOOD_ELVES
+    };
+    let Some(offered) = run(board, LoopDetectionMode::Interactive, Drive::Pass, 60) else {
+        return;
+    };
+    assert_eq!(
+        offered.state().damage_dealt_this_turn.len(),
+        2,
+        "reach: both Shocks wrote their journal rows"
+    );
+    a_shuffle_is_offered(board);
 }
 
 /// CR 701.24a + CR 732.2a: P1's Lightning Bolt beside the shuffle is an out, so the period is

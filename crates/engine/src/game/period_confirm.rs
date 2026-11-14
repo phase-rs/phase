@@ -1594,10 +1594,9 @@ pub(crate) fn mandatory_period_holds(frame: &GameState, span: NamedSpan) -> Opti
     }
     // The boundary is seeded from the replay's own base, so it shares the frames' view.
     let boundary = crate::game::engine::take_boundary(&s_n);
-    let counted_take = if settles
-        .iter()
-        .any(|settled| crate::game::engine::settle_recurs(&boundary, &settled.normalize_for_loop()))
-    {
+    let counted_take = if settles.iter().any(|settled| {
+        crate::game::engine::settle_recurs(&boundary, &settled.normalize_for_loop_sample())
+    }) {
         crate::analysis::loop_check::CountedTake::Performs
     } else {
         crate::analysis::loop_check::CountedTake::Unperformable(
@@ -2133,6 +2132,308 @@ mod tests {
             },
         }));
         state
+    }
+
+    /// The first priority frame of a mandatory loop at which the recurrence span is known,
+    /// with the offers before it declined (CR 732.2a), and that span.
+    fn first_mandatory_recurrence(
+        runner: &mut crate::game::scenario::GameRunner,
+    ) -> (GameState, NamedSpan) {
+        for _ in 0..80 {
+            let state = runner.state();
+            match &state.waiting_for {
+                WaitingFor::LoopShortcut { .. } => {
+                    runner
+                        .act(GameAction::DeclineShortcut)
+                        .expect("decline the offer");
+                }
+                WaitingFor::Priority { .. } => {
+                    if let Some(span) = crate::game::play_trace::mandatory_recurrence_span(state) {
+                        return (state.clone(), span);
+                    }
+                    runner.act(GameAction::PassPriority).expect("pass priority");
+                }
+                // The trigger listed last goes on the stack last and resolves first. Animate
+                // Dead's is listed first, so every other trigger resolves before the Dragon is
+                // back and none is buried under the loop, as in the corpus.
+                WaitingFor::OrderTriggers { triggers, .. } => {
+                    let mut order: Vec<usize> = (0..triggers.len()).collect();
+                    order.sort_by_key(|&index| {
+                        state
+                            .objects
+                            .get(&triggers[index].source_id)
+                            .is_none_or(|object| object.name != "Animate Dead")
+                    });
+                    runner
+                        .act(GameAction::OrderTriggers { order })
+                        .expect("order the triggers");
+                }
+                other => panic!("unexpected prompt {}", other.variant_name()),
+            }
+        }
+        panic!("the loop never exposed a mandatory recurrence span at a priority frame");
+    }
+
+    /// CR 104.4b + CR 732.4: the MANDATORY-REPLAY caller over real damage history.
+    ///
+    /// Marauding Raptor ("Whenever another creature you control enters, this creature deals 2
+    /// damage to it. ...") and Polyraptor ("Enrage — Whenever this creature is dealt damage,
+    /// create a token that's a copy of this creature.") loop with no choice once Shock deals
+    /// the first damage; the opponent's Prodigal Sorcerer is the out that turns the draw
+    /// into an offer, which is declined so play continues to a priority frame inside the
+    /// loop. Every row of the damage journal was written by that play. The visit counter is
+    /// reset, then `mandatory_period_holds` replays the span twice from that frame and
+    /// settles each replayed frame against `take_boundary`.
+    ///
+    /// What it shows: the period holds; the take is `Unperformable(UndelimitedCover)`, because
+    /// each period adds a token and no settle frame recurs (so this board does NOT reach a
+    /// `Performs` take); and the whole replay, boundary construction and every settle
+    /// comparison included, reads no journal row, because neither trigger in the loop reads
+    /// a damage recipient.
+    #[test]
+    fn mandatory_replay_holds_over_a_real_damage_journal_without_reading_it() {
+        use crate::analysis::loop_check::{CountedTake, UnperformableCause};
+        use crate::game::scenario::GameScenario;
+        use crate::types::game_state::{LoopDetectionMode, LOOP_DAMAGE_JOURNAL_VISITS};
+        use crate::types::mana::{ManaType, ManaUnit};
+        use crate::types::phase::Phase;
+
+        let (p0, p1) = (PlayerId(0), PlayerId(1));
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        scenario.add_creature_from_oracle(
+            p0,
+            "Marauding Raptor",
+            2,
+            3,
+            "Creature spells you cast cost {1} less to cast.\nWhenever another creature you control enters, this creature deals 2 damage to it. If a Dinosaur is dealt damage this way, this creature gets +2/+0 until end of turn.",
+        );
+        let polyraptor = scenario
+            .add_creature_from_oracle(
+                p0,
+                "Polyraptor",
+                5,
+                5,
+                "Enrage \u{2014} Whenever this creature is dealt damage, create a token that's a copy of this creature.",
+            )
+            .id();
+        scenario.add_creature_from_oracle(
+            p1,
+            "Prodigal Sorcerer",
+            1,
+            1,
+            "{T}: This creature deals 1 damage to any target.",
+        );
+        let shock = scenario
+            .add_spell_to_hand_from_oracle(p0, "Shock", true, "Shock deals 2 damage to any target.")
+            .id();
+        scenario.with_mana_pool(
+            p0,
+            vec![ManaUnit::new(ManaType::Red, ObjectId(0), false, vec![])],
+        );
+        let mut runner = scenario.build();
+        runner.state_mut().loop_detection = LoopDetectionMode::Interactive;
+        let _ = runner.cast(shock).target_object(polyraptor).commit();
+
+        let (frame, span) = first_mandatory_recurrence(&mut runner);
+        let rows = frame.damage_dealt_this_turn.len();
+        assert!(
+            rows >= 3,
+            "reach guard: play wrote the damage journal ({rows} rows) before the measurement"
+        );
+
+        LOOP_DAMAGE_JOURNAL_VISITS.with(|visits| visits.set(0));
+        let held = mandatory_period_holds(&frame, span);
+        let visits = LOOP_DAMAGE_JOURNAL_VISITS.with(std::cell::Cell::get);
+
+        let held = held.expect("the mandatory token-copy period holds");
+        assert_eq!(
+            held.counted_take,
+            CountedTake::Unperformable(UnperformableCause::UndelimitedCover),
+            "each period adds a token, so no replayed settle frame recurs against the boundary"
+        );
+        assert_eq!(
+            visits, 0,
+            "{visits} journal visits through the mandatory replay over {rows} real rows"
+        );
+    }
+
+    /// CR 104.4b + CR 732.2c + CR 732.4 + CR 608.2k: the MANDATORY-REPLAY caller settling a
+    /// take that PERFORMS, while a real damage event waits under the loop for a real reader of
+    /// its recipient. Every card is the printed card from the card database except Matsu-Tribe
+    /// Sniper, which the test fixture lacks and which is built from its printed text and 1/1.
+    ///
+    /// P0's Animate Dead returns Grizzly Bears, then P0 casts Worldgorger Dragon ("When this
+    /// creature enters, exile all other permanents you control. When this creature leaves the
+    /// battlefield, return the exiled cards to the battlefield under their owners' control."),
+    /// which exiles the Bears, Animate Dead and P0's Soul Warden ("Whenever another creature
+    /// enters, you gain 1 life."). P1's Matsu-Tribe Sniper ("{T}: This creature deals 1 damage
+    /// to target creature with flying. Whenever this creature deals damage to a creature, tap
+    /// that creature and it doesn't untap during its controller's next untap step.") pings the
+    /// Dragon; with the Sniper's trigger on the stack, P0 casts Murder on its own Dragon. The
+    /// returned Animate Dead reanimates the Dragon, whose entry exiles it again: a loop with no
+    /// choice in it, above the Sniper's trigger, which it never reaches (CR 405.5), and in
+    /// which the Warden gains life each cycle. P1's Mountain and Lightning Bolt are the out
+    /// that turns the loop into an offer (CR 732.5). The offer is declined (CR 732.2a) so play
+    /// reaches a priority frame inside the loop. The counters are reset there, then
+    /// `mandatory_period_holds` replays the span and settles each replayed frame against
+    /// `take_boundary`.
+    ///
+    /// What it shows: the period holds and the take PERFORMS, so a replayed settle frame
+    /// recurred against the boundary; the buried trigger owns the damage event and reads its
+    /// recipient, so the replay's projections read the damage history play wrote; and they
+    /// read it at most once per projection.
+    #[test]
+    fn mandatory_replay_performs_its_take_over_a_buried_damage_recipient_reader() {
+        use crate::analysis::resource::{
+            loop_detect_cost, reset_loop_detect_cost, DAMAGE_RECIPIENT_JOURNAL_VISITS,
+        };
+        use crate::game::scenario::GameScenario;
+        use crate::game::scenario_db::GameScenarioDbExt;
+        use crate::test_support::shared_card_db;
+        use crate::types::events::GameEvent;
+        use crate::types::game_state::{LoopDetectionMode, StackEntryKind};
+        use crate::types::mana::{ManaType, ManaUnit};
+        use crate::types::phase::Phase;
+        use crate::types::zones::Zone;
+
+        let (p0, p1) = (PlayerId(0), PlayerId(1));
+        let db = shared_card_db();
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let bears = scenario.add_real_card(p0, "Grizzly Bears", Zone::Graveyard, db);
+        let animate = scenario.add_real_card(p0, "Animate Dead", Zone::Hand, db);
+        let dragon = scenario.add_real_card(p0, "Worldgorger Dragon", Zone::Hand, db);
+        // Gains P0 one life as each creature returns: the loop's progress axis.
+        scenario.add_real_card(p0, "Soul Warden", Zone::Battlefield, db);
+        // Not in the test card fixture: built from its printed Oracle text and its printed 1/1.
+        let sniper = scenario
+            .add_creature_from_oracle(
+                p1,
+                "Matsu-Tribe Sniper",
+                1,
+                1,
+                "{T}: This creature deals 1 damage to target creature with flying.\nWhenever this creature deals damage to a creature, tap that creature and it doesn't untap during its controller's next untap step.",
+            )
+            .id();
+        let murder = scenario.add_real_card(p0, "Murder", Zone::Hand, db);
+        scenario.add_real_card(p1, "Mountain", Zone::Battlefield, db);
+        scenario.add_real_card(p1, "Lightning Bolt", Zone::Hand, db);
+        for seat in [p0, p1] {
+            for _ in 0..10 {
+                scenario.add_real_card(seat, "Swamp", Zone::Library, db);
+            }
+        }
+        let unit = |kind| ManaUnit::new(kind, ObjectId(0), false, vec![]);
+        scenario.with_mana_pool(
+            p0,
+            [
+                (ManaType::Black, 6),
+                (ManaType::Red, 4),
+                (ManaType::Colorless, 4),
+            ]
+            .into_iter()
+            .flat_map(|(kind, count)| std::iter::repeat_n(unit(kind), count))
+            .collect(),
+        );
+        let mut runner = scenario.build();
+        runner.state_mut().loop_detection = LoopDetectionMode::Interactive;
+        let pass = |runner: &mut crate::game::scenario::GameRunner| {
+            runner.act(GameAction::PassPriority).expect("pass priority");
+        };
+        let settle = |runner: &mut crate::game::scenario::GameRunner| loop {
+            match &runner.state().waiting_for {
+                WaitingFor::OrderTriggers { triggers, .. } => {
+                    let order = (0..triggers.len()).collect();
+                    runner
+                        .act(GameAction::OrderTriggers { order })
+                        .expect("order the triggers");
+                }
+                _ if runner.state().stack.is_empty() => break,
+                _ => {
+                    runner.act(GameAction::PassPriority).expect("pass priority");
+                }
+            }
+        };
+        drop(runner.cast(animate).target_object(bears).commit());
+        settle(&mut runner);
+        assert_eq!(runner.state().objects[&bears].zone, Zone::Battlefield);
+        drop(runner.cast(dragon).commit());
+        settle(&mut runner);
+        assert_eq!(runner.state().objects[&dragon].zone, Zone::Battlefield);
+        assert_eq!(
+            runner.state().objects[&bears].zone,
+            Zone::Exile,
+            "reach guard: the Dragon's entry exiled the reanimated Bears"
+        );
+        // P1 takes priority on the empty stack and pings the Dragon.
+        pass(&mut runner);
+        runner
+            .act(GameAction::ActivateAbility {
+                source_id: sniper,
+                ability_index: 0,
+                payment_mode: crate::types::game_state::CastPaymentMode::Auto,
+            })
+            .expect("P1 activates the Sniper");
+        while matches!(
+            runner.state().waiting_for,
+            WaitingFor::TargetSelection { .. }
+        ) {
+            runner
+                .act(GameAction::ChooseTarget {
+                    target: Some(crate::types::ability::TargetRef::Object(dragon)),
+                })
+                .expect("the Dragon is a creature with flying");
+        }
+        // Both players pass: the ping resolves and the Sniper's trigger goes on the stack.
+        pass(&mut runner);
+        pass(&mut runner);
+        let reader_on_stack = |state: &GameState| {
+            state.stack.iter().any(|entry| {
+                entry.source_id == sniper
+                    && matches!(
+                        &entry.kind,
+                        StackEntryKind::TriggeredAbility {
+                            trigger_event: Some(GameEvent::DamageDealt { .. }),
+                            ..
+                        }
+                    )
+            })
+        };
+        assert!(
+            reader_on_stack(runner.state()),
+            "reach guard: the Sniper's damage trigger is on the stack"
+        );
+        let rows = runner.state().damage_dealt_this_turn.len();
+        assert!(rows >= 1, "reach guard: the ping wrote its journal row");
+        // P0, the active player, holds priority with the trigger on the stack and casts Murder
+        // on its own Dragon above it.
+        assert_eq!(runner.state().waiting_for.acting_players(), vec![p0]);
+        drop(runner.cast(murder).target_object(dragon).commit());
+
+        let (frame, span) = first_mandatory_recurrence(&mut runner);
+        assert!(
+            reader_on_stack(&frame),
+            "reach guard: the Sniper's trigger is still buried under the loop"
+        );
+        reset_loop_detect_cost();
+        DAMAGE_RECIPIENT_JOURNAL_VISITS.with(|visits| visits.set(0));
+        let held = mandatory_period_holds(&frame, span);
+        let scans = DAMAGE_RECIPIENT_JOURNAL_VISITS.with(std::cell::Cell::get);
+        let projections = loop_detect_cost().projected_clones as usize;
+        assert_eq!(
+            held.map(|held| held.counted_take),
+            Some(crate::analysis::loop_check::CountedTake::Performs),
+            "the period holds and a replayed settle frame recurs against the boundary"
+        );
+        assert!(
+            scans >= rows,
+            "reach guard: the buried reader made a projection read the history ({scans} visits)"
+        );
+        assert!(
+            scans <= projections * rows,
+            "{scans} recipient-scan visits over {projections} projections of {rows} rows"
+        );
     }
 
     /// CR 603.2c + CR 603.3b: two occurrences equal in source and text are still two triggered
