@@ -9334,6 +9334,7 @@ fn test_mana_ability_during_mana_payment_stays_in_mana_payment() {
         cost_reduction_election: None,
         activation_cost_snapshot: None,
         activation_cost: None,
+        activation_cost_paused_on_draw: false,
         deferred_hand_discard_cost: None,
         prepaid_finalization: None,
         activation_ability_index: None,
@@ -9784,6 +9785,7 @@ fn taps_for_mana_multiplier_fires_once_on_color_choice_mana_payment_resume() {
         cost_reduction_election: None,
         activation_cost_snapshot: None,
         activation_cost: None,
+        activation_cost_paused_on_draw: false,
         deferred_hand_discard_cost: None,
         prepaid_finalization: None,
         activation_ability_index: None,
@@ -13467,5 +13469,33 @@ fn resolution_back_land_face_play_is_legal_requires_a_modal_land_back_turn_and_a
     assert!(
         !resolution_back_land_face_play_is_legal(&prohibited, PlayerId(0), card),
         "CR 101.2: a \"can't play lands\" static refuses the land face"
+    );
+}
+
+/// CR 104.1 + CR 118.12: a finished game retires the staged payment before the
+/// match transition moves to sideboarding.
+#[test]
+fn a_finished_match_retires_the_payment_before_the_transition() {
+    use crate::types::game_state::{GameEnd, ResolutionPaymentTransaction};
+    use crate::types::match_config::MatchType;
+
+    let mut state = GameState::new_two_player(7);
+    state.match_config.match_type = MatchType::Bo3;
+    state.waiting_for = WaitingFor::GameOver { winner: Some(P0) };
+    state.game_end = Some(GameEnd { winner: Some(P0) });
+    state.payment_transaction = Some(Box::new(ResolutionPaymentTransaction {
+        wire_version: 1,
+        owner: P0,
+        root: Box::new(ResolvedAbility::new(Effect::NoOp, vec![], ObjectId(1), P0)),
+        transcript: Vec::new(),
+        base_waiting_for: WaitingFor::Priority { player: P0 },
+        resolving_trigger_context: None,
+        recovered: None,
+    }));
+    let mut result = ActionResult::applied(vec![], state.waiting_for.clone());
+    super::settle_finished_game(&mut state, &mut result);
+    assert!(
+        state.payment_transaction.is_none(),
+        "the terminal transition sees no live payment descriptor"
     );
 }

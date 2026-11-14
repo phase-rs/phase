@@ -578,8 +578,8 @@ export interface FormatConfig {
    * `Forbidden` for legacy payloads. */
   sideboard_policy: SideboardPolicy;
   /**
-   * Engine-derived predicate: true when the format uses a commander card
-   * and the commander-damage state-based action (CR 903.10a / CR 704.6c).
+   * Engine-derived predicate: true when the format is a Commander variant
+   * (CR 903), independent of `commander_damage_threshold`.
    * The frontend must consume this directly rather than re-listing
    * commander-style format strings client-side.
    */
@@ -3176,7 +3176,7 @@ export type WaitingFor =
   | { type: "RespondToShortcut"; data: { player: PlayerId; remaining_players?: PlayerId[]; proposal: ShortcutProposal } }
   | { type: "PrecastCopyShortcutOffer"; data: { proposer: PlayerId; epoch: number; route_count: number } }
   | { type: "RespondToPrecastCopyShortcut"; data: { player: PlayerId; epoch: number; breakpoint_ids?: number[]; remaining_players?: PlayerId[] } }
-  | { type: "UnlessPayment"; data: { player: PlayerId; cost: UnlessCost; pending_effect: unknown; trigger_event?: unknown; effect_description?: string; remaining?: PlayerId[] } }
+  | { type: "UnlessPayment"; data: { player: PlayerId; cost: UnlessCost; pending_effect: unknown; trigger_event?: unknown; effect_description?: string; remaining?: PlayerId[]; repeat?: number } }
   // CR 118.12a: Disjunctive unless-cost — player picks **which** sub-cost
   // to pay (or declines all). Drives Tergrid's Lantern and the broader
   // "unless they X or Y" punisher class.
@@ -4535,6 +4535,17 @@ export interface SharedPilesView {
  * themselves (CLAUDE.md: engine owns all logic). Mirrors
  * `engine::game::derived_views::DerivedViews`.
  */
+/** Mirrors `engine::game::derived_views::UnlessDrawPaymentStage`. */
+export type UnlessDrawPaymentStage = "Offered" | "Continuing";
+
+/** Mirrors `engine::game::derived_views::UnlessDrawCostView`. */
+export interface UnlessDrawCostView {
+  cards: number;
+  instructions: number;
+  /** "Continuing": part of the payment is performed, so it cannot be declined. */
+  stage: UnlessDrawPaymentStage;
+}
+
 export interface DerivedViews {
   unique_authorized_submitter?: PlayerId;
   /** Engine-owned Scry prompt identity for this viewer, independent of opportunities. */
@@ -4557,6 +4568,11 @@ export interface DerivedViews {
    * per-player.
    */
   shared_piles?: SharedPilesView;
+  /** CR 121.1 + CR 702.24a: the draw an open unless-payment prompt asks for —
+   *  the resolved cards per printed instruction and how many instructions the
+   *  payment performs. Present only for a draw-cost prompt. Mirrors
+   *  `engine::game::derived_views::DerivedViews::unless_draw_cost`. */
+  unless_draw_cost?: UnlessDrawCostView;
   /**
    * Engine-classified live keyword badges for battlefield permanents. The
    * strip renders this map directly rather than deciding which keyword timing

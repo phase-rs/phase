@@ -1334,7 +1334,10 @@
         "Ticket": "ticket"
       },
       "generic": "um custo",
-      "pay": "Pagar {{cost}}"
+      "pay": "Pagar {{cost}}",
+      "draw": "compre uma carta",
+      "drawCount_one": "compre {{count}} carta",
+      "drawCount_other": "compre {{count}} cartas"
     },
     "unlessPayment": {
       "defaultEffect": "Anular a Menos Que Você Pague",

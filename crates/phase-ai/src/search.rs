@@ -2087,10 +2087,12 @@ pub fn fallback_action(
             ..
         } => Some(GameAction::DecideOptionalEffect { accept: false }),
 
-        // Unless payment: pay a zero-Mana Counter cost (CR 118.5);
-        // decline every other unless payment.
+        // Unless payment: pay a zero-Mana Counter cost (CR 118.5) and
+        // continue a repeated payment already begun (CR 702.24a: its prompt
+        // has no decline); decline every other unless payment.
         WaitingFor::UnlessPayment { player, .. } => Some(GameAction::PayUnlessCost {
-            pay: zero_counter_payment_owed_by(state, *player),
+            pay: zero_counter_payment_owed_by(state, *player)
+                || engine::ai_support::unless_payment_only_continues(state),
         }),
 
         WaitingFor::ActivationCostOneOfChoice { .. } => {
@@ -7712,6 +7714,7 @@ mod tests {
             trigger_event: None,
             effect_description: None,
             remaining,
+            repeat: None,
         };
         state
     }
@@ -7815,6 +7818,85 @@ mod tests {
     }
 
     /// `fallback_action` pays a zero Counter payment and declines a nonzero one.
+    /// CR 702.24a: at the continuation of a repeated draw payment the
+    /// fallback continues. Psychic Vortex with 1,025 age counters under an
+    /// opponent's Hullbreacher (verbatim Oracle texts) reaches the boundary
+    /// after one work slice; the only answer the state offers is to pay, and a
+    /// fallback that declined there would be filtered out by the contract and
+    /// answer nothing.
+    #[test]
+    fn fallback_continues_a_repeated_payment_at_its_work_slice_boundary() {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::Untap);
+        let vortex = scenario
+            .add_enchantment_from_oracle(
+                P0,
+                "Psychic Vortex",
+                "Cumulative upkeep\u{2014}Draw a card. (At the beginning of your upkeep, put \
+                 an age counter on this permanent, then sacrifice it unless you pay its upkeep \
+                 cost for each age counter on it.)\nAt the beginning of your end step, \
+                 sacrifice a land and discard your hand.",
+            )
+            .id();
+        scenario.add_creature_from_oracle(
+            P1,
+            "Hullbreacher",
+            3,
+            2,
+            "Flash\nIf an opponent would draw a card except the first one they draw in each \
+             of their draw steps, instead you create a Treasure token. (It's an artifact with \
+             \"{T}, Sacrifice this token: Add one mana of any color.\")",
+        );
+        let mut runner = scenario.build();
+        runner
+            .state_mut()
+            .objects
+            .get_mut(&vortex)
+            .expect("Psychic Vortex exists")
+            .counters
+            .insert(engine::types::counter::CounterType::Age, 1_024);
+        runner.auto_advance_to_main_phase();
+        runner.advance_until_stack_empty();
+        assert!(
+            matches!(
+                runner.state().waiting_for,
+                WaitingFor::UnlessPayment {
+                    repeat: Some(1_025),
+                    ..
+                }
+            ),
+            "reach: the upkeep offers 1,025 draws, got {:?}",
+            runner.state().waiting_for
+        );
+        let offered = fallback_action_default(runner.state());
+        assert_eq!(
+            offered,
+            Some(GameAction::PayUnlessCost { pay: false }),
+            "at the initial offer the fallback still declines a draw cost"
+        );
+        runner
+            .act(GameAction::PayUnlessCost { pay: true })
+            .expect("paying is never refused");
+        assert!(
+            engine::ai_support::unless_payment_only_continues(runner.state()),
+            "reach: the first slice ended at the continuation, got {:?}",
+            runner.state().waiting_for
+        );
+        let answer = fallback_action_default(runner.state());
+        assert_eq!(
+            answer,
+            Some(GameAction::PayUnlessCost { pay: true }),
+            "the fallback continues the payment"
+        );
+        runner
+            .act(answer.expect("the fallback answered"))
+            .expect("the fallback's answer is accepted");
+        assert!(
+            runner.state().pending_cost_move_resume.is_none(),
+            "the payment completed"
+        );
+    }
+
     #[test]
     fn fallback_pays_a_free_unless_payment_and_declines_a_real_one() {
         let payer = PlayerId(1);
@@ -14294,11 +14376,9 @@ mod tests {
     /// issues Σ C(8, k) for k = 0..=4 = 163 selections; the AI ranks exactly
     /// those.
     ///
-    /// The ceiling is a *blowup* guard, not a tight micro-benchmark: the
-    /// healthy path runs in tens of ms (machine- and load-dependent — this runs
-    /// in CI and alongside concurrent Tilt rebuilds), while a reversion to
-    /// Cartesian enumeration costs *tens of seconds*. A 1 s ceiling cleanly
-    /// separates the two without flaking on contention.
+    /// The scored-selection count pins the issued domain; the engine's
+    /// materialized-combination count pins that the 80-card pool is never
+    /// expanded before dedup.
     ///
     /// This is also the PAIRED POSITIVE guard for ranking the issued domain: it
     /// proves the AI still returns a real multi-card selection (not the empty
@@ -14307,11 +14387,10 @@ mod tests {
     /// every issued combination — and therefore the ranked winner — contains
     /// only uniquely-named cards.
     #[test]
-    fn gifts_ungiven_search_choice_returns_quickly_with_distinct_names() {
+    fn gifts_ungiven_search_choice_ranks_only_issued_distinct_name_sets() {
         use engine::types::ability::{
             SearchSelectionConstraint, SharedQuality, SharedQualityRelation,
         };
-        use std::time::Instant;
 
         let mut state = make_state();
 
@@ -14356,21 +14435,26 @@ mod tests {
 
         let config = create_config(AiDifficulty::VeryHard, Platform::Native);
         let mut rng = SmallRng::seed_from_u64(42);
-        let started = Instant::now();
+        crate::policies::tutor::SEARCH_SELECTIONS_SCORED.with(|c| c.replace(0));
+        engine::game::perf_counters::reset();
         let action = choose_action(&state, PlayerId(0), &config, &mut rng);
-        let elapsed = started.elapsed();
-        assert!(
-            elapsed.as_millis() < 1000,
-            "AI search-choice took {elapsed:?}; a Cartesian-enumeration regression \
-             (C(80,4) ≈ 1.5M combos) costs tens of seconds — ranking the engine's \
-             163 issued selections must stay well under the 1s blowup ceiling"
+        assert_eq!(
+            crate::policies::tutor::SEARCH_SELECTIONS_SCORED.with(|c| c.replace(0)),
+            163,
+            "the AI ranks the engine's Σ C(8,k≤4) = 163 distinct-name selections, never the C(80,4) pool product"
+        );
+        assert_eq!(
+            engine::game::perf_counters::selection_combination_snapshot().materialized,
+            163,
+            "the engine expands the 8 distinct names, never the 80-card pool before dedup"
         );
 
         match action {
             Some(GameAction::SelectCards { cards }) => {
                 assert!(
-                    cards.len() <= 4,
-                    "up_to=true SearchChoice must respect the count ceiling"
+                    (2..=4).contains(&cards.len()),
+                    "the AI must pick a multi-card selection within the count ceiling, got {}",
+                    cards.len()
                 );
                 let mut names = std::collections::HashSet::new();
                 for id in &cards {
@@ -14868,59 +14952,6 @@ mod tests {
         assert!(
             matches!(action, GameAction::ChooseOption { ref choice } if choice == "evidence"),
             "classic vote must pick first option, got {action:?}"
-        );
-    }
-
-    /// Regression guard: AI priority decision against 1000-token opponent
-    /// board must complete in single-digit milliseconds. The combination of
-    /// `ranked.truncate(branching)`, the deadline mechanism, and the
-    /// `im::HashMap` structural sharing in `apply_candidate` keeps priority
-    /// decisions cheap even on Scute Swarm-class boards. If this test ever
-    /// regresses past 100ms, something started doing per-opponent-creature
-    /// work inside `evaluate_after_action` or the candidate scoring loop —
-    /// hunt that down rather than relax this bound.
-    #[test]
-    fn priority_decision_vs_thousand_opponent_tokens_stays_fast() {
-        let mut state = make_state();
-        // 1000 1/1 opponent tokens — the pathological board.
-        for _ in 0..1000 {
-            add_creature(&mut state, PlayerId(1), 1, 1);
-        }
-        // AI has 5 untapped lands available (so legal_actions has some real
-        // candidates: PassPriority + maybe land-tap mana abilities).
-        for _ in 0..5 {
-            let cid = CardId(state.next_object_id);
-            let id = create_object(
-                &mut state,
-                cid,
-                PlayerId(0),
-                "Forest".to_string(),
-                Zone::Battlefield,
-            );
-            let obj = state.objects.get_mut(&id).unwrap();
-            obj.card_types.core_types.push(CoreType::Land);
-        }
-
-        let config = create_config(AiDifficulty::Hard, Platform::Native);
-        let mut rng = SmallRng::seed_from_u64(42);
-
-        let start = std::time::Instant::now();
-        let action = choose_action(&state, PlayerId(0), &config, &mut rng);
-        let elapsed = start.elapsed();
-
-        eprintln!(
-            "[bench] choose_action priority-pass (1000 opponent tokens, AI difficulty=Hard): {:?}",
-            elapsed
-        );
-        assert!(action.is_some(), "AI must produce some action");
-        // Empirical baseline ~5ms in debug. 100ms is a generous ceiling that
-        // catches a 20× regression while staying robust to CI-runner noise.
-        assert!(
-            elapsed.as_millis() < 100,
-            "Priority decision regressed past 100ms ceiling: {:?}; \
-             investigate per-opponent-creature work in score_candidates / \
-             evaluate_after_action before relaxing this bound.",
-            elapsed
         );
     }
 

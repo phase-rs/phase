@@ -2649,6 +2649,22 @@ fn parse_filtered_landing_zone_this_way(lower: &str) -> Option<QuantityRef> {
     })
 }
 
+/// CR 608.2c + CR 613.1b: "one <they | that player> gained control of this way" — the members of the chain tracked set whose control the instruction changed.
+fn parse_control_gained_this_way(input: &str) -> OracleResult<'_, QuantityRef> {
+    value(
+        QuantityRef::FilteredTrackedSetSize {
+            filter: Box::new(TargetFilter::Any),
+            caused_by: Some(ThisWayCause::ControlGained),
+        },
+        (
+            tag("one "),
+            alt((tag("they "), tag("that player "))),
+            tag("gained control of this way"),
+        ),
+    )
+    .parse(input)
+}
+
 fn parse_filtered_revealed_this_way(lower: &str) -> Option<QuantityRef> {
     for suffix in [" revealed this way", "revealed this way"] {
         let result: OracleResult<'_, &str> =
@@ -3675,6 +3691,9 @@ fn parse_for_each_clause_with_they_controller(
         // revealed/destroyed helpers above; a bare "card" returns `None` and keeps
         // the unfiltered `TrackedSetSize` fallback below.
         if let Some(qty) = parse_filtered_tracked_set_this_way(&lower) {
+            return Some(qty);
+        }
+        if let Ok(("", qty)) = parse_control_gained_this_way(&lower) {
             return Some(qty);
         }
         return Some(QuantityRef::TrackedSetSize);
@@ -4776,6 +4795,27 @@ mod tests {
     fn for_each_this_way_produces_tracked_set_size() {
         let qty = parse_for_each_clause("card put into a graveyard this way").unwrap();
         assert_eq!(qty, QuantityRef::TrackedSetSize);
+    }
+
+    #[test]
+    fn parse_for_each_clause_counts_control_gained_this_way() {
+        let control_gained = QuantityRef::FilteredTrackedSetSize {
+            filter: Box::new(TargetFilter::Any),
+            caused_by: Some(ThisWayCause::ControlGained),
+        };
+        for clause in [
+            "one they gained control of this way",
+            "one that player gained control of this way",
+        ] {
+            assert_eq!(parse_for_each_clause(clause), Some(control_gained.clone()));
+        }
+        assert!(!matches!(
+            parse_for_each_clause("one they exiled this way"),
+            Some(QuantityRef::FilteredTrackedSetSize {
+                caused_by: Some(ThisWayCause::ControlGained),
+                ..
+            })
+        ));
     }
 
     #[test]

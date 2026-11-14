@@ -663,6 +663,12 @@ fn hash_waiting_for(waiting_for: &WaitingFor, hasher: &mut impl Hasher) {
     hash_rules_projection(waiting_for, "WaitingFor", hasher);
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Test witness: rules projections the planner keys ran on this thread.
+    static RULES_PROJECTIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 /// The planner keys' only door from serialized state to a hash: every root is
 /// hashed through the engine's rules projection, so display-only data never
 /// reaches a key (CR 203.1 + CR 206.1). Object entries are hashed in sorted key
@@ -718,6 +724,8 @@ fn hash_rules_projection<T: Serialize + ?Sized>(
         }
     }
 
+    #[cfg(test)]
+    RULES_PROJECTIONS.with(|c| c.set(c.get() + 1));
     let projected = rules_projection(value)
         .unwrap_or_else(|error| panic!("{root} serializes for the planner key: {error}"));
     hash_json_value(&projected, hasher);
@@ -6419,10 +6427,10 @@ pub(crate) mod tests {
         assert_ne!(search_position_hash(&a), search_position_hash(&b));
     }
 
-    // Row 8b: the keyword fold path is exercised on a keyword-DENSE board (both
-    // the discriminant fast path and the serde payload branch) and stays cheap.
+    // Row 8b: keyword-dense board: the 400 `Flying` take the discriminant path,
+    // and the 8 `Ward` take the serde branch.
     #[test]
-    fn search_position_hash_keyword_dense_stays_fast() {
+    fn search_position_hash_projects_only_payload_keywords() {
         let mut state = make_state();
         for i in 0..400 {
             let owner = if i % 2 == 0 { PlayerId(0) } else { PlayerId(1) };
@@ -6433,14 +6441,12 @@ pub(crate) mod tests {
                 obj.keywords.push(Keyword::Ward(WardCost::PayLife(2))); // serde branch
             }
         }
-        let start = std::time::Instant::now();
-        for _ in 0..50 {
-            let _ = search_position_hash(&state);
-        }
-        let elapsed = start.elapsed();
-        assert!(
-            elapsed.as_millis() < 500,
-            "keyword-dense position hash too slow ({elapsed:?}) — the fold regressed"
+        RULES_PROJECTIONS.with(|c| c.replace(0));
+        let _ = search_position_hash(&state);
+        assert_eq!(
+            RULES_PROJECTIONS.with(|c| c.replace(0)),
+            8,
+            "only the Ward payloads serde-fold; unit keywords hash by discriminant"
         );
     }
 
@@ -6714,7 +6720,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn planner_key_projection_dense_waiting_for_stays_fast() {
+    fn planner_key_projection_dense_waiting_for_projects_once() {
         let mut state = make_state();
         let mut targets = HashMap::new();
         let mut requirements = HashMap::new();
@@ -6750,30 +6756,12 @@ pub(crate) mod tests {
             );
         }
 
-        let start = std::time::Instant::now();
-        for _ in 0..50 {
-            let _ = transposition_key(&state);
-        }
-        let elapsed = start.elapsed();
-        assert!(
-            elapsed.as_millis() < 1000,
-            "projection-hashed dense WaitingFor too slow ({elapsed:?})"
-        );
-
-        // Measurement only (not asserted): projection cost relative to `to_value`.
-        let start = std::time::Instant::now();
-        for _ in 0..50 {
-            let _ = rules_projection(&state.waiting_for).unwrap();
-        }
-        let projection = start.elapsed();
-        let start = std::time::Instant::now();
-        for _ in 0..50 {
-            let _ = serde_json::to_value(&state.waiting_for).unwrap();
-        }
-        let to_value = start.elapsed();
-        eprintln!(
-            "MEASURE 50x rules_projection={projection:?} 50x to_value={to_value:?} ratio={:.2}",
-            projection.as_secs_f64() / to_value.as_secs_f64()
+        RULES_PROJECTIONS.with(|c| c.replace(0));
+        let _ = transposition_key(&state);
+        assert_eq!(
+            RULES_PROJECTIONS.with(|c| c.replace(0)),
+            1,
+            "a dense WaitingFor is hashed through one projection, not one per entry"
         );
     }
 

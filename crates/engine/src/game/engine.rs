@@ -1369,6 +1369,11 @@ struct RawActionApplication {
     submitted_interaction_owner: Option<PlayerId>,
     preserve_interaction: bool,
     lifecycle: super::lifecycle::ActionLifecycleGuard,
+    /// CR 104.3a: the departure a concession committed at this boundary.
+    committed_departure: Option<CommittedDeparture>,
+    /// CR 104.3a: the failure that ended a committed concession's follow-up in
+    /// the core; finalization publishes the committed departure instead.
+    follow_up_failure: Option<EngineError>,
 }
 
 /// Receipt-relevant observations from one prospective action. The lifecycle
@@ -1585,6 +1590,8 @@ fn apply_action_boundary_core(
             submitted_interaction_owner,
             preserve_interaction,
             lifecycle,
+            committed_departure: None,
+            follow_up_failure: None,
         });
     }
     // A player-resource change this action resolves must be representable: open
@@ -1598,6 +1605,15 @@ fn apply_action_boundary_core(
     // snapshot above still holds it on its `PendingCast`, so every restore path
     // below returns it there.
     super::announcement_triggers::begin_action(state);
+    // CR 104.3a + CR 118.12: a submitter-scoped action admitted outside the
+    // parked payment must stay authoritative in the recovery checkpoint too.
+    let mirror_source = (state
+        .payment_transaction
+        .as_ref()
+        .is_some_and(|transaction| transaction.recovered.is_some())
+        && action.is_submitter_scoped()
+        && !matches!(action, GameAction::Concede { .. } | GameAction::Debug(_)))
+    .then(|| (action.clone(), authenticated_actor));
     let mut result = match if payment_transaction::owns_action(state, &action) {
         // All staged-payment actions enter through this admission point. The
         // authenticated actor is recorded for deterministic replay; the
@@ -1715,8 +1731,21 @@ fn apply_action_boundary_core(
             submitted_interaction_owner,
             preserve_interaction,
             lifecycle,
+            committed_departure: None,
+            follow_up_failure: None,
         });
     }
+    if let Some((mirror_action, mirror_actor)) = mirror_source {
+        payment_transaction::mirror_outside_action(state, mirror_actor, &mirror_action);
+    }
+    // CR 104.3a: "A player who concedes leaves the game immediately." The
+    // departure and the events that record it commit here, at the
+    // authenticated action boundary; every later failure of this action's
+    // follow-up restores this state and publishes these events.
+    let committed_departure = independent_cast_action
+        .as_ref()
+        .filter(|(_, _, action)| matches!(action, GameAction::Concede { .. }))
+        .map(|concession| CommittedDeparture::capture(state, &result, concession.clone()));
     // CR 400.7 + CR 403.3 + CR 614.12a: an as-enters choice (and any continuation it raises) can
     // span an arbitrary number of client round-trips of ANY `WaitingFor` shape, so realization of a
     // parked token battlefield entry is keyed on the action having SETTLED, not on prompt shape.
@@ -1734,70 +1763,97 @@ fn apply_action_boundary_core(
     // cannot have them collected a second time. Inert on every other route: the flush returns
     // `false` when nothing was parked or an earlier convergence point already consumed it
     // (`Option::take_if`).
-    let scan_from = result.events.len();
-    // CR 601.2h + CR 602.2b + CR 605.3b: a parked counter-cost root's subtree is
-    // finished and the root resumed before the action returns; when that made
-    // progress, its events join the convergence pass below.
-    let resumed_parked_root = match resume_parked_counter_cost_root_at_action_boundary(
-        state,
-        &result.waiting_for,
-        &mut result.events,
-    ) {
-        Ok(Some(waiting_for)) => {
-            result.waiting_for = waiting_for;
-            true
-        }
-        Ok(None) => false,
-        Err(err) => {
-            let failure = boundary_life_change_failure(state);
-            lifecycle.discard();
-            *state = cast_undo_boundary.restore(boundary_snapshot);
-            return Err(
-                failure.map_or(err, |player| EngineError::LifeChangeUnrepresentable {
-                    player,
-                }),
-            );
-        }
-    };
-    let realized_token_entry =
-        effects::token::realize_settled_token_battlefield_entry(state, &mut result.events);
-    // CR 608.2c + CR 608.2n: the same convergence for a resolution this action
-    // completed on a route that never reached the pipeline (a spell cast during
-    // a resolution, CR 608.2g, finishes its announcement here): the resolving
-    // instant or sorcery still owes its final part — leaving the stack — and the
-    // pipeline's top runs it (`run_spell_final_part_if_due`) and collects its
-    // triggers. A token realization and an owed final part on the same action
-    // share one pass.
-    let owed_spell_final_part_is_due = owed_spell_final_part_is_due(state, &result);
-    if (resumed_parked_root && matches!(result.waiting_for, WaitingFor::Priority { .. }))
-        || realized_token_entry
-        || owed_spell_final_part_is_due
-    {
-        if let Err(err) = run_boundary_convergence_pipeline(state, &mut result, scan_from) {
-            let failure = boundary_life_change_failure(state);
-            lifecycle.discard();
-            *state = cast_undo_boundary.restore(boundary_snapshot);
-            return Err(
-                failure.map_or(err, |player| EngineError::LifeChangeUnrepresentable {
-                    player,
-                }),
-            );
-        }
-    }
-    // CR 603.2 + CR 603.3: events this action emitted while the announcement
-    // stays paused are staged into its carrier; a spell's carrier returns to
-    // whichever owner now holds the announcement. A reducer arm can return a
-    // prompt carrying the announcement without having written it to the state
-    // yet, so the result's wait is the one the custody authority inspects; the
-    // state's own wait is left exactly as the reducer left it.
-    let reducer_wait = std::mem::replace(&mut state.waiting_for, result.waiting_for.clone());
-    super::announcement_triggers::end_action(state, &result.events);
-    result.waiting_for = std::mem::replace(&mut state.waiting_for, reducer_wait);
-    if let Some(player) = boundary_life_change_failure(state) {
-        lifecycle.discard();
-        *state = cast_undo_boundary.restore(boundary_snapshot);
-        return Err(EngineError::LifeChangeUnrepresentable { player });
-    }
+    // CR 104.3a: a concession's follow-up that fails stops here; finalization
+    // publishes the committed departure (`reject_or_publish_departure`).
+    let follow_up_failure =
+        'follow_up: {
+            let scan_from = result.events.len();
+            // CR 601.2h + CR 602.2b + CR 605.3b: a parked counter-cost root's subtree is
+            // finished and the root resumed before the action returns; when that made
+            // progress, its events join the convergence pass below.
+            let resumed_parked_root = match resume_parked_counter_cost_root_at_action_boundary(
+                state,
+                &result.waiting_for,
+                &mut result.events,
+            ) {
+                Ok(Some(waiting_for)) => {
+                    result.waiting_for = waiting_for;
+                    true
+                }
+                Ok(None) => false,
+                Err(err) => {
+                    if committed_departure.is_some() {
+                        break 'follow_up Some(err);
+                    }
+                    let failure = boundary_life_change_failure(state);
+                    lifecycle.discard();
+                    *state = cast_undo_boundary.restore(boundary_snapshot);
+                    return Err(failure.map_or(err, |player| {
+                        EngineError::LifeChangeUnrepresentable { player }
+                    }));
+                }
+            };
+            // CR 800.4a + CR 616.1 + CR 117.2e: a concession that left a parked unless
+            // payment without its prompt, or with a prompt that no longer describes its
+            // event, is reconciled before the action returns. A payment that ended joins
+            // the convergence pass below.
+            let reconciled_unless_payment = match reconcile_parked_unless_payment_after_departure(
+                state,
+                committed_departure.as_ref(),
+                &mut result,
+                scan_from,
+            ) {
+                Ok(moved) => moved,
+                Err(err) => break 'follow_up Some(err),
+            };
+            let realized_token_entry =
+                effects::token::realize_settled_token_battlefield_entry(state, &mut result.events);
+            // CR 608.2c + CR 608.2n: the same convergence for a resolution this action
+            // completed on a route that never reached the pipeline (a spell cast during
+            // a resolution, CR 608.2g, finishes its announcement here): the resolving
+            // instant or sorcery still owes its final part — leaving the stack — and the
+            // pipeline's top runs it (`run_spell_final_part_if_due`) and collects its
+            // triggers. A token realization and an owed final part on the same action
+            // share one pass.
+            let owed_spell_final_part_is_due = owed_spell_final_part_is_due(state, &result);
+            if ((resumed_parked_root || reconciled_unless_payment)
+                && matches!(result.waiting_for, WaitingFor::Priority { .. }))
+                || realized_token_entry
+                || owed_spell_final_part_is_due
+            {
+                if let Err(err) = run_boundary_convergence_pipeline(state, &mut result, scan_from) {
+                    if committed_departure.is_some() {
+                        break 'follow_up Some(err);
+                    }
+                    let failure = boundary_life_change_failure(state);
+                    lifecycle.discard();
+                    *state = cast_undo_boundary.restore(boundary_snapshot);
+                    return Err(failure.map_or(err, |player| {
+                        EngineError::LifeChangeUnrepresentable { player }
+                    }));
+                }
+            }
+            // CR 603.2 + CR 603.3: events this action emitted while the announcement
+            // stays paused are staged into its carrier; a spell's carrier returns to
+            // whichever owner now holds the announcement. A reducer arm can return a
+            // prompt carrying the announcement without having written it to the state
+            // yet, so the result's wait is the one the custody authority inspects; the
+            // state's own wait is left exactly as the reducer left it.
+            let reducer_wait =
+                std::mem::replace(&mut state.waiting_for, result.waiting_for.clone());
+            super::announcement_triggers::end_action(state, &result.events);
+            result.waiting_for = std::mem::replace(&mut state.waiting_for, reducer_wait);
+            if let Some(player) = boundary_life_change_failure(state) {
+                let error = EngineError::LifeChangeUnrepresentable { player };
+                if committed_departure.is_some() {
+                    break 'follow_up Some(error);
+                }
+                lifecycle.discard();
+                *state = cast_undo_boundary.restore(boundary_snapshot);
+                return Err(error);
+            }
+            None
+        };
     // Do not carry the core's window into finalization: that pass owns its own
     // scope over convergence, auto-pass, and re-convergence.
     state.ingress_life_window = None;
@@ -1815,6 +1871,8 @@ fn apply_action_boundary_core(
         submitted_interaction_owner,
         preserve_interaction,
         lifecycle,
+        committed_departure,
+        follow_up_failure,
     })
 }
 
@@ -1872,6 +1930,129 @@ fn resume_parked_counter_cost_root_at_action_boundary(
         );
     }
     Ok(progressed.then(|| state.waiting_for.clone()))
+}
+
+/// CR 800.4a + CR 616.1 + CR 117.2e: the concession-boundary reconciliation of
+/// a parked unless payment
+/// ([`PendingCostMoveResume::CounterAdditionUnlessPayment`]) the departure did
+/// not retire
+/// (`engine_payment_choices::retire_parked_unless_payment_of_departing_players`).
+///
+/// - Its replacement choice is still open for a surviving chooser, and the
+///   departure changed the replacements that apply to the parked draw (a
+///   candidate's source left, or an effect the departed player's permanent
+///   suppressed applies again): the event is re-proposed through the
+///   replacement authority, so the chooser is offered exactly the effects that
+///   apply now (CR 616.1). The same authority re-proposes on an answer; here it
+///   runs before the chooser is asked.
+/// - Its replacement choice was a departed player's own draw (a substitute
+///   draw by another player, interrupted on that player's choice). That draw
+///   can no longer happen (CR 800.4a + CR 614.17c); the same authority settles
+///   it with no card drawn and resumes the draw sequences above it (CR
+///   121.6b), so the payer's own remaining draws and then the instructions
+///   still owed are performed.
+/// - Its open question was abandoned with a departed chooser (any other
+///   parked event of theirs, or a later choice of an interactive substitute:
+///   Abundance's land-or-nonland). The departure removed only the leaver's
+///   part of the substitute (`replacement::abandon_departed_substitute_continuation`),
+///   so a surviving draw sequence is finished first (CR 121.6b), and then the
+///   payer, who chose to pay and is still in the game, performs what is still
+///   owed. No player receives priority before the payment ends (CR 117.2e);
+///   when the resolution it belongs to ends, the active player does (CR 117.3b).
+///
+/// A payment that parks again has its events collected as any pause inside a
+/// payment of draws does (CR 603.2c); one that ended is left to the caller's
+/// convergence pass. A staged resolution payment is settled by its own
+/// authority in the concession arm
+/// (`payment_transaction::settle_after_outside_action`). Inert for an action
+/// that committed no departure; `true` when the payment moved.
+fn reconcile_parked_unless_payment_after_departure(
+    state: &mut GameState,
+    departure: Option<&CommittedDeparture>,
+    result: &mut ActionResult,
+    scan_from: usize,
+) -> Result<bool, EngineError> {
+    if departure.is_none() {
+        return Ok(false);
+    }
+    match parked_unless_payment_repair(state, &result.waiting_for) {
+        Some(ParkedPaymentRepair::StalePrompt) => {
+            sync_waiting_for(state, &result.waiting_for);
+            // No answer is read: the replacement authority settles a draw that
+            // can't happen with no replacement, and re-proposes any other stale
+            // prompt, before it applies an index (`handle_replacement_choice`,
+            // `continue_replacement`).
+            result.waiting_for =
+                engine_replacement::handle_replacement_choice(state, 0, &mut result.events)?;
+            state.waiting_for = result.waiting_for.clone();
+        }
+        Some(ParkedPaymentRepair::LostPrompt) => {
+            sync_waiting_for(state, &result.waiting_for);
+            engine_payment_choices::set_active_priority(state);
+            // CR 121.6b + CR 614.11a: a surviving draw sequence the departed
+            // substitute sat inside is finished before the payment's owner
+            // resumes; a draw of it that parks keeps the owner parked.
+            if engine_replacement::resume_active_draw_sequences(state, &mut result.events).is_none()
+            {
+                resume_pending_continuation_if_priority(state, &mut result.events)?;
+            }
+            result.waiting_for = state.waiting_for.clone();
+        }
+        None => return Ok(false),
+    }
+    if !matches!(result.waiting_for, WaitingFor::Priority { .. })
+        && engine_payment_choices::paused_in_draw_payment(state)
+        && state.game_end.is_none()
+    {
+        triggers::collect_paused_exit_triggers(state, &result.events, scan_from);
+    }
+    Ok(true)
+}
+
+/// What a departure left to repair on a parked unless payment.
+enum ParkedPaymentRepair {
+    /// CR 616.1: the payment's replacement prompt no longer describes its
+    /// event. It is still open for a surviving chooser, or its chooser left
+    /// and the departure handed priority on while keeping the record
+    /// (`engine_payment_choices::departed_draw_settles_with_parked_payment`).
+    StalePrompt,
+    /// CR 117.2e: the prompt left with its chooser and the owner is parked
+    /// under a priority window.
+    LostPrompt,
+}
+
+/// The one reading of whether a parked unless payment needs the concession's
+/// reconciliation: by the reconciliation itself, and by the departure fallback
+/// (`reject_or_publish_departure`), which retires a payment still in need of
+/// it.
+fn parked_unless_payment_repair(
+    state: &GameState,
+    waiting_for: &WaitingFor,
+) -> Option<ParkedPaymentRepair> {
+    if state.payment_transaction.is_some()
+        || !matches!(
+            state.pending_cost_move_resume,
+            Some(PendingCostMoveResume::CounterAdditionUnlessPayment { .. })
+        )
+    {
+        return None;
+    }
+    let stale_prompt = engine_payment_choices::draw_payment_is_parked(state)
+        && state
+            .pending_replacement
+            .as_ref()
+            .is_some_and(|pending| replacement::parked_prompt_is_stale(state, pending));
+    match waiting_for {
+        WaitingFor::ReplacementChoice { .. } | WaitingFor::Priority { .. } if stale_prompt => {
+            Some(ParkedPaymentRepair::StalePrompt)
+        }
+        WaitingFor::Priority { .. }
+            if engine_payment_choices::parked_unless_payment_lost_its_prompt(state) =>
+        {
+            Some(ParkedPaymentRepair::LostPrompt)
+        }
+        _ => None,
+    }
 }
 
 /// The action boundary's convergence pass: the ordinary post-action pipeline,
@@ -2299,6 +2480,134 @@ fn settle_deferred_triggers_after_persisted_restore(
     Ok(())
 }
 
+/// CR 104.3a: "A player who concedes leaves the game immediately." The state a
+/// concession left and the result that publishes it, committed at the
+/// authenticated action boundary right after the reducer. It lives only in this
+/// action's frame, so the next action starts without it.
+struct CommittedDeparture {
+    state: std::sync::Arc<GameState>,
+    result: ActionResult,
+    /// The authenticated concession `(actor, owner, action)`, recorded over any
+    /// cast-undo descriptor when the departure is published.
+    concession: (PlayerId, PlayerId, GameAction),
+}
+
+impl CommittedDeparture {
+    fn capture(
+        state: &GameState,
+        result: &ActionResult,
+        concession: (PlayerId, PlayerId, GameAction),
+    ) -> Self {
+        Self {
+            state: std::sync::Arc::new(state.clone()),
+            result: result.clone(),
+            concession,
+        }
+    }
+}
+
+/// The interaction binding an action found, kept so a failure after it was
+/// consumed can still rebind the committed departure's prompt.
+struct InteractionHandoff {
+    previous_waiting: WaitingFor,
+    previous_slots: Vec<crate::types::interaction::ActiveInteractionSlot>,
+    submitted_owner: Option<PlayerId>,
+}
+
+/// The single rollback authority for a failure in finalization. Any action
+/// other than a concession restores its pre-action snapshot and is rejected.
+/// CR 104.3a: a concession committed at this boundary instead restores that
+/// committed state and publishes it with its events; the failed follow-up is
+/// discarded whole, never kept half-run.
+fn reject_or_publish_departure(
+    state: &mut GameState,
+    lifecycle: super::lifecycle::ActionLifecycleGuard,
+    snapshot: std::sync::Arc<GameState>,
+    committed: Option<CommittedDeparture>,
+    interaction_handoff: InteractionHandoff,
+    mode: PublicFinalizeMode,
+    error: EngineError,
+) -> Result<
+    (
+        ActionResult,
+        Option<super::lifecycle::ProspectiveLifecycleFacts>,
+    ),
+    EngineError,
+> {
+    lifecycle.discard();
+    let Some(departure) = committed else {
+        *state = std::sync::Arc::unwrap_or_clone(snapshot);
+        return Err(error);
+    };
+    tracing::debug!(
+        ?error,
+        "a concession's follow-up failed; the committed departure stands"
+    );
+    let CommittedDeparture {
+        state: committed_state,
+        mut result,
+        concession: (actor, owner, action),
+    } = departure;
+    *state = std::sync::Arc::unwrap_or_clone(committed_state);
+    // The committed state was taken inside the core's ingress window and
+    // announcement scope; close both as the core does.
+    state.ingress_life_window = None;
+    let reducer_wait = std::mem::replace(&mut state.waiting_for, result.waiting_for.clone());
+    super::announcement_triggers::end_action(state, &result.events);
+    result.waiting_for = std::mem::replace(&mut state.waiting_for, reducer_wait);
+    // CR 733.1: the departure is recorded over a live cast's undo descriptor,
+    // as on the ordinary path; one that cannot be rebased is retired rather
+    // than left able to restore pre-departure values.
+    if super::engine_casting::preserve_independent_cast_action(
+        state, &snapshot, actor, owner, action,
+    )
+    .is_err()
+    {
+        state.spell_cast_reversal = None;
+    }
+    // CR 104.2a: a concession that left one player ends the game here too.
+    settle_finished_game(state, &mut result);
+    // CR 104.3a + CR 118.12 + CR 616.1: the follow-up that reconciles a parked
+    // unless payment with the departure is discarded with everything else, so
+    // a payment that needed it is retired here, as part of the departure that
+    // is published. Left parked, its prompt would name the departed player's
+    // effect, and the answers that failed the follow-up (Words of Worship's
+    // gain at the life limit once the competing Hullbreacher is gone) would
+    // fail again at every attempt.
+    if state.game_end.is_none()
+        && parked_unless_payment_repair(state, &result.waiting_for).is_some()
+    {
+        engine_payment_choices::retire_unreconcilable_parked_unless_payment(state);
+        result.waiting_for = state.waiting_for.clone();
+    }
+    bump_state_revision(state);
+    sync_waiting_for(state, &result.waiting_for);
+    mark_public_state_from_events(state, &result.events);
+    finalize_rules_state(state);
+    super::un_actions::refresh_menu(state);
+    result.waiting_for = state.waiting_for.clone();
+    if matches!(mode, PublicFinalizeMode::Immediate) {
+        finalize_display_state(state);
+    }
+    result.log_entries = super::log::resolve_log_entries(&result.events, &snapshot, state);
+    let InteractionHandoff {
+        previous_waiting,
+        previous_slots,
+        submitted_owner,
+    } = interaction_handoff;
+    if interaction::rebind_interaction_slots_after_action(
+        state,
+        &previous_waiting,
+        previous_slots.clone(),
+        submitted_owner,
+    )
+    .is_err()
+    {
+        interaction::preserve_interaction_slots(state, previous_slots);
+    }
+    Ok((result, None))
+}
+
 fn finish_action_boundary(
     state: &mut GameState,
     raw: RawActionApplication,
@@ -2337,7 +2646,25 @@ fn finish_action_boundary_with_lifecycle(
         submitted_interaction_owner,
         preserve_interaction,
         lifecycle,
+        committed_departure,
+        follow_up_failure,
     } = raw;
+    let interaction_handoff = || InteractionHandoff {
+        previous_waiting: previous_interaction_waiting.clone(),
+        previous_slots: previous_interaction_slots.clone(),
+        submitted_owner: submitted_interaction_owner,
+    };
+    if let Some(error) = follow_up_failure {
+        return reject_or_publish_departure(
+            state,
+            lifecycle,
+            boundary_snapshot,
+            committed_departure,
+            interaction_handoff(),
+            mode,
+            error,
+        );
+    }
     // Finalization owns the remainder of the action (convergence, auto-pass,
     // reconvergence), so it needs its own ingress window: the core boundary
     // closed its window before handing the raw application over.
@@ -2349,9 +2676,13 @@ fn finish_action_boundary_with_lifecycle(
         reconcile_terminal_result,
     ) {
         let life_failure = close_ingress_window(state, &mut prior_window);
-        lifecycle.discard();
-        *state = std::sync::Arc::unwrap_or_clone(boundary_snapshot);
-        return Err(
+        return reject_or_publish_departure(
+            state,
+            lifecycle,
+            boundary_snapshot,
+            committed_departure,
+            interaction_handoff(),
+            mode,
             life_failure.map_or(err, |player| EngineError::LifeChangeUnrepresentable {
                 player,
             }),
@@ -2378,11 +2709,17 @@ fn finish_action_boundary_with_lifecycle(
             Ok(advanced) => advanced,
             Err(error) => {
                 let life_failure = close_ingress_window(state, &mut prior_window);
-                lifecycle.discard();
-                *state = std::sync::Arc::unwrap_or_clone(boundary_snapshot);
-                return Err(life_failure.map_or(error, |player| {
-                    EngineError::LifeChangeUnrepresentable { player }
-                }));
+                return reject_or_publish_departure(
+                    state,
+                    lifecycle,
+                    boundary_snapshot,
+                    committed_departure,
+                    interaction_handoff(),
+                    mode,
+                    life_failure.map_or(error, |player| EngineError::LifeChangeUnrepresentable {
+                        player,
+                    }),
+                );
             }
         }
     };
@@ -2395,16 +2732,20 @@ fn finish_action_boundary_with_lifecycle(
     if let Err(err) = reconcile_terminal_result_completing_resolution(state, &mut result, reconcile)
     {
         let life_failure = close_ingress_window(state, &mut prior_window);
-        lifecycle.discard();
-        *state = std::sync::Arc::unwrap_or_clone(boundary_snapshot);
-        return Err(
+        return reject_or_publish_departure(
+            state,
+            lifecycle,
+            boundary_snapshot,
+            committed_departure,
+            interaction_handoff(),
+            mode,
             life_failure.map_or(err, |player| EngineError::LifeChangeUnrepresentable {
                 player,
             }),
         );
     }
     if matches!(result.waiting_for, WaitingFor::GameOver { .. }) {
-        take_and_restore_stack_resolution_session(state);
+        payment_transaction::retire_terminal_transaction(state);
     }
     // Debug "infinite mana" (CR 500.5 suppressed for flagged players): restore any
     // pool that a spend during this action depleted, before public state is
@@ -2434,20 +2775,24 @@ fn finish_action_boundary_with_lifecycle(
         super::log::resolve_log_entries(&result.events, &boundary_snapshot, state)
     };
     if preserve_interaction && !auto_pass_advanced {
-        interaction::preserve_interaction_slots(state, previous_interaction_slots);
-    } else {
-        if interaction::rebind_interaction_slots_after_action(
+        interaction::preserve_interaction_slots(state, previous_interaction_slots.clone());
+    } else if interaction::rebind_interaction_slots_after_action(
+        state,
+        &previous_interaction_waiting,
+        previous_interaction_slots.clone(),
+        submitted_interaction_owner,
+    )
+    .is_err()
+    {
+        let life_failure = close_ingress_window(state, &mut prior_window);
+        return reject_or_publish_departure(
             state,
-            &previous_interaction_waiting,
-            previous_interaction_slots,
-            submitted_interaction_owner,
-        )
-        .is_err()
-        {
-            let life_failure = close_ingress_window(state, &mut prior_window);
-            lifecycle.discard();
-            *state = std::sync::Arc::unwrap_or_clone(boundary_snapshot);
-            return Err(life_failure.map_or_else(
+            lifecycle,
+            boundary_snapshot,
+            committed_departure,
+            interaction_handoff(),
+            mode,
+            life_failure.map_or_else(
                 || {
                     EngineError::InvalidAction(
                         "Unable to allocate interaction authority for the resulting decision"
@@ -2455,8 +2800,8 @@ fn finish_action_boundary_with_lifecycle(
                     )
                 },
                 |player| EngineError::LifeChangeUnrepresentable { player },
-            ));
-        }
+            ),
+        );
     }
     // CR 733.1: capture after information/interaction settlement too, so a
     // library reveal cannot evade its exception merely by journaling late.
@@ -2488,18 +2833,28 @@ fn finish_action_boundary_with_lifecycle(
     })();
     if let Err(error) = recording {
         let life_failure = close_ingress_window(state, &mut prior_window);
-        lifecycle.discard();
-        *state = std::sync::Arc::unwrap_or_clone(boundary_snapshot);
-        return Err(
+        return reject_or_publish_departure(
+            state,
+            lifecycle,
+            boundary_snapshot,
+            committed_departure,
+            interaction_handoff(),
+            mode,
             life_failure.map_or(error, |player| EngineError::LifeChangeUnrepresentable {
                 player,
             }),
         );
     }
     if let Some(player) = close_ingress_window(state, &mut prior_window) {
-        lifecycle.discard();
-        *state = std::sync::Arc::unwrap_or_clone(boundary_snapshot);
-        return Err(EngineError::LifeChangeUnrepresentable { player });
+        return reject_or_publish_departure(
+            state,
+            lifecycle,
+            boundary_snapshot,
+            committed_departure,
+            interaction_handoff(),
+            mode,
+            EngineError::LifeChangeUnrepresentable { player },
+        );
     }
     #[cfg(debug_assertions)]
     super::perf_counters::outside_take_cost(|| debug_assert_runtime_resolution_invariants(state));
@@ -2563,6 +2918,9 @@ fn reconcile_terminal_result(state: &mut GameState, result: &mut ActionResult) {
 fn settle_finished_game(state: &mut GameState, result: &mut ActionResult) {
     super::elimination::retire_finished_game_resolution(state);
     if matches!(state.waiting_for, WaitingFor::GameOver { .. }) {
+        // CR 104.1: retire the staged payment before the match transition can
+        // move the state to sideboarding with a live descriptor.
+        payment_transaction::retire_terminal_transaction(state);
         match_flow::handle_game_over_transition(state);
         result.waiting_for = state.waiting_for.clone();
     }
@@ -2587,8 +2945,13 @@ fn reconcile_terminal_sba(state: &mut GameState, result: &mut ActionResult) {
     // (CR 119.4), so the 0-life check waits until that process ends and a
     // player would next receive priority. Until then that player is still in
     // the game, so waiting on their choices is not the #962 softlock; prompts
-    // owned by a resolution keep the net.
-    if sba::has_pending_player_loss_sba(state) && !state.withholds_priority() {
+    // owned by a resolution keep the net. CR 117.2e + CR 121.4: one exception is
+    // a parked unless payment of draws: a draw from an empty library loses at the
+    // next priority, after the payment's later replacement prompts.
+    if sba::has_pending_player_loss_sba(state)
+        && !state.withholds_priority()
+        && !engine_payment_choices::draw_payment_is_parked(state)
+    {
         sba::check_state_based_actions(state, &mut result.events);
         // SBA may have advanced waiting_for (e.g., GameOver, or Priority for
         // the next living player). Sync the result.
@@ -7961,6 +8324,7 @@ pub(crate) fn drain_pending_cost_move_resume(
                     | PendingCostMoveResume::SacrificeForCost { .. }
                     | PendingCostMoveResume::WardSacrificePayment { .. }
                     | PendingCostMoveResume::ReplacementMayCost { .. }
+                    | PendingCostMoveResume::ReplacementMayCostInnerChoice { .. }
                     | PendingCostMoveResume::CollectEvidencePayment { .. }
                     | PendingCostMoveResume::UnlessBouncePayment { .. }
                     | PendingCostMoveResume::ManaAbilityPayment { .. }
@@ -7981,7 +8345,9 @@ pub(crate) fn drain_pending_cost_move_resume(
         // are eligible here too: whether a prevented placement leaves that
         // payment paid or failed is `resume_counter_addition_unless_payment`'s
         // call, argued in its own header; either way the pending unless branch
-        // must resolve here, not wedge.
+        // must resolve here, not wedge. A parked entry MayCost whose draw leg
+        // was skipped is eligible too: the Prevented arm completes the draw
+        // instruction before this drain (CR 614.11a), then the entry resumes.
         CostMoveDrainBoundary::ReplacementPrevented { .. } => matches!(
             state.pending_cost_move_resume,
             Some(
@@ -7989,6 +8355,7 @@ pub(crate) fn drain_pending_cost_move_resume(
                     | PendingCostMoveResume::SacrificeForCost { .. }
                     | PendingCostMoveResume::WardSacrificePayment { .. }
                     | PendingCostMoveResume::ReplacementMayCost { .. }
+                    | PendingCostMoveResume::ReplacementMayCostInnerChoice { .. }
                     | PendingCostMoveResume::Foretell { .. }
                     | PendingCostMoveResume::CollectEvidencePayment { .. }
                     | PendingCostMoveResume::UnlessBouncePayment { .. }
@@ -8012,6 +8379,13 @@ pub(crate) fn drain_pending_cost_move_resume(
                         } | PendingCostMoveResume::ManaAbilityPayment { .. }
                             | PendingCostMoveResume::CounterCostRemovalPayment { .. }
                             | PendingCostMoveResume::TurnFaceUpCostMove { .. }
+                            // CR 614.11a + CR 118.12: an interactive draw
+                            // substitute (Abundance's land/nonland then bottom
+                            // ordering) returns to the priority boundary only
+                            // after its subtree has retired; the owning payment
+                            // still has to resume then.
+                            | PendingCostMoveResume::ReplacementMayCostInnerChoice { .. }
+                            | PendingCostMoveResume::CounterAdditionUnlessPayment { .. }
                     )
                 )
         }
@@ -8042,6 +8416,11 @@ pub(crate) fn drain_pending_cost_move_resume(
         Some(PendingCostMoveResume::ReplacementMayCost { .. })
     ) {
         super::costs::resume_replacement_may_cost_move(state, events)?
+    } else if matches!(
+        state.pending_cost_move_resume,
+        Some(PendingCostMoveResume::ReplacementMayCostInnerChoice { .. })
+    ) {
+        super::costs::resume_replacement_may_cost_after_inner_choice(state, events)?
     } else if matches!(
         state.pending_cost_move_resume,
         Some(PendingCostMoveResume::Foretell { .. })
@@ -8110,6 +8489,52 @@ pub(crate) fn drain_pending_cost_move_resume(
 /// `resume_due_counter_cost_root`; the cost-move drain admits it at
 /// `PriorityBoundary`). A repeat needs the position to strictly decrease, so
 /// the loop ends.
+/// CR 118.11 + CR 614.11a: only a bare activation whose own cost is the draw
+/// instruction may resume at the common boundary; a cast or activation paused
+/// on an unrelated choice keeps its existing owner.
+fn pending_cast_is_draw_cost_activation(
+    state: &GameState,
+    pending: &crate::types::game_state::PendingCast,
+) -> bool {
+    // CR 118.12: the retained unpaid suffix can still own the parked draw when
+    // the pause happened before it; the paused-on-draw flag survives the source
+    // leaving or losing the grant.
+    if pending.activation_cost_paused_on_draw
+        || pending
+            .activation_cost
+            .as_ref()
+            .is_some_and(cost_includes_draw_instruction)
+    {
+        return true;
+    }
+    let Some(index) = pending.activation_ability_index else {
+        return false;
+    };
+    crate::game::casting::activated_ability_definitions(state, pending.object_id)
+        .into_iter()
+        .find(|(candidate, _)| *candidate == index)
+        .is_some_and(|(_, definition)| {
+            definition
+                .cost
+                .as_ref()
+                .is_some_and(cost_includes_draw_instruction)
+        })
+}
+
+/// Whether a cost (possibly a composite) contains a printed Draw instruction.
+pub(crate) fn cost_includes_draw_instruction(cost: &crate::types::ability::AbilityCost) -> bool {
+    use crate::types::ability::AbilityCost;
+    match cost {
+        AbilityCost::EffectCost { effect } => {
+            matches!(effect.as_ref(), crate::types::ability::Effect::Draw { .. })
+        }
+        AbilityCost::Composite { costs } | AbilityCost::OneOf { costs } => {
+            costs.iter().any(cost_includes_draw_instruction)
+        }
+        _ => false,
+    }
+}
+
 pub(super) fn resume_pending_continuation_if_priority(
     state: &mut GameState,
     events: &mut Vec<GameEvent>,
@@ -8122,6 +8547,21 @@ pub(super) fn resume_pending_continuation_if_priority(
             || state.counter_cost_root_subtree() != CounterCostRootSubtree::Unfinished
             || !after.is_strictly_inside(&before)
         {
+            // CR 614.11a + CR 118.11: a bare cast/activation whose draw cost
+            // paused on an interactive substitute must resume once the whole
+            // draw instruction and its substitute subtree have finished.
+            let draw_cost_activation = state
+                .pending_cast
+                .as_deref()
+                .is_some_and(|pending| pending_cast_is_draw_cost_activation(state, pending));
+            if matches!(state.waiting_for, WaitingFor::Priority { .. })
+                && state.active_ability_continuation().is_none()
+                && draw_cost_activation
+                && super::engine_replacement::resume_active_draw_sequences(state, events).is_none()
+            {
+                state.waiting_for =
+                    super::casting_costs::resume_interrupted_cost_payment(state, events, None)?;
+            }
             return Ok(());
         }
     }
@@ -10864,8 +11304,49 @@ fn apply_action(
     // owned it (see `elimination::concede`), and queues what the departure triggered
     // (CR 603.6c), since no pipeline scans this action's events.
     if let GameAction::Concede { player_id } = action {
+        // CR 614.17a + CR 118.12: keep the pre-departure base so a staged
+        // payment's already-accepted prefix (including a synchronous leg that
+        // completed before the first prompt) is not re-executed under the
+        // departure's new prohibitions (`settle_after_outside_action`).
+        let pre_action = state.payment_transaction.as_ref().map(|_| state.clone());
         let mut events = Vec::new();
         super::elimination::concede(state, player_id, &mut events);
+        // CR 800.4a + CR 118.12: a surviving staged payment re-materializes on
+        // the base the departure changed (`settle_after_outside_action`). CR
+        // 104.3a: the departure itself must survive a fallible payment recovery,
+        // so a recovery that fails, records an unrepresentable life change, or
+        // would leave a checkpoint that does not describe the departed board
+        // (its seats, or a parked prompt naming an object that left) returns to
+        // the departure and retires the payment.
+        let departed = pre_action.as_ref().map(|_| state.clone());
+        let settled = match payment_transaction::settle_after_outside_action(
+            state,
+            pre_action.as_ref(),
+            player_id,
+        ) {
+            Ok(settled)
+                if boundary_life_change_failure(state).is_none()
+                    && payment_transaction::checkpoint_describes_board(state) =>
+            {
+                settled
+            }
+            outcome => {
+                tracing::debug!(
+                    error = ?outcome.err(),
+                    "staged payment recovery failed after a concession; the departure stands"
+                );
+                if let Some(departed) = departed {
+                    *state = departed;
+                }
+                payment_transaction::abandon_failed_recovery(state);
+                None
+            }
+        };
+        if let Some(settled) = settled {
+            events.extend(settled.events);
+            return Ok(ActionResult::applied(events, state.waiting_for.clone())
+                .with_log_entries(settled.log_entries));
+        }
         return Ok(ActionResult::applied(events, state.waiting_for.clone()));
     }
 
@@ -16130,21 +16611,15 @@ fn apply_non_priority_pass_action(
 
     // CR 603.2c + CR 603.7b: inside a staged payment, an answer that opens a
     // further prompt becomes processed replay history, which no later collector
-    // scans. Deliver its still-unclaimed delayed occurrences now, while this
-    // buffer's claims and typed retention owners are live, through the same
-    // collect-only authority as the shared pipeline's non-Priority exit; then end
-    // this buffer's claim coordinates before the next recorded action's buffer.
-    if (state.payment_transaction.is_some() || state.payment_transaction_replay)
-        && state.game_end.is_none()
+    // scans; so does a resumed payment of draws that parks on its next
+    // replacement choice. Queue their still-unclaimed occurrences through the
+    // one paused-exit collector, then end this buffer's claim coordinates
+    // before the next recorded action's buffer. Other unless payments (Ward,
+    // Mana Leak, Rhystic Study) keep their delayed-only exit.
+    let staged = state.payment_transaction.is_some() || state.payment_transaction_replay;
+    if (staged || engine_payment_choices::paused_in_draw_payment(state)) && state.game_end.is_none()
     {
-        let delayed_input = engine_priority::unclaimed_delayed_trigger_input(
-            state,
-            &events,
-            0,
-            &mut Vec::new(),
-            None,
-        );
-        triggers::collect_unclaimed_delayed_triggers_into_deferred(state, &events, &delayed_input);
+        triggers::collect_paused_exit_triggers(state, &events, 0);
         state.consumed_before_priority_trigger_events.clear();
     }
 
@@ -16160,6 +16635,22 @@ pub fn preflight_debug_action(
     action: &DebugAction,
 ) -> Result<(), EngineError> {
     check_debug_action_access(state, actor)?;
+    // CR 118.12: while a recovered payment is parked, its checkpoint is the
+    // executable state and the canonical base is not; a sandbox mutation would
+    // have to run on one and be mirrored onto the other. Every debug action
+    // mutates, so all are refused here, the shared admission authority; a
+    // zero-count create stays the no-op projection, and read-only diagnostics
+    // keep their own access check (`require_explicit_debug_permission`).
+    if !action.is_zero_count_create()
+        && state
+            .payment_transaction
+            .as_ref()
+            .is_some_and(|transaction| transaction.recovered.is_some())
+    {
+        return Err(EngineError::InvalidAction(
+            "sandbox actions are unavailable while a recovered payment is parked".to_string(),
+        ));
+    }
     action
         .validate_create_count()
         .map_err(EngineError::InvalidAction)?;
@@ -25565,20 +26056,16 @@ mod cost_move_drain_priority_boundary_tests {
     use crate::types::mana::ManaCost;
     use crate::types::player::PlayerId;
 
-    /// `engine_payment_choices::resume_counter_addition_unless_payment` maps
-    /// `CostMoveDrainBoundary::PriorityBoundary` to `unreachable!`, and nothing but
-    /// this eligibility table makes that true: it admits only a Delve-commit `Cast`,
-    /// `ManaAbilityPayment`, and a counter-cost root whose replacement subtree has
-    /// retired at that boundary. Nothing else in the crate pinned that
-    /// premise, so widening the table would leave the suite green and abort a live
-    /// session instead.
+    /// CR 614.11a + CR 118.12: an interactive draw substitute returns to the
+    /// priority boundary only after its replacement subtree has retired. The
+    /// owning unless-payment must resume there rather than stay parked until a
+    /// later replacement-delivery boundary that may never arrive.
     ///
-    /// This pins the guard, not the panic. A `#[should_panic]` row would assert the
-    /// panic is *reachable*, which is the inverse of the invariant. Admitting
-    /// `CounterAdditionUnlessPayment` at `PriorityBoundary` turns this row red: the
-    /// root takes the parked continuation and panics before it can return `Ok(None)`.
+    /// The former guard pinned the opposite premise (`unreachable!` at this
+    /// boundary); the resume authority now accepts it, so this row asserts the
+    /// parked continuation is actually drained.
     #[test]
-    fn a_parked_counter_addition_unless_payment_is_never_drained_at_the_priority_boundary() {
+    fn a_parked_counter_addition_unless_payment_resumes_at_the_priority_boundary() {
         let mut state = GameState::new_two_player(42);
         state.pending_cost_move_resume =
             Some(PendingCostMoveResume::CounterAdditionUnlessPayment {
@@ -25596,6 +26083,7 @@ mod cost_move_drain_priority_boundary_tests {
                 trigger_event: None,
                 effect_description: None,
                 remaining: Vec::new(),
+                unpaid_suffix: None,
             });
         let mut events = Vec::new();
 
@@ -25606,17 +26094,13 @@ mod cost_move_drain_priority_boundary_tests {
         );
 
         assert!(
-            matches!(drained, Ok(None)),
-            "the priority boundary must not drain a counter-addition unless-payment"
+            matches!(drained, Ok(Some(_))),
+            "the priority boundary must resume the parked unless-payment: {drained:?}"
         );
         assert!(
-            matches!(
-                state.pending_cost_move_resume,
-                Some(PendingCostMoveResume::CounterAdditionUnlessPayment { .. })
-            ),
-            "the continuation must stay parked for the replacement boundary that owns it"
+            state.pending_cost_move_resume.is_none(),
+            "the resumed continuation must not stay parked"
         );
-        assert!(events.is_empty(), "an ineligible drain must emit no events");
     }
 
     /// CR 616.1 + CR 608.2c: a counter-cost root recorded at an empty stack is
