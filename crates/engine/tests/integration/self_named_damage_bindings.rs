@@ -31,7 +31,7 @@ fn sin_prodder_upkeep_acceptor_receives_source_damage_equal_to_top_mana_value() 
     reach_sin_prodder_choice(&mut runner);
     assert!(matches!(
         runner.state().waiting_for,
-        WaitingFor::OptionalEffectChoice { player: P1, .. }
+        WaitingFor::OpponentMayChoice { player: P1, .. }
     ));
     let accepted = runner
         .act(GameAction::DecideOptionalEffect { accept: true })
@@ -96,7 +96,7 @@ fn sin_prodder_upkeep_prompts_successive_opponents_when_all_decline() {
     reach_sin_prodder_choice(&mut runner);
     assert!(matches!(
         runner.state().waiting_for,
-        WaitingFor::OptionalEffectChoice { player: P1, .. }
+        WaitingFor::OpponentMayChoice { player: P1, .. }
     ));
     runner
         .act(GameAction::DecideOptionalEffect { accept: false })
@@ -104,7 +104,7 @@ fn sin_prodder_upkeep_prompts_successive_opponents_when_all_decline() {
     assert!(
         matches!(
             runner.state().waiting_for,
-            WaitingFor::OptionalEffectChoice {
+            WaitingFor::OpponentMayChoice {
                 player: PlayerId(2),
                 ..
             }
@@ -428,7 +428,7 @@ fn advance_to_next_p0_precombat(runner: &mut GameRunner) {
 fn reach_sin_prodder_choice(runner: &mut GameRunner) {
     for _ in 0..48 {
         match runner.state().waiting_for.clone() {
-            WaitingFor::OptionalEffectChoice { .. } => return,
+            WaitingFor::OpponentMayChoice { .. } => return,
             WaitingFor::Priority { .. } if runner.state().stack.is_empty() => {
                 panic!("Sin Prodder's upkeep trigger did not reach its choice")
             }
