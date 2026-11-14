@@ -1,13 +1,13 @@
-use crate::game::{players, zones};
-use crate::types::ability::{Effect, EffectError, EffectKind, ResolvedAbility};
-use crate::types::card_type::{CardType, CoreType};
+use crate::game::players;
+use crate::types::ability::{
+    Effect, EffectError, EffectKind, PtValue, QuantityExpr, ResolvedAbility, TargetFilter,
+    TokenAttackDestination,
+};
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
-use crate::types::identifiers::{CardId, ObjectId};
 use crate::types::keywords::GiftKind;
 use crate::types::mana::ManaColor;
 use crate::types::player::PlayerId;
-use crate::types::zones::Zone;
 
 /// CR 702.174: Deliver a gift to the opponent chosen when the gift cost was paid.
 /// Gift delivery is a no-op when the gift wasn't promised (`additional_cost_paid == false`).
@@ -53,37 +53,26 @@ pub fn resolve(
         GiftKind::Treasure => {
             create_gift_token(
                 state,
-                events,
+                ability,
                 opponent,
-                "Treasure",
-                ability.source_id,
-                |ct| {
-                    ct.core_types.push(CoreType::Artifact);
-                    ct.subtypes.push("Treasure".to_string());
-                },
-            );
+                GiftToken::artifact("Treasure"),
+                events,
+            )?;
         }
+        // CR 702.174d: "Gift a Food" means the chosen player creates a Food token.
         GiftKind::Food => {
-            create_gift_token(state, events, opponent, "Food", ability.source_id, |ct| {
-                ct.core_types.push(CoreType::Artifact);
-                ct.subtypes.push("Food".to_string());
-            });
+            create_gift_token(
+                state,
+                ability,
+                opponent,
+                GiftToken::artifact("Food"),
+                events,
+            )?;
         }
+        // CR 702.174f: "Gift a tapped Fish" means the chosen player creates a
+        // tapped 1/1 blue Fish creature token.
         GiftKind::TappedFish => {
-            let obj_id =
-                create_gift_token(state, events, opponent, "Fish", ability.source_id, |ct| {
-                    ct.core_types.push(CoreType::Creature);
-                    ct.subtypes.push("Fish".to_string());
-                });
-            if let Some(obj) = state.objects.get_mut(&obj_id) {
-                obj.color = vec![ManaColor::Blue];
-                obj.base_color = vec![ManaColor::Blue];
-                obj.power = Some(1);
-                obj.toughness = Some(1);
-                obj.base_power = Some(1);
-                obj.base_toughness = Some(1);
-                obj.tapped = true;
-            }
+            create_gift_token(state, ability, opponent, GiftToken::tapped_fish(), events)?;
         }
         // CR 702.174g: "Gift an extra turn" means "The chosen player takes an
         // extra turn after this one." CR 500.7 owns the queue, so this routes
@@ -137,63 +126,85 @@ fn deliver_card_draw(
     Ok(())
 }
 
-/// Create a token for a specific player with customizable card type setup.
-/// Returns the ObjectId so callers can further customize the token (e.g., colors, P/T).
+/// The token a gift hands over, in the shape the Oracle parser gives the same
+/// token ("create a Treasure token", "create a 1/1 blue Fish creature token").
+struct GiftToken {
+    name: &'static str,
+    power_toughness: i32,
+    core_type: &'static str,
+    colors: Vec<ManaColor>,
+    tapped: bool,
+}
+
+impl GiftToken {
+    /// CR 111.10a + CR 111.10b: a predefined artifact token (Treasure, Food).
+    fn artifact(name: &'static str) -> Self {
+        Self {
+            name,
+            power_toughness: 0,
+            core_type: "Artifact",
+            colors: Vec::new(),
+            tapped: false,
+        }
+    }
+
+    /// CR 702.174f: a tapped 1/1 blue Fish creature token.
+    fn tapped_fish() -> Self {
+        Self {
+            name: "Fish",
+            power_toughness: 1,
+            core_type: "Creature",
+            colors: vec![ManaColor::Blue],
+            tapped: true,
+        }
+    }
+}
+
+/// CR 702.174d/f/h + CR 111.2: the chosen player creates the gift token, so it
+/// resolves as that player's own token creation through the standard token
+/// resolver, as `investigate` does for its Clue. That makes it a token for every
+/// token rule (CR 111.1, the CR 704.5d cleanup, "token" filters), gives it its
+/// predefined abilities (CR 111.10a, CR 111.10b) and exposes the creation to
+/// token replacement effects (CR 614.1a).
 fn create_gift_token(
     state: &mut GameState,
+    ability: &ResolvedAbility,
+    recipient: PlayerId,
+    token: GiftToken,
     events: &mut Vec<GameEvent>,
-    owner: PlayerId,
-    name: &str,
-    source_id: ObjectId,
-    setup: impl FnOnce(&mut CardType),
-) -> crate::types::identifiers::ObjectId {
-    let obj_id = zones::create_object(state, CardId(0), owner, name.to_string(), Zone::Battlefield);
-
-    if let Some(obj) = state.objects.get_mut(&obj_id) {
-        let mut card_type = CardType::default();
-        setup(&mut card_type);
-        obj.card_types = card_type.clone();
-        obj.base_card_types = card_type;
-    }
-
-    // CR 613.7d: the gift token enters the battlefield, so it receives a
-    // timestamp. Drawn before the `get_mut` (`next_timestamp` takes `&mut self`).
-    let entry_timestamp = state.next_timestamp();
-
-    // CR 400.7 + CR 302.6 + CR 603.6a: Single authority for ETB state.
-    if let Some(obj) = state.objects.get_mut(&obj_id) {
-        obj.reset_for_battlefield_entry(state.turn_number, entry_timestamp);
-    }
-
-    crate::game::layers::mark_layers_full(state);
-    crate::game::restrictions::record_token_created(state, obj_id);
-
-    // CR 111.1 + CR 603.6a: Token creation is a zone change from outside the
-    // game — emit `ZoneChanged { from: None }` so ETB triggers (Soul Warden,
-    // Panharmonicon, etc.) fire for gift tokens through the normal code path.
-    //
-    // CR 400.7 + CR 608.2i + CR 603.2c: route the record and the entry pair through the single
-    // `from: None → Battlefield` authority so the emitted `ZoneChanged` carries this turn's real
-    // zone-change index instead of the `0` placeholder. The authority performs the CR 608.2i
-    // battlefield-entry bookkeeping itself, so the co-located `record_battlefield_entry` call is
-    // deleted — keeping it would double-count `battlefield_entries_this_turn`.
-    super::token::push_committed_token_entry_events(
-        state,
-        obj_id,
-        name.to_string(),
-        source_id,
-        events,
-    )
-    .expect("token just created");
-
-    obj_id
+) -> Result<(), EffectError> {
+    let creation = ResolvedAbility::new(
+        Effect::Token {
+            name: token.name.to_string(),
+            power: PtValue::Fixed(token.power_toughness),
+            toughness: PtValue::Fixed(token.power_toughness),
+            types: vec![token.core_type.to_string(), token.name.to_string()],
+            colors: token.colors,
+            keywords: Vec::new(),
+            tapped: token.tapped,
+            count: QuantityExpr::Fixed { value: 1 },
+            owner: TargetFilter::Controller,
+            attach_to: None,
+            enters_attacking: false,
+            attack_destination: TokenAttackDestination::ControllerChooses,
+            supertypes: Vec::new(),
+            static_abilities: Vec::new(),
+            enter_with_counters: Vec::new(),
+        },
+        Vec::new(),
+        ability.source_id,
+        recipient,
+    );
+    super::token::resolve(state, &creation, events)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::ability::ResolvedAbility;
-    use crate::types::identifiers::ObjectId;
+    use crate::game::zones;
+    use crate::types::card_type::CoreType;
+    use crate::types::identifiers::{CardId, ObjectId};
+    use crate::types::zones::Zone;
 
     fn make_gift_ability(kind: GiftKind, promised: bool) -> ResolvedAbility {
         let mut ability = ResolvedAbility::new(
@@ -372,6 +383,15 @@ mod tests {
             .any(|e| matches!(e, GameEvent::CardDrawn { .. })));
     }
 
+    /// The gift tokens the recipient (`PlayerId(1)`) owns.
+    fn recipient_tokens(state: &GameState) -> Vec<&crate::game::game_object::GameObject> {
+        state
+            .objects
+            .values()
+            .filter(|o| o.is_token && o.owner == PlayerId(1) && o.zone == Zone::Battlefield)
+            .collect()
+    }
+
     #[test]
     fn gift_treasure_creates_token_for_opponent() {
         let mut state = GameState::new_two_player(42);
@@ -380,14 +400,21 @@ mod tests {
         let ability = make_gift_ability(GiftKind::Treasure, true);
         resolve(&mut state, &ability, &mut events).unwrap();
 
-        let token = state
-            .objects
-            .values()
-            .find(|o| o.card_id == CardId(0) && o.owner == PlayerId(1));
-        assert!(token.is_some(), "Treasure token should exist for opponent");
-        let token = token.unwrap();
+        let tokens = recipient_tokens(&state);
+        let [token] = tokens.as_slice() else {
+            panic!("one Treasure token for the opponent, got {tokens:?}");
+        };
+        assert_eq!(token.controller, PlayerId(1));
         assert!(token.card_types.subtypes.contains(&"Treasure".to_string()));
         assert!(token.card_types.core_types.contains(&CoreType::Artifact));
+        // CR 111.10a: the predefined Treasure mana ability comes with the token.
+        assert!(
+            token
+                .abilities
+                .iter()
+                .any(|a| matches!(*a.effect, Effect::Mana { .. })),
+            "Treasure needs its mana ability"
+        );
     }
 
     #[test]
@@ -398,16 +425,17 @@ mod tests {
         let ability = make_gift_ability(GiftKind::TappedFish, true);
         resolve(&mut state, &ability, &mut events).unwrap();
 
-        let token = state
-            .objects
-            .values()
-            .find(|o| o.card_id == CardId(0) && o.owner == PlayerId(1));
-        assert!(token.is_some(), "Fish token should exist for opponent");
-        let token = token.unwrap();
+        let tokens = recipient_tokens(&state);
+        let [token] = tokens.as_slice() else {
+            panic!("one Fish token for the opponent, got {tokens:?}");
+        };
+        assert_eq!(token.controller, PlayerId(1));
         assert_eq!(token.power, Some(1));
         assert_eq!(token.toughness, Some(1));
         assert!(token.tapped, "Fish should enter tapped");
         assert!(token.color.contains(&ManaColor::Blue));
+        assert!(token.card_types.subtypes.contains(&"Fish".to_string()));
+        assert!(token.card_types.core_types.contains(&CoreType::Creature));
     }
 
     #[test]
@@ -418,12 +446,52 @@ mod tests {
         let ability = make_gift_ability(GiftKind::Food, true);
         resolve(&mut state, &ability, &mut events).unwrap();
 
-        let token = state
-            .objects
-            .values()
-            .find(|o| o.card_id == CardId(0) && o.owner == PlayerId(1));
-        assert!(token.is_some(), "Food token should exist for opponent");
-        let token = token.unwrap();
+        let tokens = recipient_tokens(&state);
+        let [token] = tokens.as_slice() else {
+            panic!("one Food token for the opponent, got {tokens:?}");
+        };
         assert!(token.card_types.subtypes.contains(&"Food".to_string()));
+        // CR 111.10b: "{2}, {T}, Sacrifice this token: You gain 3 life."
+        assert!(
+            token.abilities.iter().any(|a| matches!(
+                *a.effect,
+                Effect::GainLife {
+                    amount: QuantityExpr::Fixed { value: 3 },
+                    ..
+                }
+            )),
+            "Food needs its gain-3-life ability"
+        );
+    }
+
+    /// CR 704.5d: a gift Fish that leaves the battlefield ceases to exist; it
+    /// must not stay in its owner's graveyard like a card.
+    #[test]
+    fn dead_gift_fish_ceases_to_exist() {
+        let mut state = GameState::new_two_player(42);
+        let mut events = Vec::new();
+        resolve(
+            &mut state,
+            &make_gift_ability(GiftKind::TappedFish, true),
+            &mut events,
+        )
+        .unwrap();
+        let fish = recipient_tokens(&state)
+            .first()
+            .map(|o| o.id)
+            .expect("gift Fish on the battlefield");
+
+        zones::move_to_zone(&mut state, fish, Zone::Graveyard, &mut events);
+        assert!(
+            state.players[1].graveyard.contains(&fish),
+            "the Fish goes to the graveyard first (CR 111.7 note: dies triggers see it)"
+        );
+        crate::game::sba::check_state_based_actions(&mut state, &mut events);
+
+        assert!(
+            !state.players[1].graveyard.contains(&fish),
+            "CR 704.5d: the Fish ceases to exist"
+        );
+        assert!(!state.objects.contains_key(&fish));
     }
 }
