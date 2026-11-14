@@ -831,6 +831,7 @@ export const PermanentCard = memo(function PermanentCard({
       ref={cardRef}
       data-object-id={objectId}
       data-permanent-card={objectId}
+      data-tap-angle={isRotatedFull ? tapAngle : undefined}
       {...(reportsTouch ? { [UN_TOUCH_ATTRIBUTE]: objectId } : {})}
       data-grouped-ids={coveredIds && coveredIds.length > 1 ? coveredIds.join(" ") : undefined}
       data-card-hover

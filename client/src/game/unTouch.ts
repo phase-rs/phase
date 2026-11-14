@@ -1,3 +1,4 @@
+import { measureSurface } from "../components/animation/cardVfx/cardAnchors.ts";
 import { dispatchAction } from "./dispatch.ts";
 
 /**
@@ -44,9 +45,73 @@ function pointerOverTouchable(pointerId: number, objectId: number | null): void 
 }
 
 /**
+ * Whether (clientX, clientY) lies within the card's physical face, accounting
+ * for any tap rotation (e.g. 17° or 90°) or CSS transforms applied to it or its
+ * ancestors. Elements rendered inside the card's DOM tree but outside its face
+ * (such as the overhanging portion of a keyword badge) return false.
+ */
+export function cardFaceContainsPoint(
+  card: HTMLElement,
+  clientX: number,
+  clientY: number,
+): boolean {
+  const rect = card.getBoundingClientRect();
+  const { pose } = measureSurface(card, new DOMRect(0, 0, 0, 0));
+
+  let angleDeg = pose.angleDeg;
+  if (Math.abs(angleDeg) < 0.001) {
+    const tapAttr = card.getAttribute("data-tap-angle");
+    if (tapAttr) {
+      const parsed = parseFloat(tapAttr);
+      if (!Number.isNaN(parsed)) angleDeg = parsed;
+    }
+  }
+
+  const angleRad = (angleDeg * Math.PI) / 180;
+  const cos = Math.cos(angleRad);
+  const sin = Math.sin(angleRad);
+
+  let w = pose.w;
+  let h = pose.h;
+  if (w <= 0 || h <= 0) {
+    const absCos = Math.abs(cos);
+    const absSin = Math.abs(sin);
+    if (absSin < 0.001) {
+      w = rect.width;
+      h = rect.height;
+    } else if (absCos < 0.001) {
+      w = rect.height;
+      h = rect.width;
+    } else {
+      const denom = absCos * absCos - absSin * absSin;
+      if (Math.abs(denom) > 0.01) {
+        w = (rect.width * absCos - rect.height * absSin) / denom;
+        h = (rect.height * absCos - rect.width * absSin) / denom;
+      } else {
+        w = rect.width;
+        h = rect.height;
+      }
+    }
+  }
+
+  const cx = pose.x;
+  const cy = pose.y;
+  const dx = clientX - cx;
+  const dy = clientY - cy;
+
+  // Rotate inverse: (u, v) in card's unrotated local coordinates centered at (0, 0)
+  const u = dx * cos + dy * sin;
+  const v = -dx * sin + dy * cos;
+
+  const halfW = w / 2 + 0.01;
+  const halfH = h / 2 + 0.01;
+  return Math.abs(u) <= halfW && Math.abs(v) <= halfH;
+}
+
+/**
  * The touchable object at `element` with pointer coordinates `clientX`/`clientY`:
  * the innermost permanent containing it, if that permanent is marked touchable
- * AND the pointer is within the card's rendered boundary. An attachment is
+ * AND the pointer is within the card's physical face. An attachment is
  * rendered inside its host's element but is its own card, so a pointer on an
  * attachment's exposed edge touches the attachment, never the host beneath it.
  * An attachment control (such as the collapsed `+N` button or the attachment fan
@@ -64,8 +129,7 @@ function touchableAt(
   const card = element?.closest(`[${PERMANENT_CARD_ATTRIBUTE}]`);
   if (!card) return null;
   if (clientX !== undefined && clientY !== undefined) {
-    const rect = card.getBoundingClientRect();
-    if (clientX < rect.left || clientX > rect.right || clientY < rect.top || clientY > rect.bottom) {
+    if (card instanceof HTMLElement && !cardFaceContainsPoint(card, clientX, clientY)) {
       return null;
     }
   } else if (element?.closest(`[${KEYWORD_BADGE_ATTRIBUTE}]`)) {
