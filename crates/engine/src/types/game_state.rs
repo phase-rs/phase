@@ -621,6 +621,81 @@ mod ability_usage_key_map {
     }
 }
 
+/// CR 400.7: string codec for the departed-incarnation tally maps
+/// (`departed_activated_abilities_this_turn` /
+/// `departed_activated_abilities_this_game`). The departing incarnation rides
+/// its own `#`-free numeric segment ahead of the standard usage-key
+/// encoding, so decoding splits once on the first `#` and reuses
+/// [`ability_usage_key_map`] untouched.
+mod departed_activation_tally_map {
+    use super::ability_usage_key_map;
+    use super::AbilityUsageKey;
+    use serde::{de, ser::SerializeMap, Deserializer, Serializer};
+    use std::fmt;
+
+    pub(super) fn encode_key(key: &(AbilityUsageKey, u64)) -> String {
+        format!("{}#{}", key.1, ability_usage_key_map::encode_key(&key.0))
+    }
+
+    fn decode_key(raw: &str) -> Result<(AbilityUsageKey, u64), String> {
+        let (incarnation, rest) = raw
+            .split_once('#')
+            .ok_or_else(|| format!("invalid departed activation tally key: {raw}"))?;
+        let incarnation = incarnation
+            .parse::<u64>()
+            .map_err(|_| format!("invalid departed activation tally key: {raw}"))?;
+        let key = ability_usage_key_map::decode_key(rest)?;
+        Ok((key, incarnation))
+    }
+
+    pub fn serialize<'a, M, S>(map: &'a M, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        &'a M: IntoIterator<Item = (&'a (AbilityUsageKey, u64), &'a u32)>,
+        S: Serializer,
+    {
+        let mut entries: Vec<_> = map.into_iter().collect();
+        entries.sort_unstable_by(|a, b| a.0.cmp(b.0));
+
+        let mut ser_map = serializer.serialize_map(Some(entries.len()))?;
+        for (key, val) in entries {
+            ser_map.serialize_entry(&encode_key(key), val)?;
+        }
+        ser_map.end()
+    }
+
+    pub fn deserialize<'de, D, M>(deserializer: D) -> Result<M, D::Error>
+    where
+        D: Deserializer<'de>,
+        M: Default + Extend<((AbilityUsageKey, u64), u32)>,
+    {
+        struct DepartedTallyVisitor<T>(std::marker::PhantomData<T>);
+
+        impl<'de, T: Default + Extend<((AbilityUsageKey, u64), u32)>> de::Visitor<'de>
+            for DepartedTallyVisitor<T>
+        {
+            type Value = T;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+                formatter.write_str("a map with encoded departed activation tally keys")
+            }
+
+            fn visit_map<M>(self, mut access: M) -> Result<Self::Value, M::Error>
+            where
+                M: de::MapAccess<'de>,
+            {
+                let mut map = T::default();
+                while let Some((key, val)) = access.next_entry::<String, u32>()? {
+                    let key = decode_key(&key).map_err(de::Error::custom)?;
+                    map.extend([(key, val)]);
+                }
+                Ok(map)
+            }
+        }
+
+        deserializer.deserialize_map(DepartedTallyVisitor(std::marker::PhantomData))
+    }
+}
+
 #[cfg(test)]
 mod ability_usage_key_map_tests {
     use super::*;
@@ -26026,6 +26101,28 @@ declare_game_state! {
         with = "ability_usage_key_map"
     )]
     pub activated_abilities_this_game: im::HashMap<AbilityUsageKey, u32>,
+    /// CR 400.7 + CR 608.2c: the per-turn activation tallies that belonged
+    /// to a departed incarnation, keyed by `(usage key, departing
+    /// incarnation)`. `apply_zone_exit_cleanup` migrates the erased live
+    /// entries here (not copies) so an ability announced by the old object
+    /// still reads its count while the returned object's live journals start
+    /// at zero. Cleared at the turn boundary beside the live per-turn
+    /// journal; trusted save/restore retains it, projection clears it.
+    #[serde(
+        default,
+        skip_serializing_if = "im::HashMap::is_empty",
+        with = "departed_activation_tally_map"
+    )]
+    pub departed_activated_abilities_this_turn: im::HashMap<(AbilityUsageKey, u64), u32>,
+    /// CR 400.7: the per-game twin of the departed per-turn table. Migrated
+    /// symmetrically at zone exit and never cleared at the turn boundary,
+    /// mirroring the live per-game journal.
+    #[serde(
+        default,
+        skip_serializing_if = "im::HashMap::is_empty",
+        with = "departed_activation_tally_map"
+    )]
+    pub departed_activated_abilities_this_game: im::HashMap<(AbilityUsageKey, u64), u32>,
     /// CR 602.5b + CR 702.122: Vehicles whose crew ability has been activated this
     /// turn. Populated on a successful crew announcement; read to enforce an
     /// "Activate only once each turn" crew restriction. Crew is not an
@@ -35249,6 +35346,8 @@ impl GameState {
             triggered_abilities_added_mana_this_turn: HashSet::new(),
             activated_abilities_this_turn: im::HashMap::new(),
             activated_abilities_this_game: im::HashMap::new(),
+            departed_activated_abilities_this_turn: im::HashMap::new(),
+            departed_activated_abilities_this_game: im::HashMap::new(),
             crew_activated_this_turn: HashSet::new(),
             crew_resolved_this_turn: HashSet::new(),
             crew_history_this_turn: HashSet::new(),
@@ -38954,6 +39053,11 @@ impl GameState {
             sideboard_submitted: _,
             activated_abilities_this_turn: _,
             activated_abilities_this_game: _,
+            // NOT THIS CLASS either: the same activation-budget ledger class
+            // keyed one step further out (departing incarnation) — unbounded
+            // per blink, so ranked like the live journals (not ranked at all).
+            departed_activated_abilities_this_turn: _,
+            departed_activated_abilities_this_game: _,
             loyalty_abilities_activated_this_turn: _,
             extra_loyalty_activations_this_turn: _,
             exerted_this_turn: _,
@@ -40804,6 +40908,11 @@ fn _gamestate_partition_is_total(s: &GameState) {
         triggered_abilities_added_mana_this_turn: _,
         activated_abilities_this_turn: _,
         activated_abilities_this_game: _,
+        // COMPARED alongside the live journals: the same activation-budget
+        // class, so two positions that differ only in a departed tally are
+        // different positions (fail-closed, like the live journals).
+        departed_activated_abilities_this_turn: _,
+        departed_activated_abilities_this_game: _,
         crew_activated_this_turn: _,
         crew_resolved_this_turn: _,
         crew_history_this_turn: _,
@@ -41490,6 +41599,10 @@ impl PartialEq for GameState {
                 == other.triggered_abilities_added_mana_this_turn
             && self.activated_abilities_this_turn == other.activated_abilities_this_turn
             && self.activated_abilities_this_game == other.activated_abilities_this_game
+            && self.departed_activated_abilities_this_turn
+                == other.departed_activated_abilities_this_turn
+            && self.departed_activated_abilities_this_game
+                == other.departed_activated_abilities_this_game
             && self.crew_activated_this_turn == other.crew_activated_this_turn
             && self.crew_resolved_this_turn == other.crew_resolved_this_turn
             && self.crew_history_this_turn == other.crew_history_this_turn

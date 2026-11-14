@@ -2,6 +2,9 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
 use crate::game::game_object::ObjectIncarnationRefExt;
+use crate::types::ability_visit::{
+    granter_symbols, granter_symbols_mut, DefinitionNode, DefinitionNodeMut,
+};
 use crate::types::action_rejection::ActionRejection;
 use crate::types::display_only::DisplayOnly;
 use crate::types::events::{GameEvent, LibrarySearchCardFaceView, LibrarySearchCardView};
@@ -1285,6 +1288,11 @@ fn redact_activation_records(filtered: &mut GameState) {
     filtered.pending_activations.clear();
     filtered.activated_abilities_this_turn.clear();
     filtered.activated_abilities_this_game.clear();
+    // CR 400.2: the departed-incarnation tallies are the same engine-authority
+    // journal class as the live journals (trusted save/restore retains them;
+    // only the projection clears them).
+    filtered.departed_activated_abilities_this_turn.clear();
+    filtered.departed_activated_abilities_this_game.clear();
     if let Some(pending) = filtered.pending_cast.as_deref_mut() {
         clear(pending);
     }
@@ -4653,6 +4661,55 @@ fn redact_hidden_identity_side_tables(state: &mut GameState, hidden_ids: &HashSe
         state.lki_copiable_values_by_incarnation.remove(id);
         state.departed_stack_spells.remove(id);
         state.linked_exile_lki.remove(id);
+    }
+    // CR 400.2 + CR 613.1f: a layer-6 grant stamps the provider's incarnation
+    // onto the recipient's live definition (`granting_object`, pushed into
+    // `grant_chain` on re-donation). A face-down battlefield provider matches
+    // the grant filter's InZone pin, so its stamp survives the layer pass even
+    // though its identity is hidden from this viewer. Blank those entries in
+    // the projection so no lineage names a hidden id, while authoritative
+    // state keeps the full chain (legitimate transitive budgets survive).
+    // Projection only: projection never feeds legality.
+    //
+    // The walk is the writer's own node axis (`each_node`, the same walker
+    // `stamp_granter` uses): the head stamp is the layer-6 write site, and
+    // nested ability nodes carry stamps on a granted whole-body re-donation.
+    // `base_abilities` is walked too — printed defs carry no stamps, so the
+    // pre-pass short-circuits without cloning.
+    for (_, object) in state.objects.iter_mut() {
+        for abilities in [&mut object.abilities, &mut object.base_abilities] {
+            if abilities.iter().any(|def| {
+                let mut names_hidden = false;
+                granter_symbols::each_node(DefinitionNode::Ability(def), &mut |node| {
+                    if let DefinitionNode::Ability(node_def) = node {
+                        names_hidden |= node_def
+                            .granting_object
+                            .is_some_and(|stamp| hidden_ids.contains(&stamp.object_id))
+                            || node_def
+                                .grant_chain
+                                .iter()
+                                .any(|stamp| hidden_ids.contains(&stamp.object_id));
+                    }
+                });
+                names_hidden
+            }) {
+                for def in Arc::make_mut(abilities) {
+                    granter_symbols_mut::each_node(DefinitionNodeMut::Ability(def), &mut |node| {
+                        if let DefinitionNodeMut::Ability(node_def) = node {
+                            if node_def
+                                .granting_object
+                                .is_some_and(|stamp| hidden_ids.contains(&stamp.object_id))
+                            {
+                                node_def.granting_object = None;
+                            }
+                            node_def
+                                .grant_chain
+                                .retain(|stamp| !hidden_ids.contains(&stamp.object_id));
+                        }
+                    });
+                }
+            }
+        }
     }
     // CR 400.2: a departed activated ability names its source and carries that source's
     // ability. Once the source is hidden from this viewer the record is dropped, as a

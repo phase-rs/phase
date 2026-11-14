@@ -256,12 +256,43 @@ pub(crate) fn apply_zone_exit_cleanup(
     // CR 400.7 + CR 403.4: Activation-use history belongs to the old
     // object. `ObjectId` is storage identity here, so clear per-object counts
     // at the zone-change boundary before the same id can represent a new object.
-    state
+    //
+    // CR 400.7 + CR 608.2c: the erased entries migrate (not copied) into the
+    // departed-side tables tagged with the departing incarnation
+    // (`occurrence`, captured pre-move above): an ability the old object
+    // announced keeps reading its count through the announced carrier, while
+    // the returned object's live journals start at zero. The blink keeps the
+    // `ObjectId` and bumps the incarnation, so the tag — not the id — is what
+    // keeps the two histories independent.
+    let departed_incarnation = occurrence.incarnation;
+    let departed_turn: Vec<_> = state
         .activated_abilities_this_turn
-        .retain(|key, _| key.source != object_id);
-    state
+        .iter()
+        .filter(|(key, _)| key.source == object_id)
+        .map(|(key, count)| (key.clone(), *count))
+        .collect();
+    for (key, _) in &departed_turn {
+        state.activated_abilities_this_turn.remove(key);
+    }
+    for (key, count) in departed_turn {
+        state
+            .departed_activated_abilities_this_turn
+            .insert((key, departed_incarnation), count);
+    }
+    let departed_game: Vec<_> = state
         .activated_abilities_this_game
-        .retain(|key, _| key.source != object_id);
+        .iter()
+        .filter(|(key, _)| key.source == object_id)
+        .map(|(key, count)| (key.clone(), *count))
+        .collect();
+    for (key, _) in &departed_game {
+        state.activated_abilities_this_game.remove(key);
+    }
+    for (key, count) in departed_game {
+        state
+            .departed_activated_abilities_this_game
+            .insert((key, departed_incarnation), count);
+    }
     clear_exert_history_on_zone_change(state, object_id, from, to);
 
     // CR 400.7: Snapshot LKI before a zone change out of any zone whose

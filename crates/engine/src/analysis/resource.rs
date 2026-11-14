@@ -9753,6 +9753,13 @@ fn ability_definition_for_usage_key<'s>(
     // differ only in body (two equip costs, reconfigure attach vs unattach —
     // all `description: None`). Without it the lookup returns the first twin
     // and a gated tally is misclassified as unrestricted.
+    //
+    // CR 602.5c + CR 113.2c: the grant chain discriminates same-description
+    // twins that differ only in lineage (a direct grant vs a re-donation
+    // through a carrier — e.g. a capped Locus grant vs its unrestricted
+    // twin). Without it the lookup returns whichever twin sits first in
+    // `abilities[]` and a gated tally is projected out with the unrestricted
+    // twin's fate.
     state
         .objects
         .get(&key.source)?
@@ -9762,6 +9769,7 @@ fn ability_definition_for_usage_key<'s>(
             def.granting_object == key.provenance
                 && def.description == key.description
                 && crate::game::restrictions::ability_fingerprint(def) == key.fingerprint
+                && def.grant_chain == key.grant_chain
         })
 }
 
@@ -19564,6 +19572,111 @@ mod tests {
                 .copied(),
             None,
             "the unrestricted twin's per-game tally keeps the pumped-history projection"
+        );
+    }
+
+    /// CR 602.5c + CR 113.2c: same-source, same-description, same-body twins
+    /// that differ ONLY in `grant_chain` must not share a loop-projection
+    /// fate. The direct twin carries no lineage; the re-donated twin carries
+    /// the carrier hop through which it was re-donated (the F4 class: a capped
+    /// Locus-style re-donation vs its unrestricted twin). Without the lineage
+    /// conjunct the lookup returns whichever twin sits first in `abilities[]`
+    /// — here the unrestricted one — so the capped twin's tally is
+    /// misclassified as unrestricted and projected out (RED). Reverting the
+    /// `grant_chain` conjunct flips the retention assertion below.
+    ///
+    /// Synthetic twins: no printed card exhibits two same-description
+    /// abilities on one source differing only in lineage; the nearest printed
+    /// shape is the Locus-capped re-donation through an animated carrier.
+    /// The per-game gate twin (`OnlyOnce`) is covered by the same fixed
+    /// predicate through `ability_has_per_game_activation_gate`, so only the
+    /// per-turn axis is pinned here.
+    #[test]
+    fn projection_retains_capped_twin_of_same_lineage_pair() {
+        use crate::types::ability::{
+            AbilityDefinition, AbilityKind, ActivationRestriction, Effect, EffectScope,
+            TapStateChange, TargetFilter, TypedFilter,
+        };
+        use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
+        use std::sync::Arc;
+
+        let mut state = GameState::new_two_player(7);
+        state.phase = Phase::PreCombatMain;
+
+        let holder = inert_token(&mut state, 904, 0, "Lineage Holder");
+        let carrier = inert_token(&mut state, 905, 0, "Carrier");
+
+        let untap = || Effect::SetTapState {
+            target: TargetFilter::Typed(TypedFilter::creature()),
+            scope: EffectScope::All,
+            state: TapStateChange::Untap,
+        };
+        // The same provider acquisition for both twins; only the re-donated
+        // twin carries the carrier hop.
+        let provider_stamp = ObjectIncarnationRef::of(ObjectId(906), 1);
+        let carrier_hop = ObjectIncarnationRef::of(carrier, 2);
+        let mut direct = AbilityDefinition::new(AbilityKind::Activated, untap());
+        direct.description = Some("Twin lineage ability".to_string());
+        direct.granting_object = Some(provider_stamp);
+        let mut redonated = AbilityDefinition::new(AbilityKind::Activated, untap());
+        redonated.description = Some("Twin lineage ability".to_string());
+        redonated.granting_object = Some(provider_stamp);
+        redonated.grant_chain = vec![carrier_hop];
+        redonated.activation_restrictions = vec![ActivationRestriction::OnlyOnceEachTurn];
+        // Unrestricted twin FIRST in `abilities[]`: pre-fix, the capped key
+        // resolves to it.
+        state.objects.get_mut(&holder).unwrap().abilities = Arc::new(vec![direct, redonated]);
+
+        // Reach-guards: identical in everything the pre-fix predicate
+        // compared, differing only in lineage.
+        let key = |index: usize| {
+            crate::game::restrictions::ability_usage_key(&state, holder, index)
+                .expect("the lineage twin resolves")
+        };
+        let direct_key = key(0);
+        let capped_key = key(1);
+        assert_eq!(direct_key.provenance, capped_key.provenance);
+        assert_eq!(direct_key.description, capped_key.description);
+        assert_eq!(
+            direct_key.fingerprint, capped_key.fingerprint,
+            "identical bodies must fingerprint apart from nothing: the chain, \
+             not the body, discriminates"
+        );
+        assert!(
+            direct_key.grant_chain.is_empty(),
+            "the direct twin carries no lineage"
+        );
+        assert_eq!(
+            capped_key.grant_chain,
+            vec![carrier_hop],
+            "the re-donated twin carries the carrier hop"
+        );
+
+        state
+            .activated_abilities_this_turn
+            .insert(direct_key.clone(), 1);
+        state
+            .activated_abilities_this_turn
+            .insert(capped_key.clone(), 1);
+        assert_eq!(state.activated_abilities_this_turn.len(), 2);
+
+        let projected = project_out_resources(&state);
+
+        assert_eq!(
+            projected
+                .activated_abilities_this_turn
+                .get(&capped_key)
+                .copied(),
+            Some(1),
+            "the re-donated (capped-lineage) twin's tally must survive projection"
+        );
+        assert_eq!(
+            projected
+                .activated_abilities_this_turn
+                .get(&direct_key)
+                .copied(),
+            None,
+            "the direct (unrestricted-lineage) twin's tally keeps the pumped-history projection"
         );
     }
 

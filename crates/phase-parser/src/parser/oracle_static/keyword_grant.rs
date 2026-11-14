@@ -999,16 +999,23 @@ fn grant_source_noun_phrase(input: &str) -> OracleResult<'_, crate::types::abili
         // CR 607.2a: cards exiled with the host. Optional card-type qualifier
         // narrows the granted set (Agatha grants creature cards only).
         grant_exiled_source,
-        // CR 201.2: "creatures you control that don't have the same name as
-        // it/~" (Marvin) — battlefield creatures you control, excluding ones
-        // sharing the recipient's name.
+        // CR 201.2 + CR 613.1f: "creatures you control that don't have the
+        // same name as it/~" (Marvin) — battlefield creatures you control,
+        // excluding ones sharing the recipient's name. The InZone pin keeps
+        // hand/graveyard/exile/library creatures from donating abilities
+        // (Drana-and-Linvala precedent).
         value(
             TargetFilter::Typed(
                 TypedFilter::creature()
                     .controller(ControllerRef::You)
-                    .properties(vec![FilterProp::Not {
-                        prop: Box::new(FilterProp::SameName),
-                    }]),
+                    .properties(vec![
+                        FilterProp::Not {
+                            prop: Box::new(FilterProp::SameName),
+                        },
+                        FilterProp::InZone {
+                            zone: Zone::Battlefield,
+                        },
+                    ]),
             ),
             (
                 tag("creatures you control that don't have the same name as "),
@@ -1016,8 +1023,9 @@ fn grant_source_noun_phrase(input: &str) -> OracleResult<'_, crate::types::abili
             ),
         ),
         // CR 613.1f: "each other creature with a +1/+1 counter on it"
-        // (Experiment Kraj) — all creatures except self with at least one
-        // +1/+1 counter.
+        // (Experiment Kraj) — battlefield creatures except self with at least
+        // one +1/+1 counter. The InZone pin keeps counter-bearing cards in
+        // other zones from donating abilities (Drana-and-Linvala precedent).
         value(
             TargetFilter::And {
                 filters: vec![
@@ -1026,6 +1034,9 @@ fn grant_source_noun_phrase(input: &str) -> OracleResult<'_, crate::types::abili
                             counters: CounterMatch::OfType(CounterType::Plus1Plus1),
                             comparator: Comparator::GE,
                             count: QuantityExpr::Fixed { value: 1 },
+                        },
+                        FilterProp::InZone {
+                            zone: Zone::Battlefield,
                         },
                     ])),
                     TargetFilter::Not {

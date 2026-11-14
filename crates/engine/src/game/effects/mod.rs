@@ -28793,18 +28793,41 @@ pub(crate) fn evaluate_condition(
                     // re-derivation for carriers that predate announcement
                     // capture; an unresolvable slot reads a missing entry
                     // as count 0.
-                    AbilityUseTally::Activated => ability
-                        .announced_usage_key
-                        .clone()
-                        .or_else(|| {
+                    //
+                    // CR 400.7: when the source left its zone after announcing
+                    // (a blink above the resolving ability), the live journal
+                    // was migrated at the exit boundary, so a live miss falls
+                    // back to the departed turn tally tagged with the
+                    // announced incarnation. A live hit always wins (the Dress
+                    // Down case keeps its live entry), and a missing departed
+                    // entry reads 0 — the new incarnation's independent
+                    // history.
+                    AbilityUseTally::Activated => {
+                        let key = ability.announced_usage_key.clone().or_else(|| {
                             crate::game::restrictions::ability_usage_key(
                                 state,
                                 ability.source_id,
                                 idx,
                             )
-                        })
-                        .and_then(|key| state.activated_abilities_this_turn.get(&key).copied())
-                        .unwrap_or(0),
+                        });
+                        match key {
+                            None => 0,
+                            Some(key) => {
+                                match state.activated_abilities_this_turn.get(&key).copied() {
+                                    Some(count) => count,
+                                    None => ability
+                                        .announced_source_incarnation
+                                        .and_then(|incarnation| {
+                                            state
+                                                .departed_activated_abilities_this_turn
+                                                .get(&(key, incarnation))
+                                                .copied()
+                                        })
+                                        .unwrap_or(0),
+                                }
+                            }
+                        }
+                    }
                 };
                 comparator.evaluate(
                     crate::game::arithmetic::u32_to_i32_saturating(count),

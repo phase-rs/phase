@@ -11448,17 +11448,26 @@ fn land_cards_exiled_grant_declines_mis_scoped_sets() {
 
 /// CR 613.1f + CR 201.2: "all activated abilities of creatures you control that
 /// don't have the same name as it/~" (Marvin, Murderous Mimic) — battlefield
-/// creatures you control, excluding ones sharing the recipient's name.
+/// creatures you control, excluding ones sharing the recipient's name. The
+/// expected vec pins BOTH conjuncts: dropping the name exclusion (Marvin
+/// gains same-named abilities) or the zone pin (hand creatures donate) flips
+/// this test.
 #[test]
 fn parse_continuous_modifications_grants_creatures_you_control_not_same_name() {
     use crate::types::ability::{ControllerRef, FilterProp, TargetFilter, TypedFilter};
+    use crate::types::zones::Zone;
     let expected = ContinuousModification::GrantAllActivatedAbilitiesOf {
         source: TargetFilter::Typed(
             TypedFilter::creature()
                 .controller(ControllerRef::You)
-                .properties(vec![FilterProp::Not {
-                    prop: Box::new(FilterProp::SameName),
-                }]),
+                .properties(vec![
+                    FilterProp::Not {
+                        prop: Box::new(FilterProp::SameName),
+                    },
+                    FilterProp::InZone {
+                        zone: Zone::Battlefield,
+                    },
+                ]),
         ),
         cap: None,
         kind: None,
@@ -11477,11 +11486,15 @@ fn parse_continuous_modifications_grants_creatures_you_control_not_same_name() {
 }
 
 /// CR 613.1f: "each other creature with a +1/+1 counter on it" (Experiment Kraj)
-/// — all creatures with at least one +1/+1 counter, excluding self.
+/// — battlefield creatures with at least one +1/+1 counter, excluding self.
+/// The expected vec pins BOTH conjuncts: dropping the counter requirement
+/// (Kraj gains counterless creatures) or the zone pin (graveyard cards with
+/// counters donate) flips this test.
 #[test]
 fn parse_grant_all_activated_abilities_each_other_creature_with_counter() {
     use crate::types::ability::{Comparator, FilterProp, QuantityExpr, TargetFilter, TypedFilter};
     use crate::types::counter::{CounterMatch, CounterType};
+    use crate::types::zones::Zone;
     let expected = ContinuousModification::GrantAllActivatedAbilitiesOf {
         source: TargetFilter::And {
             filters: vec![
@@ -11490,6 +11503,9 @@ fn parse_grant_all_activated_abilities_each_other_creature_with_counter() {
                         counters: CounterMatch::OfType(CounterType::Plus1Plus1),
                         comparator: Comparator::GE,
                         count: QuantityExpr::Fixed { value: 1 },
+                    },
+                    FilterProp::InZone {
+                        zone: Zone::Battlefield,
                     },
                 ])),
                 TargetFilter::Not {

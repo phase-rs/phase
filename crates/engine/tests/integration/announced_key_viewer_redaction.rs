@@ -18,9 +18,12 @@
 //! `is_none` assertion fail; restoring a journal/pending clear makes the
 //! emptiness assertion fail.
 
+use engine::game::game_object::ObjectIncarnationRefExt;
+use engine::game::layers::evaluate_layers;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::scenario_db::GameScenarioDbExt;
 use engine::game::visibility::filter_state_for_viewer;
+use engine::game::zones::move_to_zone;
 use engine::types::ability::TargetRef;
 use engine::types::actions::GameAction;
 use engine::types::game_state::{
@@ -310,5 +313,269 @@ fn pending_mana_pause_projects_no_announced_key() {
             .count_color(ManaType::Green),
         2,
         "X = 2 other creatures yields two green mana"
+    );
+}
+
+// Verbatim Scryfall Oracle text (Marvin, Murderous Mimic).
+const MARVIN: &str = "Marvin has all activated abilities of creatures you control that don't have the same name as this creature.";
+// Verbatim Oracle text (Experiment Kraj), committed const in
+// `cost_removed_counter_amount.rs`.
+const KRAJ: &str = "Experiment Kraj has all activated abilities of each other creature with a +1/+1 counter on it.\n{T}: Put a +1/+1 counter on target creature.";
+// Standard printed text (Elvish Mystic). DERIVED — no committed const exists.
+const MYSTIC: &str = "{T}: Add {G}.";
+
+fn relayer(state: &mut engine::types::game_state::GameState) {
+    state.layers_dirty.mark_full();
+    evaluate_layers(state);
+}
+
+/// The `{G}` mana donations on `recipient` (the re-donated lineage under test).
+fn mana_donations(
+    state: &engine::types::game_state::GameState,
+    recipient: ObjectId,
+) -> Vec<&engine::types::ability::AbilityDefinition> {
+    state.objects[&recipient]
+        .abilities
+        .iter()
+        .filter(|def| {
+            def.description
+                .as_deref()
+                .is_some_and(|text| text.contains("Add {G}"))
+        })
+        .collect()
+}
+
+fn stamp_of(
+    state: &engine::types::game_state::GameState,
+    id: ObjectId,
+) -> engine::types::identifiers::ObjectIncarnationRef {
+    engine::types::identifiers::ObjectIncarnationRef::from_object(&state.objects[&id])
+}
+
+/// CR 400.2 + CR 613.1f: no projection discloses hidden provider lineage.
+///
+/// Board: Kraj gains the counter-bearing Mystic's `{G}` (first hop), Marvin
+/// re-donates it (second hop: `granting_object` overwritten to Kraj, the
+/// Mystic stamp pushed into `grant_chain`). The Mystic then moves to hand —
+/// hidden from every viewer but its owner — while the layer pass is stale, so
+/// authoritative state still holds the full chain naming the now-hidden id.
+/// (The live pass would drop the grant on re-evaluation; the F1 parser pin
+/// proves that separately.)
+///
+/// Revert detector: restoring any blanked stamp makes the projection scan
+/// fail; dropping authoritative lineage fails the trusted-state assertion.
+#[test]
+fn projection_blanks_hidden_provider_lineage_but_keeps_public_hops() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let marvin = scenario
+        .add_creature_from_oracle(P0, "Marvin, Murderous Mimic", 2, 2, MARVIN)
+        .id();
+    let kraj = scenario
+        .add_creature_from_oracle(P0, "Experiment Kraj", 4, 6, KRAJ)
+        .id();
+    let mystic = scenario
+        .add_creature_from_oracle(P0, "Elvish Mystic", 1, 1, MYSTIC)
+        .id();
+    scenario.with_counter(mystic, engine::types::counter::CounterType::Plus1Plus1, 1);
+    let mut runner = scenario.build();
+    relayer(runner.state_mut());
+
+    // Reach-guards: the two-hop lineage exists in authoritative state.
+    // Marvin matches the battlefield Mystic twice: directly (its own filter
+    // also names it) and through Kraj's re-donation — the same-body lineage
+    // twins the F4 lookup must discriminate.
+    let (kraj_stamp, mystic_stamp) = (
+        stamp_of(runner.state(), kraj),
+        stamp_of(runner.state(), mystic),
+    );
+    let kraj_mana = mana_donations(runner.state(), kraj);
+    assert_eq!(
+        kraj_mana.len(),
+        1,
+        "Kraj holds exactly the Mystic's donated mana ability; got {:?}",
+        runner.state().objects[&kraj].abilities
+    );
+    assert_eq!(
+        kraj_mana[0].granting_object,
+        Some(mystic_stamp),
+        "first hop stamps the Mystic"
+    );
+    assert!(
+        kraj_mana[0].grant_chain.is_empty(),
+        "the direct grant carries no chain"
+    );
+    let marvin_mana = mana_donations(runner.state(), marvin);
+    assert_eq!(
+        marvin_mana.len(),
+        2,
+        "Marvin holds the direct donation AND the re-donation; got {:?}",
+        runner.state().objects[&marvin].abilities
+    );
+    let direct = marvin_mana
+        .iter()
+        .find(|def| def.grant_chain.is_empty())
+        .expect("Marvin's direct Mystic donation");
+    assert_eq!(
+        direct.granting_object,
+        Some(mystic_stamp),
+        "the direct twin names the Mystic with no chain"
+    );
+    let redonated = marvin_mana
+        .iter()
+        .find(|def| !def.grant_chain.is_empty())
+        .expect("Marvin's Kraj re-donation");
+    assert_eq!(
+        redonated.granting_object,
+        Some(kraj_stamp),
+        "re-donation overwrites the head stamp to the carrier"
+    );
+    assert_eq!(
+        redonated.grant_chain,
+        vec![mystic_stamp],
+        "the overwritten first-hop stamp rides the chain"
+    );
+
+    // The Mystic moves to hand (hidden from P1 and the unseated viewer) while
+    // the layer pass is stale, so authority keeps naming the now-hidden id.
+    let mut events = Vec::new();
+    move_to_zone(runner.state_mut(), mystic, Zone::Hand, &mut events);
+    assert_eq!(
+        runner.state().objects[&mystic].zone,
+        Zone::Hand,
+        "reach-guard: the provider is hidden from the opponent"
+    );
+
+    for viewer in [P1, unseated()] {
+        let filtered = filter_state_for_viewer(runner.state(), viewer);
+        // No lineage entry anywhere in the projection may name the hidden id.
+        for (id, object) in filtered.objects.iter() {
+            for abilities in [&object.abilities, &object.base_abilities] {
+                for def in abilities.iter() {
+                    assert!(
+                        def.granting_object
+                            .is_none_or(|stamp| stamp.object_id != mystic),
+                        "{viewer:?} sees a provider stamp naming the hidden Mystic on {id:?}"
+                    );
+                    assert!(
+                        !def.grant_chain
+                            .iter()
+                            .any(|stamp| stamp.object_id == mystic),
+                        "{viewer:?} sees a chain hop naming the hidden Mystic on {id:?}"
+                    );
+                }
+            }
+        }
+        // The public hop survives on both twins: the direct twin's head stamp
+        // (Mystic, hidden) is blanked while its empty chain stays empty; the
+        // re-donated twin keeps naming Kraj while only the hidden hop leaves
+        // the chain.
+        let projected_mana = mana_donations(&filtered, marvin);
+        assert_eq!(
+            projected_mana.len(),
+            2,
+            "{viewer:?} still sees both donated mana abilities themselves"
+        );
+        let projected_direct = projected_mana
+            .iter()
+            .find(|def| def.granting_object.is_none() && def.grant_chain.is_empty())
+            .expect("the direct twin, head-stamp blanked");
+        assert!(
+            projected_direct.grant_chain.is_empty(),
+            "{viewer:?} keeps the direct twin's empty chain empty"
+        );
+        let projected_redonated = projected_mana
+            .iter()
+            .find(|def| def.granting_object == Some(kraj_stamp))
+            .expect("the re-donated twin, carrier hop kept");
+        assert!(
+            projected_redonated.grant_chain.is_empty(),
+            "{viewer:?} drops only the hidden hop, not the whole chain"
+        );
+    }
+
+    // Authoritative state keeps the full chain (legitimate transitive budgets
+    // survive — projection never feeds legality).
+    let marvin_mana = mana_donations(runner.state(), marvin);
+    let redonated = marvin_mana
+        .iter()
+        .find(|def| !def.grant_chain.is_empty())
+        .expect("the authoritative re-donated twin");
+    assert_eq!(
+        redonated.grant_chain,
+        vec![mystic_stamp],
+        "authoritative state retains the hidden hop"
+    );
+    assert!(
+        marvin_mana
+            .iter()
+            .any(|def| def.granting_object == Some(mystic_stamp) && def.grant_chain.is_empty()),
+        "authoritative state retains the direct twin's head stamp"
+    );
+}
+
+/// CR 400.2: the departed-incarnation tally tables are engine authority —
+/// cleared wholesale in every projection, retained in trusted state.
+///
+/// The Ranger activates (live journal counts it), then leaves to the
+/// graveyard (the zone exit migrates the entry to the departed table). Both
+/// the opponent and the unseated viewer project empty tables while authority
+/// retains the migrated count.
+#[test]
+fn projection_clears_departed_activation_tallies() {
+    let Some(db) = shared_card_db() else { return };
+    let (mut runner, ranger, bear, forest) = ranger_board(db);
+
+    // Announce + place the Ranger's activation so the live journal counts it.
+    announce_to_target_prompt(&mut runner, ranger);
+    runner
+        .act(GameAction::ChooseTarget {
+            target: Some(TargetRef::Object(bear)),
+        })
+        .expect("target must be accepted");
+    runner
+        .act(GameAction::SelectCards {
+            cards: vec![forest],
+        })
+        .expect("the bounce cost must be accepted");
+    assert_eq!(
+        runner.state().activated_abilities_this_turn.len(),
+        1,
+        "reach-guard: the live turn journal counts the announcement"
+    );
+
+    // The Ranger leaves to the graveyard: the live entry migrates.
+    let mut events = Vec::new();
+    move_to_zone(runner.state_mut(), ranger, Zone::Graveyard, &mut events);
+    assert!(
+        runner.state().activated_abilities_this_turn.is_empty(),
+        "reach-guard: the live journal cleared at the zone exit"
+    );
+    assert_eq!(
+        runner.state().departed_activated_abilities_this_turn.len(),
+        1,
+        "reach-guard: the departed turn table holds the migrated entry"
+    );
+
+    for viewer in [P1, unseated()] {
+        let filtered = filter_state_for_viewer(runner.state(), viewer);
+        assert!(
+            filtered.departed_activated_abilities_this_turn.is_empty(),
+            "{viewer:?} sees the departed turn table"
+        );
+        assert!(
+            filtered.departed_activated_abilities_this_game.is_empty(),
+            "{viewer:?} sees the departed game table"
+        );
+    }
+
+    // Trusted save/restore retains the departed tables (projection only clears).
+    let round_tripped: engine::types::game_state::GameState =
+        serde_json::from_str(&serde_json::to_string(runner.state()).expect("serializes"))
+            .expect("deserializes");
+    assert_eq!(
+        round_tripped.departed_activated_abilities_this_turn.len(),
+        1,
+        "save/restore must retain the departed turn table"
     );
 }
