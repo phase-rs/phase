@@ -16400,6 +16400,10 @@ mod staged_batch_tests {
                 cant_regenerate: false,
                 outer: StagedDestroyOuterApproval::Unapproved,
             });
+        } else {
+            // CR 608.2c: the ChangeZone population's writer records the
+            // instruction's performer on every member request.
+            member.request.performed_by = Some(PlayerId(0));
         }
         let group = push_approved_staged(&mut state, vec![member], BatchDeliveryStage::Approving);
         let completion = if destroy {
