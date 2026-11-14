@@ -87,6 +87,7 @@ fn trigger_route(mode: &TriggerMode) -> Option<TriggerRoute> {
         TriggerMode::ChangesZone | TriggerMode::Evolve => silent_as_entry(match_changes_zone),
         TriggerMode::Evolved => silent(match_evolved),
         TriggerMode::GotchaSaid => silent(match_gotcha_said),
+        TriggerMode::Touched => silent(match_touched),
         TriggerMode::ChangesZoneAll => silent_as_entry(match_changes_zone_all),
         // CR 702.55c: Haunt payoff — fires from exile when the haunted creature
         // dies; resolved through the `ExileLinkKind::Haunt` link.
@@ -641,6 +642,7 @@ pub fn build_trigger_registry() -> HashMap<TriggerMode, TriggerMatcher> {
     // evolve ability's resolution actually put one or more +1/+1 counters on it.
     r.insert(TriggerMode::Evolved, match_evolved);
     r.insert(TriggerMode::GotchaSaid, match_gotcha_said);
+    r.insert(TriggerMode::Touched, match_touched);
 
     // CR 702.122e: Crew trigger matchers
     r.insert(TriggerMode::Crewed, match_vehicle_crewed);
@@ -1107,6 +1109,7 @@ fn count_matching_trigger_event_subjects(
         GameEvent::CreatureExerted { object_id, .. } => count_one(*object_id),
         GameEvent::CreatureEnlisted { attacker, .. } => count_one(*attacker),
         GameEvent::ArmyAmassed { object_id, .. } => count_one(*object_id),
+        GameEvent::ObjectTouched { object_id, .. } => count_one(*object_id),
         // Un-card events carry no object subject.
         GameEvent::UnTellPerformed { .. }
         | GameEvent::PhraseSaid { .. }
@@ -2831,6 +2834,22 @@ pub(super) fn match_gotcha_said(
     _state: &GameState,
 ) -> bool {
     matches!(event, GameEvent::GotchaSaid { source, .. } if source.reference == source_context.identity.reference)
+}
+
+/// Un-card touch (no CR entry): a player touched an object. `valid_card` names
+/// the touched object ("this creature" → `SelfRef`), `valid_target` the
+/// touching player ("a player").
+pub(super) fn match_touched(
+    event: &GameEvent,
+    trigger: &TriggerDefinition,
+    source_context: &TriggerSourceContext,
+    state: &GameState,
+) -> bool {
+    let GameEvent::ObjectTouched { player, object_id } = event else {
+        return false;
+    };
+    valid_card_matches(trigger, state, *object_id, source_context)
+        && valid_player_matches(trigger, state, *player, source_context)
 }
 
 pub(super) fn match_counter_removed(

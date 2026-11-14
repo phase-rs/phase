@@ -5017,7 +5017,7 @@ pub struct PendingChangeZoneIteration {
     /// position of a terminal-shuffle operation, carried across the pause.
     #[serde(
         default,
-        skip_serializing_if = "crate::types::ability::LibraryShuffleMode::is_per_object"
+        skip_serializing_if = "phase_ast::types::ability::LibraryShuffleMode::is_per_object"
     )]
     pub library_shuffle: crate::types::ability::LibraryShuffleMode,
     /// CR 303.4f: Pre-resolved Aura host carried across a paused ChangeZone loop.
@@ -7085,7 +7085,7 @@ pub struct PendingBatchZoneMoveRequest {
     /// operation (see `ProposedEvent::ZoneChange::library_shuffle`).
     #[serde(
         default,
-        skip_serializing_if = "crate::types::ability::LibraryShuffleMode::is_per_object"
+        skip_serializing_if = "phase_ast::types::ability::LibraryShuffleMode::is_per_object"
     )]
     pub library_shuffle: crate::types::ability::LibraryShuffleMode,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -18886,7 +18886,7 @@ pub enum WaitingFor {
         /// chosen merged permanent's components share it on resume.
         #[serde(
             default,
-            skip_serializing_if = "crate::types::ability::LibraryShuffleMode::is_per_object"
+            skip_serializing_if = "phase_ast::types::ability::LibraryShuffleMode::is_per_object"
         )]
         library_shuffle: crate::types::ability::LibraryShuffleMode,
         /// Exact origin/identity snapshot for a fresh CR 401.4 owner
@@ -37109,6 +37109,7 @@ impl GameState {
                 | GameEvent::CascadeMissed { .. }
                 | GameEvent::DebugActionUsed { .. }
                 | GameEvent::DebugPermissionGranted { .. }
+                | GameEvent::ObjectTouched { .. }
                 | GameEvent::DebugPermissionRevoked { .. } => {}
             }
         }
@@ -37381,6 +37382,7 @@ impl GameState {
                 | GameEvent::UnTellPerformed { .. }
                 | GameEvent::PhraseSaid { .. }
                 | GameEvent::GotchaSaid { .. }
+                | GameEvent::ObjectTouched { .. }
                 | GameEvent::CounterRemoved { .. }
                 | GameEvent::TokenCreated { .. }
                 | GameEvent::ObjectConjured { .. }
@@ -37644,6 +37646,7 @@ impl GameState {
                 | GameEvent::CascadeMissed { .. }
                 | GameEvent::DebugActionUsed { .. }
                 | GameEvent::DebugPermissionGranted { .. }
+                | GameEvent::ObjectTouched { .. }
                 | GameEvent::DebugPermissionRevoked { .. } => {}
             }
         }

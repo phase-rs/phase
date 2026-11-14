@@ -52,6 +52,11 @@ pub struct UnActionState {
     /// (player, source, returned card), so the list is bounded by the cards in play.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pending_offers: Vec<GotchaOffer>,
+    /// Objects a player can touch to some effect: those with a functioning
+    /// `TriggerMode::Touched` ability, derived by `game::un_actions::refresh_menu`
+    /// after every action. The client reports a touch only for these.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub touchable: Vec<ObjectId>,
     /// Next unique identifier minted for a [`GotchaOffer`].
     #[serde(default, skip_serializing_if = "is_zero_u64")]
     pub next_offer_id: u64,
@@ -79,6 +84,7 @@ impl UnActionState {
             && self.gotcha_offers.is_empty()
             && self.menu.is_empty()
             && self.pending_offers.is_empty()
+            && self.touchable.is_empty()
             && self.next_offer_id == 0
     }
 }
@@ -96,6 +102,8 @@ pub enum UnAction {
         source_id: ObjectId,
         returns: ObjectId,
     },
+    /// Touch an object (the player's cursor entered the card).
+    TouchObject { object_id: ObjectId },
 }
 
 #[cfg(test)]

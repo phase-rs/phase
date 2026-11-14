@@ -1434,7 +1434,8 @@ export type UnTellKind =
 export type UnAction =
   | { type: "SetEnabled"; data: { enabled: boolean } }
   | { type: "PerformTell"; data: { tell: UnTell } }
-  | { type: "SayGotcha"; data: { source_id: ObjectId; returns: ObjectId } };
+  | { type: "SayGotcha"; data: { source_id: ObjectId; returns: ObjectId } }
+  | { type: "TouchObject"; data: { object_id: ObjectId } };
 
 export interface GotchaOffer {
   id: number;
@@ -1458,6 +1459,10 @@ export interface UnActionState {
   enabled_players?: PlayerId[];
   gotcha_offers?: GotchaOffer[];
   menu?: UnTellKind[];
+  /** Objects with a functioning touch ability ("Whenever a player's skin or
+   *  fingernail touches this creature", Vile Bile). The client reports a touch
+   *  (`TouchObject`) when an opted-in player's pointer enters one of them. */
+  touchable?: ObjectId[];
 }
 
 export type UnlessCost =
@@ -4053,10 +4058,12 @@ export type GameEvent =
   // (relative to that player) — there is no engine-named face; the heads/tails
   // depiction is a presentation choice.
   | { type: "CoinFlipped"; data: { player_id: PlayerId; won: boolean } }
-  // Un-card gestures / speech (no CR entry); mirror engine GameEvent::{UnTellPerformed, PhraseSaid, GotchaSaid}.
+  // Un-card gestures / speech / touch (no CR entry); mirror engine
+  // GameEvent::{UnTellPerformed, PhraseSaid, GotchaSaid, ObjectTouched}.
   | { type: "UnTellPerformed"; data: { player: PlayerId; tell: UnTell } }
   | { type: "PhraseSaid"; data: { player: PlayerId; phrase: string } }
   | { type: "GotchaSaid"; data: { player: PlayerId; source: ObjectIdentityBinding; returns: ObjectIdentityBinding } }
+  | { type: "ObjectTouched"; data: { player: PlayerId; object_id: ObjectId } }
   // CR 116.2c: a player took the special action of paying a continuous effect's
   // printed termination cost. `group` is the engine-minted group key;
   // `source_id` is the permanent whose resolution installed the effect.

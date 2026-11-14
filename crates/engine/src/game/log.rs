@@ -487,6 +487,7 @@ fn importance(event: &GameEvent) -> LogImportance {
         | GameEvent::UnTellPerformed { .. }
         | GameEvent::PhraseSaid { .. }
         | GameEvent::GotchaSaid { .. }
+        | GameEvent::ObjectTouched { .. }
         | GameEvent::RingTemptsYou { .. }
         | GameEvent::CreatureExploited { .. }
         | GameEvent::RoomDoorUnlocked { .. }
@@ -567,6 +568,7 @@ fn tone(event: &GameEvent) -> LogTone {
         | GameEvent::UnTellPerformed { .. }
         | GameEvent::PhraseSaid { .. }
         | GameEvent::GotchaSaid { .. }
+        | GameEvent::ObjectTouched { .. }
         | GameEvent::RingTemptsYou { .. }
         | GameEvent::Firebend { .. }
         | GameEvent::Airbend { .. }
@@ -1043,6 +1045,7 @@ fn categorize(event: &GameEvent) -> LogCategory {
         | GameEvent::UnTellPerformed { .. }
         | GameEvent::PhraseSaid { .. }
         | GameEvent::GotchaSaid { .. }
+        | GameEvent::ObjectTouched { .. }
         | GameEvent::RingTemptsYou { .. }
         | GameEvent::CreatureExploited { .. }
         | GameEvent::Firebend { .. }
@@ -1989,6 +1992,12 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
         GameEvent::GotchaSaid { player, .. } => {
             vec![player_seg(state, *player), text(" says \"Gotcha!\"")]
         }
+
+        GameEvent::ObjectTouched { player, object_id } => vec![
+            player_seg(state, *player),
+            text(" touches "),
+            card_seg(state, *object_id),
+        ],
 
         GameEvent::RingTemptsYou { player_id, .. } => {
             vec![text("The Ring tempts "), player_seg(state, *player_id)]

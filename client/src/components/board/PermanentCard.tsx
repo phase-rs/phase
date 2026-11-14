@@ -1,12 +1,13 @@
 import { motion, useReducedMotion } from "framer-motion";
 import type React from "react";
-import { memo, useCallback, useId, useMemo, useRef } from "react";
+import { memo, useCallback, useEffect, useId, useMemo, useRef } from "react";
 import { useTranslation } from "react-i18next";
 
 import type { GameObject, Keyword, ObjectId } from "../../adapter/types.ts";
 import { cardImageLookup, tokenFiltersForObject } from "../../services/cardImageLookup.ts";
 import { useCanActForWaitingState, usePlayerId } from "../../hooks/usePlayerId.ts";
 import { dispatchAction } from "../../game/dispatch.ts";
+import { ATTACHMENT_CONTROL_ATTRIBUTE, retainTouchTracking, UN_TOUCH_ATTRIBUTE } from "../../game/unTouch.ts";
 import { ArtCropCard } from "../card/ArtCropCard.tsx";
 import { CardImage } from "../card/CardImage.tsx";
 import { PTBox } from "./PTBox.tsx";
@@ -15,6 +16,7 @@ import { useIsCompactHeight } from "../../hooks/useIsCompactHeight.ts";
 import { useIsMobile } from "../../hooks/useIsMobile.ts";
 import { useFlightVeil } from "../../hooks/useFlightVeil.ts";
 import { useLongPress } from "../../hooks/useLongPress.ts";
+import { useSpectatorMode } from "../../hooks/useSpectatorMode.ts";
 import { isUnbounded, pillsOf, useCounterDisplay } from "../../hooks/useCounterDisplay.ts";
 import { useAnimationStore } from "../../stores/animationStore.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
@@ -446,6 +448,22 @@ export const PermanentCard = memo(function PermanentCard({
   // deliver honest pointer events: a remote-desktop session advertises no
   // hover-capable input while sending `pointerType: "mouse"`. See useCardHover
   // for why this is a denylist on "touch" rather than a "mouse" allowlist.
+  //
+  // Un-card touch (Vile Bile): the engine lists the objects whose touch
+  // abilities function (`un_actions.touchable`). An opted-in player's pointer
+  // entering one is a touch — each entry one instance — and any pointer type
+  // counts, since a finger on the screen touches the card too. The card only
+  // marks itself with `UN_TOUCH_ATTRIBUTE`; the shared tracker in
+  // game/unTouch.ts resolves the card under the pointer (never a host whose
+  // attachment the pointer is on) and counts each entry once.
+  const spectator = useSpectatorMode();
+  const reportsTouch = useGameStore((s) => {
+    const unActions = s.gameState?.un_actions;
+    return !spectator
+      && (unActions?.enabled_players?.includes(playerId) ?? false)
+      && (unActions?.touchable?.includes(objectId) ?? false);
+  });
+  useEffect(() => (reportsTouch ? retainTouchTracking() : undefined), [reportsTouch]);
   const handlePointerEnter = useCallback((event: React.PointerEvent<HTMLDivElement>) => {
     if (isMobile || event.pointerType === "touch") return;
     hoverObject(objectId); inspectObject(objectId);
@@ -813,6 +831,7 @@ export const PermanentCard = memo(function PermanentCard({
       ref={cardRef}
       data-object-id={objectId}
       data-permanent-card={objectId}
+      {...(reportsTouch ? { [UN_TOUCH_ATTRIBUTE]: objectId } : {})}
       data-grouped-ids={coveredIds && coveredIds.length > 1 ? coveredIds.join(" ") : undefined}
       data-card-hover
       layoutId={`permanent-${objectId}`}
@@ -882,6 +901,7 @@ export const PermanentCard = memo(function PermanentCard({
       {hiddenAttachmentCount > 0 && (
         <button
           type="button"
+          {...{ [ATTACHMENT_CONTROL_ATTRIBUTE]: "true" }}
           className="absolute -right-3 top-6 z-30 flex h-6 min-w-6 items-center justify-center rounded-full bg-amber-300 px-1.5 text-[11px] font-black leading-none text-amber-950 ring-2 ring-amber-950/80 shadow transition-transform hover:scale-105 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white"
           title={t("permanent.hiddenAttachmentsAria", { count: hiddenAttachmentCount })}
           aria-label={t("permanent.hiddenAttachmentsAria", { count: hiddenAttachmentCount })}
@@ -1203,6 +1223,7 @@ export const PermanentCard = memo(function PermanentCard({
       {attachmentFanCardCount > 0 && attachmentsExpanded && (
         <button
           type="button"
+          {...{ [ATTACHMENT_CONTROL_ATTRIBUTE]: "true" }}
           className="absolute -left-2.5 -top-2.5 z-40 flex items-center justify-center rounded-full bg-black/90 leading-none text-amber-200 ring-2 ring-amber-200/80 shadow-[0_2px_8px_rgba(0,0,0,0.65)] transition-transform hover:scale-105 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white"
           style={{
             width: attachmentBadgeSize,

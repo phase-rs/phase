@@ -895,6 +895,31 @@ fn place_priority_batch(
         .filter(|wf| !matches!(wf, WaitingFor::Priority { .. }))
 }
 
+/// CR 603.2 + CR 603.3: queue a batch of triggered abilities that an action
+/// collected itself, staged so it could be admitted or refused whole, with the
+/// batch the current wait parks. At a priority boundary that is the boundary's
+/// own batch, placed by the pass that follows; during any other decision the
+/// batch waits until a player would next receive priority, exactly as that
+/// wait's own triggers would.
+///
+/// CR 603.2c: `events` were collected once, here, so they are claimed for the
+/// ordinary collector: neither the following priority pass nor a paused
+/// announcement's carrier collects them again. `events` is the action's whole
+/// event buffer, so its indices are the occurrences the claim records.
+pub(crate) fn queue_collected_triggers(
+    state: &mut GameState,
+    events: &[GameEvent],
+    collection: triggers::PendingActivationTriggerCollection,
+) {
+    let origin = parked_batch_origin(&state.waiting_for);
+    let mut contexts = Vec::new();
+    collection.commit_into(state, &mut contexts);
+    let first_new_context = state.deferred_triggers.len();
+    state.deferred_triggers.extend(contexts);
+    triggers::stamp_deferred_triggers_from(state, first_new_context, origin);
+    super::announcement_triggers::claim_ordinary_collected_span(state, events, 0, events.len());
+}
+
 /// The origin a boundary batch parks with behind `waiting_for`: SBA-owned
 /// choices merge with their answer; any other wait keeps the batch its own.
 fn parked_batch_origin(waiting_for: &WaitingFor) -> triggers::DeferredTriggerBatchOrigin {
