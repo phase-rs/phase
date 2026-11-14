@@ -30295,13 +30295,6 @@ impl TargetFilter {
                 // exactly the failure `AmassedArmy` above documents.
                 | TargetFilter::EventTargetController
                 | TargetFilter::ParentTargetOwner
-                // CR 400.3 + CR 701.24c: "its owner's library" reads the owner
-                // of the exact source (live or LKI) at resolution. It is never
-                // a player-chosen target; without this arm a chained owner
-                // Shuffle (Fblthp, Impossibly Lost) surfaces a required target
-                // slot the trigger cannot fill, so CR 603.3d drops the whole
-                // trigger before it resolves.
-                | TargetFilter::Owner
                 | TargetFilter::SourceChosenPlayer
                 | TargetFilter::PostReplacementSourceController
                 // CR 615.5: the prevented event's damage source (reflection

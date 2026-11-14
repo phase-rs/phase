@@ -25746,9 +25746,11 @@ fn try_split_compound_subject(text: &str) -> Option<(TargetFilter, &str, TargetF
 /// Returns a ParsedEffectClause with a ChangeZone for the first subject and a sub_ability
 /// for the second subject, both with owner_library: true.
 ///
-/// CR 608.2f: the two ChangeZone nodes preserve the prospective-owner shuffle
-/// settlement, but this lowering does not claim simultaneous co-departure
-/// grouping for the two legs; that pre-existing boundary is a follow-up.
+/// CR 608.2f: a self+target compound ("this creature and target …") lowers to
+/// one grouped ChangeZone over `Or { SelfRef, target }`, so both members share
+/// one logical zone-change group and the tracked-owner terminal still settles
+/// each owner's shuffle. Other compound shapes retain sequential ChangeZone
+/// nodes.
 fn try_parse_compound_shuffle(text: &str, ctx: &mut ParseContext) -> Option<ParsedEffectClause> {
     let lower = text.to_lowercase();
     tag::<_, _, OracleError<'_>>("shuffle ")
@@ -25790,7 +25792,7 @@ fn try_parse_compound_shuffle(text: &str, ctx: &mut ParseContext) -> Option<Pars
         actor: crate::types::ability::LibraryInstructionActor::Controller,
         origin: None,
         destination: Zone::Library,
-        target: second,
+        target: second.clone(),
         owner_library,
         // CR 701.24c: the compound instruction settles both legs through one
         // terminal owner population; neither leg may shuffle its own delivery.
@@ -25846,6 +25848,36 @@ fn try_parse_compound_shuffle(text: &str, ctx: &mut ParseContext) -> Option<Pars
     } else {
         None
     };
+    // CR 608.2f: a self+target compound is one simultaneous action. A single
+    // ChangeZone over `Or { SelfRef, second }` keeps both members in one
+    // logical zone-change group (Dour Port-Mage sees one departure), while the
+    // tracked-owner terminal still settles each affected owner's shuffle.
+    if owner_library && matches!(first, TargetFilter::SelfRef) {
+        let effect = Effect::ChangeZone {
+            origin: first_origin,
+            destination: Zone::Library,
+            target: TargetFilter::Or {
+                filters: vec![TargetFilter::SelfRef, second.clone()],
+            },
+            owner_library,
+            library_shuffle: crate::types::ability::LibraryShuffleMode::TerminalShuffle,
+            enter_transformed: false,
+            enters_under: None,
+            enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+            enters_attacking: false,
+            up_to: false,
+            enter_with_counters: vec![],
+            conditional_enter_with_counters: vec![],
+            face_down_profile: None,
+            enters_modified_if: None,
+        };
+        let mut clause = imperative::with_shuffle_sub_ability(effect);
+        if clause.multi_target.is_none() {
+            clause.multi_target = extract_optional_target_multi_target(second_text, &clause.effect);
+        }
+        return Some(clause);
+    }
+
     let primary_effect = Effect::ChangeZone {
         actor: crate::types::ability::LibraryInstructionActor::Controller,
         origin: first_origin,
@@ -32442,6 +32474,7 @@ fn apply_anchor_subject(
     anchor: &TargetFilter,
     draw_inherits_anchor: bool,
     preserve_reveal_controller: bool,
+    preserve_search_controller: bool,
 ) {
     // `ParentTarget` reaches this chain-local applier only from
     // `bind_player_anchor_in_chain`'s player-only `TargetOnly` wrapper
@@ -32459,6 +32492,7 @@ fn apply_anchor_subject(
     match effect {
         Effect::Shuffle { target }
             if !owner_anchor
+                && !preserve_search_controller
                 && (matches!(
                     *target,
                     TargetFilter::Controller
@@ -32475,7 +32509,7 @@ fn apply_anchor_subject(
         Effect::SearchLibrary {
             target_player: tp @ None,
             ..
-        } if !owner_anchor => {
+        } if !owner_anchor && !preserve_search_controller => {
             *tp = Some(anchor.clone());
         }
         // CR 608.2c: "If that player does, they reveal …" after a source-owner
@@ -32553,12 +32587,18 @@ fn apply_anchor_subject_to_clause(
     // CR 109.5: an explicit "your library" possession is printed, not an
     // inherited actor; never let the previous clause's anchor overwrite it.
     let preserve_reveal_controller = scan_contains_phrase(text_lower, "your library");
+    // CR 109.5 + CR 701.23: "search your library" is printed to the ability's
+    // controller, not the preceding owner anchor.
+    let preserve_search_controller = scan_contains_phrase(text_lower, "search your library");
+    let preserve_caster_shuffle =
+        preserve_search_controller || scan_contains_phrase(text_lower, "then shuffle");
     apply_their_library_reveal_anchor(&mut clause.effect, anchor, text_lower);
     apply_anchor_subject(
         &mut clause.effect,
         anchor,
         draw_inherits_anchor,
         preserve_reveal_controller,
+        preserve_search_controller,
     );
     let mut sub = clause.sub_ability.as_deref_mut();
     while let Some(def) = sub {
@@ -32568,8 +32608,23 @@ fn apply_anchor_subject_to_clause(
             anchor,
             draw_inherits_anchor,
             preserve_reveal_controller,
+            preserve_search_controller,
         );
         sub = def.sub_ability.as_deref_mut();
+    }
+    // CR 701.23 + CR 109.5: "Search your library …, then shuffle" is the
+    // caster's own shuffle; a preceding owner anchor must not retarget it.
+    if preserve_caster_shuffle {
+        if let Effect::Shuffle { target } = &mut clause.effect {
+            *target = TargetFilter::Controller;
+        }
+        let mut node = clause.sub_ability.as_deref_mut();
+        while let Some(def) = node {
+            if let Effect::Shuffle { target } = def.effect.as_mut() {
+                *target = TargetFilter::Controller;
+            }
+            node = def.sub_ability.as_deref_mut();
+        }
     }
 }
 

@@ -11274,6 +11274,16 @@ pub(super) fn with_shuffle_sub_ability(mut effect: Effect) -> ParsedEffectClause
             owner_library: true,
             ..
         } => TargetFilter::Owner,
+        // CR 608.2f + CR 701.24c: the single grouped self+target move spans the
+        // source's owner and the target's owner; settle both through the
+        // tracked-owner ScopedPlayer terminal.
+        Effect::ChangeZone {
+            owner_library: true,
+            target: TargetFilter::Or { filters },
+            ..
+        } if filters.iter().any(|f| matches!(f, TargetFilter::SelfRef)) => {
+            TargetFilter::ScopedPlayer
+        }
         Effect::ChangeZone {
             owner_library: true,
             ..
@@ -11282,20 +11292,6 @@ pub(super) fn with_shuffle_sub_ability(mut effect: Effect) -> ParsedEffectClause
         _ => TargetFilter::Controller,
     };
     let tracks_owner_population = matches!(&effect, Effect::ChangeZoneAll { .. });
-    // CR 701.24a + CR 608.2c: a source self-move to its owner's library is the
-    // move component of a parser-emitted "shuffle ~ into its owner's library".
-    // Mark it TerminalShuffle so the generic delivery tail does not auto-shuffle
-    // and the explicit chained Shuffle owns the one randomization (the same
-    // authority the typed graveyard population and ChangeZoneAll use).
-    let source_self_move = matches!(
-        &effect,
-        Effect::ChangeZone {
-            destination: Zone::Library,
-            target: TargetFilter::SelfRef,
-            owner_library: true,
-            ..
-        }
-    );
     // A selected graveyard population explicitly owned by the caster or the
     // declared player has one library subject (Dwell on the Past). ParentTarget/
     // SelfRef moves do not establish that guarantee: their receiving owner may
@@ -11328,17 +11324,16 @@ pub(super) fn with_shuffle_sub_ability(mut effect: Effect) -> ParsedEffectClause
         &effect,
         Effect::ChangeZone {
             owner_library: true,
-            target,
+            target: TargetFilter::Or { filters },
             ..
-        } if owner_move_spans_owners(target)
-    );
-    let specific_owner_move = matches!(
+        } if filters.iter().any(|f| matches!(f, TargetFilter::SelfRef))
+    ) || matches!(
         &effect,
         Effect::ChangeZone {
             owner_library: true,
             target,
             ..
-        } if !matches!(target, TargetFilter::SelfRef) && !scoped_owner_move
+        } if owner_move_spans_owners(target)
     );
     match &mut effect {
         // CR 701.24a + CR 701.24d: every parser-emitted compound move into a
@@ -27900,17 +27895,17 @@ mod tests {
     #[test]
     fn parse_shuffle_parent_target_into_owners_library_uses_owner_scope() {
         let text = "shuffle that card into its owner's library";
-        let ast = parse_shuffle_ast(text, text).expect("parent-target shuffle parses");
+        let ast = parse_shuffle_ast(text, text, &mut ParseContext::default())
+            .expect("parent-target shuffle parses");
         let clause = lower_shuffle_ast(ast);
         match &clause.effect {
-            Effect::ChangeZone {
+            Effect::ChangeZoneAll {
                 destination: Zone::Library,
                 target: TargetFilter::ParentTarget,
-                owner_library: true,
                 library_shuffle: LibraryShuffleMode::TerminalShuffle,
                 ..
             } => {}
-            other => panic!("expected terminal parent-target owner move, got {other:?}"),
+            other => panic!("expected terminal parent-target owner mass move, got {other:?}"),
         }
         let shuffle = clause.sub_ability.as_deref().expect("terminal shuffle");
         assert!(matches!(
