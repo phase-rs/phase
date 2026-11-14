@@ -182,6 +182,7 @@ fn redact_paid_cast_cleanup_authority(waiting_for: &mut WaitingFor) {
         | WaitingFor::TriggerTargetSelection { .. }
         | WaitingFor::BetweenGamesSideboard { .. }
         | WaitingFor::BetweenGamesChoosePlayDraw { .. }
+        | WaitingFor::ChooseStartingPlayer { .. }
         | WaitingFor::NamedChoice { .. }
         | WaitingFor::OpponentGuess { .. }
         | WaitingFor::SpellbookDraft { .. }
@@ -1303,6 +1304,7 @@ fn redact_activation_records(filtered: &mut GameState) {
             // is in flight in any of these.
             PendingCostMoveResume::WardSacrificePayment { .. }
             | PendingCostMoveResume::ReplacementMayCost { .. }
+            | PendingCostMoveResume::ReplacementMayCostInnerChoice { .. }
             | PendingCostMoveResume::Foretell { .. }
             | PendingCostMoveResume::UnlessBouncePayment { .. }
             | PendingCostMoveResume::ManaAbilityPayment { .. }
@@ -3117,10 +3119,12 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
         ref conditional_enter_with_counters,
         count_param,
         ref library_position,
+        library_shuffle,
         mass_library_order: _,
         is_cost_payment: _,
         enters_modified_if: _,
         ref duration,
+        performed_by,
     } = state.waiting_for
     {
         // A private-zone choice reveals exactly which cards can be selected,
@@ -3152,12 +3156,15 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
                 conditional_enter_with_counters: conditional_enter_with_counters.clone(),
                 count_param,
                 library_position: library_position.clone(),
+                library_shuffle,
                 mass_library_order: None,
                 is_cost_payment: false,
                 enters_modified_if: None,
                 // The bounded-move duration is a public effect parameter, not
                 // private hand info — pass it through the redaction.
                 duration: duration.clone(),
+                // Who performs the move is public, like the duration.
+                performed_by,
             };
         }
     }
@@ -4940,7 +4947,7 @@ fn hide_card(state: &mut GameState, obj_id: ObjectId) {
         obj.name = HIDDEN_CARD_NAME.to_string();
         redact_printed_identity(obj);
         Arc::make_mut(&mut obj.abilities).clear();
-        obj.keywords.clear();
+        obj.clear_keywords();
         obj.power = None;
         obj.toughness = None;
         obj.loyalty = None;
@@ -5025,7 +5032,7 @@ fn redact_face_down_identity_from_observer(obj: &mut crate::game::game_object::G
         redact_secret_agenda_choices(obj);
         obj.card_types = Default::default();
         obj.mana_cost = crate::types::mana::ManaCost::NoCost;
-        obj.keywords.clear();
+        obj.clear_keywords();
         obj.color.clear();
     }
 }
@@ -6509,6 +6516,7 @@ mod tests {
                     trigger_event: Some(event.clone()),
                     effect_description: None,
                     remaining: Vec::new(),
+                    repeat: None,
                 },
             ),
             (
@@ -7030,6 +7038,7 @@ mod tests {
             trigger_event: Some(fixture.event.clone()),
             effect_description: None,
             remaining: Vec::new(),
+            repeat: None,
         };
         pending.cost_move_resume = Some(ManaAbilityResume::EffectPayCost {
             payer: fixture.owner,
@@ -7095,6 +7104,7 @@ mod tests {
                     trigger_event: None,
                     effect_description: None,
                     remaining: Vec::new(),
+                    repeat: None,
                 }),
             ),
             (
@@ -8024,6 +8034,7 @@ mod tests {
             cost_reduction_election: None,
             activation_cost_snapshot: None,
             activation_cost: None,
+            activation_cost_paused_on_draw: false,
             deferred_hand_discard_cost: None,
             prepaid_finalization: None,
             activation_ability_index: None,
@@ -8088,6 +8099,7 @@ mod tests {
             trigger_event: None,
             effect_description: None,
             remaining: Vec::new(),
+            repeat: None,
         };
 
         let filtered = filter_state_for_viewer(&state, PlayerId(1));
@@ -8163,6 +8175,8 @@ mod tests {
             chosen_tappers: None,
             chosen_discards: Vec::new(),
             chosen_mana_payment: None,
+            payment_mode: CastPaymentMode::Auto,
+            pinned_pool_units: Vec::new(),
             chosen_counter_counts: Vec::new(),
             chosen_x: None,
             collected_evidence: Vec::new(),
@@ -11503,6 +11517,7 @@ mod tests {
             .execute(AbilityDefinition::new(
                 AbilityKind::Spell,
                 Effect::ChangeZone {
+                    actor: crate::types::ability::LibraryInstructionActor::Controller,
                     library_shuffle: Default::default(),
                     origin: None,
                     destination: Zone::Library,
@@ -11691,6 +11706,7 @@ mod tests {
             .execute(AbilityDefinition::new(
                 AbilityKind::Spell,
                 Effect::ChangeZone {
+                    actor: crate::types::ability::LibraryInstructionActor::Controller,
                     library_shuffle: Default::default(),
                     origin: None,
                     destination: Zone::Library,

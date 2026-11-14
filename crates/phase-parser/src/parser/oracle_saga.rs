@@ -464,6 +464,26 @@ fn apply_duration_free_lifetime(effect: &mut Effect) {
 mod tests {
     use super::*;
 
+    #[test]
+    fn multiline_reminder_view_keeps_chapter_indices_and_following_rules() {
+        let oracle = "(As this Saga enters and after your draw\nstep, add a lore counter. Sacrifice after III.)\nI — Draw two cards, then discard two cards.\nII — Return up to one target artifact, instant, or sorcery card from your graveyard to your hand.\nIII — Choose up to two target cards in graveyards. The owners of those cards shuffle them into their libraries.";
+        let view = super::super::oracle_util::mask_multiline_reminder_text(oracle);
+        let lines: Vec<_> = view.lines().collect();
+        let (chapters, _, consumed) = parse_saga_chapters(&lines, "Those Old Scientists");
+        assert_eq!(
+            chapters.iter().map(|(line, _)| *line).collect::<Vec<_>>(),
+            vec![2, 3, 4]
+        );
+        assert_eq!(consumed, HashSet::from([2, 3, 4]));
+        let view = super::super::oracle_util::mask_multiline_reminder_text("(Nested (reminder)\ntext)\nI — Choose one —\n• Draw a card.\n• You gain 2 life.\nFlying");
+        let lines: Vec<_> = view.lines().collect();
+        let (chapters, _, consumed) = parse_saga_chapters(&lines, "Modal chapter fixture");
+        assert_eq!(chapters.len(), 1);
+        assert_eq!(chapters[0].0, 2);
+        assert!(consumed.contains(&3) && consumed.contains(&4));
+        assert!(!consumed.contains(&5));
+    }
+
     /// u4-c2 test shim: map the source-line-tagged preprocessor return back to the
     /// bare-def shape the existing assertions read.
     fn saga_test_chapters(

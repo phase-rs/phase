@@ -331,6 +331,11 @@
     "body": "应用遇到意外错误，无法在此界面继续。重新加载通常可以解决。",
     "reload": "重新加载"
   },
+  "stateCodec": {
+    "actionInterrupted": "操作期间状态传输中断",
+    "submissionNotSent": "正在恢复状态传输；此次操作尚未发送。",
+    "reconnectSubmissionNotSent": "正在重新建立连接；此次操作尚未发送。"
+  },
   "actionError": {
     "title": "{{action}}失败",
     "skipTarget": "跳过目标",
