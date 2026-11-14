@@ -216,6 +216,7 @@ fn eval(
             count_param: 0,
             mass_library_order: None,
             library_position: None,
+            library_shuffle: engine::types::ability::LibraryShuffleMode::PerObject,
             is_cost_payment: false,
             enters_modified_if: None,
             duration: None,

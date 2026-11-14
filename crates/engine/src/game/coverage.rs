@@ -10123,6 +10123,27 @@ fn damage_rider_effect_asks_a_choice(effect: &Effect, targets: RiderTargets) -> 
             enters_modified_if: _,
             library_shuffle: _,
         } => *up_to || picks_a_population(target),
+        // CR 608.2c + CR 701.24a: "that creature's owner shuffles it into their library"
+        // (Weeping Angel) moves the bound object and shuffles; it picks nothing unless its object
+        // is a population. Any other mass move fails closed.
+        Effect::ChangeZoneAll {
+            origin: _,
+            destination: _,
+            target,
+            enters_under: _,
+            enter_tapped: _,
+            enters_attacking: _,
+            enter_with_counters: _,
+            face_down_profile: _,
+            library_position: _,
+            library_shuffle: _,
+            random_order: _,
+        } => {
+            !crate::game::effects::is_selected_object_library_move(effect)
+                || picks_a_population(target)
+        }
+        // CR 115.1 + CR 608.2b: the move's declaration node names the same bound object.
+        Effect::TargetOnly { target } => picks_a_target(target),
         // `effect_offers_choice` already answers the count half of these: its "up to" guard.
         Effect::GainLife { amount: _, player } => {
             picks_a_target(player) || effect_offers_choice(effect)
@@ -10228,7 +10249,6 @@ fn damage_rider_effect_asks_a_choice(effect: &Effect, targets: RiderTargets) -> 
         | Effect::DamageEachPlayer { .. }
         | Effect::EachPlayerCopyChosen { .. }
         | Effect::DestroyAll { .. }
-        | Effect::ChangeZoneAll { .. }
         | Effect::Dig { .. }
         | Effect::GainControl { .. }
         | Effect::GainControlAll { .. }
@@ -10297,7 +10317,6 @@ fn damage_rider_effect_asks_a_choice(effect: &Effect, targets: RiderTargets) -> 
         | Effect::Reveal { .. }
         | Effect::RevealTop { .. }
         | Effect::ExileFaceDownPile { .. }
-        | Effect::TargetOnly { .. }
         | Effect::Choose { .. }
         | Effect::ChooseDamageSource { .. }
         | Effect::Suspect { .. }

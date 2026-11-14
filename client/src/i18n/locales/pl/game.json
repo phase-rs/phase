@@ -574,7 +574,9 @@
     "dungeonTooltip": "Wyprawa w {{name}}",
     "poisonAriaLabel_one": "{{count}} znacznik trucizny",
     "poisonAriaLabel_other": "{{count}} znaczników trucizny",
-    "poisonTooltip": "Znaczniki trucizny: {{count}}\nGracz z co najmniej dziesięcioma znacznikami trucizny przegrywa grę.",
+    "poisonTooltip": "Znaczniki trucizny: {{count}}",
+    "poisonLossPlayer": "Gracz z co najmniej {{threshold}} znacznikami trucizny przegrywa grę.",
+    "poisonLossTeam": "Drużyna z co najmniej {{threshold}} znacznikami trucizny przegrywa grę.",
     "energyAriaLabel_one": "{{count}} znacznik energii",
     "energyAriaLabel_other": "{{count}} znaczników energii",
     "energyTooltip": "Znaczniki energii: {{count}}\nZnaczniki energii są zasobem gracza wydawanym przez zdolności kart.",
@@ -1184,6 +1186,11 @@
       "drawFirst": "Dobieraj pierwszy",
       "drawFirstDescription": "Wykonaj dodatkowe dobranie w swojej pierwszej turze"
     },
+    "startingPlayer": {
+      "title": "Wybierz, kto zaczyna",
+      "playerPlaysFirst": "{{name}} zaczyna",
+      "opponentChoosing": "{{name}} wybiera, kto zaczyna…"
+    },
     "mulligan": {
       "opponentDeciding": "Przeciwnik wybiera swoją rękę startową…",
       "londonTitle": "Mulligan londyński ({{count}} wziętych)",
@@ -1422,6 +1429,7 @@
     "config": {
       "startingLife": "Życie początkowe",
       "commanderDamage": "Obrażenia od dowódcy",
+      "poisonCounters": "Znaczniki trucizny",
       "players": "Gracze",
       "whoGoesFirst": "Kto zaczyna",
       "firstPlayer": {

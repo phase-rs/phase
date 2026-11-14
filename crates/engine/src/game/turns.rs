@@ -3847,7 +3847,9 @@ fn process_phase_triggers(
     // already does at the sibling (`WaitingFor::Priority`) boundary, using the
     // same authority and the same gate.
     //
-    // This is load-bearing, not belt-and-braces: `engine::start_game` and
+    // This is load-bearing, not belt-and-braces: a direct call to
+    // `engine::start_game_with_starting_player` (an explicit starter, replay
+    // reconstruction, `engine::start_game_winner_plays_first`) and
     // `engine::start_game_skip_mulligan` drive `turns::auto_advance` and return
     // an `ActionResult` without going through the post-action pipeline, so on
     // those paths the pipeline's drain does not run and a parked batch would
@@ -14736,6 +14738,11 @@ mod object_sweep_sharing_tests {
     /// CR 508.4 + CR 509.4 + CR 506.4 + CR 511.3 + CR 611.3a: a combat that recorded
     /// membership (entered attacking, a placed blocker, or a removed attacker)
     /// invalidates layers when it ends.
+    ///
+    /// Paired with `end_combat_teardown_keeps_layers_clean_for_untouched_combat` below: the
+    /// SAME teardown on the SAME fixture, differing only in whether combat recorded anything,
+    /// so a teardown that simply stopped invalidating layers (positive red) is distinguished
+    /// from one that started invalidating unconditionally (negative red).
     #[test]
     fn end_combat_teardown_invalidates_layers_for_recorded_combat() {
         type Shape = fn(&mut GameState, ObjectId, ObjectId);
@@ -14744,7 +14751,26 @@ mod object_sweep_sharing_tests {
             (
                 "placed blocking, attacker removed",
                 |state, attacker, blocker| {
-                    assert!(combat::place_blocking(state, blocker, attacker));
+                    // CR 506.3a: only a CREATURE enters as a blocking permanent, and the
+                    // sweep fixture's objects carry no printed types. Give the blocker one
+                    // (base and live, so layer reseeding keeps it) — this arm is about the
+                    // RECORDED block, and it must really record one.
+                    let fixture_types = crate::types::card_type::CardType {
+                        supertypes: Vec::new(),
+                        core_types: vec![crate::types::card_type::CoreType::Creature],
+                        subtypes: Vec::new(),
+                    };
+                    let object = state.objects.get_mut(&blocker).expect("fixture object");
+                    object.base_card_types = fixture_types.clone();
+                    object.card_types = fixture_types;
+                    // `place_blocking` journals the entering block, so it takes the event
+                    // buffer; a discarded buffer keeps this arm about combat bookkeeping.
+                    assert!(combat::place_blocking(
+                        state,
+                        blocker,
+                        attacker,
+                        &mut Vec::new()
+                    ));
                     assert!(combat::prune_object_from_combat(state, attacker));
                 },
             ),

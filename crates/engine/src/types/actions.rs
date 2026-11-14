@@ -450,6 +450,10 @@ pub enum GameAction {
     ChoosePlayDraw {
         play_first: bool,
     },
+    /// CR 103.1: answer to `WaitingFor::ChooseStartingPlayer` — the seat that takes the first turn.
+    ChooseStartingPlayer {
+        player: PlayerId,
+    },
     ChooseOption {
         choice: String,
     },
@@ -2176,6 +2180,7 @@ impl GameAction {
             | Self::CancelCast
             | Self::SubmitSideboard { .. }
             | Self::ChoosePlayDraw { .. }
+            | Self::ChooseStartingPlayer { .. }
             | Self::ChooseOption { .. }
             | Self::SubmitVoteCandidate { .. }
             | Self::SubmitSpellbookDraft { .. }
@@ -2524,6 +2529,7 @@ impl GameAction {
             | GameAction::BackToManaPayment
             | GameAction::SubmitSideboard { .. }
             | GameAction::ChoosePlayDraw { .. }
+            | GameAction::ChooseStartingPlayer { .. }
             | GameAction::ChooseOption { .. }
             | GameAction::SubmitVoteCandidate { .. }
             | GameAction::SubmitSpellbookDraft { .. }

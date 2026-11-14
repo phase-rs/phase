@@ -17084,6 +17084,18 @@ fn apply_non_priority_pass_action(
             GameAction::ChoosePlayDraw { play_first },
         ) => match_flow::handle_choose_play_draw(state, *player, play_first, &mut events)
             .map_err(EngineError::InvalidAction)?,
+        // CR 103.1: the chooser names the seat that takes the first turn.
+        (
+            WaitingFor::ChooseStartingPlayer { player, candidates },
+            GameAction::ChooseStartingPlayer { player: chosen },
+        ) => match_flow::handle_choose_starting_player(
+            state,
+            *player,
+            candidates,
+            chosen,
+            &mut events,
+        )
+        .map_err(EngineError::InvalidAction)?,
         (
             waiting_for @ WaitingFor::AbilityModeChoice { .. },
             GameAction::SelectModes { indices },
@@ -21120,27 +21132,26 @@ fn build_contest_rounds(
 
 /// Start game with mulligan flow. If no cards in libraries, skips mulligan.
 ///
-/// CR 103.1: At the start of game 1 of a match the players determine who takes
-/// the first turn "using any mutually agreeable method (flipping a coin,
-/// rolling dice, etc.)". This engine models that determination as an
+/// CR 103.1: At the start of game 1 of a match the players determine which one
+/// of them will choose who takes the first turn, "using any mutually agreeable
+/// method (flipping a coin, rolling dice, etc.)". This engine's method is an
 /// authoritative d20 high-roll contest — one d20 per seat using the game's
 /// seeded RNG (CR 706, rolling a die) — with ties rerolled among the tied top
-/// group. NOTE ON FIDELITY: the literal CR 103.1 sequence is "contest winner
-/// *chooses* who takes the first turn"; this engine collapses that to "contest
-/// winner *becomes* the starting player" (it does not present a play/draw
-/// choice here), an existing, accepted simplification — the annotation does not
-/// claim the choose-step is implemented. Subsequent games in a multi-game match
-/// route through `match_flow::start_next_game`, which uses `next_game_chooser`
-/// instead, so this function is always the game-1 path.
+/// group. The contest determines **who chooses**: the function ends at
+/// `WaitingFor::ChooseStartingPlayer`, and the chooser's answer
+/// (`match_flow::handle_choose_starting_player`) starts the game. Subsequent
+/// games in a multi-game match route through `match_flow::start_next_game`,
+/// which uses `next_game_chooser` instead, so this function is always the
+/// game-1 path.
 ///
 /// The contest is surfaced as a single authoritative
 /// `GameEvent::StartingPlayerContest` carrying the full round structure (round
 /// 1 = all seats, each later round = the prior round's tied-max reroll group)
 /// plus the engine's authoritative `winner`, so downstream consumers render the
-/// contest round by round without re-deriving anything. It is inserted at the
-/// front of the result, ahead of `GameStarted` → `TurnStarted`. This replaces
-/// the prior flat per-roll `DieRolled` batch; in-game die rolls still emit
-/// `DieRolled`.
+/// contest round by round without re-deriving anything. It is the only event
+/// of the start batch; `GameStarted` → `TurnStarted` follow in the answer's
+/// batch. This replaces the prior flat per-roll `DieRolled` batch; in-game die
+/// rolls still emit `DieRolled`.
 ///
 /// DETERMINISM: the contest draws only from `state.rng` (the seeded
 /// `ChaCha20Rng`), never thread/global RNG, so replays and AI search stay
@@ -21149,11 +21160,12 @@ fn build_contest_rounds(
 /// representation change introduces ZERO determinism shift relative to the
 /// prior `DieRolled`-batch implementation. (It still differs from the original
 /// single `random_range(0..len)` pick that predated the contest, an earlier,
-/// accepted shift.)
+/// accepted shift.) The choice itself draws nothing from `state.rng`.
 ///
 /// Callers that need a deterministic starter (tests, fixed scenarios) must use
 /// `start_game_with_starting_player` directly — that path runs no contest and
-/// emits no `StartingPlayerContest` event.
+/// emits no `StartingPlayerContest` event. Callers that predate the choice and
+/// are not about it use `start_game_winner_plays_first`.
 pub fn start_game(state: &mut GameState) -> ActionResult {
     let before = state.clone();
     if state.seat_order.is_empty() {
@@ -21179,11 +21191,11 @@ pub fn start_game(state: &mut GameState) -> ActionResult {
         return start_game_with_starting_player(state, first);
     }
 
-    // CR 103.1 / CR 706: roll one d20 per seat; the high roller becomes the
-    // starting player. Draw order/count is identical to the prior
+    // CR 103.1 / CR 706: roll one d20 per seat; the high roller chooses who
+    // takes the first turn. Draw order/count is identical to the prior
     // implementation — one `random_range(1..=20)` per contender, in seat order.
     let seat_order = state.seat_order.clone();
-    let (rounds, starting_player) = build_contest_rounds(&seat_order, |contenders| {
+    let (rounds, winner) = build_contest_rounds(&seat_order, |contenders| {
         contenders
             .iter()
             .map(|&seat| {
@@ -21195,15 +21207,42 @@ pub fn start_game(state: &mut GameState) -> ActionResult {
             .collect()
     });
 
-    let mut result = start_game_with_starting_player(state, starting_player);
-    // CR 103.1: StartingPlayerContest → GameStarted → TurnStarted.
-    result.events.insert(
-        0,
-        GameEvent::StartingPlayerContest {
-            rounds,
-            winner: starting_player,
-        },
-    );
+    // CR 103.1: the contest decides who chooses; the chooser names the starting
+    // player. CR 103.1a: under shared team turns the chooser and the candidates
+    // are side representatives, so the choice names a starting team.
+    normalize_match_type(state);
+    let events = vec![GameEvent::StartingPlayerContest { rounds, winner }];
+    let waiting_for = WaitingFor::ChooseStartingPlayer {
+        player: super::topology::normalize_shared_turn_recipient(state, winner),
+        candidates: super::topology::turn_representatives(state),
+    };
+    state.waiting_for = waiting_for.clone();
+    bump_state_revision(state);
+    mark_public_state_all_dirty(state);
+    finalize_public_state(state);
+    let log_entries = super::log::resolve_log_entries(&events, &before, state);
+    ActionResult::applied(events, waiting_for).with_log_entries(log_entries)
+}
+
+/// CR 103.1 with the contest winner electing to take the first turn:
+/// `start_game`, then the raw roll winner starts, in every format (under
+/// shared team turns too, where it may be a team's second seat). The single
+/// migration authority for routes that predate the game-one choice (replay
+/// formats 2–3) and for harnesses whose subject is not the choice. Archenemy,
+/// Horde and seatless starts emit no contest and pass through, since
+/// `start_game` already started them.
+pub fn start_game_winner_plays_first(state: &mut GameState) -> ActionResult {
+    let before = state.clone();
+    let mut result = start_game(state);
+    let Some(winner) = result.events.iter().find_map(|event| match event {
+        GameEvent::StartingPlayerContest { winner, .. } => Some(*winner),
+        _ => None,
+    }) else {
+        return result; // Archenemy / Horde / seatless: already started
+    };
+    let start = start_game_with_starting_player(state, winner);
+    result.events.extend(start.events);
+    result.waiting_for = start.waiting_for;
     result.log_entries = super::log::resolve_log_entries(&result.events, &before, state);
     result
 }
@@ -21216,6 +21255,22 @@ fn match_type_within(configured: MatchType, ceiling: MatchType) -> MatchType {
             MatchType::Bo1
         }
     }
+}
+
+/// The match type this game plays: Bo3 only for two-player or Archenemy
+/// games, and never longer than the format's ceiling. Idempotent.
+fn normalize_match_type(state: &mut GameState) {
+    if state.match_config.match_type == MatchType::Bo3
+        && state.players.len() != 2
+        && super::topology::archenemy(state).is_none()
+    {
+        state.match_config.match_type = MatchType::Bo1;
+    }
+    // The ceiling is read from the format, so no host-supplied match config can raise it.
+    state.match_config.match_type = match_type_within(
+        state.match_config.match_type,
+        state.format_config.format.best_of_three_ceiling(),
+    );
 }
 
 /// Start game with a specific player taking the first turn.
@@ -21236,17 +21291,7 @@ pub fn start_game_with_starting_player(
         super::topology::archenemy(state).unwrap_or(starting_player)
     };
 
-    if state.match_config.match_type == MatchType::Bo3
-        && state.players.len() != 2
-        && super::topology::archenemy(state).is_none()
-    {
-        state.match_config.match_type = MatchType::Bo1;
-    }
-    // The ceiling is read from the format, so no host-supplied match config can raise it.
-    state.match_config.match_type = match_type_within(
-        state.match_config.match_type,
-        state.format_config.format.best_of_three_ceiling(),
-    );
+    normalize_match_type(state);
 
     events.push(GameEvent::GameStarted);
 
@@ -25369,8 +25414,11 @@ mod stage2_injector_tests {
     ///
     /// A producer's key is `file::fn {fields}` — its enclosing column-0 `fn` plus the
     /// whitespace-stripped field text of the construction minted there, so a REPLACEMENT
-    /// inside an already-pinned function moves the key. A reader keys as `file::fn`.
-    fn cr_603_5_sites(rel: &str, text: &str) -> (Vec<String>, Vec<String>, usize) {
+    /// inside an already-pinned function moves the key. A reader keys as `file::fn`. An
+    /// in-test site keys as its FILE, because the fixture that parks a prompt may live in an
+    /// indented `#[cfg(test)] mod` body where the column-0 tracker names no function of its
+    /// own — the file is the coordinate that does not churn.
+    fn cr_603_5_sites(rel: &str, text: &str) -> (Vec<String>, Vec<String>, Vec<String>) {
         use crate::source_census::code as code_of;
 
         /// The `#[cfg(test)]`-attributed column-0 `mod … {` … column-0 `}` spans.
@@ -25447,11 +25495,11 @@ mod stage2_injector_tests {
         // instrument. `..` excludes multi-line READ destructures whose rest-pattern sits on
         // a later line — the inflation the raw grep suffers from.
         let needle = format!("WaitingFor::{}Choice {{", "OptionalEffect");
-        let (mut producers, mut readers, mut in_test) = (Vec::new(), Vec::new(), 0usize);
+        let (mut producers, mut readers, mut in_test) = (Vec::new(), Vec::new(), Vec::new());
         // Enclosing-function tracker for this file: `enclosing` names each site and
         // `fn_start` bounds the qualifying look-back below, so no coordinate is minted.
         // Column-0 `fn` headers only — a producer inside an `impl` method would take the
-        // preceding free function's name; all five producers today are free functions.
+        // preceding free function's name; all four producers today are free functions.
         let (mut enclosing, mut fn_start) = (String::new(), 0usize);
         for (n, line) in lines.iter().enumerate() {
             let code = code_of(line);
@@ -25473,7 +25521,7 @@ mod stage2_injector_tests {
                 continue;
             }
             if test_file || spans.iter().any(|(a, b)| (*a..=*b).contains(&n)) {
-                in_test += 1;
+                in_test.push(rel.to_string());
             } else if code.contains("waiting_for = ")
                 || code.contains("Ok(Some(")
                 // `install_direct_choice_frame` owns the actual `state.waiting_for`
@@ -25507,6 +25555,23 @@ mod stage2_injector_tests {
     /// coordinate is asserted, so movement above a producer is not an event and a REPLACEMENT
     /// inside a pinned function is. The pin is a sorted MULTISET, so a sixth mint in one of them
     /// still fails here; comment text is never a site (`source_census::code`).
+    ///
+    /// **NOT THE SAME BOUNDARY AS THE CONJUNCT CENSUS.** The retained
+    /// `f2c_the_cr_603_5_conjunct_set_has_one_production_assembler` row below counts CONSUMERS
+    /// of the five gate predicates (`has_kind_driven_repeat`, `optional_prompt_player`, …) and
+    /// pins that they are assembled in one place. It cannot see who MINTS
+    /// `WaitingFor::OptionalEffectChoice`, which is what this row counts — so neither row
+    /// subsumes the other.
+    ///
+    /// **THE PARTITION DELTA IS ACCOUNTED, NOT ABSORBED.** This row was first pinned at
+    /// `4 / 11 / 44`; the in-test column is now 45. The single added site is
+    /// `game/effects/phase_out.rs`'s `restore_phase_state` suspension fixture, which parks a
+    /// typed optional prompt on two cloned states to keep a continuation legitimately
+    /// suspended. It is `#[cfg(test)]`-only: it mints no production producer and changes no
+    /// production key. The producer multiset below is byte-identical to the original pin, so
+    /// no producer moved; the assertion that the phase_out file contributes exactly one
+    /// in-test site is what makes that delta an explicit adjudication instead of a number
+    /// bump.
     #[test]
     fn the_cr_603_5_prompt_census_is_pinned_so_a_sixth_producer_is_a_counted_event() {
         /// Every `.rs` under the crate's `src`.
@@ -25527,7 +25592,7 @@ mod stage2_injector_tests {
         files.sort();
         assert!(files.len() > 100, "reach-guard: the walker found the crate");
 
-        let (mut producers, mut readers, mut in_test) = (Vec::new(), Vec::new(), 0usize);
+        let (mut producers, mut readers, mut in_test) = (Vec::new(), Vec::new(), Vec::new());
         for path in &files {
             let text = std::fs::read_to_string(path).expect("readable source file");
             let rel = path
@@ -25543,26 +25608,40 @@ mod stage2_injector_tests {
             let (file_producers, file_readers, file_in_test) = cr_603_5_sites(&rel, &text);
             producers.extend(file_producers);
             readers.extend(file_readers);
-            in_test += file_in_test;
+            in_test.extend(file_in_test);
         }
         producers.sort();
 
         assert_eq!(
-            producers.len() + readers.len() + in_test,
-            59,
+            producers.len() + readers.len() + in_test.len(),
+            60,
             "CR 603.5 prompt census drifted. A new PRODUCER must have its recipient bound \
              somewhere — the mint's conjunct (a) covers exactly ONE of them. A new READER is \
              the benign case (U4's own consumption arm was one).\n\
              producers={producers:#?}\nreaders={readers:#?}"
         );
         assert_eq!(
-            (producers.len(), readers.len(), in_test),
-            (4, 11, 44),
+            (producers.len(), readers.len(), in_test.len()),
+            (4, 11, 45),
             "the partition, not just the total: four PRODUCTION producers, eleven PRODUCTION \
-             readers (including the two new optional-subject projection reads), and 44 \
-             `#[cfg(test)]` lines, including the ChooseOneOf, retained optional/outer, \
-             and retained repeat/choice restore fixtures.\nproducers={producers:#?}\n\
-             readers={readers:#?}"
+             readers (including the two new optional-subject projection reads), and 45 \
+             `#[cfg(test)]` sites, including the ChooseOneOf, retained optional/outer, \
+             retained repeat/choice restore fixtures, and the `phase_out` suspension fixture \
+             that parks a typed prompt on a clone (test-only: it mints no producer).\n\
+             producers={producers:#?}\nreaders={readers:#?}"
+        );
+        // The one delta against the first pin, named rather than counted away: the `phase_out`
+        // `restore_phase_state` fixture parks an `OptionalEffectChoice` on each of two cloned
+        // states. A SECOND in-test site in that file (or this one disappearing) is an event.
+        assert_eq!(
+            in_test
+                .iter()
+                .filter(|rel| rel.as_str() == "game/effects/phase_out.rs")
+                .count(),
+            1,
+            "the accounted in-test delta is exactly the `restore_phase_state` suspension \
+             fixture's parked prompt; a second parked prompt in that file (or its removal) \
+             changes the in-test column for a reason this row has not adjudicated"
         );
         assert_eq!(
             producers,

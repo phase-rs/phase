@@ -337,6 +337,11 @@ pub fn apply_trusted_match_forfeit(
         winner: Some(winner),
     };
 
+    // The admitted, recorded match forfeit is a terminal authority of its own.
+    // Retire the abandoned resolution here, outside any active resolver, without
+    // manufacturing a game result or running the spell's remaining instructions.
+    super::elimination::retire_finished_game_resolution(state);
+
     // CR 104.1 + CR 723.1: a match forfeit does not go through
     // `elimination::end_game`, so it ends player control itself.
     crate::game::turn_control::end_all_player_control(state);
@@ -621,12 +626,32 @@ pub fn handle_choose_play_draw(
     restart_between_games_with_starting_player(state, chooser, starting_player, events)
 }
 
+/// CR 103.1: the chooser decides which candidate takes the first turn. The
+/// chooser is latched as `next_game_chooser` first: if this game is a draw,
+/// the same player chooses again (CR 103.1). Game one runs in place; there is
+/// no between-games rebuild.
+pub fn handle_choose_starting_player(
+    state: &mut GameState,
+    chooser: PlayerId,
+    candidates: &[PlayerId],
+    chosen: PlayerId,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, String> {
+    if !candidates.contains(&chosen) {
+        return Err("Chosen player is not a candidate to take the first turn".to_string());
+    }
+    state.next_game_chooser = Some(chooser);
+    let start = super::engine::start_game_with_starting_player(state, chosen);
+    events.extend(start.events);
+    Ok(start.waiting_for)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::game::deck_loading::load_deck_into_state;
     use crate::game::deck_loading::PlayerDeckPayload;
-    use crate::game::engine::{apply_as_current, start_game};
+    use crate::game::engine::{apply_as_current, start_game, start_game_winner_plays_first};
     use crate::types::ability::ControlWindow;
     use crate::types::actions::GameAction;
     use crate::types::card::CardFace;
@@ -1042,7 +1067,7 @@ mod tests {
     }
 
     #[test]
-    fn bo3_game_one_starter_is_randomized() {
+    fn bo3_game_one_chooser_is_randomized() {
         let mut saw_p0 = false;
         let mut saw_p1 = false;
 
@@ -1051,10 +1076,14 @@ mod tests {
             state.match_config.match_type = MatchType::Bo3;
             state.game_number = 1;
             let _ = start_game(&mut state);
-            if state.current_starting_player == PlayerId(0) {
+            // CR 103.1: the contest decides who chooses.
+            let WaitingFor::ChooseStartingPlayer { player, .. } = state.waiting_for else {
+                panic!("the start rests at the CR 103.1 choice");
+            };
+            if player == PlayerId(0) {
                 saw_p0 = true;
             }
-            if state.current_starting_player == PlayerId(1) {
+            if player == PlayerId(1) {
                 saw_p1 = true;
             }
             if saw_p0 && saw_p1 {
@@ -1086,7 +1115,7 @@ mod tests {
             ..Default::default()
         };
         load_deck_into_state(&mut state, &payload);
-        let _ = start_game(&mut state);
+        let _ = start_game_winner_plays_first(&mut state);
 
         state.match_phase = MatchPhase::BetweenGames;
         state.match_score = crate::types::match_config::MatchScore {
@@ -1209,7 +1238,7 @@ mod tests {
             ..Default::default()
         };
         load_deck_into_state(&mut state, &payload);
-        let _ = start_game(&mut state);
+        let _ = start_game_winner_plays_first(&mut state);
 
         // Drive to the between-games rebuild for game 2.
         state.match_phase = MatchPhase::BetweenGames;
@@ -1315,7 +1344,7 @@ mod tests {
             ..Default::default()
         };
         load_deck_into_state(&mut state, &payload);
-        let _ = start_game(&mut state);
+        let _ = start_game_winner_plays_first(&mut state);
 
         state.match_phase = MatchPhase::BetweenGames;
         state.match_score = crate::types::match_config::MatchScore {
@@ -1405,7 +1434,7 @@ mod tests {
             ..Default::default()
         };
         load_deck_into_state(&mut state, &payload);
-        let _ = start_game(&mut state);
+        let _ = start_game_winner_plays_first(&mut state);
 
         state.match_phase = MatchPhase::BetweenGames;
         state.match_score = crate::types::match_config::MatchScore {
