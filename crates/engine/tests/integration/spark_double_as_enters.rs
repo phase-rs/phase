@@ -2862,9 +2862,11 @@ mod feldon_tokens {
     /// Ever After returns two Servant of the Scale cards as one event with Satoru, the
     /// Infiltrator on the battlefield. With `paused`, Hardened Scales and Doubling Season make
     /// each Servant's counter stop on a CR 616.1 order, so the move is delivered in two
-    /// segments. Returns the cards Satoru's ability drew; asserts that both Servants entered
-    /// and that Ever After ended as the bottom card of its owner's library.
-    fn ever_after_satoru_draws(paused: bool) -> usize {
+    /// segments. Returns the cards Satoru's ability drew and the orders answered; asserts that
+    /// both Servants entered, that every order the setup requires was reached and answered
+    /// (none unpaused, two paused: one per Servant) and that Ever After ended as the bottom
+    /// card of its owner's library. The return and the draws are asserted separately.
+    fn ever_after_satoru_draws(paused: bool) -> (usize, usize) {
         let (mut scenario, _feldon) = setup();
         scenario
             .add_creature_from_oracle(P0, "Satoru, the Infiltrator", 2, 3, SATORU)
@@ -2889,13 +2891,26 @@ mod feldon_tokens {
             .cast(ever_after)
             .target_objects(&[first, second])
             .resolve();
+        let mut orders = 0;
         match scales {
             Some(scales) => {
-                // Reach guard: the batch stopped on a counter order.
-                assert!(matches!(
-                    runner.state().waiting_for,
-                    WaitingFor::ReplacementChoice { .. }
-                ));
+                // The batch stops on a counter order for each Servant: answer both.
+                for _ in 0..2 {
+                    let WaitingFor::ReplacementChoice { candidates, .. } =
+                        &runner.state().waiting_for
+                    else {
+                        panic!(
+                            "required a counter order, got {:?}",
+                            runner.state().waiting_for
+                        );
+                    };
+                    let index = candidates
+                        .iter()
+                        .position(|candidate| candidate.source_id == scales)
+                        .expect("Hardened Scales is offered");
+                    orders += 1;
+                    runner.act(GameAction::ChooseReplacement { index }).unwrap();
+                }
                 settle_answering(&mut runner, scales);
             }
             None => assert_token_entry_complete(&mut runner),
@@ -2916,29 +2931,32 @@ mod feldon_tokens {
             library + 1,
             "each draw left the library and Ever After returned to it"
         );
-        draws
+        (draws, orders)
     }
 
     /// CR 603.2c: Satoru, the Infiltrator's "Whenever Satoru and/or one or more other nontoken
     /// creatures you control enter … draw a card." triggers once for the two Servants Ever After
-    /// returns together: exactly one draw, and Ever After on the bottom of its owner's library.
+    /// returns together: exactly one draw, and, asserted separately in the helper, Ever After
+    /// is the bottom card of its owner's library (CR 608.2c).
     #[test]
     fn a_card_batch_triggers_a_one_or_more_observer_once() {
-        assert_eq!(ever_after_satoru_draws(false), 1);
+        assert_eq!(ever_after_satoru_draws(false), (1, 0));
     }
 
     /// The same batch delivered in two segments, each Servant's counter stopping on the order of
-    /// Hardened Scales and Doubling Season. KNOWN-WRONG, and equal to main (measured there: two
-    /// draws): the logical zone-change owner, which this change leaves as it is, collects per
-    /// delivered segment, so Satoru triggers twice for the one event. The row pins that this
-    /// change neither adds a trigger nor loses the spell's last instruction; it is not evidence
-    /// of correct batching.
+    /// Hardened Scales and Doubling Season. Both orders must be reached and answered, and Ever
+    /// After must still end as the bottom card of its owner's library. BASELINE LIMITATION, not
+    /// correct batching: the logical zone-change owner collects each completed slice
+    /// (`zone_pipeline.rs` hands it to `append_and_collect_logical_zone_trigger_segment`), so
+    /// Satoru triggers once per segment and draws two cards for the one event (CR 603.2c asks
+    /// for one). The same setup and answers draw two on main, outside this change.
     #[test]
     fn a_counter_order_answer_inside_a_card_batch_keeps_the_card_batch_owners_collection() {
+        let (draws, orders) = ever_after_satoru_draws(true);
+        assert_eq!(orders, 2, "one counter order per Servant, both answered");
         assert_eq!(
-            ever_after_satoru_draws(true),
-            2,
-            "the card-batch owner's per-segment collection, as on main"
+            draws, 2,
+            "baseline limitation: the card-batch owner draws once per delivered segment"
         );
     }
 
