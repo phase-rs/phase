@@ -363,3 +363,136 @@ fn mysterious_limousine_declined_target_returns_nothing() {
         "nothing was put into exile this way, so nothing returns"
     );
 }
+
+/// CR 702.122a: crew `vehicle` by tapping `crewer`.
+fn crew(runner: &mut GameRunner, vehicle: ObjectId, crewer: ObjectId) {
+    runner
+        .act(GameAction::CrewVehicle {
+            vehicle_id: vehicle,
+            creature_ids: vec![],
+        })
+        .expect("enter crew selection");
+    runner
+        .act(GameAction::CrewVehicle {
+            vehicle_id: vehicle,
+            creature_ids: vec![crewer],
+        })
+        .expect("pay the crew cost");
+    runner.advance_until_stack_empty();
+}
+
+/// CR 400.7 + CR 608.2c + CR 702.122a: the "creature" put into exile this way
+/// is a crewed Vehicle, which stops being a creature the moment it leaves the
+/// battlefield. The noun is read as it was when moved, so the gate still holds
+/// and the card Limousine exiled earlier (through its own enters trigger) comes
+/// back while the Vehicle stays exiled. The second Vehicle is SYNTHETIC
+/// ("Parked Vehicle", Crew 1, no other text); the nearest printed analogue is
+/// any crewed Vehicle, e.g. a second Mysterious Limousine.
+#[test]
+fn mysterious_limousine_exiling_a_crewed_vehicle_returns_the_other_exiled_card() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let limo = scenario
+        .add_artifact_to_hand_from_oracle(P0, "Mysterious Limousine", MYSTERIOUS_LIMOUSINE)
+        .with_subtypes(vec!["Vehicle"])
+        .id();
+    let parked = scenario
+        .add_creature(P0, "Parked Vehicle", 3, 3)
+        .as_artifact()
+        .with_subtypes(vec!["Vehicle"])
+        .from_oracle_text("Crew 1")
+        .id();
+    let limo_crewer = scenario.add_creature(P0, "Limousine Crewer", 2, 2).id();
+    let parked_crewer = scenario.add_creature(P0, "Parked Crewer", 1, 1).id();
+    let first_victim = scenario.add_creature(P1, "First Bear", 2, 2).id();
+    // Both players must be able to draw through the turn cycle.
+    for n in 0..3 {
+        scenario.add_card_to_library_top(P0, &format!("P0 Library {n}"));
+        scenario.add_card_to_library_top(P1, &format!("P1 Library {n}"));
+    }
+    scenario.with_mana_pool(
+        P0,
+        (0..5)
+            .map(|_| ManaUnit::new(ManaType::White, ObjectId(0), false, vec![]))
+            .collect(),
+    );
+    let mut runner = scenario.build();
+
+    // Enters trigger: the first exile happens through gameplay and is linked.
+    runner.cast(limo).target_object(first_victim).resolve();
+    assert_eq!(runner.state().objects[&first_victim].zone, Zone::Exile);
+
+    // Cycle to P0's next precombat main, attacking and blocking with nothing.
+    let start = runner.state().turn_number;
+    for _ in 0..600 {
+        let st = runner.state();
+        if st.turn_number >= start + 2 && st.active_player == P0 && st.phase == Phase::PreCombatMain
+        {
+            break;
+        }
+        let action = match runner.state().waiting_for.clone() {
+            WaitingFor::DeclareAttackers { .. } => GameAction::DeclareAttackers {
+                attacks: vec![],
+                bands: vec![],
+            },
+            WaitingFor::DeclareBlockers { .. } => GameAction::DeclareBlockers {
+                assignments: vec![],
+            },
+            WaitingFor::Priority { .. } => GameAction::PassPriority,
+            other => panic!("unexpected prompt {other:?}"),
+        };
+        runner.act(action).expect("the turn cycle advances");
+    }
+    assert_eq!(runner.state().active_player, P0, "reach: P0's next turn");
+    assert_eq!(runner.state().phase, Phase::PreCombatMain);
+
+    crew(&mut runner, limo, limo_crewer);
+    crew(&mut runner, parked, parked_crewer);
+    assert!(
+        runner.state().objects[&parked]
+            .card_types
+            .core_types
+            .contains(&engine::types::card_type::CoreType::Creature),
+        "reach: the crewed Vehicle is a creature on the battlefield"
+    );
+
+    runner.advance_to_combat();
+    runner
+        .act(GameAction::DeclareAttackers {
+            attacks: vec![(limo, AttackTarget::Player(P1))],
+            bands: vec![],
+        })
+        .expect("the Limousine attacks");
+    for _ in 0..40 {
+        let action = match runner.state().waiting_for.clone() {
+            WaitingFor::TriggerTargetSelection {
+                target_slots,
+                selection,
+                ..
+            } => {
+                let legal = &target_slots[selection.current_slot].legal_targets;
+                assert!(legal.contains(&TargetRef::Object(parked)));
+                GameAction::ChooseTarget {
+                    target: Some(TargetRef::Object(parked)),
+                }
+            }
+            WaitingFor::Priority { .. } if runner.state().stack.is_empty() => break,
+            WaitingFor::Priority { .. } => GameAction::PassPriority,
+            other => panic!("unexpected prompt {other:?}"),
+        };
+        runner.act(action).expect("the attack trigger resolves");
+    }
+    assert!(runner.state().stack.is_empty(), "reach: trigger resolved");
+
+    let state = runner.state();
+    assert_eq!(
+        state.objects[&parked].zone,
+        Zone::Exile,
+        "the crewed Vehicle was put into exile"
+    );
+    assert_eq!(
+        state.objects[&first_victim].zone,
+        Zone::Battlefield,
+        "a creature was put into exile this way, so the other exiled card returns"
+    );
+}

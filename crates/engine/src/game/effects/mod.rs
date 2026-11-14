@@ -28753,7 +28753,18 @@ pub(crate) fn evaluate_condition(
             // CR 107.3a + CR 601.2b: ability-context filter evaluation.
             let ctx = crate::game::filter::FilterContext::from_ability(ability);
             state.last_zone_changed_ids.iter().any(|&id| {
-                crate::game::filter::matches_target_filter(state, id, filter, &ctx)
+                // CR 400.7 + CR 608.2c: the noun ("a creature") names the object as
+                // it was when moved. A permanent that left the battlefield has
+                // lost any temporary types (a crewed Vehicle, CR 702.122a), so
+                // its last-known information also answers the noun.
+                (crate::game::filter::matches_target_filter(state, id, filter, &ctx)
+                    || state.objects.get(&id).is_some_and(|obj| {
+                        !matches!(obj.zone, Zone::Battlefield | Zone::Stack)
+                    }) && state.lki_cache.get(&id).is_some_and(|lki| {
+                        crate::game::filter::matches_target_filter_on_lki_snapshot(
+                            state, id, lki, filter, &ctx,
+                        )
+                    }))
                     // CR 608.2c + CR 122.1h + CR 614.6: a destination-bound
                     // wording ("put into a graveyard / dies this way") needs the
                     // ARRIVAL, not just the move — a replacement that redirected
