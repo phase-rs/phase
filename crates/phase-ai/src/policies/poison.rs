@@ -315,9 +315,7 @@ fn cast_path_may_trigger(state: &GameState, ai_player: PlayerId, targets: &[Targ
                     TriggerEventKey::SpellCast(_) | TriggerEventKey::TapsForMana => {
                         trigger_admits_player(state, obj, def, ai_player)
                     }
-                    TriggerEventKey::AbilityOrCopyActivated
-                    | TriggerEventKey::ManaProduced
-                    | TriggerEventKey::ManaSpent => true,
+                    TriggerEventKey::AbilityOrCopyActivated | TriggerEventKey::ManaProduced => true,
                     TriggerEventKey::BecomesTarget => !targets.is_empty(),
                     _ => false,
                 })

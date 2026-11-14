@@ -2200,3 +2200,21 @@ fn an_opponents_own_cast_trigger_does_not_withhold_the_lethal_read() {
     cast_and_settle(&mut runner, prologue);
     assert!(!engine::game::players::is_alive(runner.state(), OPPONENT));
 }
+
+/// CR 700.14: an opponent's Bakersbane Duo triggers only when its controller expends 4, so it
+/// does not withhold Prologue's lethal.
+#[test]
+fn an_opponents_own_expend_trigger_does_not_withhold_the_lethal_read() {
+    let (runner, prologue) = race_board(Some("Bakersbane Duo"), false);
+    let reason = verdict_on(runner.state(), &cast_candidate(prologue)).1;
+    assert_eq!(reason.kind, "poison_clock_lethal");
+}
+
+/// CR 603.2: an opponent's Forbidden Orchard triggers only when its controller taps it for mana,
+/// so the AI tapping Islands for Prologue does not withhold the lethal.
+#[test]
+fn an_opponents_own_tap_for_mana_trigger_does_not_withhold_the_lethal_read() {
+    let (runner, prologue) = race_board(Some("Forbidden Orchard"), true);
+    let reason = verdict_on(runner.state(), &cast_candidate(prologue)).1;
+    assert_eq!(reason.kind, "poison_clock_lethal");
+}
