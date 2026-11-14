@@ -269,6 +269,17 @@ impl CommanderEligibilityRule {
             ))),
         }
     }
+
+    /// Whether a custom format modeled on this rule's source is a Commander
+    /// variant (CR 903), mirroring `GameFormat::uses_commander`.
+    pub fn uses_commander(self) -> bool {
+        match self {
+            Self::Standard | Self::FreeformAnyCastableCard => true,
+            // CR 903.12a: Brawl is a Commander variant.
+            Self::BrawlColorIdentity => true,
+            Self::TinyLeaders | Self::OathbreakerSignatureSpell => false,
+        }
+    }
 }
 
 /// Whether a custom format uses the command zone (CR 903) and, if so, its

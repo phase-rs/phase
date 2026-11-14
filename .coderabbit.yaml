@@ -69,9 +69,9 @@ reviews:
         rule and the existing authority or typed alternative that fits. Do not
         invent a runtime bug to justify it; a merely different implementation
         preference without that evidence is not a finding.
-        A latent bug behind a guard or unreached branch
-        is still a finding — rate it by what happens when the form is reached or the
-        guard is removed, not by today's reachability. Check edge cases when relevant:
+        A latent bug behind a guard or unreached branch is a finding only when a
+        printed card in a legal game reaches it, or the PR claims the card; otherwise
+        mention it once as a note naming the nearest printed card. Check edge cases when relevant:
         empty inputs (0 mana, 0 targets, empty filter), multi-target/modal/repeat-for
         interactions, simultaneous events (dies + ETB in one SBA pass, copy-of-copy,
         control change with summoning sickness), eliminated players still referenced,

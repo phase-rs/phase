@@ -2791,9 +2791,9 @@ fn scan_quantity_ref(x: &QuantityRef, mode: ScanMode) -> Axes {
             acc
         }
         QuantityRef::TrackedSetSize => Axes::NONE,
-        // CR 608.2c: with a cause, the set is what one zone change or keyword action produced
-        // "this way", so its size scales only through that producer, whose own arm carries any
-        // population read.
+        // CR 608.2c: with a cause, the set is what one zone change, keyword action or control
+        // change produced "this way", so its size scales only through that producer, whose own
+        // arm carries any population read.
         QuantityRef::FilteredTrackedSetSize { filter, caused_by } => {
             let ctx = match (mode, caused_by) {
                 (ScanMode::LoopFirewall, Some(_)) => FilterReadContext::SnapshotOrEvent,

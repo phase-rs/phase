@@ -2409,10 +2409,13 @@ fn joins_next_damage_clause(node: &ResolvedAbility) -> bool {
 /// (Undergrowth Champion ruling: "its prevention effect will apply once to all that damage").
 /// `None` when this node starts no run, or when nothing on the board has a guard. The stamp
 /// is the carrier a remaining portion already uses, so a pause inside the run composes.
+/// Boxed and kept out of line: `resolve_chain_body` recurses once per instruction, and the
+/// stamped clone must not sit on each of its frames.
+#[inline(never)]
 pub(super) fn settle_joined_damage_run(
     state: &GameState,
     ability: &ResolvedAbility,
-) -> Option<ResolvedAbility> {
+) -> Option<Box<ResolvedAbility>> {
     if !ability.context.settled_damage_guards.is_empty() || !joins_next_damage_clause(ability) {
         return None;
     }
@@ -2420,8 +2423,8 @@ pub(super) fn settle_joined_damage_run(
     if guards.is_empty() {
         return None;
     }
-    let mut stamped = ability.clone();
-    let mut node = &mut stamped;
+    let mut stamped = Box::new(ability.clone());
+    let mut node = &mut *stamped;
     loop {
         node.context.settled_damage_guards = guards.clone();
         if !joins_next_damage_clause(node) {
