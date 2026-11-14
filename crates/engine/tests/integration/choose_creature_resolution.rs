@@ -1287,8 +1287,24 @@ struct WraithBoard {
 /// entry of `own_land_colors`; P1 controls a land; P0's library holds exactly
 /// two basic Plains and one basic Island.
 fn wraith_at_payment_prompt(own_land_colors: &[ManaColor]) -> WraithBoard {
+    wraith_board_at_payment_prompt(own_land_colors, false)
+}
+
+const A_GOOD_DAY_TO_DIE: &str = "Target creature gets +2/+0 until end of turn. When that creature dies this turn, you draw a card.";
+
+/// As above; with `good_day`, P0 first casts A Good Day to Die on the Wraith in
+/// the main phase (paid with the board's Black land, which `own_land_colors`
+/// must include), so a delayed "when that creature dies this turn" trigger is
+/// waiting when the Wraith is sacrificed.
+fn wraith_board_at_payment_prompt(own_land_colors: &[ManaColor], good_day: bool) -> WraithBoard {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
+    let day = good_day.then(|| {
+        scenario
+            .add_spell_to_hand_from_oracle(P0, "A Good Day to Die", false, A_GOOD_DAY_TO_DIE)
+            .with_mana_cost(parse_mtgjson_mana_cost("{B}"))
+            .id()
+    });
     let wraith = scenario
         .add_creature_from_oracle(P0, "Canoptek Wraith", 2, 1, CANOPTEK_WRAITH_ORACLE)
         .as_artifact_creature()
@@ -1321,9 +1337,22 @@ fn wraith_at_payment_prompt(own_land_colors: &[ManaColor]) -> WraithBoard {
         "the staged lands must be P0's entire library"
     );
 
+    if let Some(day) = day {
+        runner.cast(day).target_object(wraith).commit();
+        runner.advance_until_stack_empty();
+        assert_eq!(
+            runner.state().objects[&day].zone,
+            Zone::Graveyard,
+            "reach guard: A Good Day to Die resolved, so its delayed trigger exists"
+        );
+    }
     run_combat(&mut runner, vec![wraith], vec![]);
     // Reach guard: the unblocked Wraith connected, so its trigger exists.
-    assert_eq!(runner.life(P1), 18, "the Wraith must deal 2 combat damage");
+    assert_eq!(
+        runner.life(P1),
+        if good_day { 16 } else { 18 },
+        "the Wraith must deal its combat damage"
+    );
     assert_eq!(runner.state().stack.len(), 1);
     assert_eq!(runner.state().stack[0].source_id, wraith);
     pass_priority_to_prompt(&mut runner, "Canoptek Wraith trigger");
@@ -3465,4 +3494,77 @@ fn spell_copy_observer_triggers_once_when_a_concession_resumes_the_choice() {
         2,
         "one Treasure for the cast and exactly one for the copy"
     );
+}
+
+/// CR 603.7 + CR 603.3: A Good Day to Die on Canoptek Wraith ("When that creature
+/// dies this turn, you draw a card."). The Wraith connects; P0 pays {3} and
+/// sacrifices it, which opens the land choice in the same action. The delayed
+/// trigger's event (the sacrifice) must not be lost across that pause: after the
+/// land is chosen and the search finishes, the draw is put on the stack and
+/// resolves exactly once.
+#[test]
+fn good_day_to_die_draws_once_when_the_wraith_payment_opens_the_land_choice() {
+    let WraithBoard {
+        mut runner,
+        wraith,
+        own_lands,
+        library_plains,
+        ..
+    } = wraith_board_at_payment_prompt(
+        &[
+            ManaColor::White,
+            ManaColor::Blue,
+            ManaColor::Black,
+            ManaColor::Red,
+            ManaColor::Green,
+        ],
+        true,
+    );
+    let hand_before = runner.state().players[P0.0 as usize].hand.len();
+    runner
+        .act(GameAction::DecideOptionalEffect { accept: true })
+        .unwrap();
+    assert_eq!(
+        runner.state().objects[&wraith].zone,
+        Zone::Graveyard,
+        "reach guard: the payment sacrificed the Wraith"
+    );
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::ChooseFromZoneChoice { .. }
+        ),
+        "reach guard: the same action opened the land choice: {:?}",
+        runner.state().waiting_for
+    );
+    runner
+        .act(GameAction::SelectCards {
+            cards: vec![own_lands[0]],
+        })
+        .unwrap();
+    runner
+        .act(GameAction::SelectCards {
+            cards: library_plains.to_vec(),
+        })
+        .unwrap();
+    for plains in library_plains {
+        assert_eq!(
+            runner.state().objects[&plains].zone,
+            Zone::Battlefield,
+            "reach guard: the search finished"
+        );
+    }
+    assert_eq!(
+        runner.state().stack.len(),
+        1,
+        "the delayed draw trigger is on the stack: {:?}",
+        runner.state().stack
+    );
+    runner.advance_until_stack_empty();
+    assert_eq!(
+        runner.state().players[P0.0 as usize].hand.len(),
+        hand_before + 1,
+        "A Good Day to Die draws exactly one card"
+    );
+    assert_resolution_settled(&runner, "Canoptek Wraith with A Good Day to Die");
 }
