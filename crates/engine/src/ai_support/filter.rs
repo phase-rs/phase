@@ -1206,6 +1206,9 @@ fn condition_reads_only_memo_safe_state(c: &ParsedCondition) -> bool {
         | ParsedCondition::PlayerCountAtLeast { .. }
         | ParsedCondition::HasCityBlessing
         | ParsedCondition::HasEnduringStory
+        // CR 725.1: reads `state.monarch`, a single apply()-constant game field,
+        // exactly like the two designation predicates above.
+        | ParsedCondition::IsMonarch
         // CR 309.7: reads `state.dungeon_progress` for the scoped player (via
         // `game::dungeon`) — a per-player completion set that only a dungeon
         // card's removal from the game mutates. apply()-constant and

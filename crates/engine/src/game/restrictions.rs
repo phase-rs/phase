@@ -1977,6 +1977,11 @@ fn evaluate_condition_for_granter(
         // CR 702.131c: The city's blessing is a player designation that effects
         // and restrictions may identify.
         ParsedCondition::HasCityBlessing => state.city_blessing.contains(&player),
+        // CR 725.1: "if you're the monarch" reads the monarch designation off
+        // the activating player (CR 109.5), not off the source's controller —
+        // CR 602.2 can let someone else activate the ability. CR 725.5: a vacant
+        // designation (no player holds it) makes the leaf false.
+        ParsedCondition::IsMonarch => state.monarch == Some(player),
         // CR 702.195b: The enduring story is a player designation effects and
         // restrictions may identify.
         ParsedCondition::HasEnduringStory => state.enduring_story.contains(&player),

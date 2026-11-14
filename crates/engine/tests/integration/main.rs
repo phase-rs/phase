@@ -115,6 +115,7 @@ mod investigate_that_many_times;
 mod ironscale_hydra_combat_prevention;
 mod ironsoul_enforcer_commander_attacks_alone;
 mod issue_1020_level_up_double_counters;
+mod issue_10268_crown_of_gondor_equip_monarch;
 mod issue_1124_ohran_frostfang_attacking_deathtouch;
 mod issue_1191_tzaangor_shaman;
 mod issue_1308_unstoppable_plan;
