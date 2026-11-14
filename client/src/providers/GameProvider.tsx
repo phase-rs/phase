@@ -104,7 +104,7 @@ import {
   fetchBossAvatarUrl,
 } from "../services/playerAvatars";
 import type { PlayerAvatarIdentity } from "../services/playerAvatars";
-import { getSeatCount } from "../viewmodel/gameStateView";
+import { getSeatCount } from "../viewmodel/seatCount";
 
 /** Build per-seat AI controller bindings for a game about to start. Reads
  *  the session-scoped `aiSeats` snapshot from `ActiveGameMeta` (written at
