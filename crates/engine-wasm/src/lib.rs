@@ -1068,7 +1068,10 @@ fn clear_ai_session_cache() {
 }
 
 /// Forget every seat's LLM decision memory and message thread. Both describe
-/// the game that was installed, so they go whenever it is replaced.
+/// the game that was installed, so they go when a new game is installed or the
+/// game is restored. (The next game of a Bo3 replaces the game in place
+/// without coming through here; a message thread is bound to its game number,
+/// and a decision between games uses none.)
 fn clear_llm_memories() {
     LLM_DECISION_MEMORY.with(|cell| cell.borrow_mut().clear());
     LLM_THREAD_MEMORY.with(|cell| cell.borrow_mut().clear());
@@ -5064,10 +5067,11 @@ mod restored_card_db_requirements_tests {
         clear_game_state();
     }
 
-    /// A best-of-three moves on to its next game by replacing the installed
-    /// game in place (`restart_between_games_with_starting_player`), without
-    /// a new-game boundary: the next game's first decision must not continue
-    /// the last game's thread.
+    /// A best-of-three moves on to its next game without a new-game boundary:
+    /// game over raises the game number and opens the between-games choices,
+    /// and `restart_between_games_with_starting_player` then replaces the game
+    /// in place. Neither the between-games play/draw choice nor the next
+    /// game's first decision may continue the last game's thread.
     #[test]
     fn the_next_game_of_a_match_never_continues_the_last_games_thread() {
         let seat = PlayerId(1);
@@ -5080,7 +5084,36 @@ mod restored_card_db_requirements_tests {
             serde_json::json!({ "type": "continue", "previous_message_id": "msg_1" })
         );
 
-        with_installed_state_mut(|state| state.game_number += 1).expect("the game is installed");
+        // Game over: the match moves between games, and the seat chooses
+        // whether to play or draw the next one. That choice belongs to no game,
+        // so it is today's request, which opens no thread.
+        with_installed_state_mut(|state| {
+            state.match_phase = engine::types::match_config::MatchPhase::BetweenGames;
+            state.game_number += 1;
+            state.waiting_for = WaitingFor::BetweenGamesChoosePlayDraw {
+                player: seat,
+                game_number: state.game_number,
+                score: state.match_score,
+            };
+            state.priority_player = seat;
+        })
+        .expect("the game is installed");
+        let play_draw = build_llm_decision(seat);
+        assert_eq!(
+            thread_of(&play_draw),
+            serde_json::Value::Null,
+            "{play_draw}"
+        );
+        let chosen = resolve_llm_reply(seat, &play_draw, 200, &anthropic_reply("msg_2", 0));
+        assert!(chosen["proposal"].is_object(), "{chosen}");
+
+        // The next game replaces the board in place; its first decision starts
+        // a new thread.
+        with_installed_state_mut(|state| {
+            state.match_phase = engine::types::match_config::MatchPhase::InGame;
+            state.waiting_for = WaitingFor::Priority { player: seat };
+        })
+        .expect("the game is installed");
         let next_game = build_llm_decision(seat);
         assert_eq!(
             thread_of(&next_game),

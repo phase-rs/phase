@@ -12,6 +12,7 @@ use engine::game::visibility::filter_state_for_viewer;
 use engine::types::actions::GameAction;
 use engine::types::game_state::GameState;
 use engine::types::log::GameLogEntry;
+use engine::types::match_config::MatchPhase;
 use engine::types::player::PlayerId;
 use phase_ai::config::AiDifficulty;
 
@@ -43,9 +44,10 @@ pub struct GameDecisionRequest {
     update: ThreadUpdateParts,
 }
 
-/// The strings a message-thread continue reuses from the full prompt, so the
-/// two shapes of one decision show the model the same position and the same
-/// option domain, rendered once.
+/// What a message thread needs from this decision beyond the full prompt: the
+/// strings a continue reuses, so the two shapes of one decision show the model
+/// the same position and the same option domain, rendered once, and what
+/// decides whether the decision may use a thread at all.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ThreadUpdateParts {
     /// The board and the pending prompt, without the history section: the
@@ -56,25 +58,30 @@ struct ThreadUpdateParts {
     /// The seat's difficulty-driven history window, which also bounds how much
     /// of what happened since its last answer a continue may carry.
     history: HistoryBudget,
-    /// The game of the match the decision belongs to. The next game of a match
-    /// replaces this one in place, and a thread never continues across games.
-    game_number: u8,
+    /// The game of the match the decision is part of, or `None` for a
+    /// decision between games (sideboarding, the play/draw choice).
+    game: Option<u8>,
 }
 
 impl GameDecisionRequest {
-    /// Whether this decision's seat may keep its game in a message thread.
+    /// The game of the match a message thread for this decision belongs to,
+    /// or `None` when the decision may not use a thread at all.
     ///
-    /// Only a difficulty whose history window already reaches past the turn
-    /// cycle in progress may. The two lowest difficulties deliberately reason
-    /// from a near-term window ([`crate::prompt::history_budget`]), and a
-    /// thread, which holds every earlier turn, would undo that.
-    pub fn allows_message_thread(&self) -> bool {
-        self.update.history.summarized_cycles > 0
-    }
-
-    /// The game of the match this decision belongs to.
-    pub fn game_number(&self) -> u8 {
-        self.update.game_number
+    /// Two kinds of decision may not:
+    ///
+    /// - one by the two lowest difficulties, which deliberately reason from a
+    ///   near-term window ([`crate::prompt::history_budget`]) that a thread,
+    ///   holding every earlier turn, would undo; and
+    /// - one between games (sideboarding, the play/draw choice), which belongs
+    ///   to no game.
+    ///
+    /// A thread never continues across games. The next game of a match
+    /// replaces the game in place without clearing any memory, so the game
+    /// number is what tells its decisions apart from the last game's.
+    pub fn thread_game(&self) -> Option<u8> {
+        self.update
+            .game
+            .filter(|_| self.update.history.summarized_cycles > 0)
     }
 
     /// The one user message that continues a seat's message thread with this
@@ -466,7 +473,7 @@ pub fn build_game_decision_prompt(
             live_position: format!("{live_board}\n{waiting_for}"),
             options: options_section,
             history: render.history,
-            game_number: state.game_number,
+            game: (state.match_phase == MatchPhase::InGame).then_some(state.game_number),
         },
     })
 }
@@ -2010,7 +2017,7 @@ mod tests {
 
     /// The two near-term difficulties never keep a thread; every other one may.
     #[test]
-    fn only_a_difficulty_that_reaches_earlier_turns_allows_a_thread() {
+    fn only_a_difficulty_that_reaches_earlier_turns_may_use_a_thread() {
         for (difficulty, allowed) in [
             (AiDifficulty::VeryEasy, false),
             (AiDifficulty::Easy, false),
@@ -2027,7 +2034,35 @@ mod tests {
                 &[],
             )
             .unwrap();
-            assert_eq!(request.allows_message_thread(), allowed, "{difficulty:?}");
+            assert_eq!(request.thread_game().is_some(), allowed, "{difficulty:?}");
         }
+    }
+
+    /// A decision between games belongs to no game: it never uses a thread,
+    /// and a decision in a game names the game it is part of.
+    #[test]
+    fn a_decision_between_games_may_not_use_a_thread() {
+        let mut state = GameState::default();
+        state.game_number = 2;
+        let in_game = build_game_decision_prompt(
+            &state,
+            &two_option_contract(),
+            AiDifficulty::Hard,
+            None,
+            &[],
+        )
+        .unwrap();
+        assert_eq!(in_game.thread_game(), Some(2));
+
+        state.match_phase = MatchPhase::BetweenGames;
+        let between = build_game_decision_prompt(
+            &state,
+            &two_option_contract(),
+            AiDifficulty::Hard,
+            None,
+            &[],
+        )
+        .unwrap();
+        assert_eq!(between.thread_game(), None);
     }
 }

@@ -32,19 +32,21 @@
 //!   was rewound under the thread, and when more was logged since the seat's
 //!   last answer than its history window shows (the full request summarizes
 //!   older turns, which a continue cannot).
-//! - **Difficulty.** The two lowest difficulties never use a thread: they
-//!   deliberately reason from a near-term window, which a thread would undo
-//!   ([`GameDecisionRequest::allows_message_thread`]).
+//! - **No thread at all.** The two lowest difficulties never use one: they
+//!   deliberately reason from a near-term window, which a thread would undo.
+//!   Neither does a decision between games (sideboarding, the play/draw
+//!   choice), which belongs to no game ([`GameDecisionRequest::thread_game`]).
 //! - **Thread errors.** A thread is best effort: the API drops one after five
 //!   idle minutes, among other reasons. On a thread error the seat's thread is
 //!   dropped ([`LlmThreadMemory::record_reply`]) and the caller asks the same
 //!   decision once more, which then goes out as a fresh create. An API
 //!   that refuses threads outright is answered with self-contained requests
-//!   for that endpoint from then on.
+//!   for that endpoint for as long as this memory lasts.
 //!
 //! A thread belongs to one seat of one game. Nothing in it reaches another seat
-//! or the shared game log, and the owner of this memory clears it whenever the
-//! game it describes is replaced.
+//! or the shared game log. The owner of this memory clears it when a new game
+//! is installed or the game is restored; the next game of a match replaces the
+//! game in place without a clear, and the game number keeps its threads apart.
 
 use std::collections::HashMap;
 
@@ -87,7 +89,8 @@ pub struct DecisionHttpRequest {
 ///
 /// Session state held by the transport beside
 /// [`LlmDecisionMemory`](crate::game_decision::LlmDecisionMemory), and cleared
-/// with it whenever the game is replaced.
+/// with it when a new game is installed or the game is restored. Within a
+/// match, each thread is bound to its game number.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct LlmThreadMemory {
     seats: HashMap<PlayerId, SeatThread>,
@@ -102,8 +105,9 @@ struct SeatThread {
     /// accepted.
     pending: Option<PendingTurn>,
     /// An endpoint whose API refused threads (`thread_unsupported_request`).
-    /// The seat's decisions to it are self-contained for the rest of the game,
-    /// because a fresh create would only be refused again.
+    /// The seat's decisions to it are self-contained for as long as this
+    /// memory lasts (the rest of the match), because a fresh create would only
+    /// be refused again.
     refused: Option<ThreadEndpoint>,
 }
 
@@ -128,8 +132,9 @@ impl ThreadEndpoint {
 /// A thread the API holds for a seat, as of the seat's last accepted reply.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct OpenThread {
-    /// The game of the match the thread belongs to. A thread never continues
-    /// into the next game of a match, which replaces the game in place.
+    /// The game of the match the thread belongs to
+    /// ([`GameDecisionRequest::thread_game`]). A thread never continues into
+    /// the next game.
     game_number: u8,
     endpoint: ThreadEndpoint,
     /// Fingerprint of the system prompt the thread was created with. A
@@ -188,8 +193,9 @@ impl LlmThreadMemory {
     ///
     /// An endpoint that does not use message threads — every profile that did
     /// not opt in, and every protocol but Anthropic Messages — and a seat whose
-    /// difficulty does not allow one get exactly [`build_chat_request`]'s
-    /// request, and any thread the seat held is forgotten. Otherwise the request continues the seat's thread when it
+    /// decision may not use one ([`GameDecisionRequest::thread_game`]) get
+    /// exactly [`build_chat_request`]'s request, and any thread the seat held
+    /// is forgotten. Otherwise the request continues the seat's thread when it
     /// can and creates a new one when it cannot, and is remembered as pending
     /// until [`Self::record_reply`].
     ///
@@ -210,10 +216,13 @@ impl LlmThreadMemory {
             request,
             prompt_chars: decision.prompt.char_count(),
         };
-        if !endpoint.uses_message_threads() || !decision.allows_message_thread() {
-            self.seats.remove(&seat);
-            return build_chat_request(endpoint, &decision.prompt).map(full);
-        }
+        let game_number = match decision.thread_game() {
+            Some(game_number) if endpoint.uses_message_threads() => game_number,
+            _ => {
+                self.seats.remove(&seat);
+                return build_chat_request(endpoint, &decision.prompt).map(full);
+            }
+        };
         let target = ThreadEndpoint::of(endpoint)?;
         let thread = self.seats.entry(seat).or_default();
         if thread.refused.as_ref() == Some(&target) {
@@ -223,7 +232,7 @@ impl LlmThreadMemory {
 
         let next = PendingTurn {
             fingerprint: decision.fingerprint.clone(),
-            game_number: decision.game_number(),
+            game_number,
             endpoint: target,
             system: fingerprint_of([decision.prompt.system.as_str()]),
             seen_through: history.iter().map(|entry| entry.seq).max(),
@@ -409,6 +418,17 @@ mod tests {
         difficulty: AiDifficulty,
         game_number: u8,
     ) -> GameDecisionRequest {
+        let mut state = GameState::default();
+        state.game_number = game_number;
+        decision_on(&state, revision, difficulty)
+    }
+
+    /// [`decision`] on `state`.
+    fn decision_on(
+        state: &GameState,
+        revision: u64,
+        difficulty: AiDifficulty,
+    ) -> GameDecisionRequest {
         let contract = AiDecisionContract {
             semantic_owner: SEAT,
             authorized_actor: SEAT,
@@ -424,9 +444,7 @@ mod tests {
             })
             .collect(),
         };
-        let mut state = GameState::default();
-        state.game_number = game_number;
-        build_game_decision_prompt(&state, &contract, difficulty, None, &[]).unwrap()
+        build_game_decision_prompt(state, &contract, difficulty, None, &[]).unwrap()
     }
 
     /// A log of `count` public events numbered `0..count`, as the client
@@ -1078,6 +1096,51 @@ mod tests {
                 SEAT,
                 &threaded(),
                 &decision_in_game(2, AiDifficulty::Medium, 2),
+                &log(6),
+            )
+            .unwrap()
+            .request;
+        assert!(is_create(&next_game));
+    }
+
+    /// A decision between games belongs to no game: it is today's request,
+    /// and it leaves no thread for the next game to continue.
+    #[test]
+    fn a_decision_between_games_uses_no_thread() {
+        let mut memory = LlmThreadMemory::new();
+        answer(
+            &mut memory,
+            &threaded(),
+            &decision_in_game(1, AiDifficulty::Medium, 1),
+            &log(4),
+            "msg_1",
+        );
+
+        let mut between = GameState::default();
+        between.game_number = 2;
+        between.match_phase = engine::types::match_config::MatchPhase::BetweenGames;
+        let play_draw = decision_on(&between, 2, AiDifficulty::Medium);
+        let sent = memory
+            .decision_request(SEAT, &threaded(), &play_draw, &log(5))
+            .unwrap()
+            .request;
+        assert_eq!(
+            sent,
+            build_chat_request(&threaded(), &play_draw.prompt).unwrap()
+        );
+        accept_reply(
+            &mut memory,
+            &play_draw.fingerprint,
+            LlmProvider::Anthropic,
+            &reply("msg_2", 900),
+        );
+        assert!(!memory.has_open_thread(SEAT));
+
+        let next_game = memory
+            .decision_request(
+                SEAT,
+                &threaded(),
+                &decision_in_game(3, AiDifficulty::Medium, 2),
                 &log(6),
             )
             .unwrap()
