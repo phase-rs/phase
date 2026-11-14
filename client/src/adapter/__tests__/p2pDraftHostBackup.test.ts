@@ -91,4 +91,32 @@ describe("P2PDraftHost server backup", () => {
     expect(body.host_peer_id).toBe("host-peer-abc");
     expect(body.draft_code).toMatch(/^draft-[0-9a-f]{8}$/);
   });
+
+  // Synthetic ordering (no printed card): `initialize()` queues a lobby save
+  // that is still writing when `startDraft()` queues the started snapshot. The
+  // forced upload must go out with the started snapshot, not be consumed by the
+  // earlier lobby save.
+  it("uploads the started snapshot even when an earlier lobby save is still pending", async () => {
+    const host = makeHost();
+    wireAdapter(host);
+    let releaseLobbySave!: () => void;
+    vi.mocked(saveDraftHostSession).mockImplementationOnce(
+      () => new Promise<void>((resolve) => { releaseLobbySave = resolve; }),
+    );
+
+    await host.initialize();
+    const started = host.startDraft();
+    // Let startDraft() reach its persist fence (queued behind the lobby save).
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    releaseLobbySave();
+    await started;
+    await flushPersistQueue(host);
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const body = JSON.parse(fetchMock.mock.calls[0][1].body as string);
+    expect(JSON.parse(body.snapshot_json)).toMatchObject({
+      draftStarted: true,
+      draftSessionJson: '{"status":"Drafting"}',
+    });
+  });
 });

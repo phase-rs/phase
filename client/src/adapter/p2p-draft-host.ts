@@ -1415,11 +1415,11 @@ export class P2PDraftHost {
       // flushed AHEAD of newer state by the next persist, writing the
       // abandoned draft to IndexedDB where a reload would restore it.
       //
-      // Seed the backup counter so this first snapshot also uploads: the host
-      // claims the server backup row before any guest can observe the started
-      // draft, instead of waiting BACKUP_INTERVAL_PICKS picks.
-      this.picksSinceLastBackup = P2PDraftHost.BACKUP_INTERVAL_PICKS;
-      await this.persistSessionStrict({ retainFailedDraftSnapshot: false });
+      // `forceBackupUpload` makes THIS started snapshot attempt the existing
+      // best-effort backup POST at startup (when persistence and a backup
+      // endpoint are configured) instead of waiting BACKUP_INTERVAL_PICKS
+      // picks. It does not guarantee the server stored the row.
+      await this.persistSessionStrict({ retainFailedDraftSnapshot: false, forceBackupUpload: true });
     } catch (err) {
       this.draftStarted = false;
       this.draftCode = "";
@@ -3769,12 +3769,13 @@ export class P2PDraftHost {
    * retaining its failed engine snapshot for replay.
    */
   private persistSessionStrict(
-    options: { retainFailedDraftSnapshot?: boolean } = {},
+    options: { retainFailedDraftSnapshot?: boolean; forceBackupUpload?: boolean } = {},
   ): Promise<void> {
     if (!this.persistenceId || this.persistenceClosed) return Promise.resolve();
     return this.enqueuePersistSession(
       this.draftStarted ? undefined : this.buildPersistedSnapshot(null),
       options.retainFailedDraftSnapshot,
+      options.forceBackupUpload,
     );
   }
 
@@ -3786,6 +3787,7 @@ export class P2PDraftHost {
   private enqueuePersistSession(
     snapshotAtMutation?: PersistedDraftHostSession,
     retainFailedDraftSnapshot = true,
+    forceBackupUpload = false,
   ): Promise<void> {
     if (!this.persistenceId || this.persistenceClosed) return Promise.resolve();
     const persist = this.persistQueue.then(async () => {
@@ -3812,6 +3814,9 @@ export class P2PDraftHost {
       }
 
       // Server backup upload (D-08, T-60-11: rate-limited to every N picks)
+      // `forceBackupUpload` is bound to this queued snapshot, so an earlier
+      // queued lobby save cannot consume it.
+      if (forceBackupUpload) this.picksSinceLastBackup = P2PDraftHost.BACKUP_INTERVAL_PICKS;
       this.picksSinceLastBackup++;
       if (this.backupEndpoint && this.picksSinceLastBackup >= P2PDraftHost.BACKUP_INTERVAL_PICKS) {
         this.picksSinceLastBackup = 0;
