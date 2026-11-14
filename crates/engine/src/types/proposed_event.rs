@@ -524,7 +524,7 @@ pub enum ProposedEvent {
         /// pause/resume, like `face_down_in_exile`.
         #[serde(
             default,
-            skip_serializing_if = "crate::types::ability::LibraryShuffleMode::is_per_object"
+            skip_serializing_if = "phase_ast::types::ability::LibraryShuffleMode::is_per_object"
         )]
         library_shuffle: crate::types::ability::LibraryShuffleMode,
         #[serde(serialize_with = "crate::types::deterministic_serde::hash_set")]
