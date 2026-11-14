@@ -3436,6 +3436,7 @@ fn an_exile_may_cost_entry_finishes_before_the_effects_next_instruction() {
 
     let entry_then_life = ResolvedAbility::new(
         Effect::ChangeZone {
+            actor: engine::types::ability::LibraryInstructionActor::Controller,
             origin: Some(Zone::Hand),
             destination: Zone::Battlefield,
             target: TargetFilter::SpecificObject { id: mimeoplasm },
