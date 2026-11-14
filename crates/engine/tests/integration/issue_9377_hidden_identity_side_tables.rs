@@ -3253,7 +3253,8 @@ fn frost_titan_pili_pala_payment_window_blanks_hidden_mana_source() {
     // included: the engine-only announced key is cleared while the activation
     // itself stays intact.
     assert_eq!(
-        window_parts(&p0).0.announced_usage_key, None,
+        window_parts(&p0).0.announced_usage_key,
+        None,
         "owner view redacts the announced usage key"
     );
     let mut expected = PendingManaAbility::clone(raw_pending);
