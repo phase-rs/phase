@@ -17197,11 +17197,10 @@ fn try_parse_reveal_until(tp: TextPair, player: TargetFilter) -> Option<ParsedEf
         WhereXBinding::bare(where_x_expression.as_deref()),
     )?;
 
-    // CR 406.2: Consume the remainder after " is revealed" / " are revealed".
-    // The only recognized trailing suffix on a passive reveal-until clause is an optional
-    // inline "and exiles that card" (Indomitable Creativity) followed by terminal
-    // punctuation. Any unconsumed tail (such as Thought Dissector's ", whichever comes first")
-    // causes this branch to fail closed as unimplemented.
+    // CR 608.2c: Preserve the full instruction after " is revealed" or " are revealed".
+    // The only recognized suffix is the optional inline exile (CR 406.2) on
+    // Indomitable Creativity followed by terminal punctuation. An unconsumed
+    // tail such as Thought Dissector's ", whichever comes first" fails closed.
     let (after_inline_exile, inline_exile) =
         opt(tag::<_, _, OracleError<'_>>(" and exiles that card"))
             .parse(remainder)
