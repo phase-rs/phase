@@ -4401,6 +4401,13 @@ pub(super) fn cast_has_elected_alternative_cost(
 ) -> Result<bool, EngineError> {
     if variant.uses_alternative_cost()
         || next_spell_without_paying_applies(state, player, object_id, variant)
+        // CR 118.9a: a static exile permission that replaces the mana cost is the cast's
+        // alternative cost.
+        || elected_exile_permission_source(state, player, object_id, Some(variant), permission_index)
+            .is_some_and(|source| {
+                exile_cast_permission_source_full(state, player, object_id, Some(source))
+                    .is_none_or(|elected| !static_source_is_normal_cost_authority(&elected))
+            })
     {
         return Ok(true);
     }
@@ -4428,7 +4435,13 @@ pub(super) fn cast_has_elected_alternative_cost(
         | CastingPermission::WarpExile { .. }
         | CastingPermission::Plotted { .. }
         | CastingPermission::Foretold { .. } => true,
-        CastingPermission::AdventureCreature | CastingPermission::PlayFromExile { .. } => false,
+        CastingPermission::AdventureCreature => false,
+        // CR 118.9: "You may cast [this object] without paying its mana cost" is an alternative
+        // cost.
+        CastingPermission::PlayFromExile {
+            without_paying_mana_cost,
+            ..
+        } => *without_paying_mana_cost,
     })
 }
 
@@ -19477,8 +19490,26 @@ pub fn handle_cast_spell_with_payment_mode(
                     prototype_form.mana_cost.clone(),
                 )
                 .unwrap_or_else(|| prototype_form.mana_cost.clone());
+                // CR 718.3a + CR 118.9a: the prototyped cast is judged with its own
+                // characteristics, and may be paid with a granted alternative cost.
                 let prototype_affordable =
-                    can_pay_cost_after_auto_tap(state, player, object_id, &prototype_cost_eff);
+                    can_pay_cost_after_auto_tap(state, player, object_id, &prototype_cost_eff)
+                        || prepare_casting_variant(
+                            state,
+                            player,
+                            object_id,
+                            CastingVariant::Prototype,
+                            CastingMode::Display,
+                            None,
+                        )
+                        .is_ok_and(|projected| {
+                            can_cast_prepared_now_with_probe(
+                                &projected.transformed_state,
+                                player,
+                                &projected.prepared,
+                                None,
+                            )
+                        });
                 if normal_affordable && prototype_affordable {
                     return Ok(WaitingFor::AlternativeCastChoice {
                         player,
@@ -22032,9 +22063,16 @@ fn can_cast_prepared_now_with_probe(
         return true;
     }
 
-    // CR 118.9a + CR 601.2b: a face-down or other non-Normal method already
-    // elected its own alternative cost and cannot use the printed self-option.
-    if prepared.casting_variant == CastingVariant::Normal
+    // CR 118.9a + CR 601.2b: a cast that already elected an alternative cost, by its method or its
+    // permission, can't also take a granted one.
+    if !cast_has_elected_alternative_cost(
+        state,
+        player,
+        prepared.object_id,
+        prepared.casting_permission_index,
+        prepared.casting_variant,
+    )
+    .unwrap_or(true)
         && targets_ok
         && super::casting_costs::payable_spell_alternative_cost_details_at_index(
             state,

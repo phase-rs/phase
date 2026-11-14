@@ -1286,7 +1286,7 @@ pub(crate) fn payable_spell_alternative_cost_for_timing(
     )
 }
 
-/// The alternative cost granted to this Normal hand cast together with
+/// The alternative cost granted to this hand cast together with
 /// `timing_permission`, whether or not it is still payable.
 pub(super) fn spell_alternative_cost_for_timing(
     state: &GameState,
@@ -1295,9 +1295,9 @@ pub(super) fn spell_alternative_cost_for_timing(
     casting_variant: CastingVariant,
     timing_permission: CastTimingPermission,
 ) -> Option<super::casting::GrantedSpellAlternativeCost> {
-    // CR 601.3c: the timing comes only with its alternative cost, which only a
-    // Normal-method cast elects.
-    if casting_variant != CastingVariant::Normal {
+    // CR 118.9a + CR 601.3c: the timing comes only with the granted alternative cost, which a
+    // method that is itself an alternative cost can't add.
+    if casting_variant.uses_alternative_cost() {
         return None;
     }
     let obj = state.objects.get(&object_id)?;
@@ -9666,9 +9666,16 @@ fn check_additional_cost_or_pay_with_kept_cost(
     // cost. Reuse the existing `AdditionalCost::Choice` prompt shape by making
     // the pending spell mana cost `NoCost`: accepting pays the alternative cost,
     // declining pays the printed mana cost as the fallback branch.
-    if casting_variant == CastingVariant::Normal
-        && lock.alternative_cost_election
-            == crate::types::game_state::SpellAlternativeCostElection::Undecided
+    // CR 118.9a: never over a cast whose method or permission already elected one.
+    if lock.alternative_cost_election
+        == crate::types::game_state::SpellAlternativeCostElection::Undecided
+        && !super::casting::cast_has_elected_alternative_cost(
+            state,
+            player,
+            object_id,
+            casting_permission_index,
+            casting_variant,
+        )?
     {
         let alt_cost = cast_timing_permission
             .filter(|route| *route == CastTimingRoute::AlternativeCost)

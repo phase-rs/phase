@@ -7,7 +7,7 @@
 use engine::database::card_db::CardDatabase;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::scenario_db::GameScenarioDbExt;
-use engine::types::ability::TargetRef;
+use engine::types::ability::{AbilityCost, AdditionalCost, QuantityExpr, TargetRef};
 use engine::types::actions::{AlternativeCastDecision, GameAction};
 use engine::types::game_state::{
     AlternativeCastKeyword, CastPaymentMode, ManaChoice, PayCostKind, WaitingFor,
@@ -845,4 +845,450 @@ fn teferi_mage_of_zhalfir_creature_spell_gains_the_flash_keyword() {
         scenario.add_real_card(P0, "Grizzly Bears", Zone::Hand, db)
     });
     assert_upkeep_cast_snapshot_flash(&mut runner, bears, true);
+}
+
+fn cast_with(runner: &mut GameRunner, spell: ObjectId, payment_mode: CastPaymentMode) -> bool {
+    let card_id = runner.state().objects[&spell].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: spell,
+            card_id,
+            targets: Vec::new(),
+            payment_mode,
+        })
+        .is_ok()
+}
+
+/// The file's upkeep board at `phase`, with two energy and exactly `mana` floating.
+fn energy_board<T>(
+    phase: Phase,
+    mana: &[ManaType],
+    setup: impl FnOnce(&mut GameScenario, &CardDatabase) -> T,
+) -> (GameRunner, T) {
+    let (mut runner, ids) = upkeep(setup);
+    runner.state_mut().phase = phase;
+    let player = &mut runner.state_mut().players[P0.0 as usize];
+    player.energy = 2;
+    player.mana_pool = Default::default();
+    for color in mana {
+        player
+            .mana_pool
+            .add(ManaUnit::new(*color, ObjectId(9_905), false, vec![]));
+    }
+    (runner, ids)
+}
+
+fn prayers_and_fleshgorger(phase: Phase) -> (GameRunner, ObjectId) {
+    energy_board(phase, &[], |scenario, db| {
+        scenario.add_real_card(P0, "Primal Prayers", Zone::Battlefield, db);
+        scenario.add_real_card(P0, "Phyrexian Fleshgorger", Zone::Hand, db)
+    })
+}
+
+fn assert_priority(runner: &GameRunner) {
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { player } if player == P0),
+        "{:?}",
+        runner.state().waiting_for
+    );
+}
+
+/// CR 718.3b: the prototyped spell has only its alternative characteristics, and Primal
+/// Prayers' {E} paid for it.
+fn assert_prototyped_through_prayers(runner: &GameRunner, fleshgorger: ObjectId) {
+    assert!(on_stack(runner, fleshgorger));
+    let object = &runner.state().objects[&fleshgorger];
+    assert_eq!((object.power, object.toughness), (Some(3), Some(3)));
+    assert_eq!(
+        object.mana_cost,
+        ManaCost::Cost {
+            shards: vec![ManaCostShard::Black, ManaCostShard::Black],
+            generic: 1,
+        }
+    );
+    assert_eq!(energy(runner), 1);
+    assert_eq!(pool(runner, P0), 0);
+}
+
+fn assert_upkeep_prototype_cast_through_prayers(payment_mode: CastPaymentMode) {
+    let (mut runner, fleshgorger) = prayers_and_fleshgorger(Phase::Upkeep);
+    assert!(engine::game::casting::can_cast_object_now(
+        runner.state(),
+        P0,
+        fleshgorger
+    ));
+    assert!(cast_with(&mut runner, fleshgorger, payment_mode));
+    assert_priority(&runner);
+    assert_prototyped_through_prayers(&runner, fleshgorger);
+}
+
+// CR 718.3a + CR 118.9a + CR 601.3c: the prototyped Phyrexian Fleshgorger is a creature spell
+// with mana value 3, so Primal Prayers' {E} casts it in the upkeep.
+#[test]
+fn primal_prayers_casts_a_prototyped_spell_in_the_upkeep() {
+    assert_upkeep_prototype_cast_through_prayers(CastPaymentMode::Manual);
+    assert_upkeep_prototype_cast_through_prayers(CastPaymentMode::Auto);
+}
+
+// CR 702.160a + CR 118.9a: at sorcery timing Primal Prayers' {E} is offered for the prototyped
+// cast.
+#[test]
+fn primal_prayers_is_offered_for_a_prototyped_spell() {
+    let (mut runner, fleshgorger) = prayers_and_fleshgorger(Phase::PreCombatMain);
+    assert!(cast_with(&mut runner, fleshgorger, CastPaymentMode::Manual));
+    let prototype_cost = ManaCost::Cost {
+        shards: vec![ManaCostShard::Black, ManaCostShard::Black],
+        generic: 1,
+    };
+    match &runner.state().waiting_for {
+        WaitingFor::OptionalCostChoice {
+            cost: AdditionalCost::Choice(alt, AbilityCost::Mana { cost }),
+            ..
+        } => {
+            assert_eq!(
+                alt,
+                &AbilityCost::PayEnergy {
+                    amount: QuantityExpr::Fixed { value: 1 },
+                }
+            );
+            assert_eq!(cost, &prototype_cost);
+        }
+        other => panic!("expected Primal Prayers' offer, got {other:?}"),
+    }
+    runner
+        .act(GameAction::DecideOptionalCost { pay: true })
+        .expect("P0 pays {E}");
+    assert_priority(&runner);
+    assert_prototyped_through_prayers(&runner, fleshgorger);
+}
+
+/// Casts Bonecrusher Giant as Stomp targeting P1 with manual payment.
+fn announce_stomp(runner: &mut GameRunner, giant: ObjectId) {
+    assert!(cast_with(runner, giant, CastPaymentMode::Manual));
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::CastOffer { .. }),
+        "{:?}",
+        runner.state().waiting_for
+    );
+    runner
+        .act(GameAction::ChooseAdventureFace { creature: false })
+        .expect("P0 casts Stomp");
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::TargetSelection { .. }
+        ),
+        "{:?}",
+        runner.state().waiting_for
+    );
+    runner
+        .act(GameAction::SelectTargets {
+            targets: vec![TargetRef::Player(P1)],
+        })
+        .expect("Stomp targets P1");
+}
+
+fn finish_paying(runner: &mut GameRunner) {
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::ManaPayment { .. }),
+        "{:?}",
+        runner.state().waiting_for
+    );
+    runner
+        .act(GameAction::PassPriority)
+        .expect("P0 finishes paying");
+    assert_priority(runner);
+}
+
+// CR 715.3a + CR 118.9a: Stomp is cast with its own characteristics, and Fist of Suns'
+// alternative cost may pay for it.
+#[test]
+fn fist_of_suns_is_offered_for_an_adventure() {
+    use ManaType::{Black, Blue, Green, Red, White};
+    let (mut runner, giant) = energy_board(
+        Phase::PreCombatMain,
+        &[White, Blue, Black, Red, Green],
+        |scenario, db| {
+            scenario.add_real_card(P0, "Fist of Suns", Zone::Battlefield, db);
+            scenario.add_real_card(P1, "Grizzly Bears", Zone::Battlefield, db);
+            scenario.add_real_card(P0, "Bonecrusher Giant", Zone::Hand, db)
+        },
+    );
+    announce_stomp(&mut runner, giant);
+    let wubrg = ManaCost::Cost {
+        shards: vec![
+            ManaCostShard::White,
+            ManaCostShard::Blue,
+            ManaCostShard::Black,
+            ManaCostShard::Red,
+            ManaCostShard::Green,
+        ],
+        generic: 0,
+    };
+    let stomp = ManaCost::Cost {
+        shards: vec![ManaCostShard::Red],
+        generic: 1,
+    };
+    match &runner.state().waiting_for {
+        WaitingFor::OptionalCostChoice {
+            cost:
+                AdditionalCost::Choice(AbilityCost::Mana { cost: alt }, AbilityCost::Mana { cost }),
+            ..
+        } => assert_eq!((alt, cost), (&wubrg, &stomp)),
+        other => panic!("expected Fist of Suns' offer, got {other:?}"),
+    }
+    runner
+        .act(GameAction::DecideOptionalCost { pay: true })
+        .expect("P0 accepts Fist of Suns' cost");
+    finish_paying(&mut runner);
+    assert!(on_stack(&runner, giant));
+    assert_eq!(pool(&runner, P0), 0);
+}
+
+// CR 702.37c + CR 118.9a: a face-down cast is itself an alternative cost, so Primal Prayers'
+// timing doesn't come with it.
+#[test]
+fn primal_prayers_does_not_let_a_face_down_spell_be_cast_in_the_upkeep() {
+    let stalker_board = |phase| {
+        energy_board(phase, &[ManaType::Blue; 4], |scenario, db| {
+            scenario.add_real_card(P0, "Primal Prayers", Zone::Battlefield, db);
+            scenario.add_real_card(P0, "Glacial Stalker", Zone::Hand, db)
+        })
+    };
+    let (mut runner, stalker) = stalker_board(Phase::PreCombatMain);
+    assert!(cast_with(&mut runner, stalker, CastPaymentMode::Manual));
+    finish_paying(&mut runner);
+    assert!(on_stack(&runner, stalker));
+    assert!(runner.state().objects[&stalker].face_down);
+    assert_eq!(pool(&runner, P0), 1);
+
+    let (mut runner, stalker) = stalker_board(Phase::Upkeep);
+    assert!(!cast_with(&mut runner, stalker, CastPaymentMode::Manual));
+    assert_eq!(runner.state().objects[&stalker].zone, Zone::Hand);
+    assert_eq!(energy(&runner), 2);
+    assert_eq!(pool(&runner, P0), 4);
+}
+
+// CR 715.3a: Stomp is an instant, outside Primal Prayers' creature spells.
+#[test]
+fn primal_prayers_is_not_offered_for_an_instant_adventure() {
+    let (mut runner, giant) =
+        energy_board(Phase::PreCombatMain, &[ManaType::Red; 2], |scenario, db| {
+            scenario.add_real_card(P0, "Primal Prayers", Zone::Battlefield, db);
+            scenario.add_real_card(P1, "Grizzly Bears", Zone::Battlefield, db);
+            scenario.add_real_card(P0, "Bonecrusher Giant", Zone::Hand, db)
+        });
+    announce_stomp(&mut runner, giant);
+    finish_paying(&mut runner);
+    assert!(on_stack(&runner, giant));
+    assert_eq!(pool(&runner, P0), 0);
+    assert_eq!(energy(&runner), 2);
+}
+
+const TLINCALLI_HUNTER: &str = "Trample\nOnce each turn, you may pay {0} rather than pay the mana \
+cost for a creature spell you cast from exile.";
+
+/// P0's precombat main with Tlincalli Hunter and `mana` floating; `setup` adds the other cards.
+fn hunter_board<T>(
+    mana: Vec<ManaUnit>,
+    setup: impl FnOnce(&mut GameScenario, &CardDatabase) -> T,
+) -> (GameRunner, ObjectId, T) {
+    let db = load_db().expect("the committed integration card fixture loads");
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let hunter = scenario
+        .add_creature_from_oracle(P0, "Tlincalli Hunter", 7, 7, TLINCALLI_HUNTER)
+        .id();
+    let ids = setup(&mut scenario, db);
+    scenario.with_mana_pool(P0, mana);
+    (scenario.build(), hunter, ids)
+}
+
+fn floating(color: ManaType, count: usize) -> Vec<ManaUnit> {
+    vec![ManaUnit::new(color, ObjectId(9_900), false, vec![]); count]
+}
+
+/// Passes priority until the stack is empty, choosing P1 for each target and keeping a scried
+/// card on top.
+fn resolve_choosing_p1(runner: &mut GameRunner) {
+    for _ in 0..40 {
+        let action = match &runner.state().waiting_for {
+            WaitingFor::Priority { .. } if runner.state().stack.is_empty() => return,
+            WaitingFor::Priority { .. } | WaitingFor::ManaPayment { .. } => {
+                GameAction::PassPriority
+            }
+            WaitingFor::TargetSelection { .. } | WaitingFor::TriggerTargetSelection { .. } => {
+                GameAction::ChooseTarget {
+                    target: Some(TargetRef::Player(P1)),
+                }
+            }
+            WaitingFor::ScryChoice { .. } => GameAction::SelectCards { cards: Vec::new() },
+            other => panic!("unexpected prompt {other:?}"),
+        };
+        runner.act(action).expect("the action is legal");
+    }
+    panic!("the stack did not empty");
+}
+
+fn assert_cast_from_exile_without_hunter(
+    runner: &mut GameRunner,
+    spell: ObjectId,
+    hunter: ObjectId,
+) {
+    assert!(cast_with(runner, spell, CastPaymentMode::Auto));
+    assert_priority(runner);
+    assert!(on_stack(runner, spell));
+    assert!(!runner
+        .state()
+        .alt_cost_grant_permissions_used
+        .contains(&hunter));
+}
+
+// CR 118.9a: Maralen's "without paying its mana cost" is the cast's one alternative cost, so
+// Tlincalli Hunter's {0} isn't offered over it.
+#[test]
+fn maralen_free_cast_is_not_offered_tlincalli_hunters_cost() {
+    let (mut runner, hunter, (maralen, elves, pile)) =
+        hunter_board(floating(ManaType::Green, 1), |scenario, db| {
+            scenario.with_library_top(P0, &["Library A", "Library B"]);
+            (
+                scenario.add_real_card(P0, "Maralen, Fae Ascendant", Zone::Battlefield, db),
+                scenario.add_real_card(P0, "Llanowar Elves", Zone::Hand, db),
+                [
+                    scenario.add_real_card(P1, "Grizzly Bears", Zone::Library, db),
+                    scenario.add_real_card(P1, "Grizzly Bears", Zone::Library, db),
+                ],
+            )
+        });
+    assert!(cast(&mut runner, elves));
+    resolve_choosing_p1(&mut runner);
+    assert_eq!(
+        pile.map(|bears| runner.state().objects[&bears].zone),
+        [Zone::Exile; 2]
+    );
+    assert_eq!(pool(&runner, P0), 0);
+    assert!(engine::game::casting::can_cast_object_now(
+        runner.state(),
+        P0,
+        pile[0]
+    ));
+    assert_cast_from_exile_without_hunter(&mut runner, pile[0], hunter);
+    assert!(runner
+        .state()
+        .exile_cast_permissions_used
+        .contains(&maralen));
+}
+
+// CR 118.9a: Uba Mask leaves the mana cost to pay, so Tlincalli Hunter's {0} may replace it.
+#[test]
+fn uba_mask_cast_is_offered_tlincalli_hunters_cost() {
+    let (mut runner, hunter, (opt, bears)) =
+        hunter_board(floating(ManaType::Blue, 1), |scenario, db| {
+            scenario.add_real_card(P0, "Uba Mask", Zone::Battlefield, db);
+            (
+                instant(scenario, "Opt", OPT, vec![ManaCostShard::Blue], 0),
+                scenario.add_real_card(P0, "Grizzly Bears", Zone::Library, db),
+            )
+        });
+    assert!(cast(&mut runner, opt));
+    resolve_choosing_p1(&mut runner);
+    assert_eq!(runner.state().objects[&bears].zone, Zone::Exile);
+    assert_eq!(pool(&runner, P0), 0);
+    assert!(cast_with(&mut runner, bears, CastPaymentMode::Auto));
+    let printed = ManaCost::Cost {
+        shards: vec![ManaCostShard::Green],
+        generic: 1,
+    };
+    match &runner.state().waiting_for {
+        WaitingFor::OptionalCostChoice {
+            cost:
+                AdditionalCost::Choice(AbilityCost::Mana { cost: alt }, AbilityCost::Mana { cost }),
+            ..
+        } => assert_eq!((alt, cost), (&ManaCost::generic(0), &printed)),
+        other => panic!("expected Tlincalli Hunter's offer, got {other:?}"),
+    }
+    runner
+        .act(GameAction::DecideOptionalCost { pay: true })
+        .expect("P0 pays {0}");
+    assert_priority(&runner);
+    assert!(on_stack(&runner, bears));
+    assert!(runner
+        .state()
+        .alt_cost_grant_permissions_used
+        .contains(&hunter));
+}
+
+/// Valgavoth with P0 at `life` after Thought Scour mills two of P1's Grizzly Bears into exile.
+fn valgavoth_pile(life: i32) -> (GameRunner, ObjectId, [ObjectId; 2]) {
+    let (mut runner, hunter, (scour, pile)) =
+        hunter_board(floating(ManaType::Blue, 1), |scenario, db| {
+            scenario.with_library_top(P0, &["Library A", "Library B"]);
+            scenario.with_life(P0, life);
+            scenario.add_real_card(P0, "Valgavoth, Terror Eater", Zone::Battlefield, db);
+            (
+                scenario.add_real_card(P0, "Thought Scour", Zone::Hand, db),
+                [
+                    scenario.add_real_card(P1, "Grizzly Bears", Zone::Library, db),
+                    scenario.add_real_card(P1, "Grizzly Bears", Zone::Library, db),
+                ],
+            )
+        });
+    assert!(cast(&mut runner, scour));
+    resolve_choosing_p1(&mut runner);
+    assert_eq!(
+        pile.map(|bears| runner.state().objects[&bears].zone),
+        [Zone::Exile; 2]
+    );
+    assert_eq!(pool(&runner, P0), 0);
+    assert_eq!(runner.state().players[P0.0 as usize].life, life);
+    (runner, hunter, pile)
+}
+
+// CR 118.9a: Valgavoth's "pay life equal to its mana value rather than pay its mana cost" is the
+// cast's one alternative cost, so Tlincalli Hunter's {0} isn't offered over it.
+#[test]
+fn valgavoth_life_cast_is_not_offered_tlincalli_hunters_cost() {
+    let (mut runner, hunter, pile) = valgavoth_pile(20);
+    assert_cast_from_exile_without_hunter(&mut runner, pile[0], hunter);
+    assert_eq!(runner.state().players[P0.0 as usize].life, 18);
+}
+
+// CR 118.9a + CR 119.4: at 1 life Valgavoth's cost can't be paid, and Tlincalli Hunter's {0}
+// can't replace it.
+#[test]
+fn valgavoth_life_cast_is_refused_when_the_life_cannot_be_paid() {
+    let (mut runner, _, pile) = valgavoth_pile(1);
+    assert!(!engine::game::casting::can_cast_object_now(
+        runner.state(),
+        P0,
+        pile[0]
+    ));
+    assert!(!cast_with(&mut runner, pile[0], CastPaymentMode::Auto));
+    assert_eq!(runner.state().objects[&pile[0]].zone, Zone::Exile);
+    assert_eq!(runner.state().players[P0.0 as usize].life, 1);
+}
+
+// CR 118.9: Fire Lord Ozai's "you may play one of those cards without paying its mana cost" is
+// the cast's one alternative cost, so Tlincalli Hunter's {0} isn't offered over it.
+#[test]
+fn fire_lord_ozai_free_cast_is_not_offered_tlincalli_hunters_cost() {
+    let (mut runner, hunter, (ozai, bears)) =
+        hunter_board(floating(ManaType::Red, 6), |scenario, db| {
+            scenario.with_library_top(P0, &["Library A", "Library B"]);
+            (
+                scenario.add_real_card(P0, "Fire Lord Ozai", Zone::Battlefield, db),
+                scenario.add_real_card(P1, "Grizzly Bears", Zone::Library, db),
+            )
+        });
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: ozai,
+            ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("P0 activates Fire Lord Ozai");
+    resolve_choosing_p1(&mut runner);
+    assert_eq!(runner.state().objects[&bears].zone, Zone::Exile);
+    assert_eq!(pool(&runner, P0), 0);
+    assert_cast_from_exile_without_hunter(&mut runner, bears, hunter);
 }
