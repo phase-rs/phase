@@ -385,6 +385,8 @@ fn leonardos_counter_applies_after_it_is_sacrificed_mid_payment() {
         "Leonardo's rider was latched at announcement, counters: {:?}",
         entered.counters
     );
+    // CR 110.5b: Leonardo prints no tapped rider, so the Decoy enters untapped.
+    assert!(!entered.tapped);
 }
 
 // --- Muldrotha vs Exploration Broodship ----------------------------------

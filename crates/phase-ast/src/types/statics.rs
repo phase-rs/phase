@@ -5670,4 +5670,63 @@ mod tests {
             "NewMode"
         );
     }
+
+    /// C25b + C26 (#9770): a `GraveyardCastPermission` written before
+    /// `enter_tapped` existed (Muldrotha's card-data shape, and a populated
+    /// permission with counter, pool and destination riders) loads as
+    /// `Unspecified` with its other terms intact; a permission carrying the
+    /// rider round-trips.
+    #[test]
+    fn graveyard_cast_permission_enter_tapped_legacy_and_round_trip() {
+        use super::super::zones::EtbTapState;
+
+        let muldrotha: StaticMode = serde_json::from_str(
+            r#"{"GraveyardCastPermission":{"frequency":"OncePerTurnPerPermanentType","play_mode":"Play"}}"#,
+        )
+        .expect("card-data shape loads");
+        assert!(matches!(
+            muldrotha,
+            StaticMode::GraveyardCastPermission {
+                frequency: CastFrequency::OncePerTurnPerPermanentType,
+                enter_tapped: EtbTapState::Unspecified,
+                ..
+            }
+        ));
+
+        let permission = |enter_tapped: EtbTapState| StaticMode::GraveyardCastPermission {
+            frequency: CastFrequency::OncePerTurn,
+            play_mode: CardPlayMode::Cast,
+            graveyard_destination_replacement: Some(Zone::Exile),
+            extra_cost: None,
+            enters_with_counter: Some(super::super::counter::CounterType::Finality),
+            enter_tapped,
+            required_cast_keyword: None,
+            pool: GraveyardPermissionPool::AnyGraveyard,
+            cast_limit: PermissionCastLimit::Unlimited,
+            mana_spend_permission: None,
+            enters_modifications: Default::default(),
+        };
+        let legacy = serde_json::to_value(permission(EtbTapState::Unspecified)).unwrap();
+        let fields = legacy["GraveyardCastPermission"].as_object().unwrap();
+        assert!(
+            !fields.contains_key("enter_tapped"),
+            "pre-field shape: {legacy}"
+        );
+        assert!(
+            fields.contains_key("enters_with_counter")
+                && fields.contains_key("pool")
+                && fields.contains_key("graveyard_destination_replacement"),
+            "reach guard: a populated permission, {legacy}"
+        );
+        let loaded: StaticMode = serde_json::from_value(legacy).unwrap();
+        assert_eq!(loaded, permission(EtbTapState::Unspecified));
+
+        let populated = permission(EtbTapState::Tapped);
+        let json = serde_json::to_string(&populated).unwrap();
+        assert!(json.contains("\"enter_tapped\":\"Tapped\""), "{json}");
+        assert_eq!(
+            serde_json::from_str::<StaticMode>(&json).unwrap(),
+            populated
+        );
+    }
 }

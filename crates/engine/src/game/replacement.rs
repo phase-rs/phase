@@ -15392,6 +15392,84 @@ mod tests {
         );
     }
 
+    /// CR 614.1d + CR 616.2 (C20, boundary row): a spell cast through Edgar,
+    /// Master Machinist's permission carries "that artifact enters tapped" on
+    /// the Stack-zone object. Any Stack→Battlefield entry of that object — its
+    /// own resolution, or a counter that puts it onto the battlefield instead
+    /// (Desertion, ratified reading) — finds the rider as a candidate, and
+    /// applying it stamps the entry tapped. (C21) No other move finds it: not
+    /// from another zone, not to another zone, not once applied, and not when
+    /// the object no longer carries it.
+    #[test]
+    fn cast_permission_rider_applies_to_any_stack_to_battlefield_entry() {
+        use crate::types::zones::EtbTapState;
+
+        let mut state = test_state_with_object(ObjectId(10), Zone::Stack, vec![]);
+        state.battlefield.retain(|id| *id != ObjectId(10));
+        state
+            .objects
+            .get_mut(&ObjectId(10))
+            .unwrap()
+            .cast_permission_enter_tapped = EtbTapState::Tapped;
+        let registry = replacement_registry();
+        let rid = cast_permission_enter_tapped_replacement_id(ObjectId(10));
+
+        let entry = ProposedEvent::zone_change(ObjectId(10), Zone::Stack, Zone::Battlefield, None);
+        assert!(find_applicable_replacements(&state, &entry, registry).contains(&rid));
+        assert!(matches!(
+            candidate_materiality(&state, rid, &entry),
+            CandidateMateriality::Writes {
+                field: EventField::EnterTapped,
+                commute: CommuteClass::EnterTapped,
+            }
+        ));
+        let mut events = Vec::new();
+        let applied = apply_single_replacement(
+            &mut state,
+            entry,
+            rid,
+            ReplacementBranch::Execute,
+            registry,
+            &mut events,
+        )
+        .expect("the rider applies");
+        assert!(matches!(
+            applied,
+            ProposedEvent::ZoneChange {
+                enter_tapped: EtbTapState::Tapped,
+                ..
+            }
+        ));
+        assert!(
+            !find_applicable_replacements(&state, &applied, registry).contains(&rid),
+            "CR 616.1f: an applied effect isn't offered again"
+        );
+
+        for (from, to) in [
+            (Zone::Exile, Zone::Battlefield),
+            (Zone::Graveyard, Zone::Battlefield),
+            (Zone::Stack, Zone::Graveyard),
+            (Zone::Stack, Zone::Exile),
+        ] {
+            let event = ProposedEvent::zone_change(ObjectId(10), from, to, None);
+            assert!(
+                !find_applicable_replacements(&state, &event, registry).contains(&rid),
+                "{from:?}→{to:?} isn't the spell's entry"
+            );
+        }
+
+        state
+            .objects
+            .get_mut(&ObjectId(10))
+            .unwrap()
+            .cast_permission_enter_tapped = EtbTapState::Unspecified;
+        let entry = ProposedEvent::zone_change(ObjectId(10), Zone::Stack, Zone::Battlefield, None);
+        assert!(
+            !find_applicable_replacements(&state, &entry, registry).contains(&rid),
+            "a spell not cast this way has no rider"
+        );
+    }
+
     #[test]
     fn replacement_index_preserves_virtual_candidate_prefix() {
         let mut state = test_state_with_object(

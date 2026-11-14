@@ -4832,3 +4832,39 @@ mod draw_from_bottom_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod cast_permission_enter_tapped_tests {
+    use super::*;
+    use crate::types::zones::EtbTapState;
+
+    /// CR 113.6f + CR 601.3 (C6): the exclusivity clause ("…, but not from
+    /// anywhere else", Haakon) accounts only for a rider-free own permission. A
+    /// permission carrying the enters-tapped rider is refused, while the same
+    /// permission without it is accepted (positive control).
+    #[test]
+    fn exclusive_own_permission_refuses_an_enters_tapped_rider() {
+        let own = |enter_tapped: EtbTapState| {
+            StaticDefinition::new(StaticMode::GraveyardCastPermission {
+                frequency: CastFrequency::Unlimited,
+                play_mode: CardPlayMode::Cast,
+                graveyard_destination_replacement: None,
+                extra_cost: None,
+                enters_with_counter: None,
+                enter_tapped,
+                required_cast_keyword: None,
+                pool: GraveyardPermissionPool::OwnGraveyard,
+                cast_limit: PermissionCastLimit::Unlimited,
+                mana_spend_permission: None,
+                enters_modifications: Default::default(),
+            })
+            .affected(TargetFilter::SelfRef)
+            .active_zones(vec![Zone::Graveyard])
+        };
+        assert!(
+            own_unlimited_cast_permission_zones(&own(EtbTapState::Unspecified)).is_some(),
+            "reach guard: the rider-free own permission is accepted"
+        );
+        assert!(own_unlimited_cast_permission_zones(&own(EtbTapState::Tapped)).is_none());
+    }
+}
