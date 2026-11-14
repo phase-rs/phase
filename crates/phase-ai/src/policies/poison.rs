@@ -59,7 +59,7 @@ use engine::game::effects::preview_resolution;
 use engine::game::functioning_abilities::battlefield_active_triggers;
 use engine::game::players::{self, PoisonLossMeasure, PoisonLossScope};
 use engine::game::sba::check_state_based_actions;
-use engine::game::trigger_index::trigger_subscribes_to;
+use engine::game::trigger_index::{trigger_admits_player, trigger_subscribes_to};
 use engine::types::ability::{AbilityDefinition, Effect, QuantityExpr, ResolvedAbility, TargetRef};
 use engine::types::actions::GameAction;
 use engine::types::game_state::{GameState, WaitingFor};
@@ -271,9 +271,9 @@ fn ability_delivery(
                         .cloned(),
                 })
                 .collect::<Option<Vec<_>>>()?;
-            // CR 601.2c + CR 601.2i: abilities that trigger on targeting or casting go on the stack
-            // first; conservative: subjects and valid_source are not evaluated because the spell
-            // isn't staged on the preview.
+            // CR 601.2c + CR 601.2g + CR 601.2i + CR 602.2b: abilities that trigger on targeting,
+            // paying, casting or activating go on the stack first; conservative: subjects and
+            // valid_source are not evaluated because the spell isn't staged on the preview.
             if cast_path_may_trigger(state, ai_player, &targets) {
                 return None;
             }
@@ -299,21 +299,28 @@ fn ability_delivery(
     })
 }
 
-/// CR 702.21a: Ward on a targeted object, or a live cast, activation or (when targeting)
-/// becomes-target trigger on a permanent the AI doesn't control; an unsettled board may hide
-/// granted ones.
+/// CR 702.21a + CR 601.2g + CR 601.2i + CR 602.2b: Ward on a targeted object, or a live cast,
+/// payment, activation or (when targeting) becomes-target trigger that can fire on the AI's cast,
+/// on a permanent the AI doesn't control; an unsettled board may hide granted ones.
 fn cast_path_may_trigger(state: &GameState, ai_player: PlayerId, targets: &[TargetRef]) -> bool {
-    let cast_path_key = |key: &TriggerEventKey| match key {
-        TriggerEventKey::SpellCast(_) | TriggerEventKey::AbilityOrCopyActivated => true,
-        TriggerEventKey::BecomesTarget => !targets.is_empty(),
-        _ => false,
-    };
     state.layers_dirty.is_dirty()
         || targets
             .iter()
             .any(|target| has_ward(state, ai_player, target))
         || battlefield_active_triggers(state).any(|(obj, active)| {
-            obj.controller != ai_player && trigger_subscribes_to(active.definition, cast_path_key)
+            let def = active.definition;
+            obj.controller != ai_player
+                && trigger_subscribes_to(def, |key| match key {
+                    // These keys' matchers end with the acting player's filter, which the AI fills.
+                    TriggerEventKey::SpellCast(_) | TriggerEventKey::TapsForMana => {
+                        trigger_admits_player(state, obj, def, ai_player)
+                    }
+                    TriggerEventKey::AbilityOrCopyActivated
+                    | TriggerEventKey::ManaProduced
+                    | TriggerEventKey::ManaSpent => true,
+                    TriggerEventKey::BecomesTarget => !targets.is_empty(),
+                    _ => false,
+                })
         })
 }
 

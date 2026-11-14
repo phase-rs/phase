@@ -21,7 +21,7 @@ use engine::types::format::FormatConfig;
 use engine::types::game_state::{CastPaymentMode, GameState, LayersDirty, PendingCast, WaitingFor};
 use engine::types::identifiers::{CardId, ObjectId};
 use engine::types::keywords::Keyword;
-use engine::types::mana::ManaCost;
+use engine::types::mana::{ManaColor, ManaCost, ManaCostShard};
 use engine::types::phase::Phase;
 use engine::types::player::{PlayerCounterKind, PlayerId};
 use engine::types::zones::Zone;
@@ -1170,6 +1170,10 @@ fn steady_progress(scenario: &mut GameScenario) -> ObjectId {
 fn prologue_to_phyresis(scenario: &mut GameScenario) -> ObjectId {
     scenario
         .add_spell_to_hand_from_oracle(AI, "Prologue to Phyresis", true, PROLOGUE_TO_PHYRESIS)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Blue],
+            generic: 1,
+        })
         .id()
 }
 
@@ -1605,13 +1609,15 @@ fn each_opponent_poison_reads_the_scoped_actor() {
     for with_vorinclex in [false, true] {
         let (mut runner, ids) = board(FormatConfig::two_headed_giant(), 4, &at_13, |s| {
             let prologue = prologue_to_phyresis(s);
+            s.add_basic_land(AI, ManaColor::Blue);
+            s.add_basic_land(AI, ManaColor::Blue);
             if with_vorinclex {
                 vorinclex(s, AI);
             }
             vec![prologue]
         });
         let (delta, reason) = verdict_on(runner.state(), &cast_candidate(ids[0]));
-        runner.cast(ids[0]).free_cast().resolve();
+        runner.cast(ids[0]).resolve();
         let heads = (
             poison_of(runner.state(), PlayerId(2)),
             poison_of(runner.state(), PlayerId(3)),
@@ -2096,19 +2102,24 @@ fn an_untargeted_spell_ignores_becomes_target_triggers() {
     assert_eq!(reason.kind, "poison_clock_lethal");
 }
 
-/// The AI at 2 life with Prologue to Phyresis and {1}{U}; the opponent at nine poison, with
-/// Kambal, Consul of Allocation when `kambal`.
-fn kambal_board(kambal: bool) -> (GameRunner, ObjectId) {
+/// The AI at 2 life with Prologue to Phyresis and {1}{U}, from two Islands when `islands` and
+/// floating otherwise; the opponent at nine poison, with `opposing` on the battlefield.
+fn race_board(opposing: Option<&str>, islands: bool) -> (GameRunner, ObjectId) {
     use engine::types::mana::{ManaType, ManaUnit};
     let (runner, ids) = board(FormatConfig::standard(), 2, &[(OPPONENT, 9)], |s| {
         s.at_phase(Phase::PreCombatMain);
         s.with_life(AI, 2);
-        let blue = |t| ManaUnit::new(t, ObjectId(0), false, vec![]);
-        s.with_mana_pool(AI, vec![blue(ManaType::Blue), blue(ManaType::Blue)]);
-        if kambal {
+        if islands {
+            s.add_basic_land(AI, ManaColor::Blue);
+            s.add_basic_land(AI, ManaColor::Blue);
+        } else {
+            let blue = |t| ManaUnit::new(t, ObjectId(0), false, vec![]);
+            s.with_mana_pool(AI, vec![blue(ManaType::Blue), blue(ManaType::Blue)]);
+        }
+        if let Some(name) = opposing {
             s.add_real_card(
                 OPPONENT,
-                "Kambal, Consul of Allocation",
+                name,
                 Zone::Battlefield,
                 shared_integration_card_db(),
             );
@@ -2118,12 +2129,8 @@ fn kambal_board(kambal: bool) -> (GameRunner, ObjectId) {
     (runner, ids[0])
 }
 
-/// CR 601.2i + CR 704.5a: Kambal triggers as Prologue becomes cast and resolves first, so the AI
-/// at 2 life loses before the opponent's tenth counter; the policy withholds lethal, and credits
-/// it without Kambal.
-#[test]
-fn a_cast_trigger_that_can_eliminate_the_ai_withholds_the_lethal_read() {
-    let (mut runner, prologue) = kambal_board(true);
+/// Casts Prologue, then orders triggers and passes priority until the game ends.
+fn cast_and_settle(runner: &mut GameRunner, prologue: ObjectId) {
     let card_id = runner.state().objects[&prologue].card_id;
     runner
         .act(GameAction::CastSpell {
@@ -2134,17 +2141,62 @@ fn a_cast_trigger_that_can_eliminate_the_ai_withholds_the_lethal_read() {
         })
         .expect("Prologue is cast");
     for _ in 0..8 {
-        if matches!(runner.state().waiting_for, WaitingFor::GameOver { .. }) {
-            break;
-        }
-        runner.act(GameAction::PassPriority).expect("pass priority");
+        let action = match &runner.state().waiting_for {
+            WaitingFor::GameOver { .. } => break,
+            WaitingFor::OrderTriggers { triggers, .. } => GameAction::OrderTriggers {
+                order: (0..triggers.len()).collect(),
+            },
+            _ => GameAction::PassPriority,
+        };
+        runner.act(action).expect("the game advances");
     }
+}
+
+const KAMBAL: &str = "Kambal, Consul of Allocation";
+
+/// CR 601.2i + CR 704.5a: Kambal triggers as Prologue becomes cast and resolves first, so the AI
+/// at 2 life loses before the opponent's tenth counter; the policy withholds lethal, and credits
+/// it without Kambal.
+#[test]
+fn a_cast_trigger_that_can_eliminate_the_ai_withholds_the_lethal_read() {
+    let (mut runner, prologue) = race_board(Some(KAMBAL), false);
+    cast_and_settle(&mut runner, prologue);
     assert!(!engine::game::players::is_alive(runner.state(), AI));
     assert_eq!(poison_of(runner.state(), OPPONENT), 9);
 
-    let kinds = [true, false].map(|kambal| {
-        let (runner, prologue) = kambal_board(kambal);
+    let kinds = [Some(KAMBAL), None].map(|opposing| {
+        let (runner, prologue) = race_board(opposing, false);
         verdict_on(runner.state(), &cast_candidate(prologue)).1.kind
     });
     assert_eq!(kinds, ["poison_clock_pressure", "poison_clock_lethal"]);
+}
+
+/// CR 601.2g + CR 704.5a: tapping both Islands for Prologue triggers Manabarbs twice, and those
+/// triggers resolve first, so the AI at 2 life loses before the opponent's tenth counter; the
+/// policy withholds lethal, and credits it without Manabarbs.
+#[test]
+fn a_payment_trigger_that_can_eliminate_the_ai_withholds_the_lethal_read() {
+    let (mut runner, prologue) = race_board(Some("Manabarbs"), true);
+    cast_and_settle(&mut runner, prologue);
+    assert!(!engine::game::players::is_alive(runner.state(), AI));
+    assert_eq!(poison_of(runner.state(), OPPONENT), 9);
+
+    let kinds = [Some("Manabarbs"), None].map(|opposing| {
+        let (runner, prologue) = race_board(opposing, true);
+        verdict_on(runner.state(), &cast_candidate(prologue)).1.kind
+    });
+    assert_eq!(kinds, ["poison_clock_pressure", "poison_clock_lethal"]);
+}
+
+/// CR 601.2i: an opponent's Young Pyromancer triggers only on its controller's casts, so it does
+/// not withhold Prologue's lethal, and the cast ends the game for the opponent.
+#[test]
+fn an_opponents_own_cast_trigger_does_not_withhold_the_lethal_read() {
+    let (runner, prologue) = race_board(Some("Young Pyromancer"), false);
+    let reason = verdict_on(runner.state(), &cast_candidate(prologue)).1;
+    assert_eq!(reason.kind, "poison_clock_lethal");
+
+    let (mut runner, prologue) = race_board(Some("Young Pyromancer"), false);
+    cast_and_settle(&mut runner, prologue);
+    assert!(!engine::game::players::is_alive(runner.state(), OPPONENT));
 }
