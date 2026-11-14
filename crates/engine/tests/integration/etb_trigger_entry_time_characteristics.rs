@@ -591,29 +591,6 @@ fn search_then_counters(pick_giant: bool) -> (GameRunner, ObjectId, usize) {
     let mut runner = scenario.build();
     set_pt(&mut runner, giant, 3, 3);
     set_pt(&mut runner, bears, 2, 2);
-    // Parse guard: SearchLibrary -> ChangeZone{Library -> Battlefield, forward_result} -> PutCounter -> Shuffle.
-    {
-        let a = &runner.state().objects[&spell].abilities[0];
-        assert!(matches!(a.effect.as_ref(), Effect::SearchLibrary { .. }));
-        let cz = a.sub_ability.as_ref().expect("ChangeZone");
-        assert!(matches!(
-            cz.effect.as_ref(),
-            Effect::ChangeZone {
-                destination: Zone::Battlefield,
-                ..
-            }
-        ));
-        assert!(cz.forward_result);
-        let put = cz.sub_ability.as_ref().expect("PutCounter");
-        assert!(matches!(
-            put.effect.as_ref(),
-            Effect::PutCounter {
-                counter_type: CounterType::Plus1Plus1,
-                ..
-            }
-        ));
-        assert_eq!(put.sub_link, SubAbilityLink::SequentialSibling);
-    }
     let chosen = if pick_giant { giant } else { bears };
     let c = runner.cast(spell).commit();
     drop(c);

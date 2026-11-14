@@ -1154,6 +1154,7 @@ fn park_resolution_attachment_choice(
         conditional_enter_with_counters: vec![],
         count_param: 0,
         library_position: None,
+        library_shuffle: crate::types::ability::LibraryShuffleMode::PerObject,
         mass_library_order: None,
         is_cost_payment: false,
         enters_modified_if: None,
@@ -2445,10 +2446,9 @@ fn capture_protection_start_attachment_snapshot(
     let Some(host) = state.objects.get(&host_id) else {
         return Vec::new();
     };
-    host.attachments
-        .iter()
-        .filter_map(|&attachment_id| {
-            let attachment = state.objects.get(&attachment_id)?;
+    // CR 702.26b: a phased-out attachment is not "already attached" when protection starts.
+    crate::game::filter::phased_in_attachments(state, host)
+        .filter_map(|attachment| {
             let is_aura_or_equipment = attachment
                 .card_types
                 .subtypes
@@ -2464,7 +2464,7 @@ fn capture_protection_start_attachment_snapshot(
             ) {
                 return None;
             }
-            Some(attachment_id)
+            Some(attachment.id)
         })
         .collect()
 }

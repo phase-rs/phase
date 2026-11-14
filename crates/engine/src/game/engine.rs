@@ -22107,8 +22107,11 @@ mod stage2_injector_tests {
     ///
     /// A producer's key is `file::fn {fields}` — its enclosing column-0 `fn` plus the
     /// whitespace-stripped field text of the construction minted there, so a REPLACEMENT
-    /// inside an already-pinned function moves the key. A reader keys as `file::fn`.
-    fn cr_603_5_sites(rel: &str, text: &str) -> (Vec<String>, Vec<String>, usize) {
+    /// inside an already-pinned function moves the key. A reader keys as `file::fn`. An
+    /// in-test site keys as its FILE, because the fixture that parks a prompt may live in an
+    /// indented `#[cfg(test)] mod` body where the column-0 tracker names no function of its
+    /// own — the file is the coordinate that does not churn.
+    fn cr_603_5_sites(rel: &str, text: &str) -> (Vec<String>, Vec<String>, Vec<String>) {
         use crate::source_census::code as code_of;
 
         /// The `#[cfg(test)]`-attributed column-0 `mod … {` … column-0 `}` spans.
@@ -22185,11 +22188,11 @@ mod stage2_injector_tests {
         // instrument. `..` excludes multi-line READ destructures whose rest-pattern sits on
         // a later line — the inflation the raw grep suffers from.
         let needle = format!("WaitingFor::{}Choice {{", "OptionalEffect");
-        let (mut producers, mut readers, mut in_test) = (Vec::new(), Vec::new(), 0usize);
+        let (mut producers, mut readers, mut in_test) = (Vec::new(), Vec::new(), Vec::new());
         // Enclosing-function tracker for this file: `enclosing` names each site and
         // `fn_start` bounds the qualifying look-back below, so no coordinate is minted.
         // Column-0 `fn` headers only — a producer inside an `impl` method would take the
-        // preceding free function's name; all five producers today are free functions.
+        // preceding free function's name; all four producers today are free functions.
         let (mut enclosing, mut fn_start) = (String::new(), 0usize);
         for (n, line) in lines.iter().enumerate() {
             let code = code_of(line);
@@ -22211,7 +22214,7 @@ mod stage2_injector_tests {
                 continue;
             }
             if test_file || spans.iter().any(|(a, b)| (*a..=*b).contains(&n)) {
-                in_test += 1;
+                in_test.push(rel.to_string());
             } else if code.contains("waiting_for = ")
                 || code.contains("Ok(Some(")
                 // `install_direct_choice_frame` owns the actual `state.waiting_for`
@@ -22244,6 +22247,23 @@ mod stage2_injector_tests {
     /// coordinate is asserted, so movement above a producer is not an event and a REPLACEMENT
     /// inside a pinned function is. The pin is a sorted MULTISET, so a sixth mint in one of them
     /// still fails here; comment text is never a site (`source_census::code`).
+    ///
+    /// **NOT THE SAME BOUNDARY AS THE CONJUNCT CENSUS.** The retained
+    /// `f2c_the_cr_603_5_conjunct_set_has_one_production_assembler` row below counts CONSUMERS
+    /// of the five gate predicates (`has_kind_driven_repeat`, `optional_prompt_player`, …) and
+    /// pins that they are assembled in one place. It cannot see who MINTS
+    /// `WaitingFor::OptionalEffectChoice`, which is what this row counts — so neither row
+    /// subsumes the other.
+    ///
+    /// **THE PARTITION DELTA IS ACCOUNTED, NOT ABSORBED.** This row was first pinned at
+    /// `4 / 11 / 44`. The single in-test site added since is
+    /// `game/effects/phase_out.rs`'s `restore_phase_state` suspension fixture, which parks a
+    /// typed optional prompt on two cloned states to keep a continuation legitimately
+    /// suspended. It is `#[cfg(test)]`-only: it mints no production producer and changes no
+    /// production key. The producer multiset below is byte-identical to the original pin, so
+    /// no producer moved; the assertion that the phase_out file contributes exactly one
+    /// in-test site is what makes that delta an explicit adjudication instead of a number
+    /// bump.
     #[test]
     fn the_cr_603_5_prompt_census_is_pinned_so_a_sixth_producer_is_a_counted_event() {
         /// Every `.rs` under the crate's `src`.
@@ -22264,7 +22284,7 @@ mod stage2_injector_tests {
         files.sort();
         assert!(files.len() > 100, "reach-guard: the walker found the crate");
 
-        let (mut producers, mut readers, mut in_test) = (Vec::new(), Vec::new(), 0usize);
+        let (mut producers, mut readers, mut in_test) = (Vec::new(), Vec::new(), Vec::new());
         for path in &files {
             let text = std::fs::read_to_string(path).expect("readable source file");
             let rel = path
@@ -22280,26 +22300,40 @@ mod stage2_injector_tests {
             let (file_producers, file_readers, file_in_test) = cr_603_5_sites(&rel, &text);
             producers.extend(file_producers);
             readers.extend(file_readers);
-            in_test += file_in_test;
+            in_test.extend(file_in_test);
         }
         producers.sort();
 
         assert_eq!(
-            producers.len() + readers.len() + in_test,
-            54,
+            producers.len() + readers.len() + in_test.len(),
+            55,
             "CR 603.5 prompt census drifted. A new PRODUCER must have its recipient bound \
              somewhere — the mint's conjunct (a) covers exactly ONE of them. A new READER is \
              the benign case (U4's own consumption arm was one).\n\
              producers={producers:#?}\nreaders={readers:#?}"
         );
         assert_eq!(
-            (producers.len(), readers.len(), in_test),
-            (4, 9, 41),
+            (producers.len(), readers.len(), in_test.len()),
+            (4, 9, 42),
             "the partition, not just the total: four PRODUCTION producers, nine PRODUCTION \
-             readers (including the two optional-subject projection reads), and 41 \
-             `#[cfg(test)]` lines, including the ChooseOneOf, retained optional/outer, \
-             and retained repeat/choice restore fixtures.\nproducers={producers:#?}\n\
-             readers={readers:#?}"
+             readers (including the two optional-subject projection reads), and 42 \
+             `#[cfg(test)]` sites, including the ChooseOneOf, retained optional/outer, \
+             retained repeat/choice restore fixtures, and the `phase_out` suspension fixture \
+             that parks a typed prompt on a clone (test-only: it mints no producer).\n\
+             producers={producers:#?}\nreaders={readers:#?}"
+        );
+        // The one delta against the first pin, named rather than counted away: the `phase_out`
+        // `restore_phase_state` fixture parks an `OptionalEffectChoice` on each of two cloned
+        // states. A SECOND in-test site in that file (or this one disappearing) is an event.
+        assert_eq!(
+            in_test
+                .iter()
+                .filter(|rel| rel.as_str() == "game/effects/phase_out.rs")
+                .count(),
+            1,
+            "the accounted in-test delta is exactly the `restore_phase_state` suspension \
+             fixture's parked prompt; a second parked prompt in that file (or its removal) \
+             changes the in-test column for a reason this row has not adjudicated"
         );
         assert_eq!(
             producers,

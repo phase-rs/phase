@@ -1640,19 +1640,19 @@ pub enum GameEvent {
     BlockersDeclared {
         assignments: Vec<(ObjectId, ObjectId)>,
     },
-    /// CR 509.3c: An effect made an attacking creature become blocked, and it was
-    /// an unblocked creature at that time — the precondition for "becomes blocked"
-    /// triggers to fire from an effect-block.
-    /// CR 509.3d: A "becomes blocked BY A CREATURE" trigger, and any blocker-side
-    /// "whenever ~ blocks" trigger, must NOT fire from an effect-block — this event
-    /// is distinct from BlockersDeclared precisely so those matchers ignore it.
+    /// CR 509.3c: An effect or entering blocker changed an unblocked attacker
+    /// into a blocked attacker. Only the bare "becomes blocked" form consumes
+    /// this first-transition event.
+    /// CR 509.3d + CR 509.4: It carries no blocker identity and never fires
+    /// qualified "becomes blocked by" or blocker-side "blocks" abilities; an
+    /// entering blocker supplies a separate per-creature event below.
     AttackerBecameBlockedByEffect {
         attacker: ObjectId,
     },
-    /// CR 509.3d: A per-blocker `Blocks`/`BecomesBlocked`/`BlocksOrBecomesBlocked`
-    /// firing with an explicit blocker/attacker qualifier — carries both ids so
-    /// "that creature"/"the other creature" resolution never has to infer
-    /// orientation from event shape.
+    /// CR 509.3d: An attacker-side, qualified `BecomesBlocked` or
+    /// `BlocksOrBecomesBlocked` occurrence, from declaration or an entering
+    /// blocker. The explicit pair preserves "that creature" context orientation.
+    /// CR 509.4: This event never claims that the entering blocker itself blocked.
     AttackerBecameBlockedByFilteredBlocker {
         attacker: ObjectId,
         blocker: ObjectId,
