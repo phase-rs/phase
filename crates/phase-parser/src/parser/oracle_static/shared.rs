@@ -6898,6 +6898,30 @@ fn parse_subtype_planeswalkers_you_control_nom(
     ))
 }
 
+/// Mixed-case sibling of [`parse_subtype_planeswalkers_you_control_nom`] for
+/// `parse_combat_tax_body`, which runs on original-case text (mana-symbol
+/// case-sensitivity). Structural tags are `tag_no_case`; `parse_subtype`
+/// returns the canonical subtype regardless of input case, so the yielded
+/// filter is identical to the lowercase path's. Same
+/// `PLANESWALKER_SUBTYPES` gate: a non-planeswalker subtype fails closed.
+pub(crate) fn parse_subtype_planeswalkers_you_control_mixed_case_nom(
+    input: &str,
+) -> OracleResult<'_, crate::types::triggers::AttackTargetFilter> {
+    let (input, _) = tag_no_case::<_, _, OracleError<'_>>(" ").parse(input)?;
+    let (subtype, consumed) = parse_subtype(input).ok_or_else(|| oracle_err(input))?;
+    let (input, _) =
+        tag_no_case::<_, _, OracleError<'_>>(" you control").parse(&input[consumed..])?;
+    if !PLANESWALKER_SUBTYPES.contains(&subtype.as_str()) {
+        return Err(oracle_err(input));
+    }
+    Ok((
+        input,
+        crate::types::triggers::AttackTargetFilter::Planeswalker {
+            subtype: Some(subtype),
+        },
+    ))
+}
+
 /// Optional attack-target scope after "can't attack" (CR 508.1b + CR 508.1c).
 pub(crate) fn parse_cant_attack_defended_scope_nom(
     input: &str,

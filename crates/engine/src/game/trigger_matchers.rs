@@ -1175,6 +1175,7 @@ fn count_matching_trigger_event_subjects(
         GameEvent::GameStarted
         | GameEvent::TurnStarted { .. }
         | GameEvent::PhaseChanged { .. }
+        | GameEvent::PhaseChangedForPlayer { .. }
         | GameEvent::PriorityPassed { .. }
         | GameEvent::SpellCopied { .. }
         | GameEvent::XValueChosen { .. }
@@ -3231,16 +3232,20 @@ pub(super) fn match_phase(
     source_context: &TriggerSourceContext,
     state: &GameState,
 ) -> bool {
-    if let GameEvent::PhaseChanged { phase } = event {
-        let phase_matches = if let Some(ref trigger_phase) = trigger.phase {
-            phase == trigger_phase
-        } else {
-            true
-        };
-        phase_matches && valid_player_matches(trigger, state, state.active_player, source_context)
+    // CR 805.4d: a fanned occurrence admits exactly like the production event
+    // (active-player-based); its bound player is binding context, not an
+    // admission criterion.
+    let phase = match event {
+        GameEvent::PhaseChanged { phase } => phase,
+        GameEvent::PhaseChangedForPlayer { phase, .. } => phase,
+        _ => return false,
+    };
+    let phase_matches = if let Some(ref trigger_phase) = trigger.phase {
+        phase == trigger_phase
     } else {
-        false
-    }
+        true
+    };
+    phase_matches && valid_player_matches(trigger, state, state.active_player, source_context)
 }
 
 // CR 603.4: Match when the trigger's source becomes the target of a spell or ability.

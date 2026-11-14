@@ -16807,6 +16807,22 @@ fn optional_effect_is_infeasible(state: &GameState, ability: &ResolvedAbility) -
                 *origin,
             )
         }
+        // CR 608.2d + CR 400.7: "that player may exile a card from their
+        // graveyard" (Web of Inertia) is impossible with no eligible card —
+        // an exact typed selection from an empty set cannot be performed, so
+        // the offer is skipped and resolution proceeds to the "doesn't"
+        // branch. Hydrate event-context targets first, exactly as resolution
+        // does.
+        Effect::ChangeZone {
+            origin: Some(Zone::Graveyard),
+            destination: Zone::Exile,
+            target: TargetFilter::Typed { .. },
+            up_to: false,
+            ..
+        } if ability.multi_target.is_none() => {
+            let effective = hydrate_event_context_targets(state, ability);
+            change_zone::optional_exact_graveyard_exile_is_infeasible(state, effective.as_ref())
+        }
         // CR 608.2d + CR 701.20a: "you may reveal the top card of your library"
         // (Priority Boarding) is impossible when it would reveal no card. Hydrate
         // event-context targets first, exactly as resolution does.

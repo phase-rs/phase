@@ -8,9 +8,10 @@ use crate::types::ability::{
     AttachmentReferent, CardTypeSetSource, CastManaSpentMetric, ChosenAttribute,
     CommanderOwnership, ControllerRef, CopyRetargetPermission, DamageAmountScope,
     DamageAmountThreshold, DelayedAbilityOrigin, DelayedTriggerCondition, DurationEvent, Effect,
-    FilterProp, IndicatedActionLimit, ModalChoice, NameStickerSet, ObjectScope, OriginConstraint,
-    PlayerFilter, PlayerScope, QuantityExpr, QuantityRef, RenownSubject, ResolvedAbility,
-    SacrificeCost, StaticCondition, TargetFilter, TargetRef, TributeOutcome, TriggerCondition,
+    FilterProp, GameRestriction, IndicatedActionLimit, ModalChoice, NameStickerSet, ObjectScope,
+    OriginConstraint, PlayerFilter, PlayerScope, QuantityExpr, QuantityRef, RenownSubject,
+    ResolvedAbility, RestrictionPlayerScope, SacrificeCost, StaticCondition,
+    TapCreaturesRequirement, TargetFilter, TargetRef, TributeOutcome, TriggerCondition,
     TriggerConditionAnchor, TriggerConstraint, TriggerDefinition, TriggerDefinitionOccurrenceRef,
     TriggerDefinitionRef, TriggerEntry, TriggerGrantProducerKey, TriggerLimitSpend, TypeFilter,
     TypedFilter,
@@ -1910,7 +1911,188 @@ fn occurrence_trigger_events(
                 state,
             ))
         }
+        // CR 805.4d: an opponent-scoped phase trigger on a shared team turn
+        // fires once per eligible opponent. Production `PhaseChanged` only: a
+        // fanned occurrence never re-fans (its binding rides along instead).
+        _ if trig_def.mode == TriggerMode::Phase
+            && matches!(event, GameEvent::PhaseChanged { .. }) =>
+        {
+            shared_turn_phase_occurrences(event, trig_def, state, ability)
+        }
         _ => None,
+    }
+}
+
+/// CR 805.4d: the per-player phase occurrences for an opponent-scoped phase
+/// trigger on a shared team turn. Returns `None` unless every gate holds —
+/// the trigger is opponent-turn-scoped, its effect names the turn's player
+/// (never through a team-collective payment, CR 805.6), the active side
+/// shares its turn, and at least two eligible opponents share it — so every
+/// other phase trigger keeps the single firing below.
+fn shared_turn_phase_occurrences(
+    event: &GameEvent,
+    trig_def: &TriggerDefinition,
+    state: &GameState,
+    ability: &ResolvedAbility,
+) -> Option<Vec<GameEvent>> {
+    let GameEvent::PhaseChanged { phase } = event else {
+        return None;
+    };
+    if trig_def.constraint != Some(TriggerConstraint::OnlyDuringOpponentsTurn) {
+        return None;
+    }
+    if !phase_trigger_effect_references_turn_player(ability) {
+        return None;
+    }
+    let active = state.active_player;
+    if !super::topology::side_takes_shared_turn(state, active) {
+        return None;
+    }
+    let members: Vec<PlayerId> = super::topology::team_members(state, active)
+        .into_iter()
+        .filter(|&member| super::players::is_opponent(state, ability.controller, member))
+        .collect();
+    if members.len() < 2 {
+        return None;
+    }
+    Some(
+        members
+            .into_iter()
+            .map(|player_id| GameEvent::PhaseChangedForPlayer {
+                phase: *phase,
+                player_id,
+            })
+            .collect(),
+    )
+}
+
+/// CR 805.4d's "when the effect refers to that opponent": whether the firing's
+/// effect tree names the turn's player through a PER-FIRING binding — the
+/// stamped `ScopedPlayer` or the occurrence-bound `TriggeringPlayer`. Live or
+/// set-wide references (`ActivePlayer`, `Opponent`, bare `You`) do NOT count:
+/// fanning out cannot differentiate them, so counting them would duplicate
+/// identical firings.
+///
+/// CR 805.4d + CR 805.6: a team-collective payment (Bow to My Command's "they
+/// may tap … with total power 8 or greater", `collective: true`) refers to the
+/// TEAM, not "that opponent" — the collective payment authority distributes
+/// the per-hero prompts internally, so the single firing must never fan out.
+/// Any collective node anywhere in the tree disqualifies the whole firing:
+/// duplicating it per opponent would demand the team threshold N times.
+fn phase_trigger_effect_references_turn_player(ability: &ResolvedAbility) -> bool {
+    if ability_tree_has_collective_payment(ability) {
+        return false;
+    }
+    if ability_node_references_turn_player(ability) {
+        return true;
+    }
+    ability
+        .child_links()
+        .any(|(_, child)| phase_trigger_effect_references_turn_player(child))
+}
+
+/// Whether any node in the effect tree carries a team-collective payment.
+/// Mirrors the payment authority's own read (`game::costs` matches
+/// `Aggregate { collective: true, .. }`), so the fan-out gate and the payment
+/// path can never disagree on what counts as collective.
+fn ability_tree_has_collective_payment(ability: &ResolvedAbility) -> bool {
+    if let Effect::PayCost { cost, .. } = &ability.effect {
+        if ability_cost_is_team_collective(cost) {
+            return true;
+        }
+    }
+    ability
+        .child_links()
+        .any(|(_, child)| ability_tree_has_collective_payment(child))
+}
+
+fn ability_cost_is_team_collective(cost: &AbilityCost) -> bool {
+    match cost {
+        AbilityCost::TapCreatures { requirement, .. } => matches!(
+            requirement,
+            TapCreaturesRequirement::Aggregate {
+                collective: true,
+                ..
+            }
+        ),
+        AbilityCost::Composite { costs } | AbilityCost::OneOf { costs } => {
+            costs.iter().any(ability_cost_is_team_collective)
+        }
+        AbilityCost::EffectCost { effect } => {
+            matches!(effect.as_ref(), Effect::PayCost { cost, .. } if ability_cost_is_team_collective(cost))
+        }
+        _ => false,
+    }
+}
+
+fn ability_node_references_turn_player(node: &ResolvedAbility) -> bool {
+    if node
+        .effect
+        .target_filter()
+        .is_some_and(turn_player_filter_references)
+    {
+        return true;
+    }
+    if let Effect::PayCost { payer, .. } = &node.effect {
+        if turn_player_filter_references(payer) {
+            return true;
+        }
+    }
+    if node
+        .optional_player
+        .as_ref()
+        .is_some_and(turn_player_filter_references)
+    {
+        return true;
+    }
+    if let Effect::AddRestriction { restriction, .. } = &node.effect {
+        match restriction {
+            GameRestriction::ProhibitActivity {
+                affected_players, ..
+            } => {
+                if matches!(affected_players, RestrictionPlayerScope::ScopedPlayer) {
+                    return true;
+                }
+            }
+            GameRestriction::CantEnterBattlefieldFrom { filter, .. } => {
+                if turn_player_filter_references(filter) {
+                    return true;
+                }
+            }
+            GameRestriction::DamagePreventionDisabled { .. } => {}
+        }
+    }
+    false
+}
+
+fn turn_player_filter_references(filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::ScopedPlayer | TargetFilter::TriggeringPlayer => true,
+        TargetFilter::Typed(typed) => {
+            typed.controller == Some(ControllerRef::ScopedPlayer)
+                || typed.properties.iter().any(|prop| {
+                    matches!(
+                        prop,
+                        FilterProp::Owned {
+                            controller: ControllerRef::ScopedPlayer
+                        }
+                    )
+                })
+        }
+        TargetFilter::And { filters } | TargetFilter::Or { filters } => {
+            filters.iter().any(turn_player_filter_references)
+        }
+        TargetFilter::Not { filter } => turn_player_filter_references(filter),
+        _ => false,
+    }
+}
+
+/// CR 805.4d: rebind a fanned phase firing to its own occurrence player. A
+/// no-op for every other event shape (production `PhaseChanged` keeps the
+/// collection-time stamp).
+fn restamp_scoped_player_from_phase_occurrence(ability: &mut ResolvedAbility, event: &GameEvent) {
+    if let GameEvent::PhaseChangedForPlayer { player_id, .. } = event {
+        ability.set_scoped_player_recursive(*player_id);
     }
 }
 
@@ -3554,6 +3736,9 @@ fn collect_matching_triggers_inner(
                     Some(&trigger_event),
                     later_equal_in_batch,
                 );
+                // CR 805.4d: a fanned phase occurrence rebinds its firing to
+                // its own player; every other shape keeps the stamp above.
+                restamp_scoped_player_from_phase_occurrence(&mut pending_ability, &trigger_event);
                 pending.push(MatchedTrigger {
                     trig_idx,
                     definition_ref: definition_ref.clone(),
@@ -15501,6 +15686,11 @@ fn delayed_trigger_to_context(
     // CR 603.2c + CR 608.2c: the firing's whole narrowed group, on the Delayed
     // dispatch identity (not `PendingTriggerContext::batched`).
     context.trigger_events = trigger_events;
+    // CR 805.4d: a fanned phase occurrence rebinds its firing to its own
+    // player (same authority as the printed per-group loop).
+    if let Some(event) = context.pending.trigger_event.clone() {
+        restamp_scoped_player_from_phase_occurrence(&mut context.pending.ability, &event);
+    }
     context
 }
 
@@ -30483,6 +30673,155 @@ pub mod tests {
                 .iter()
                 .any(|e| matches!(e, GameEvent::CombatDamageDealtToPlayer { .. })),
             "the aggregate must be consumed so a re-scan cannot fire the trigger twice"
+        );
+    }
+
+    /// CR 805.4d parity — a DELAYED opponent-scoped phase trigger fans out
+    /// exactly like its printed twin: on a shared team turn one `PhaseChanged`
+    /// yields one firing per eligible opponent, each firing bound to its own
+    /// player (occurrence event + scoped-player stamp).
+    /// REVERT-FAIL (fan-out removed): a single firing bound to P2.
+    #[test]
+    fn delayed_phase_trigger_fans_out_per_opponent_on_shared_turn() {
+        // 2HG: P0+P1 vs P2+P3; P0 controls the trigger; P2 holds the turn.
+        let mut state = GameState::new(
+            crate::types::format::FormatConfig::two_headed_giant(),
+            4,
+            42,
+        );
+        let controller = PlayerId(0);
+        let (p2, p3) = (PlayerId(2), PlayerId(3));
+        state.active_player = p2;
+        let source = create_object(
+            &mut state,
+            CardId(0x8054_0001),
+            controller,
+            "Shared Watcher".to_string(),
+            Zone::Battlefield,
+        );
+
+        let mut trigger = TriggerDefinition::new(TriggerMode::Phase);
+        trigger.phase = Some(crate::types::phase::Phase::BeginCombat);
+        trigger.constraint =
+            Some(crate::types::ability::TriggerConstraint::OnlyDuringOpponentsTurn);
+        let mut ability = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::ScopedPlayer,
+            },
+            vec![],
+            source,
+            controller,
+        );
+        let rider_ctx = trigger_source_context_for_latch(&state, &state.objects[&source]);
+        ability.set_trigger_source_recursive(rider_ctx);
+        state.delayed_triggers.push(DelayedTrigger {
+            condition: DelayedTriggerCondition::WheneverEvent {
+                trigger: Box::new(trigger),
+                expiry: crate::types::ability::WheneverEventExpiry::EndOfTurn,
+            },
+            ability: Box::new(ability),
+            controller,
+            source_id: source,
+            one_shot: false,
+            kind: DelayedTriggerKind::Ordinary,
+            provenance: crate::types::identifiers::DelayedInstallIdentity::LegacyDelayed,
+        });
+
+        let events = vec![GameEvent::PhaseChanged {
+            phase: crate::types::phase::Phase::BeginCombat,
+        }];
+        let DelayedTriggerMatch {
+            contexts: pending, ..
+        } = collect_matching_delayed_triggers(&mut state, &events, DelayedTriggerEventScope::Any);
+        assert_eq!(pending.len(), 2, "one firing per eligible opponent");
+        let bindings: Vec<(PlayerId, Option<PlayerId>)> = pending
+            .iter()
+            .map(|ctx| {
+                let event_player = match ctx.pending.trigger_event {
+                    Some(GameEvent::PhaseChangedForPlayer { player_id, .. }) => player_id,
+                    ref other => panic!("each firing rides its own occurrence, got {other:?}"),
+                };
+                (event_player, ctx.pending.ability.scoped_player)
+            })
+            .collect();
+        assert_eq!(bindings.len(), 2);
+        assert!(
+            bindings.contains(&(p2, Some(p2))) && bindings.contains(&(p3, Some(p3))),
+            "each firing is bound to its own seat, got {bindings:?}"
+        );
+    }
+
+    /// CR 805.4d + CR 805.6 — a team-collective payment never fans out: Bow
+    /// to My Command's "they may tap … with total power 8 or greater" names
+    /// the TEAM, not "that opponent", so on the same shared 2HG turn that
+    /// fans a singular payment out, the collective shape keeps the single
+    /// firing. REVERT-FAIL (collective exclusion removed): two occurrences,
+    /// one per opponent, instead of `None`.
+    #[test]
+    fn collective_team_payment_keeps_single_firing_on_shared_turn() {
+        // Same shared-turn board as the parity test: P0+P1 vs P2+P3, P0
+        // controls the trigger, P2 holds the turn.
+        let mut state = GameState::new(
+            crate::types::format::FormatConfig::two_headed_giant(),
+            4,
+            42,
+        );
+        let controller = PlayerId(0);
+        let p2 = PlayerId(2);
+        state.active_player = p2;
+        let source = create_object(
+            &mut state,
+            CardId(0x8054_0002),
+            controller,
+            "Collective Watcher".to_string(),
+            Zone::Battlefield,
+        );
+
+        let mut trigger = TriggerDefinition::new(TriggerMode::Phase);
+        trigger.phase = Some(crate::types::phase::Phase::BeginCombat);
+        trigger.constraint =
+            Some(crate::types::ability::TriggerConstraint::OnlyDuringOpponentsTurn);
+        // Bow's shape: optional team-collective tap payment by the triggering
+        // opponent. The payer IS turn-player-bound — only the `collective`
+        // stamp keeps this singular, which is exactly what the test pins.
+        let mut ability = ResolvedAbility::new(
+            Effect::PayCost {
+                cost: crate::types::ability::AbilityCost::TapCreatures {
+                    requirement: crate::types::ability::TapCreaturesRequirement::Aggregate {
+                        stat: crate::types::ability::TapCreaturesAggregateStat::TotalPower,
+                        comparator: crate::types::ability::Comparator::GE,
+                        value: 8,
+                        collective: true,
+                    },
+                    filter: TargetFilter::TriggeringPlayer,
+                },
+                scale: None,
+                payer: TargetFilter::TriggeringPlayer,
+            },
+            vec![],
+            source,
+            controller,
+        );
+        ability.optional = true;
+        let rider_ctx = trigger_source_context_for_latch(&state, &state.objects[&source]);
+        ability.set_trigger_source_recursive(rider_ctx);
+
+        assert!(
+            !phase_trigger_effect_references_turn_player(&ability),
+            "a team-collective payment refers to the team, not that opponent"
+        );
+        assert_eq!(
+            shared_turn_phase_occurrences(
+                &GameEvent::PhaseChanged {
+                    phase: crate::types::phase::Phase::BeginCombat,
+                },
+                &trigger,
+                &state,
+                &ability,
+            ),
+            None,
+            "the collective firing must stay single on a shared turn"
         );
     }
 

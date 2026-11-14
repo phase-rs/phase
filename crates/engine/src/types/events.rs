@@ -1006,6 +1006,16 @@ pub enum GameEvent {
     PhaseChanged {
         phase: Phase,
     },
+    /// CR 805.4d: one phase occurrence FOR one player. Synthetic — produced
+    /// only by `occurrence_trigger_events` for an opponent-scoped phase
+    /// trigger on a shared team turn, so each eligible opponent gets their
+    /// own firing bound to themselves. Never emitted into the global event
+    /// batch. Admission gates MUST treat it exactly like `PhaseChanged`
+    /// (active-player-based); only per-firing BINDING reads `player_id`.
+    PhaseChangedForPlayer {
+        phase: Phase,
+        player_id: PlayerId,
+    },
     /// `player_id` is the player who now receives priority, not the passer.
     PriorityPassed {
         player_id: PlayerId,

@@ -24757,20 +24757,24 @@ pub(crate) fn parse_dangling_phase_trigger_head(input: &str) -> OracleResult<'_,
 /// going on the stack; choosing a defending player).
 ///
 /// The possessive table itself lives in [`parse_turn_possessive_prefix`] — one
-/// table, two consumers. Also checks for a trailing "on your turn" suffix.
+/// table, two consumers. The trailing "on <spec>" suffix reuses the shared
+/// [`parse_during_turn_spec`] table, so "on your turn" and "on each opponent's
+/// turn" (Jace, Multiverse Architect / Web of Inertia) constrain identically to
+/// their prefix and "during" siblings.
 fn parse_turn_constraint(phase_text: &str) -> Option<TriggerConstraint> {
     // Prefix-based: try at the start of the text
     if let Ok((_, constraint)) = parse_turn_possessive_prefix(phase_text) {
         return Some(constraint);
     }
-    // Suffix-based: "combat on your turn", "each combat on your turn"
+    // Suffix-based: "combat on your turn", "combat on each opponent's turn".
+    // The spec after "on " runs through the shared turn-spec authority rather
+    // than a second literal table, so the suffix can never drift from it.
     let mut remaining = phase_text;
     while !remaining.is_empty() {
-        if tag::<_, _, OracleError<'_>>("on your turn")
-            .parse(remaining)
-            .is_ok()
+        if let Ok((_, constraint)) =
+            preceded(tag::<_, _, OracleError<'_>>("on "), parse_during_turn_spec).parse(remaining)
         {
-            return Some(TriggerConstraint::OnlyDuringYourTurn);
+            return Some(constraint);
         }
         remaining = remaining
             .find(' ')
@@ -24779,10 +24783,116 @@ fn parse_turn_constraint(phase_text: &str) -> Option<TriggerConstraint> {
     None
 }
 
+/// The "on <spec>" phase-head suffix shares [`parse_during_turn_spec`], so every
+/// spec the "during" path constrains is honored after "on" too — in particular
+/// "on each opponent's turn" (Jace, Multiverse Architect / Web of Inertia),
+/// which previously parsed to an unrestricted `BeginCombat` trigger.
+#[cfg(test)]
+mod phase_turn_constraint_suffix_tests {
+    use super::parse_trigger_line;
+    use crate::types::ability::TriggerConstraint;
+    use crate::types::phase::Phase;
+    use crate::types::triggers::TriggerMode;
+
+    /// Jace, Multiverse Architect, first ability, verbatim.
+    #[test]
+    fn combat_on_each_opponents_turn_constrains_to_opponents() {
+        let def = parse_trigger_line(
+            "At the beginning of combat on each opponent's turn, they may pay {2}. If they don't, creatures they control can't attack Jaces you control this turn.",
+            "Jace, Multiverse Architect",
+        );
+        assert_eq!(def.mode, TriggerMode::Phase);
+        assert_eq!(def.phase, Some(Phase::BeginCombat));
+        assert_eq!(
+            def.constraint,
+            Some(TriggerConstraint::OnlyDuringOpponentsTurn),
+            "got {:?}",
+            def.constraint
+        );
+    }
+
+    /// Web of Inertia, verbatim.
+    #[test]
+    fn web_head_constrains_to_opponents() {
+        let def = parse_trigger_line(
+            "At the beginning of combat on each opponent's turn, that player may exile a card from their graveyard. If the player doesn't, creatures they control can't attack you this turn.",
+            "Web of Inertia",
+        );
+        assert_eq!(def.mode, TriggerMode::Phase);
+        assert_eq!(def.phase, Some(Phase::BeginCombat));
+        assert_eq!(
+            def.constraint,
+            Some(TriggerConstraint::OnlyDuringOpponentsTurn),
+            "got {:?}",
+            def.constraint
+        );
+    }
+
+    /// The pre-existing "on your turn" suffix keeps its constraint.
+    #[test]
+    fn combat_on_your_turn_still_constrains_to_controller() {
+        let def = parse_trigger_line(
+            "At the beginning of combat on your turn, draw a card.",
+            "Probe",
+        );
+        assert_eq!(def.mode, TriggerMode::Phase);
+        assert_eq!(
+            def.constraint,
+            Some(TriggerConstraint::OnlyDuringYourTurn),
+            "got {:?}",
+            def.constraint
+        );
+    }
+
+    /// "on each of your turns" rides the shared table too.
+    #[test]
+    fn combat_on_each_of_your_turns_constrains_to_controller() {
+        let def = parse_trigger_line(
+            "At the beginning of combat on each of your turns, draw a card.",
+            "Probe",
+        );
+        assert_eq!(
+            def.constraint,
+            Some(TriggerConstraint::OnlyDuringYourTurn),
+            "got {:?}",
+            def.constraint
+        );
+    }
+
+    /// The possessive-prefix path is unchanged by the suffix work.
+    #[test]
+    fn opponents_prefix_control_is_unchanged() {
+        let def = parse_trigger_line(
+            "At the beginning of each opponent's upkeep, draw a card.",
+            "Probe",
+        );
+        assert_eq!(
+            def.constraint,
+            Some(TriggerConstraint::OnlyDuringOpponentsTurn),
+            "got {:?}",
+            def.constraint
+        );
+    }
+
+    /// A determiner head ("each player's") still constrains nothing: the
+    /// mode+phase assertions are the reach-guard proving the head parsed.
+    #[test]
+    fn determiner_head_stays_unconstrained() {
+        let def = parse_trigger_line(
+            "At the beginning of each player's upkeep, draw a card.",
+            "Probe",
+        );
+        assert_eq!(def.mode, TriggerMode::Phase);
+        assert_eq!(def.phase, Some(Phase::Upkeep));
+        assert_eq!(def.constraint, None, "got {:?}", def.constraint);
+    }
+}
+
 /// CR 603.1: match the turn specifier that follows "during " in a trigger's
 /// turn-restriction clause → the corresponding trigger constraint. Single
-/// authority shared by the trailing peel ([`peel_trailing_turn_constraint`]) and
-/// the leading matcher ([`parse_leading_turn_constraint`]).
+/// authority shared by the trailing peel ([`peel_trailing_turn_constraint`]),
+/// the leading matcher ([`parse_leading_turn_constraint`]), and the phase-head
+/// "on <spec>" suffix ([`parse_turn_constraint`]).
 fn parse_during_turn_spec(input: &str) -> OracleResult<'_, TriggerConstraint> {
     alt((
         value(

@@ -44,6 +44,7 @@ use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
 use engine::types::counter::CounterType;
 use engine::types::events::GameEvent;
+use engine::types::format::FormatConfig;
 use engine::types::game_state::{GameState, WaitingFor};
 use engine::types::identifiers::{CardId, ObjectId};
 use engine::types::mana::{ManaType, ManaUnit};
@@ -54,6 +55,7 @@ use engine::types::triggers::{AttackTargetFilter, TriggerMode};
 use engine::types::zones::Zone;
 
 const P2: PlayerId = PlayerId(2);
+const P3: PlayerId = PlayerId(3);
 
 /// Verbatim Oracle text (Scryfall `Jace, Multiverse Architect`).
 const JACE_ORACLE: &str = "At the beginning of combat on each opponent's turn, they may pay {2}. If they don't, creatures they control can't attack Jaces you control this turn.\n+1: Draw two cards, then put a card from your hand on the bottom of your library.\n-3: Exile another target planeswalker or creature you control. Reveal cards from the top of your library until you reveal a creature or planeswalker card. Put that card onto the battlefield and the rest on the bottom of your library in a random order.\nJace, Multiverse Architect can be your commander.";
@@ -205,6 +207,43 @@ fn drive_to_optional_prompt(runner: &mut GameRunner) {
             return;
         }
     }
+}
+
+/// Drive to the next {2} seat prompt on a shared turn, answering a
+/// same-controller trigger-ordering prompt (identity order) along the way.
+/// Returns the prompted seat. The ordering arm asserts exactly two firings —
+/// the direct two-occurrence proof.
+fn drive_to_seat_prompt(runner: &mut GameRunner) -> PlayerId {
+    for _ in 0..100 {
+        match runner.state().waiting_for.clone() {
+            WaitingFor::OptionalEffectChoice { player, .. } => return player,
+            WaitingFor::OrderTriggers { triggers, .. } => {
+                assert_eq!(
+                    triggers.len(),
+                    2,
+                    "both seats' firings await ordering, got {}",
+                    triggers.len()
+                );
+                runner
+                    .act(GameAction::OrderTriggers {
+                        order: (0..triggers.len()).collect(),
+                    })
+                    .expect("trigger order");
+            }
+            _ => {
+                if runner.state().stack.is_empty() {
+                    panic!("settled without surfacing the seat prompt");
+                }
+                if runner.act(GameAction::PassPriority).is_err() {
+                    panic!(
+                        "stuck without the seat prompt: {:?}",
+                        runner.state().waiting_for
+                    );
+                }
+            }
+        }
+    }
+    panic!("never reached the seat prompt");
 }
 
 /// Drain to an idle empty stack. A further `OptionalEffectChoice` here is
@@ -1152,21 +1191,19 @@ fn jace_non_planeswalker_subtype_scope_stays_unsupported() {
     );
 }
 
-/// Rows 9/9b — subtype-defended static TAX, scoped end to end (fix round 2,
-/// decision (a)): the subject-led shape lowers SUPPORTED (`CantAttack` +
-/// `attack_defended` + `UnlessPay{2, Flat, defended}`) because the
-/// `:2709` attach stamps `UnlessPay.defended` from `attack_defended`, and the
-/// runtime tax (`compute_combat_tax`) filters by it — unpaid Jace attacks are
-/// taxed (illegal unfunded), paid Jace attacks commit, and unpaid non-Jace /
+/// Rows 9/9b — subtype-defended static TAX, scoped end to end: the probe lowers
+/// through the DEDICATED combat-tax path (`CantAttack` + `UnlessPay{{2},
+/// PerAffectedCreature, subtype-defended}`), and the runtime tax
+/// (`compute_combat_tax`) filters by it — unpaid Jace attacks are taxed
+/// (illegal unfunded), paid Jace attacks commit, and unpaid non-Jace /
 /// controller attacks are untaxed (legal with an empty pool).
 ///
 /// Probe text re-derived at implementation from the real Ghostly Prison
 /// sentence ("Creatures can't attack you unless their controller pays {2}
 /// for each creature they control that's attacking you."), with the defended
-/// "you" replaced by "Jaces you control". The probe keeps the "for each"
-/// tail, which lowers to `Flat` scaling; the runtime legs use a single
-/// attacker, for which `Flat` and per-attacker scaling are equivalent —
-/// multi-attacker scaling of the dropped tail is unpinned.
+/// "you" replaced by "Jaces you control". The "for each" tail lowers to
+/// per-affected scaling with the full payment preserved — never the
+/// subject-led fallback's `Flat` truncation.
 const JACE_TAX_ORACLE: &str = "Creatures can't attack Jaces you control unless their controller pays {2} for each creature they control that's attacking you.";
 
 /// Ghostly-Prison-with-Jaces combat-tax static, carried by a 2/2 creature
@@ -1209,9 +1246,12 @@ fn fund_two_generic(runner: &mut GameRunner) {
 
 #[test]
 fn jace_subtype_defended_tax_shape_and_runtime() {
-    // Parse shape: CantAttack + subtype defended + UnlessPay {2}.
-    // REVERT-FAIL (combinator arm removed): `parse_static_line` yields no
-    // subtype-defended tax (None defended or unparsed).
+    // Parse shape: CantAttack + UnlessPay {2, PerAffectedCreature,
+    // subtype-defended} via the DEDICATED combat-tax path (`attack_defended`
+    // stays None there — the tax payload carries the scope natively, as
+    // Onakke's does).
+    // REVERT-FAIL (subtype arm removed): the line falls to the subject-led
+    // route — `attack_defended` becomes Some while scaling collapses to Flat.
     let def =
         parse_static_line(JACE_TAX_ORACLE).expect("Ghostly-Prison-with-Jaces tax should parse");
     assert_eq!(
@@ -1221,16 +1261,10 @@ fn jace_subtype_defended_tax_shape_and_runtime() {
         def.mode
     );
     assert_eq!(
-        def.attack_defended,
-        Some(AttackTargetFilter::Planeswalker {
-            subtype: Some("Jace".to_string())
-        }),
-        "the shared combinator scopes the tax to Jaces you control"
+        def.attack_defended, None,
+        "the dedicated route carries the scope on the tax payload, got {:?}",
+        def.attack_defended
     );
-    // Reach-guard: `attack_defended` proves the line reached the subject-led
-    // path (not an upstream decline) — the stamp below keys off exactly it.
-    // RED-first on the stamp (fix reverted): `UnlessPay.defended` stays
-    // `None` while `attack_defended` stays `Some` — the refuted premise.
     match &def.condition {
         Some(StaticCondition::UnlessPay {
             cost,
@@ -1240,15 +1274,15 @@ fn jace_subtype_defended_tax_shape_and_runtime() {
             assert_eq!(cost.mana_value(), 2, "the tax costs {{2}}, got {cost:?}");
             assert_eq!(
                 *scaling,
-                UnlessPayScaling::Flat,
-                "the subject-led route carries no per-affected tail, got {scaling:?}"
+                UnlessPayScaling::PerAffectedCreature,
+                "the written for-each tail must scale, got {scaling:?}"
             );
             assert_eq!(
                 *defended,
                 Some(AttackTargetFilter::Planeswalker {
                     subtype: Some("Jace".to_string())
                 }),
-                "the :2709 stamp scopes the tax payload to Jaces you control"
+                "the tax payload scopes to Jaces you control, got {defended:?}"
             );
         }
         other => panic!("expected an UnlessPay tax condition, got {other:?}"),
@@ -1328,9 +1362,9 @@ fn jace_subtype_defended_tax_shape_and_runtime() {
     );
     assert_eq!(mana_total(&runner, P1), 0, "the {{2}} tax left P1's pool");
 
-    // Row 9b continued — SCOPED legs (fix round 2): the stamped
-    // `UnlessPay.defended` means the tax fires ONLY on Jace-subtype targets.
-    // REVERT-FAIL (stamp reverted → `defended: None`): the preview below
+    // Row 9b continued — SCOPED legs: the native `UnlessPay.defended` means
+    // the tax fires ONLY on Jace-subtype targets.
+    // REVERT-FAIL (defended lost → `defended: None`): the preview below
     // reports unaffordable and the declaration opens a tax prompt — the
     // over-broad-tax direction (unpaid non-Jace attacks illegally taxed).
     for (target, label) in [
@@ -1364,6 +1398,61 @@ fn jace_subtype_defended_tax_shape_and_runtime() {
                 .any(|a| a.object_id == fresh_attacker)),
             "the untaxed {label} attack commits"
         );
+    }
+}
+
+/// Rows 9/9b counted scope — the per-affected scaling is load-bearing, not
+/// decorative: two Jace attackers owe {4} total (a `Flat` tax would owe
+/// {2}), and a mixed declaration (one Jace, one Chandra) owes {2} — only
+/// Jace-defended attackers join the counted population.
+/// REVERT-FAIL (scaling `Flat`): the two-Jace total halves to {2}.
+/// REVERT-FAIL (defended lost): the mixed total doubles to {4}.
+#[test]
+fn jace_subtype_defended_tax_counts_only_jace_attackers() {
+    let (mut runner, attacker, jace, _) = jace_tax_board();
+    let second = add_bear(runner.state_mut(), P1, "P1 Wolf");
+    runner.pass_both_players();
+    runner
+        .act(GameAction::DeclareAttackers {
+            attacks: vec![
+                (attacker, AttackTarget::Planeswalker(jace)),
+                (second, AttackTarget::Planeswalker(jace)),
+            ],
+            bands: vec![],
+        })
+        .expect("two Jace attackers must open the tax prompt");
+    match &runner.state().waiting_for {
+        WaitingFor::CombatTaxPayment { total_cost, .. } => {
+            assert_eq!(
+                total_cost.mana_value(),
+                4,
+                "two Jace attackers scale {{2}} to {{4}}, got {total_cost:?}"
+            );
+        }
+        other => panic!("expected CombatTaxPayment for two Jace attackers, got {other:?}"),
+    }
+
+    let (mut fresh, fresh_attacker, fresh_jace, fresh_chandra) = jace_tax_board();
+    let fresh_second = add_bear(fresh.state_mut(), P1, "P1 Wolf");
+    fresh.pass_both_players();
+    fresh
+        .act(GameAction::DeclareAttackers {
+            attacks: vec![
+                (fresh_attacker, AttackTarget::Planeswalker(fresh_jace)),
+                (fresh_second, AttackTarget::Planeswalker(fresh_chandra)),
+            ],
+            bands: vec![],
+        })
+        .expect("the mixed declaration must open the tax prompt");
+    match &fresh.state().waiting_for {
+        WaitingFor::CombatTaxPayment { total_cost, .. } => {
+            assert_eq!(
+                total_cost.mana_value(),
+                2,
+                "only the Jace attacker joins the counted population, got {total_cost:?}"
+            );
+        }
+        other => panic!("expected CombatTaxPayment for the mixed declaration, got {other:?}"),
     }
 }
 
@@ -1469,5 +1558,141 @@ fn jace_trigger_fires_through_real_begin_combat_transition() {
             .as_ref()
             .is_some_and(|combat| combat.attackers.iter().any(|a| a.object_id == attacker)),
         "the Bear is recorded as attacking P0"
+    );
+}
+
+/// Row 10b — the opponent qualifier through a REAL phase transition on the
+/// CONTROLLER's combat: from P0's pre-combat main with priority (P0 controls
+/// Jace), advance into beginning of combat via the runner and prove the
+/// trigger stays silent — no {2} prompt while the window is open, no ban
+/// afterwards. The phase reach-guard proves the transition happened and the
+/// trigger had its chance; row 10 is the positive control proving the same
+/// trigger fires on the opponent's combat.
+/// REVERT-FAIL (constraint dropped): the trigger fires on P0's combat and the
+/// prompt surfaces during the priority drain.
+#[test]
+fn jace_trigger_silent_through_real_controller_combat_transition() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.add_planeswalker_from_oracle(P0, "Jace, Multiverse Architect", "Jace", 4, JACE_ORACLE);
+    scenario.add_creature(P1, "P1 Bear", 2, 2);
+    let mut runner = scenario.build();
+    runner.state_mut().active_player = P0;
+    runner.state_mut().priority_player = P0;
+    runner.state_mut().waiting_for = WaitingFor::Priority { player: P0 };
+    // NOTE: phase stays PreCombatMain — the advance below is the real thing.
+
+    runner.advance_to_phase(Phase::BeginCombat);
+    assert_eq!(
+        runner.state().phase,
+        Phase::BeginCombat,
+        "reach-guard: the runner must reach beginning of combat, else the \
+         silence below proves nothing"
+    );
+    // A pending trigger surfaces on priority passes; drain priority until the
+    // BeginCombat window closes. Any {2} prompt here is the trigger firing.
+    for _ in 0..10 {
+        assert!(
+            !matches!(
+                runner.state().waiting_for,
+                WaitingFor::OptionalEffectChoice { .. }
+            ),
+            "the trigger must not offer its payment on the controller's combat"
+        );
+        if runner.state().phase != Phase::BeginCombat {
+            break;
+        }
+        if runner.act(GameAction::PassPriority).is_err() {
+            break;
+        }
+    }
+    assert!(
+        !has_attack_ban(&runner),
+        "no prohibition may exist when the trigger never fired"
+    );
+}
+
+/// CR 805.4d — shared opposing combat (2HG): P0+P1 vs P2+P3, Jace under P0.
+/// On team B's shared combat the trigger fires ONCE PER OPPONENT — two {2}
+/// prompts, one per seat, each bound to its own seat. P2 pays (no ban for
+/// P2; P2's pool drops) while P3 declines (P3 banned) — one seat's payment
+/// leaves the other's restriction intact. Prompt order is read off the
+/// prompts (order-adaptive), never assumed.
+/// REVERT-FAIL (single firing): only one prompt surfaces and the second
+/// seat's legality assertion fails.
+#[test]
+fn jace_shared_combat_fires_once_per_opponent() {
+    let mut scenario = GameScenario::new_with_format(FormatConfig::two_headed_giant(), 4, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    let jace = scenario
+        .add_planeswalker_from_oracle(P0, "Jace, Multiverse Architect", "Jace", 4, JACE_ORACLE)
+        .id();
+    let p2_attacker = scenario.add_creature(P2, "P2 Bear", 2, 2).id();
+    let p3_attacker = scenario.add_creature(P3, "P3 Bear", 2, 2).id();
+    scenario.with_mana_pool(
+        P2,
+        floating_mana(&[ManaType::Colorless, ManaType::Colorless]),
+    );
+    let mut runner = scenario.build();
+    // Team B's shared turn: P2 holds the turn as representative.
+    runner.state_mut().active_player = P2;
+    runner.state_mut().priority_player = P2;
+    runner.state_mut().phase = Phase::BeginCombat;
+    runner.state_mut().waiting_for = WaitingFor::Priority { player: P2 };
+
+    fire_begin_combat(&mut runner);
+    let mut prompted = Vec::new();
+    for _ in 0..2 {
+        let seat = drive_to_seat_prompt(&mut runner);
+        assert!(
+            seat == P2 || seat == P3,
+            "each prompt addresses an opposing seat, got {seat:?}"
+        );
+        prompted.push(seat);
+        // Answer WITHOUT draining: the sibling firing is still on the stack,
+        // and `answer_optional`'s idle-drain would fail loudly on its prompt.
+        runner
+            .act(GameAction::DecideOptionalEffect { accept: seat == P2 })
+            .expect("answering the seat's {2} choice");
+    }
+    assert_ne!(
+        prompted[0], prompted[1],
+        "the two opposing seats are prompted separately"
+    );
+    drive_to_idle(&mut runner);
+
+    assert_eq!(
+        mana_total(&runner, P2),
+        0,
+        "P2 paid {{2}} from their own pool"
+    );
+    assert!(
+        attack_is_legal(&runner, P2, p2_attacker, AttackTarget::Planeswalker(jace)),
+        "P2 attacks Jaces freely after paying"
+    );
+    assert!(
+        !attack_is_legal(&runner, P3, p3_attacker, AttackTarget::Planeswalker(jace)),
+        "P3 is banned after declining — P2's payment lifted nothing for P3"
+    );
+}
+
+/// CR 805.4d control — no shared turn, no fan-out: in a standard multiplayer
+/// game the trigger fires exactly ONCE per opposing combat even with several
+/// opponents at the table. Decline the single prompt, then `drive_to_idle`
+/// fails loudly if a second firing is pending.
+#[test]
+fn jace_standard_game_fires_once_per_combat() {
+    let (mut runner, jace, amy_attacker, _) = jace_three_player_scenario();
+    fire_begin_combat(&mut runner);
+    drive_to_optional_prompt(&mut runner);
+    answer_optional(&mut runner, P1, false);
+    drive_to_idle(&mut runner);
+    assert!(
+        has_attack_ban(&runner),
+        "the single decline installs the ban"
+    );
+    assert!(
+        !attack_is_legal(&runner, P1, amy_attacker, AttackTarget::Planeswalker(jace)),
+        "Amy is banned after declining"
     );
 }

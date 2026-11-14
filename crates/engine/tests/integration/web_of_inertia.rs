@@ -21,6 +21,7 @@ use engine::types::ability::{GameRestriction, ProhibitedActivity};
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
 use engine::types::events::GameEvent;
+use engine::types::format::FormatConfig;
 use engine::types::game_state::{GameState, WaitingFor};
 use engine::types::identifiers::{CardId, ObjectId};
 use engine::types::phase::Phase;
@@ -28,6 +29,7 @@ use engine::types::player::PlayerId;
 use engine::types::zones::Zone;
 
 const P2: PlayerId = PlayerId(2);
+const P3: PlayerId = PlayerId(3);
 
 /// Verbatim Oracle text (Web of Inertia).
 const WEB_OF_INERTIA_ORACLE: &str = "At the beginning of combat on each opponent's turn, that player may exile a card from their graveyard. If the player doesn't, creatures they control can't attack you this turn.";
@@ -77,6 +79,43 @@ fn drive_to_optional_prompt(runner: &mut GameRunner) {
             return;
         }
     }
+}
+
+/// Drive to the next exile seat prompt on a shared turn, answering a
+/// same-controller trigger-ordering prompt (identity order) along the way.
+/// Returns the prompted seat. The ordering arm asserts exactly two firings —
+/// the direct two-occurrence proof.
+fn drive_to_seat_prompt(runner: &mut GameRunner) -> PlayerId {
+    for _ in 0..100 {
+        match runner.state().waiting_for.clone() {
+            WaitingFor::OptionalEffectChoice { player, .. } => return player,
+            WaitingFor::OrderTriggers { triggers, .. } => {
+                assert_eq!(
+                    triggers.len(),
+                    2,
+                    "both seats' firings await ordering, got {}",
+                    triggers.len()
+                );
+                runner
+                    .act(GameAction::OrderTriggers {
+                        order: (0..triggers.len()).collect(),
+                    })
+                    .expect("trigger order");
+            }
+            _ => {
+                if runner.state().stack.is_empty() {
+                    panic!("settled without surfacing the seat prompt");
+                }
+                if runner.act(GameAction::PassPriority).is_err() {
+                    panic!(
+                        "stuck without the seat prompt: {:?}",
+                        runner.state().waiting_for
+                    );
+                }
+            }
+        }
+    }
+    panic!("never reached the seat prompt");
 }
 
 /// Drain to an idle empty stack. A further `OptionalEffectChoice` here is
@@ -154,12 +193,20 @@ fn has_attack_ban(runner: &GameRunner) -> bool {
 /// (Amy) and P2 (Bob) each have an attacker, and P1 has a graveyard card so
 /// the decline prompt is offered. Active player is P1 at beginning of combat.
 fn inertia_three_player_scenario() -> (GameRunner, ObjectId, ObjectId, ObjectId) {
+    inertia_three_player_scenario_with_p1_graveyard(&["Spare Card"])
+}
+
+/// Same board with P1's graveyard caller-supplied (empty for the CR 608.2d
+/// skip test, two cards for the real-selection test).
+fn inertia_three_player_scenario_with_p1_graveyard(
+    p1_yard: &[&str],
+) -> (GameRunner, ObjectId, ObjectId, ObjectId) {
     let mut scenario = GameScenario::new_n_player(3, 42);
     scenario.at_phase(Phase::PreCombatMain);
     scenario.add_enchantment_from_oracle(P0, "Web of Inertia", WEB_OF_INERTIA_ORACLE);
     let amy_attacker = scenario.add_creature(P1, "Amy Bear", 2, 2).id();
     let bob_attacker = scenario.add_creature(P2, "Bob Bear", 2, 2).id();
-    scenario.with_graveyard(P1, &["Spare Card"]);
+    scenario.with_graveyard(P1, p1_yard);
     let mut runner = scenario.build();
     let chandra = add_planeswalker(runner.state_mut(), P0, "Chandra", "Chandra");
     runner.state_mut().active_player = P1;
@@ -217,6 +264,89 @@ fn web_of_inertia_decline_bans_controller_attacks_only() {
     );
 }
 
+/// Real-transition board: like `inertia_three_player_scenario` but parked at
+/// pre-combat main with priority for `active`, so the test advances into
+/// beginning of combat through the production turn pipeline.
+fn inertia_transition_board(active: PlayerId) -> (GameRunner, ObjectId, ObjectId, ObjectId) {
+    let mut scenario = GameScenario::new_n_player(3, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.add_enchantment_from_oracle(P0, "Web of Inertia", WEB_OF_INERTIA_ORACLE);
+    let amy_attacker = scenario.add_creature(P1, "Amy Bear", 2, 2).id();
+    let bob_attacker = scenario.add_creature(P2, "Bob Bear", 2, 2).id();
+    scenario.with_graveyard(P1, &["Spare Card"]);
+    let mut runner = scenario.build();
+    let chandra = add_planeswalker(runner.state_mut(), P0, "Chandra", "Chandra");
+    runner.state_mut().active_player = active;
+    runner.state_mut().priority_player = active;
+    runner.state_mut().waiting_for = WaitingFor::Priority { player: active };
+    (runner, amy_attacker, bob_attacker, chandra)
+}
+
+/// Delivery through a REAL phase transition on the OPPONENT's combat: from
+/// P1's pre-combat main, advance into beginning of combat via the runner (no
+/// injected `PhaseChanged`) and prove the trigger fires — the exile choice
+/// reaches P1 and declining installs the ban. Positive control for the
+/// controller-silence test below.
+#[test]
+fn web_of_inertia_fires_through_real_opponent_combat_transition() {
+    let (mut runner, amy_attacker, _, _) = inertia_transition_board(P1);
+    runner.advance_to_phase(Phase::BeginCombat);
+    assert_eq!(
+        runner.state().phase,
+        Phase::BeginCombat,
+        "reach-guard: the runner must reach beginning of combat, else the \
+         trigger below never fires"
+    );
+    drive_to_optional_prompt(&mut runner);
+    answer_optional(&mut runner, P1, false);
+    assert!(
+        has_attack_ban(&runner),
+        "declining installs the attack prohibition"
+    );
+    assert!(
+        !attack_is_legal(&runner, P1, amy_attacker, AttackTarget::Player(P0)),
+        "CR 508.1c: P1 can't attack P0 after declining"
+    );
+}
+
+/// The opponent qualifier through a REAL phase transition on the
+/// CONTROLLER's combat: from P0's pre-combat main (P0 controls Web), advance
+/// into beginning of combat and prove the trigger stays silent — no exile
+/// prompt while the window is open, no ban afterwards. P1 holds a graveyard
+/// card, so the silence is the qualifier's doing, not an empty graveyard.
+/// REVERT-FAIL (constraint dropped): the trigger fires on P0's combat and the
+/// prompt surfaces during the priority drain.
+#[test]
+fn web_of_inertia_silent_through_real_controller_combat_transition() {
+    let (mut runner, _, _, _) = inertia_transition_board(P0);
+    runner.advance_to_phase(Phase::BeginCombat);
+    assert_eq!(
+        runner.state().phase,
+        Phase::BeginCombat,
+        "reach-guard: the runner must reach beginning of combat, else the \
+         silence below proves nothing"
+    );
+    for _ in 0..12 {
+        assert!(
+            !matches!(
+                runner.state().waiting_for,
+                WaitingFor::OptionalEffectChoice { .. }
+            ),
+            "the trigger must not offer its exile on the controller's combat"
+        );
+        if runner.state().phase != Phase::BeginCombat {
+            break;
+        }
+        if runner.act(GameAction::PassPriority).is_err() {
+            break;
+        }
+    }
+    assert!(
+        !has_attack_ban(&runner),
+        "no prohibition may exist when the trigger never fired"
+    );
+}
+
 /// Row 11b accept-path probe (kept only if the harness yields it without new
 /// machinery): accepting exiles the graveyard card and installs NO ban.
 #[test]
@@ -242,5 +372,164 @@ fn web_of_inertia_accept_exiles_and_installs_no_ban() {
     assert!(
         attack_is_legal(&runner, P1, amy_attacker, AttackTarget::Player(P0)),
         "P1 attacks P0 freely after accepting"
+    );
+}
+
+/// CR 608.2d: with an empty graveyard the exile is impossible, so no offer is
+/// made at all — resolution goes straight to the ban without ever surfacing
+/// an `OptionalEffectChoice`. P1 holds NO graveyard card here.
+/// REVERT-FAIL (feasibility arm removed): the prompt is offered and
+/// `drive_to_idle` fails loudly on it.
+#[test]
+fn web_of_inertia_empty_graveyard_skips_straight_to_ban() {
+    let (mut runner, amy_attacker, _, _) = inertia_three_player_scenario_with_p1_graveyard(&[]);
+    assert!(
+        runner
+            .state()
+            .objects
+            .values()
+            .filter(|o| o.zone == Zone::Graveyard && o.owner == P1)
+            .count()
+            == 0,
+        "reach-guard: P1's graveyard must start empty"
+    );
+    fire_begin_combat(&mut runner);
+    drive_to_idle(&mut runner);
+    assert!(
+        has_attack_ban(&runner),
+        "the ban installs without any offer when the exile is impossible"
+    );
+    assert!(
+        !attack_is_legal(&runner, P1, amy_attacker, AttackTarget::Player(P0)),
+        "CR 508.1c: P1 can't attack P0"
+    );
+}
+
+/// Row 11b, full selection: with TWO eligible cards, accepting reaches the
+/// affected opponent's REAL selection (not the single-card automatic branch).
+/// P1 chooses which card to exile through the runner; the chosen card leaves
+/// the graveyard, the other stays, and no ban installs.
+/// REVERT-FAIL (auto-branch for multi-card): no `EffectZoneChoice` prompt.
+/// REVERT-FAIL (wrong chooser): the prompt names a player other than P1.
+#[test]
+fn web_of_inertia_two_cards_reach_opponent_selection() {
+    let (mut runner, amy_attacker, _, _) =
+        inertia_three_player_scenario_with_p1_graveyard(&["Alpha Card", "Beta Card"]);
+    fire_begin_combat(&mut runner);
+    drive_to_optional_prompt(&mut runner);
+    answer_optional(&mut runner, P1, true);
+    let cards = match runner.state().waiting_for.clone() {
+        WaitingFor::EffectZoneChoice { player, cards, .. } => {
+            assert_eq!(
+                player, P1,
+                "P1 (the affected opponent) must choose the exile"
+            );
+            assert_eq!(
+                cards.len(),
+                2,
+                "both graveyard cards must be offered, got {cards:?}"
+            );
+            cards
+        }
+        other => panic!("expected EffectZoneChoice to P1 after accepting, got {other:?}"),
+    };
+    let chosen = cards[0];
+    runner
+        .act(GameAction::SelectCards {
+            cards: vec![chosen],
+        })
+        .expect("P1's exile selection");
+    assert_eq!(
+        runner.state().objects.get(&chosen).map(|o| o.zone),
+        Some(Zone::Exile),
+        "the chosen card leaves the graveyard"
+    );
+    assert!(
+        runner
+            .state()
+            .objects
+            .values()
+            .any(|o| o.zone == Zone::Graveyard && o.owner == P1),
+        "the unchosen card stays in P1's graveyard"
+    );
+    drive_to_idle(&mut runner);
+    assert!(
+        !has_attack_ban(&runner),
+        "accepting installs no prohibition"
+    );
+    assert!(
+        attack_is_legal(&runner, P1, amy_attacker, AttackTarget::Player(P0)),
+        "P1 attacks P0 freely after accepting"
+    );
+}
+
+/// CR 805.4d — shared opposing combat (2HG): P0+P1 vs P2+P3, Web under P0.
+/// On team B's shared combat the trigger fires ONCE PER OPPONENT — two exile
+/// offers, one per seat, each bound to its own seat. P2 exiles a card (no
+/// ban for P2) while P3 declines (P3 banned) — one seat's exile leaves the
+/// other's restriction intact. Prompt order is read off the prompts
+/// (order-adaptive), never assumed.
+/// REVERT-FAIL (single firing): only one offer surfaces and the second
+/// seat's legality assertion fails.
+#[test]
+fn web_of_inertia_shared_combat_fires_once_per_opponent() {
+    let mut scenario = GameScenario::new_with_format(FormatConfig::two_headed_giant(), 4, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.add_enchantment_from_oracle(P0, "Web of Inertia", WEB_OF_INERTIA_ORACLE);
+    let p2_attacker = scenario.add_creature(P2, "P2 Bear", 2, 2).id();
+    let p3_attacker = scenario.add_creature(P3, "P3 Bear", 2, 2).id();
+    scenario.with_graveyard(P2, &["P2 Spare"]);
+    scenario.with_graveyard(P3, &["P3 Spare"]);
+    let mut runner = scenario.build();
+    // Team B's shared turn: P2 holds the turn as representative.
+    runner.state_mut().active_player = P2;
+    runner.state_mut().priority_player = P2;
+    runner.state_mut().phase = Phase::BeginCombat;
+    runner.state_mut().waiting_for = WaitingFor::Priority { player: P2 };
+
+    fire_begin_combat(&mut runner);
+    let mut prompted = Vec::new();
+    for _ in 0..2 {
+        let seat = drive_to_seat_prompt(&mut runner);
+        assert!(
+            seat == P2 || seat == P3,
+            "each offer addresses an opposing seat, got {seat:?}"
+        );
+        prompted.push(seat);
+        // Answer WITHOUT draining: the sibling firing is still on the stack,
+        // and `answer_optional`'s idle-drain would fail loudly on its offer.
+        runner
+            .act(GameAction::DecideOptionalEffect { accept: seat == P2 })
+            .expect("answering the seat's exile choice");
+    }
+    assert_ne!(
+        prompted[0], prompted[1],
+        "the two opposing seats are offered separately"
+    );
+    drive_to_idle(&mut runner);
+
+    assert!(
+        runner
+            .state()
+            .objects
+            .values()
+            .any(|o| o.name == "P2 Spare" && o.zone == Zone::Exile),
+        "P2's accept exiled their own card"
+    );
+    assert!(
+        runner
+            .state()
+            .objects
+            .values()
+            .any(|o| o.name == "P3 Spare" && o.zone == Zone::Graveyard),
+        "P3's declined card stays in their graveyard"
+    );
+    assert!(
+        attack_is_legal(&runner, P2, p2_attacker, AttackTarget::Player(P0)),
+        "P2 attacks P0 freely after exiling"
+    );
+    assert!(
+        !attack_is_legal(&runner, P3, p3_attacker, AttackTarget::Player(P0)),
+        "P3 is banned after declining — P2's exile lifted nothing for P3"
     );
 }

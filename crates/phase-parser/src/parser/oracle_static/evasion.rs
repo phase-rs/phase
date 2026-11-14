@@ -2994,6 +2994,7 @@ pub(crate) fn parse_crew_contribution_static(text: &str) -> Option<StaticDefinit
 ///   color     := ("non")? ("white"|"blue"|"black"|"red"|"green")
 ///   restriction := "can't attack" | "can't block" | "can't attack or block"
 ///   scope     := " you" | " planeswalkers you control" | " you or planeswalkers you control"
+///              | " <planeswalker-subtype>s you control"
 ///   payer     := "their controller pays " | "its controller pays " | "you pay "
 ///   suffix    := " for each ..." dynamic_x?
 ///   dynamic_x := ", where x is the number of " <filter-phrase>
@@ -3092,6 +3093,13 @@ pub(crate) fn parse_combat_tax_body(input: &str) -> OracleResult<'_, CombatTaxPa
             AttackTargetFilter::Planeswalker { subtype: None },
             tag_no_case::<_, _, OracleError<'_>>(" planeswalkers you control"),
         ),
+        // CR 205.3j: subtype-defended scope ("Jaces you control") sits after
+        // the generic planeswalker arm and before bare " you", mirroring the
+        // rule-static defended table — longest-first, since nom `alt` is
+        // leftmost-match. Routes subtype taxes through the complete parser
+        // (full cost, per-affected scaling, native defended) instead of the
+        // lossy subject-led fallback.
+        super::shared::parse_subtype_planeswalkers_you_control_mixed_case_nom,
         value(
             AttackTargetFilter::Player,
             tag_no_case::<_, _, OracleError<'_>>(" you"),
@@ -3798,6 +3806,7 @@ mod assign_damage_pronoun_tests {
 mod structural_marker_tests {
     use super::*;
     use crate::types::ability::UnlessPayScaling;
+    use crate::types::triggers::AttackTargetFilter;
 
     #[test]
     fn combat_tax_per_affected_marker() {
@@ -3878,17 +3887,62 @@ mod structural_marker_tests {
         }
     }
 
-    /// Row 9 route-A decline: the dedicated combat-tax body has no
-    /// subtype-defended arm, so subtype-defended tax text declines HERE and
-    /// dispatch falls through to the subject-led path — never a silent
-    /// `defended: None` acceptance. REVERT-FAIL (subtype arm added to the
-    /// hardcoded alt): the probe parses instead of declining.
+    /// Row 9 route-A: the dedicated combat-tax body accepts subtype-defended
+    /// scope with the complete tax payload — full cost, per-affected scaling,
+    /// native defended. REVERT-FAIL (arm removed): the probe declines and the
+    /// line falls to the lossy subject-led route (`Flat` + dropped tail).
     #[test]
-    fn combat_tax_body_declines_subtype_defended_scope() {
-        let text = "Creatures can't attack Jaces you control unless their controller pays {2} for each creature they control that's attacking you.";
+    fn combat_tax_body_accepts_subtype_defended_scope_complete() {
+        let text = "Creatures can't attack Jaces you control unless their controller pays {2} for each creature they control that's attacking you";
+        let (rest, tax) = parse_combat_tax_body(text).expect("subtype-defended tax body");
+        assert_eq!(rest, "", "the body must consume the whole line");
+        assert_eq!(tax.base_cost.mana_value(), 2, "got {:?}", tax.base_cost);
+        assert_eq!(
+            tax.scaling,
+            UnlessPayScaling::PerAffectedCreature,
+            "the written for-each tail must scale, got {:?}",
+            tax.scaling
+        );
+        assert_eq!(
+            tax.defended,
+            Some(AttackTargetFilter::Planeswalker {
+                subtype: Some("Jace".to_string())
+            }),
+            "got {:?}",
+            tax.defended
+        );
+    }
+
+    /// Full-payment preservation through the dedicated path: a multi-shard
+    /// colored tax keeps every shard (the lowercasing subject-led fallback
+    /// truncated "{2}{U}" to "{2}").
+    #[test]
+    fn combat_tax_body_preserves_colored_multi_shard_cost() {
+        let text = "Creatures can't attack Jaces you control unless their controller pays {2}{U}";
+        let (rest, tax) = parse_combat_tax_body(text).expect("colored tax body");
+        assert_eq!(rest, "", "the body must consume the whole line");
+        assert_eq!(tax.base_cost.mana_value(), 3, "got {:?}", tax.base_cost);
+        match &tax.base_cost {
+            crate::types::mana::ManaCost::Cost { shards, generic } => {
+                assert_eq!(*generic, 2, "got {:?}", tax.base_cost);
+                assert_eq!(
+                    shards.len(),
+                    1,
+                    "the {{U}} shard must survive, got {shards:?}"
+                );
+            }
+            other => panic!("expected a shard-carrying cost, got {other:?}"),
+        }
+    }
+
+    /// A non-planeswalker subtype still fails the defended gate — never a
+    /// silent `defended: None` acceptance of subtype tax text.
+    #[test]
+    fn combat_tax_body_declines_non_planeswalker_subtype() {
+        let text = "Creatures can't attack Goblins you control unless their controller pays {2}.";
         assert!(
             parse_combat_tax_body(text).is_err(),
-            "subtype-defended tax text must decline the dedicated path"
+            "non-planeswalker subtype tax text must decline the dedicated path"
         );
     }
 
