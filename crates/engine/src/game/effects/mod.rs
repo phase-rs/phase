@@ -18599,6 +18599,7 @@ fn previous_effect_amount_from_events(
     ability: &ResolvedAbility,
     events: &[GameEvent],
 ) -> Option<i32> {
+    use crate::game::arithmetic::{sum_saturating_i32, u32_to_i32_saturating};
     // CR 706.2 + CR 706.4 + CR 608.2c: `roll_die::resolve` is the single
     // authority for the scalar value a follow-up `PreviousEffectAmount` or
     // `EventContextAmount` consumer reads. That avoids re-deriving from an
@@ -18631,16 +18632,18 @@ fn previous_effect_amount_from_events(
     }
 
     let channel = amount_channel(&ability.effect)?;
+    // CR 107.1: every arm folds through the one saturating-sum authority, so an
+    // effect that removes, deals or changes more than `i32::MAX` in total
+    // publishes `i32::MAX` rather than wrapping (per-event amounts are already
+    // saturated `i32`; the events themselves keep their true counts).
     let amount: i32 = match channel.events {
-        AmountEvents::DamageDealt => events
-            .iter()
-            .filter_map(|event| match event {
-                GameEvent::DamageDealt { amount, .. } => {
-                    Some(crate::game::arithmetic::u32_to_i32_saturating(*amount))
-                }
+        AmountEvents::DamageDealt => {
+            let dealt = events.iter().filter_map(|event| match event {
+                GameEvent::DamageDealt { amount, .. } => Some(u32_to_i32_saturating(*amount)),
                 _ => None,
-            })
-            .sum(),
+            });
+            sum_saturating_i32(dealt)
+        }
         AmountEvents::FightExcessOnFoughtCreature => {
             // CR 120.10 + CR 701.14a: "add that much {R}" (The Last Agni Kai)
             // reads the excess dealt to the *fought* creature — the fight's
@@ -18652,7 +18655,7 @@ fn previous_effect_amount_from_events(
                 .ok()
                 .flatten()
                 .map(|(_subject, fought)| fought);
-            events
+            let excess = events
                 .iter()
                 .filter_map(|event| match (event, fought_creature) {
                     (
@@ -18662,36 +18665,32 @@ fn previous_effect_amount_from_events(
                             ..
                         },
                         Some(fought_creature),
-                    ) if *id == fought_creature => {
-                        Some(crate::game::arithmetic::u32_to_i32_saturating(*excess))
-                    }
+                    ) if *id == fought_creature => Some(u32_to_i32_saturating(*excess)),
                     _ => None,
-                })
-                .sum()
+                });
+            sum_saturating_i32(excess)
         }
-        AmountEvents::LifeLost => events
-            .iter()
-            .filter_map(|event| match event {
+        AmountEvents::LifeLost => {
+            let lost = events.iter().filter_map(|event| match event {
                 GameEvent::LifeChanged { amount, .. } if *amount < 0 => Some(-*amount),
                 _ => None,
-            })
-            .sum(),
-        AmountEvents::LifeGained => events
-            .iter()
-            .filter_map(|event| match event {
+            });
+            sum_saturating_i32(lost)
+        }
+        AmountEvents::LifeGained => {
+            let gained = events.iter().filter_map(|event| match event {
                 GameEvent::LifeChanged { amount, .. } if *amount > 0 => Some(*amount),
                 _ => None,
-            })
-            .sum(),
-        AmountEvents::CountersRemoved => events
-            .iter()
-            .filter_map(|event| match event {
-                GameEvent::CounterRemoved { count, .. } => {
-                    Some(crate::game::arithmetic::u32_to_i32_saturating(*count))
-                }
+            });
+            sum_saturating_i32(gained)
+        }
+        AmountEvents::CountersRemoved => {
+            let removed = events.iter().filter_map(|event| match event {
+                GameEvent::CounterRemoved { count, .. } => Some(u32_to_i32_saturating(*count)),
                 _ => None,
-            })
-            .sum(),
+            });
+            sum_saturating_i32(removed)
+        }
     };
 
     // CR 608.2c (#6956): the predecessor tail was `(amount > 0).then_some(amount)`,
@@ -18787,27 +18786,23 @@ fn effect_instruction_completed(ability: &ResolvedAbility, events: &[GameEvent])
 /// and scoped to the fight target, mirroring the `Fight` arm of
 /// `previous_effect_amount_from_events`.
 ///
-/// Kept as a sibling of `previous_effect_amount_from_events` (which stays
-/// byte-unchanged) because the channel is a property of the *downstream*
-/// `PreviousEffectAmount` condition, not known at stamp time: both channels are
-/// stamped eagerly and `evaluate_condition` selects. Returns `None` when no
-/// excess was dealt.
+/// Kept as a sibling of `previous_effect_amount_from_events` because the
+/// channel is a property of the *downstream* `PreviousEffectAmount` condition,
+/// not known at stamp time: both channels are stamped eagerly and
+/// `evaluate_condition` selects. Returns `None` when no excess was dealt.
 fn previous_effect_excess_amount_from_events(
     state: &GameState,
     ability: &ResolvedAbility,
     events: &[GameEvent],
 ) -> Option<i32> {
+    use crate::game::arithmetic::{sum_saturating_i32, u32_to_i32_saturating};
     let excess: i32 = match &ability.effect {
         Effect::DealDamage { .. } | Effect::DamageAll { .. } | Effect::DamageEachPlayer { .. } => {
-            events
-                .iter()
-                .filter_map(|event| match event {
-                    GameEvent::DamageDealt { excess, .. } => {
-                        Some(crate::game::arithmetic::u32_to_i32_saturating(*excess))
-                    }
-                    _ => None,
-                })
-                .sum()
+            let excess = events.iter().filter_map(|event| match event {
+                GameEvent::DamageDealt { excess, .. } => Some(u32_to_i32_saturating(*excess)),
+                _ => None,
+            });
+            sum_saturating_i32(excess)
         }
         Effect::Fight { .. } => {
             // CR 120.10 + CR 701.14a: The Fight excess condition names the
@@ -18822,7 +18817,7 @@ fn previous_effect_excess_amount_from_events(
                 .ok()
                 .flatten()
                 .map(|(_subject, fought)| fought);
-            events
+            let excess = events
                 .iter()
                 .filter_map(|event| match (event, fought_creature) {
                     (
@@ -18832,12 +18827,10 @@ fn previous_effect_excess_amount_from_events(
                             ..
                         },
                         Some(fought_creature),
-                    ) if *id == fought_creature => {
-                        Some(crate::game::arithmetic::u32_to_i32_saturating(*excess))
-                    }
+                    ) if *id == fought_creature => Some(u32_to_i32_saturating(*excess)),
                     _ => None,
-                })
-                .sum()
+                });
+            sum_saturating_i32(excess)
         }
         _ => 0,
     };
@@ -68011,5 +68004,191 @@ mod repeat_admission_tests {
             },
             other => panic!("expected an effect cost: {other:?}"),
         }
+    }
+}
+
+#[cfg(test)]
+mod saturating_amount_tests {
+    use super::{previous_effect_amount_from_events, previous_effect_excess_amount_from_events};
+    use crate::types::ability::{
+        Effect, EffectKind, EffectScope, QuantityExpr, ResolvedAbility, TargetFilter, TargetRef,
+    };
+    use crate::types::counter::CounterType;
+    use crate::types::events::{GameEvent, LifeTotalReading};
+    use crate::types::game_state::GameState;
+    use crate::types::identifiers::ObjectId;
+    use crate::types::player::PlayerId;
+
+    const SOURCE: ObjectId = ObjectId(100);
+    const FOUGHT: ObjectId = ObjectId(32);
+
+    fn ability(effect: Effect, targets: Vec<TargetRef>) -> ResolvedAbility {
+        ResolvedAbility::new(effect, targets, SOURCE, PlayerId(0))
+    }
+
+    fn one() -> QuantityExpr {
+        QuantityExpr::Fixed { value: 1 }
+    }
+
+    fn remove_all_counters() -> ResolvedAbility {
+        ability(
+            Effect::RemoveCounter {
+                counter_type: None,
+                count: QuantityExpr::Fixed { value: -1 },
+                target: TargetFilter::Any,
+                scope: EffectScope::All,
+            },
+            vec![],
+        )
+    }
+
+    fn deal_damage() -> ResolvedAbility {
+        ability(
+            Effect::DealDamage {
+                amount: one(),
+                target: TargetFilter::Any,
+                damage_source: None,
+                excess: None,
+            },
+            vec![],
+        )
+    }
+
+    /// A dual-target fight: the second object target is the fought creature.
+    fn fight() -> ResolvedAbility {
+        ability(
+            Effect::Fight {
+                target: TargetFilter::Any,
+                subject: TargetFilter::Any,
+            },
+            vec![TargetRef::Object(ObjectId(31)), TargetRef::Object(FOUGHT)],
+        )
+    }
+
+    fn removed(count: u32) -> GameEvent {
+        GameEvent::CounterRemoved {
+            object_id: ObjectId(1),
+            counter_type: CounterType::Generic("charge".to_string()),
+            count,
+        }
+    }
+
+    fn damage(amount: u32, excess: u32) -> GameEvent {
+        GameEvent::DamageDealt {
+            source_id: SOURCE,
+            target: TargetRef::Object(FOUGHT),
+            amount,
+            is_combat: false,
+            excess,
+            source_incarnation: None,
+        }
+    }
+
+    fn life(amount: i32) -> GameEvent {
+        GameEvent::LifeChanged {
+            player_id: PlayerId(1),
+            amount,
+            new_total: LifeTotalReading::default(),
+        }
+    }
+
+    fn amount(ability: &ResolvedAbility, events: &[GameEvent]) -> Option<i32> {
+        previous_effect_amount_from_events(&GameState::new_two_player(7), ability, events)
+    }
+
+    fn excess(ability: &ResolvedAbility, events: &[GameEvent]) -> Option<i32> {
+        previous_effect_excess_amount_from_events(&GameState::new_two_player(7), ability, events)
+    }
+
+    /// CR 107.1: two permanents each losing 2^31 counters (two Astral
+    /// Cornucopias under Aether Snap) total more than `i32::MAX`; the counters
+    /// removed this way saturate instead of wrapping.
+    #[test]
+    fn counters_removed_total_saturates() {
+        let snap = remove_all_counters();
+        assert_eq!(
+            amount(&snap, &[removed(1 << 31), removed(1 << 31)]),
+            Some(i32::MAX)
+        );
+        assert_eq!(amount(&snap, &[removed(1 << 31)]), Some(i32::MAX));
+        assert_eq!(amount(&snap, &[removed(5), removed(2)]), Some(7));
+        // The zero policy is unchanged: a completed removal of nothing is 0.
+        let completed = GameEvent::EffectResolved {
+            kind: EffectKind::from(&snap.effect),
+            source_id: SOURCE,
+            subject: None,
+        };
+        assert_eq!(amount(&snap, &[completed]), Some(0));
+    }
+
+    #[test]
+    fn damage_dealt_total_saturates() {
+        let bolt = deal_damage();
+        assert_eq!(
+            amount(&bolt, &[damage(u32::MAX, 0), damage(u32::MAX, 0)]),
+            Some(i32::MAX)
+        );
+        assert_eq!(amount(&bolt, &[damage(3, 0), damage(4, 0)]), Some(7));
+    }
+
+    #[test]
+    fn fight_excess_total_saturates() {
+        let fight = fight();
+        assert_eq!(
+            amount(&fight, &[damage(1, u32::MAX), damage(1, u32::MAX)]),
+            Some(i32::MAX)
+        );
+        assert_eq!(amount(&fight, &[damage(5, 2)]), Some(2));
+    }
+
+    #[test]
+    fn life_gained_total_saturates() {
+        let gain = ability(
+            Effect::GainLife {
+                amount: one(),
+                player: TargetFilter::Controller,
+            },
+            vec![],
+        );
+        assert_eq!(
+            amount(&gain, &[life(i32::MAX), life(i32::MAX)]),
+            Some(i32::MAX)
+        );
+        assert_eq!(amount(&gain, &[life(4)]), Some(4));
+        // A loss in the same window is not part of the gained total.
+        assert_eq!(amount(&gain, &[life(4), life(-3)]), Some(4));
+    }
+
+    /// Only `-i32::MAX` losses: the `i32::MIN` negation is outside this change.
+    #[test]
+    fn life_lost_total_saturates() {
+        let drain = ability(
+            Effect::LoseLife {
+                amount: one(),
+                target: None,
+            },
+            vec![],
+        );
+        assert_eq!(
+            amount(&drain, &[life(-i32::MAX), life(-i32::MAX)]),
+            Some(i32::MAX)
+        );
+        assert_eq!(amount(&drain, &[life(-3), life(2)]), Some(3));
+    }
+
+    #[test]
+    fn excess_totals_saturate() {
+        let bolt = deal_damage();
+        assert_eq!(
+            excess(&bolt, &[damage(1, u32::MAX), damage(1, u32::MAX)]),
+            Some(i32::MAX)
+        );
+        assert_eq!(excess(&bolt, &[damage(4, 1), damage(4, 2)]), Some(3));
+        let fight = fight();
+        assert_eq!(
+            excess(&fight, &[damage(1, u32::MAX), damage(1, u32::MAX)]),
+            Some(i32::MAX)
+        );
+        assert_eq!(excess(&fight, &[damage(5, 2)]), Some(2));
     }
 }

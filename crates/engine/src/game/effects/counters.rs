@@ -2104,7 +2104,8 @@ pub fn resolve_reproduce_event_counters(
 
     // Fold the firing's `CounterAdded` occurrences into a kind→count multiset,
     // preserving first-seen kind order for deterministic placement/event order.
-    let mut reproduced: Vec<(CounterType, u32)> = Vec::new();
+    // `None` marks a kind whose SameNumber sum is not representable as `u32`.
+    let mut reproduced: Vec<(CounterType, Option<u32>)> = Vec::new();
     for event in &state.current_trigger_events {
         let GameEvent::CounterAdded {
             counter_type,
@@ -2128,12 +2129,26 @@ pub fn resolve_reproduce_event_counters(
             Some((_, existing)) => match per_kind_count {
                 // SameNumber sums repeated kinds; PerKind is a flat per-kind
                 // count, so a repeated kind stays at `n` (already recorded).
-                EventCounterReproductionCount::SameNumber => *existing += amount,
+                // CR 107.1 + CR 122.1: counter counts have no rules maximum,
+                // but the engine stores them as `u32`. A sum past `u32::MAX`
+                // could not be placed on any permanent, so the kind's
+                // reproduction is dropped, the same outcome
+                // `apply_counter_addition` gives any addition past `u32::MAX`
+                // (no counters, no `CounterAdded` event). It is never clamped:
+                // clamping would place a capped count. A dropped kind stays
+                // dropped for the rest of the fold.
+                EventCounterReproductionCount::SameNumber => {
+                    *existing = existing.and_then(|sum| sum.checked_add(amount));
+                }
                 EventCounterReproductionCount::PerKind(_) => {}
             },
-            None => reproduced.push((counter_type.clone(), amount)),
+            None => reproduced.push((counter_type.clone(), Some(amount))),
         }
     }
+    let reproduced: Vec<(CounterType, u32)> = reproduced
+        .into_iter()
+        .filter_map(|(kind, amount)| amount.map(|amount| (kind, amount)))
+        .collect();
 
     if reproduced.is_empty() {
         events.push(GameEvent::EffectResolved {
@@ -3622,7 +3637,13 @@ pub fn resolve_remove(
         }));
     }
 
-    let total = remaining.iter().map(|entry| entry.count).sum();
+    // CR 107.1: counter counts have no rules maximum, but the queue total is a
+    // fixed-width `u32` over every queued removal (two permanents with 2^31
+    // counters each already exceed it). It is a diagnostic aggregate, so it
+    // saturates; each queued entry keeps its true count.
+    let total = remaining
+        .iter()
+        .fold(0u32, |total, entry| total.saturating_add(entry.count));
     state.push_counter_removals(PendingCounterRemovalQueue {
         remaining,
         effect_kind: EffectKind::from(&ability.effect),
@@ -10087,5 +10108,181 @@ mod tests {
             order_untyped_removal_kinds(&mut single_finite, EffectScope::Single, 1);
             assert_eq!(&single_finite, read, "single finite keeps {read:?}");
         }
+    }
+}
+
+#[cfg(test)]
+mod same_number_overflow_tests {
+    use super::*;
+    use crate::game::zones::create_object;
+    use crate::types::identifiers::CardId;
+
+    fn charge() -> CounterType {
+        CounterType::Generic("charge".to_string())
+    }
+
+    fn ice() -> CounterType {
+        CounterType::Generic("ice".to_string())
+    }
+
+    fn placed(object_id: ObjectId, counter_type: CounterType, count: u32) -> GameEvent {
+        GameEvent::CounterAdded {
+            object_id,
+            counter_type,
+            count,
+            actor: PlayerId(1),
+        }
+    }
+
+    /// A state with the placement's recipient and the reproducing creature on
+    /// the battlefield, and `firing` as the trigger's event window.
+    fn reproduce(
+        per_kind_count: EventCounterReproductionCount,
+        firing: impl Fn(ObjectId) -> Vec<GameEvent>,
+    ) -> (GameState, ObjectId, Vec<GameEvent>) {
+        let mut state = GameState::new_two_player(7);
+        let recipient = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Their Bear".to_string(),
+            Zone::Battlefield,
+        );
+        let plagiarist = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Bold Plagiarist".to_string(),
+            Zone::Battlefield,
+        );
+        state.current_trigger_events = firing(recipient);
+        let ability = ResolvedAbility::new(
+            Effect::ReproduceEventCounters {
+                target: TargetFilter::Any,
+                per_kind_count,
+            },
+            vec![TargetRef::Object(plagiarist)],
+            plagiarist,
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve_reproduce_event_counters(&mut state, &ability, &mut events).unwrap();
+        (state, plagiarist, events)
+    }
+
+    fn count_on(state: &GameState, id: ObjectId, kind: &CounterType) -> u32 {
+        state.objects[&id].counters.get(kind).copied().unwrap_or(0)
+    }
+
+    fn added(events: &[GameEvent], kind: &CounterType) -> Vec<u32> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                GameEvent::CounterAdded {
+                    counter_type,
+                    count,
+                    ..
+                } if counter_type == kind => Some(*count),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Probe 9, the reference outcome: `apply_counter_addition` drops an
+    /// addition past `u32::MAX` (no counters, no `CounterAdded` event).
+    #[test]
+    fn an_addition_past_u32_max_is_dropped_without_an_event() {
+        let mut state = GameState::new_two_player(7);
+        let id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Full Relic".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&id)
+            .unwrap()
+            .counters
+            .insert(charge(), u32::MAX);
+        let mut events = Vec::new();
+        add_counter_with_replacement(&mut state, PlayerId(0), id, charge(), 1, &mut events);
+        assert_eq!(count_on(&state, id, &charge()), u32::MAX);
+        assert!(added(&events, &charge()).is_empty(), "{events:?}");
+    }
+
+    /// CR 122.1 + CR 107.1: "the same number and kind of counters" over two
+    /// same-kind placements of 2^31 sums past `u32::MAX`. That kind is dropped,
+    /// the outcome the add path gives any addition past `u32::MAX`; the other
+    /// kind in the same firing is still reproduced.
+    #[test]
+    fn an_unrepresentable_same_number_sum_drops_only_that_kind() {
+        let (state, plagiarist, events) =
+            reproduce(EventCounterReproductionCount::SameNumber, |recipient| {
+                vec![
+                    placed(recipient, charge(), 1 << 31),
+                    placed(recipient, charge(), 1 << 31),
+                    placed(recipient, ice(), 3),
+                ]
+            });
+        // Reach guard: the resolver ran and placed the representable kind.
+        assert_eq!(count_on(&state, plagiarist, &ice()), 3);
+        assert_eq!(added(&events, &ice()), vec![3]);
+        assert_eq!(count_on(&state, plagiarist, &charge()), 0);
+        assert!(added(&events, &charge()).is_empty(), "{events:?}");
+    }
+
+    /// A later placement of a dropped kind does not bring it back.
+    #[test]
+    fn a_dropped_same_number_kind_stays_dropped() {
+        let (state, plagiarist, events) =
+            reproduce(EventCounterReproductionCount::SameNumber, |recipient| {
+                vec![
+                    placed(recipient, charge(), 1 << 31),
+                    placed(recipient, charge(), 1 << 31),
+                    placed(recipient, charge(), 5),
+                    placed(recipient, ice(), 3),
+                ]
+            });
+        assert_eq!(count_on(&state, plagiarist, &ice()), 3);
+        assert_eq!(count_on(&state, plagiarist, &charge()), 0);
+        assert!(added(&events, &charge()).is_empty(), "{events:?}");
+    }
+
+    /// No cap below `u32::MAX`: one placement of 2^31, and a same-kind sum that
+    /// lands exactly on `u32::MAX`, are reproduced in full.
+    #[test]
+    fn a_representable_same_number_sum_is_reproduced_in_full() {
+        let (state, plagiarist, _) =
+            reproduce(EventCounterReproductionCount::SameNumber, |recipient| {
+                vec![placed(recipient, charge(), 1 << 31)]
+            });
+        assert_eq!(count_on(&state, plagiarist, &charge()), 1 << 31);
+
+        let (state, plagiarist, _) =
+            reproduce(EventCounterReproductionCount::SameNumber, |recipient| {
+                vec![
+                    placed(recipient, charge(), 1 << 31),
+                    placed(recipient, charge(), (1 << 31) - 1),
+                ]
+            });
+        assert_eq!(count_on(&state, plagiarist, &charge()), u32::MAX);
+    }
+
+    /// "One of each of those kinds" ignores magnitude, so the same firing
+    /// reproduces one counter of each kind.
+    #[test]
+    fn per_kind_reproduction_ignores_the_large_magnitudes() {
+        let (state, plagiarist, _) =
+            reproduce(EventCounterReproductionCount::PerKind(1), |recipient| {
+                vec![
+                    placed(recipient, charge(), 1 << 31),
+                    placed(recipient, charge(), 1 << 31),
+                    placed(recipient, ice(), 3),
+                ]
+            });
+        assert_eq!(count_on(&state, plagiarist, &charge()), 1);
+        assert_eq!(count_on(&state, plagiarist, &ice()), 1);
     }
 }

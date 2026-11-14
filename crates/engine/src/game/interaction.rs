@@ -8108,7 +8108,9 @@ fn materialize_counter_response(
             selected: assignments.len().min(u32::MAX as usize) as u32,
             minimum: projection.total,
             maximum: Some(projection.total),
-            aggregate: Some(total as i32),
+            // The aggregate is an `i32` progress value; a `u32` counter total
+            // past `i32::MAX` saturates instead of wrapping negative.
+            aggregate: Some(crate::game::arithmetic::u32_to_i32_saturating(total)),
             confirmable: true,
         },
     ))
@@ -12573,5 +12575,60 @@ mod tests {
             }),
             None
         );
+    }
+}
+
+#[cfg(test)]
+mod counter_cost_progress_tests {
+    use super::*;
+
+    fn distribution(
+        amounts: &[u32],
+    ) -> (
+        InteractionId,
+        CounterDistributionProjection,
+        InteractionResponse,
+    ) {
+        let interaction_id = InteractionId("t.0.0".to_string());
+        let candidates = amounts
+            .iter()
+            .enumerate()
+            .map(|(index, amount)| CounterAssignmentCandidate {
+                object_id: ObjectId(40 + index as u64),
+                counter_type: CounterType::Plus1Plus1,
+                available: *amount,
+            })
+            .collect();
+        let assignments = amounts
+            .iter()
+            .enumerate()
+            .map(|(index, amount)| AmountAssignment {
+                choice_id: interaction_choice_id(&interaction_id, 'a', index),
+                amount: *amount,
+            })
+            .collect();
+        let projection = CounterDistributionProjection {
+            candidates,
+            total: amounts.iter().sum(),
+        };
+        (
+            interaction_id,
+            projection,
+            InteractionResponse::AssignAmounts { assignments },
+        )
+    }
+
+    /// A remove-counter cost total above `i32::MAX` reports a saturated
+    /// aggregate, never a wrapped negative one.
+    #[test]
+    fn counter_cost_progress_aggregate_saturates() {
+        let (id, projection, response) = distribution(&[1 << 30, 1 << 30]);
+        let (_, progress) = materialize_counter_response(&id, &projection, &response).unwrap();
+        assert_eq!(progress.minimum, 1 << 31);
+        assert_eq!(progress.aggregate, Some(i32::MAX));
+
+        let (id, projection, response) = distribution(&[3, 1]);
+        let (_, progress) = materialize_counter_response(&id, &projection, &response).unwrap();
+        assert_eq!(progress.aggregate, Some(4));
     }
 }

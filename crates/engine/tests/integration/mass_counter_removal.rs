@@ -20,6 +20,7 @@ use engine::types::game_state::WaitingFor;
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
+use engine::types::player::{PlayerCounterKind, PlayerId};
 use engine::types::zones::Zone;
 
 const AETHER_SNAP: &str = "Remove all counters from all permanents and exile all tokens.";
@@ -626,4 +627,235 @@ fn thrull_parasite_finite_removal_removes_exactly_one_counter() {
         (plus1, ice_left) == (1, 0) || (plus1, ice_left) == (0, 1),
         "the survivor is one of the two kinds: +1/+1={plus1}, ice={ice_left}"
     );
+}
+
+const VOREL_OF_THE_HULL_CLADE: &str =
+    "{G}{U}, {T}: Double the number of each kind of counter on target artifact, creature, or land.";
+const ASTRAL_CORNUCOPIA: &str = "This artifact enters with X charge counters on it.\n\
+{T}: Choose a color. Add one mana of that color for each charge counter on this artifact.";
+const FINAL_ACT: &str = "Choose one or more \u{2014}\n\
+\u{2022} Destroy all creatures.\n\
+\u{2022} Destroy all planeswalkers.\n\
+\u{2022} Destroy all battles.\n\
+\u{2022} Exile all graveyards.\n\
+\u{2022} Each opponent loses all counters.";
+const PLATINUM_ANGEL: &str =
+    "Flying\nYou can't lose the game and your opponents can't win the game.";
+
+/// A board with Vorel of the Hull Clade and `cornucopias` Astral Cornucopias,
+/// each holding one charge counter, plus Aether Snap in hand at {0}.
+///
+/// Scaffolding (not under test): the single charge counter stands in for
+/// casting a Cornucopia with X = 1, and `double_with_vorel` untaps Vorel and
+/// refills {G}{U} between activations. Every doubling is a real activation.
+fn cornucopia_board(cornucopias: usize) -> (GameRunner, ObjectId, Vec<ObjectId>, ObjectId) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let vorel = scenario
+        .add_creature_from_oracle(P0, "Vorel of the Hull Clade", 1, 4, VOREL_OF_THE_HULL_CLADE)
+        .id();
+    let relics: Vec<ObjectId> = (0..cornucopias)
+        .map(|_| {
+            scenario
+                .add_artifact_from_oracle(P0, "Astral Cornucopia", ASTRAL_CORNUCOPIA)
+                .id()
+        })
+        .collect();
+    for relic in &relics {
+        scenario.with_counter(*relic, charge(), 1);
+    }
+    let snap = scenario
+        .add_spell_to_hand_from_oracle(P0, "Aether Snap", false, AETHER_SNAP)
+        .with_mana_cost(ManaCost::generic(0))
+        .id();
+    (scenario.build(), vorel, relics, snap)
+}
+
+/// CR 701.10e: each Vorel activation gives the target as many of each kind of
+/// counter as it already has. Asserts the exact count after every doubling, so
+/// a silently dropped addition is caught at the step where it happens.
+fn double_with_vorel(runner: &mut GameRunner, vorel: ObjectId, target: ObjectId, doublings: u32) {
+    for k in 1..=doublings {
+        {
+            let state = runner.state_mut();
+            state.objects.get_mut(&vorel).unwrap().tapped = false;
+            for mana in [ManaType::Green, ManaType::Blue] {
+                let _ = state.add_mana_to_pool(P0, ManaUnit::new(mana, ObjectId(0), false, vec![]));
+            }
+        }
+        runner.activate(vorel, 0).target_object(target).resolve();
+        assert_eq!(
+            count_of(runner, target, &charge()),
+            1 << k,
+            "after doubling {k}"
+        );
+    }
+}
+
+/// F2 witness (PR #10814): two Astral Cornucopias doubled to 2^31 charge
+/// counters each by 31 real Vorel activations apiece, then Aether Snap. The
+/// removal total (2^32) does not fit `u32` and the counters removed this way
+/// do not fit `i32`; neither aggregate may wrap or panic. Both Cornucopias end
+/// with no counters and each removal event carries its true count.
+#[test]
+fn aether_snap_clears_two_cornucopias_at_two_to_the_thirty_one() {
+    let (mut runner, vorel, relics, snap) = cornucopia_board(2);
+    for relic in &relics {
+        double_with_vorel(&mut runner, vorel, *relic, 31);
+    }
+    for relic in &relics {
+        assert_eq!(count_of(&runner, *relic, &charge()), 2_147_483_648);
+    }
+
+    let outcome = runner.cast(snap).resolve();
+    assert!(
+        matches!(outcome.final_waiting_for(), WaitingFor::Priority { .. }),
+        "the spell resolves: {:?}",
+        outcome.final_waiting_for()
+    );
+    let mut removed = removals(outcome.events());
+    removed.sort_by_key(|(id, _, _)| *id);
+    let mut expected: Vec<_> = relics
+        .iter()
+        .map(|id| (*id, charge(), 1u32 << 31))
+        .collect();
+    expected.sort_by_key(|(id, _, _)| *id);
+    assert_eq!(removed, expected, "true counts, one event per Cornucopia");
+    for relic in &relics {
+        assert_eq!(count_of(&runner, *relic, &charge()), 0);
+    }
+}
+
+/// Control for the witness: one Cornucopia at 2^31 fits every aggregate.
+#[test]
+fn aether_snap_clears_one_cornucopia_at_two_to_the_thirty_one() {
+    let (mut runner, vorel, relics, snap) = cornucopia_board(1);
+    double_with_vorel(&mut runner, vorel, relics[0], 31);
+
+    let outcome = runner.cast(snap).resolve();
+    assert!(matches!(
+        outcome.final_waiting_for(),
+        WaitingFor::Priority { .. }
+    ));
+    assert_eq!(
+        removals(outcome.events()),
+        vec![(relics[0], charge(), 1u32 << 31)]
+    );
+    assert_eq!(count_of(&runner, relics[0], &charge()), 0);
+}
+
+/// Boundary seed (scaffolding: `u32::MAX` charge counters placed directly):
+/// one permanent's removals total `u32::MAX + 1`.
+#[test]
+fn aether_snap_clears_a_full_counter_stack_plus_one() {
+    let (mut runner, _vorel, relics, snap) = cornucopia_board(1);
+    {
+        let counters = &mut runner
+            .state_mut()
+            .objects
+            .get_mut(&relics[0])
+            .unwrap()
+            .counters;
+        counters.insert(charge(), u32::MAX);
+        counters.insert(ice(), 1);
+    }
+
+    let outcome = runner.cast(snap).resolve();
+    assert!(matches!(
+        outcome.final_waiting_for(),
+        WaitingFor::Priority { .. }
+    ));
+    let mut removed = removals(outcome.events());
+    removed.sort_by_key(|(_, _, count)| *count);
+    assert_eq!(
+        removed,
+        vec![(relics[0], ice(), 1), (relics[0], charge(), u32::MAX)]
+    );
+    assert!(runner.state().objects[&relics[0]].counters.is_empty());
+}
+
+/// `PlayerCounterChanged` deltas for `player`'s `kind`, in emission order.
+fn player_counter_deltas(
+    events: &[GameEvent],
+    player: PlayerId,
+    kind: PlayerCounterKind,
+) -> Vec<i32> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            GameEvent::PlayerCounterChanged {
+                player: changed,
+                counter_kind,
+                delta,
+            } if *changed == player && *counter_kind == kind => Some(*delta),
+            _ => None,
+        })
+        .collect()
+}
+
+/// CR 122.1: Final Act's "Each opponent loses all counters" removes player
+/// counter kinds holding more than `i32::MAX` counters. Poison counters past
+/// ten exist only under a can't-lose effect (CR 104.3d), so the opponent
+/// controls Platinum Angel and "Destroy all creatures" is not chosen.
+/// Scaffolding: the large counts are placed directly (a real add is capped at
+/// `i32::MAX` per edit and accumulates across adds).
+#[test]
+fn final_act_removes_player_counter_kinds_above_i32_max() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.add_creature_from_oracle(P1, "Platinum Angel", 4, 4, PLATINUM_ANGEL);
+    let final_act = scenario
+        .add_spell_to_hand_from_oracle(P0, "Final Act", false, FINAL_ACT)
+        .with_mana_cost(ManaCost::generic(0))
+        .id();
+    let mut runner = scenario.build();
+    {
+        let state = runner.state_mut();
+        let opponent = &mut state.players[1];
+        opponent.poison_counters = 1 << 31;
+        opponent
+            .player_counters
+            .insert(PlayerCounterKind::Experience, 3_000_000_000);
+        let caster = &mut state.players[0];
+        caster.poison_counters = 1;
+        caster
+            .player_counters
+            .insert(PlayerCounterKind::Experience, 2);
+    }
+    // Reach guard: Platinum Angel keeps the poisoned opponent in the game.
+    engine::game::sba::check_state_based_actions(runner.state_mut(), &mut Vec::new());
+    assert!(!runner.state().players[1].is_eliminated);
+
+    let outcome = runner.cast(final_act).modes(&[4]).resolve();
+    assert!(
+        matches!(outcome.final_waiting_for(), WaitingFor::Priority { .. }),
+        "the spell resolves: {:?}",
+        outcome.final_waiting_for()
+    );
+
+    let opponent = &runner.state().players[1];
+    assert!(!opponent.is_eliminated);
+    assert_eq!(opponent.poison_counters, 0);
+    assert!(
+        opponent.player_counters.is_empty(),
+        "{:?}",
+        opponent.player_counters
+    );
+    let events = outcome.events();
+    assert_eq!(
+        player_counter_deltas(events, P1, PlayerCounterKind::Experience),
+        vec![-i32::MAX, -852_516_353]
+    );
+    assert_eq!(
+        player_counter_deltas(events, P1, PlayerCounterKind::Poison),
+        vec![-i32::MAX, -1]
+    );
+    // Final Act affects only opponents.
+    let caster = &runner.state().players[0];
+    assert_eq!(caster.poison_counters, 1);
+    assert_eq!(
+        caster.player_counters.get(&PlayerCounterKind::Experience),
+        Some(&2)
+    );
+    assert!(player_counter_deltas(events, P0, PlayerCounterKind::Experience).is_empty());
 }
