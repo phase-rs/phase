@@ -1414,6 +1414,11 @@ export class P2PDraftHost {
       // abandoned. Retained, it would sit in `pendingDraftSnapshot` and be
       // flushed AHEAD of newer state by the next persist, writing the
       // abandoned draft to IndexedDB where a reload would restore it.
+      //
+      // Seed the backup counter so this first snapshot also uploads: the host
+      // claims the server backup row before any guest can observe the started
+      // draft, instead of waiting BACKUP_INTERVAL_PICKS picks.
+      this.picksSinceLastBackup = P2PDraftHost.BACKUP_INTERVAL_PICKS;
       await this.persistSessionStrict({ retainFailedDraftSnapshot: false });
     } catch (err) {
       this.draftStarted = false;
@@ -1427,11 +1432,6 @@ export class P2PDraftHost {
       this.pendingDraftSnapshot = null;
       throw err;
     }
-
-    // Force the first persisted state to upload immediately so the host
-    // claims the backup row before any guest can observe the started draft.
-    this.picksSinceLastBackup = P2PDraftHost.BACKUP_INTERVAL_PICKS;
-    await this.persistSessionStrict();
 
     // Send each guest their filtered view
     for (const [seat, session] of this.guestSessions) {
