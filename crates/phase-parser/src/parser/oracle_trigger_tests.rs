@@ -28895,6 +28895,51 @@ fn trigger_active_milled_an_opponent_scopes_controller() {
 }
 
 #[test]
+fn trigger_active_milled_intervening_if_it_binds_source_not_milled_card() {
+    // Issue #8003 — Infesting Radroach, verbatim Oracle. CR 603.4 + CR 608.2k:
+    // "it" names the intervening-if's subject (this creature, in the graveyard),
+    // not the milled card the `Milled` event is about. `TriggeringSource` would
+    // resolve through `extract_source_from_event` to the milled card.
+    let oracle = "Flying\n\
+            This creature can't block.\n\
+            Whenever this creature deals combat damage to a player, they get that many rad counters.\n\
+            Whenever an opponent mills a nonland card, if this creature is in your graveyard, you may return it to your hand.";
+    let parsed = parse_oracle_text(
+        oracle,
+        "Infesting Radroach",
+        &[],
+        &["Creature".to_string()],
+        &["Insect".to_string(), "Mutant".to_string()],
+    );
+    let milled = parsed
+        .triggers
+        .iter()
+        .find(|t| t.mode == TriggerMode::Milled)
+        .expect("the mill trigger must parse to TriggerMode::Milled");
+    assert_eq!(
+        milled.condition,
+        Some(TriggerCondition::SourceInZone {
+            zone: Zone::Graveyard
+        })
+    );
+    assert!(milled.trigger_zones.contains(&Zone::Graveyard));
+    let execute = milled.execute.as_ref().expect("mill trigger has a body");
+    assert!(execute.optional, "\"you may\" makes the return optional");
+    assert!(
+        matches!(
+            execute.effect.as_ref(),
+            Effect::Bounce {
+                target: TargetFilter::SelfRef,
+                destination: None,
+                ..
+            }
+        ),
+        "\"return it to your hand\" must bounce the source, got {:?}",
+        execute.effect
+    );
+}
+
+#[test]
 fn trigger_active_milled_one_or_more() {
     // Zellix shape: "Whenever a player mills one or more creature cards, …"
     let def = parse_trigger_line(
