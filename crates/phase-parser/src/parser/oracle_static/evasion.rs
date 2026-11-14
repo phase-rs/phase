@@ -2763,6 +2763,26 @@ pub(crate) fn parse_subject_combat_rule_static(text: &str) -> Option<StaticDefin
         // `CantAttack`/`CantBlock`/`CantAttackOrBlock`; see
         // `combat::combat_tax_mode_matches`), so the gate defers those to an
         // honest gap instead of a condition no player can ever satisfy.
+        // CR 508.1c + CR 118.12a: scope the combat-tax payload to the parsed
+        // defended scope. The generic trailing-`unless` route always builds
+        // `UnlessPay { defended: None }`, while this production's own predicate
+        // already parsed the defended scope into `def.attack_defended` via the
+        // shared combinator. Without this stamp the runtime tax
+        // (`compute_combat_tax`) reads only `UnlessPay.defended` and taxes every
+        // attack by the affected creatures — the parsed scope would live only on
+        // `attack_defended` and the U1 matcher arm would never fire on this path.
+        let unless_cond = match unless_cond {
+            StaticCondition::UnlessPay {
+                cost,
+                scaling,
+                defended: None,
+            } if def.attack_defended.is_some() => StaticCondition::UnlessPay {
+                cost,
+                scaling,
+                defended: def.attack_defended.clone(),
+            },
+            other => other,
+        };
         let gap_text = tp.split_around(" unless ").map_or_else(
             || trailing.to_string(),
             |(_, after)| after.original.trim().trim_end_matches('.').to_string(),
@@ -2974,6 +2994,7 @@ pub(crate) fn parse_crew_contribution_static(text: &str) -> Option<StaticDefinit
 ///   color     := ("non")? ("white"|"blue"|"black"|"red"|"green")
 ///   restriction := "can't attack" | "can't block" | "can't attack or block"
 ///   scope     := " you" | " planeswalkers you control" | " you or planeswalkers you control"
+///              | " <planeswalker-subtype>s you control"
 ///   payer     := "their controller pays " | "its controller pays " | "you pay "
 ///   suffix    := " for each ..." dynamic_x?
 ///   dynamic_x := ", where x is the number of " <filter-phrase>
@@ -3069,9 +3090,16 @@ pub(crate) fn parse_combat_tax_body(input: &str) -> OracleResult<'_, CombatTaxPa
             tag_no_case::<_, _, OracleError<'_>>(" you or planeswalkers you control"),
         ),
         value(
-            AttackTargetFilter::Planeswalker,
+            AttackTargetFilter::Planeswalker { subtype: None },
             tag_no_case::<_, _, OracleError<'_>>(" planeswalkers you control"),
         ),
+        // CR 205.3j: subtype-defended scope ("Jaces you control") sits after
+        // the generic planeswalker arm and before bare " you", mirroring the
+        // rule-static defended table — longest-first, since nom `alt` is
+        // leftmost-match. Routes subtype taxes through the complete parser
+        // (full cost, per-affected scaling, native defended) instead of the
+        // lossy subject-led fallback.
+        super::shared::parse_subtype_planeswalkers_you_control_mixed_case_nom,
         value(
             AttackTargetFilter::Player,
             tag_no_case::<_, _, OracleError<'_>>(" you"),
@@ -3778,6 +3806,7 @@ mod assign_damage_pronoun_tests {
 mod structural_marker_tests {
     use super::*;
     use crate::types::ability::UnlessPayScaling;
+    use crate::types::triggers::AttackTargetFilter;
 
     #[test]
     fn combat_tax_per_affected_marker() {
@@ -3856,6 +3885,65 @@ mod structural_marker_tests {
                 "{tail:?}"
             );
         }
+    }
+
+    /// Row 9 route-A: the dedicated combat-tax body accepts subtype-defended
+    /// scope with the complete tax payload — full cost, per-affected scaling,
+    /// native defended. REVERT-FAIL (arm removed): the probe declines and the
+    /// line falls to the lossy subject-led route (`Flat` + dropped tail).
+    #[test]
+    fn combat_tax_body_accepts_subtype_defended_scope_complete() {
+        let text = "Creatures can't attack Jaces you control unless their controller pays {2} for each creature they control that's attacking you";
+        let (rest, tax) = parse_combat_tax_body(text).expect("subtype-defended tax body");
+        assert_eq!(rest, "", "the body must consume the whole line");
+        assert_eq!(tax.base_cost.mana_value(), 2, "got {:?}", tax.base_cost);
+        assert_eq!(
+            tax.scaling,
+            UnlessPayScaling::PerAffectedCreature,
+            "the written for-each tail must scale, got {:?}",
+            tax.scaling
+        );
+        assert_eq!(
+            tax.defended,
+            Some(AttackTargetFilter::Planeswalker {
+                subtype: Some("Jace".to_string())
+            }),
+            "got {:?}",
+            tax.defended
+        );
+    }
+
+    /// Full-payment preservation through the dedicated path: a multi-shard
+    /// colored tax keeps every shard (the lowercasing subject-led fallback
+    /// truncated "{2}{U}" to "{2}").
+    #[test]
+    fn combat_tax_body_preserves_colored_multi_shard_cost() {
+        let text = "Creatures can't attack Jaces you control unless their controller pays {2}{U}";
+        let (rest, tax) = parse_combat_tax_body(text).expect("colored tax body");
+        assert_eq!(rest, "", "the body must consume the whole line");
+        assert_eq!(tax.base_cost.mana_value(), 3, "got {:?}", tax.base_cost);
+        match &tax.base_cost {
+            crate::types::mana::ManaCost::Cost { shards, generic } => {
+                assert_eq!(*generic, 2, "got {:?}", tax.base_cost);
+                assert_eq!(
+                    shards.len(),
+                    1,
+                    "the {{U}} shard must survive, got {shards:?}"
+                );
+            }
+            other => panic!("expected a shard-carrying cost, got {other:?}"),
+        }
+    }
+
+    /// A non-planeswalker subtype still fails the defended gate — never a
+    /// silent `defended: None` acceptance of subtype tax text.
+    #[test]
+    fn combat_tax_body_declines_non_planeswalker_subtype() {
+        let text = "Creatures can't attack Goblins you control unless their controller pays {2}.";
+        assert!(
+            parse_combat_tax_body(text).is_err(),
+            "non-planeswalker subtype tax text must decline the dedicated path"
+        );
     }
 
     /// The combat-tax body reads original-case text, so a capitalized controller

@@ -508,6 +508,12 @@ pub(crate) fn keys_from_event(event: &GameEvent, state: &GameState) -> Keys {
         | GameEvent::PhysicalContestResolved { .. } => {}
         GameEvent::TurnStarted { .. } => push(TriggerEventKey::TurnStarted),
         GameEvent::PhaseChanged { phase } => push(TriggerEventKey::BeginningOfPhase(*phase)),
+        // CR 805.4d: a fanned occurrence indexes under its phase like the
+        // production event (synthetic occurrences never enter the batch, but
+        // the key must exist if one is ever indexed).
+        GameEvent::PhaseChangedForPlayer { phase, .. } => {
+            push(TriggerEventKey::BeginningOfPhase(*phase))
+        }
         GameEvent::PriorityPassed { .. } => {}
         GameEvent::StickerPlaced { .. } => {}
         GameEvent::CreatureExerted { .. } => push(TriggerEventKey::Exerted),

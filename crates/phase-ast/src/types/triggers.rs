@@ -179,10 +179,29 @@ pub enum TriggerEventKey {
 }
 
 /// CR 508.3a: Filter for attack target type in "attacks [a target]" triggers.
+///
+/// Decoded through a normalizing `Deserialize` (`remote = "Self"`): the legacy
+/// unit form `"Planeswalker"` (written before the variant carried a `subtype`;
+/// it always meant every planeswalker the protected player controls) still
+/// loads as `Planeswalker { subtype: None }`. This is a deliberate, narrow
+/// departure from the strict card-data / transport decode policy in
+/// `game_state.rs` (obsolete tags stay rejected): the tag only ever had one
+/// meaning, so accepting it loses nothing. Precedent: the `TriggerMode` shim
+/// below and the `WardCost` shim in `keywords.rs`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(remote = "Self")]
 pub enum AttackTargetFilter {
     Player,
-    Planeswalker,
+    /// CR 508.1c: "can't attack planeswalkers you control" — attacks against
+    /// planeswalkers the protected player controls. Controller-anchored (the
+    /// matcher compares against `source_controller`, never `source_owner`).
+    /// CR 205.3j: `subtype: Some(_)` narrows to planeswalkers bearing the
+    /// named subtype (a planeswalker subtype, canonicalized by
+    /// `parse_subtype`), e.g. "can't attack Jaces you control"; `None`
+    /// defends all of them.
+    Planeswalker {
+        subtype: Option<String>,
+    },
     PlayerOrPlaneswalker,
     Battle,
     /// CR 506.2 + CR 508.1a: "can't attack its owner" — the permanent may not
@@ -227,6 +246,54 @@ pub enum AttackTargetFilter {
     /// restriction, so the runtime matcher needs that object's id, not the
     /// controller the `you`-scoped variants resolve.
     PlayerAttackedBySourceThisTurn,
+}
+
+impl Serialize for AttackTargetFilter {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        AttackTargetFilter::serialize(self, serializer)
+    }
+}
+
+/// Non-buffering visitor behind `AttackTargetFilter`'s normalizing
+/// `Deserialize`. Routes every current-shape payload to the derived
+/// implementation and maps the one legacy unit tag (`"Planeswalker"`) onto
+/// its only historical meaning. Uses `deserialize_any`, so it needs a
+/// self-describing format (serde_json, serde-wasm-bindgen — the only ones in
+/// use); bincode / postcard cannot decode an `AttackTargetFilter`.
+struct AttackTargetFilterVisitor;
+
+impl<'de> serde::de::Visitor<'de> for AttackTargetFilterVisitor {
+    type Value = AttackTargetFilter;
+
+    fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("an AttackTargetFilter (variant name string or externally tagged map)")
+    }
+
+    fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<AttackTargetFilter, E> {
+        use serde::de::IntoDeserializer;
+        match v {
+            // CR 508.1c: before the `subtype` axis existed, the unit
+            // `Planeswalker` filter was only ever every planeswalker the
+            // protected player controls.
+            "Planeswalker" => Ok(AttackTargetFilter::Planeswalker { subtype: None }),
+            other => {
+                AttackTargetFilter::deserialize(IntoDeserializer::<E>::into_deserializer(other))
+            }
+        }
+    }
+
+    fn visit_map<A: serde::de::MapAccess<'de>>(
+        self,
+        map: A,
+    ) -> Result<AttackTargetFilter, A::Error> {
+        AttackTargetFilter::deserialize(serde::de::value::MapAccessDeserializer::new(map))
+    }
+}
+
+impl<'de> Deserialize<'de> for AttackTargetFilter {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        deserializer.deserialize_any(AttackTargetFilterVisitor)
+    }
 }
 
 /// CR 701.31 + CR 701.31d: which role the trigger's source must occupy in the
@@ -1403,5 +1470,52 @@ mod tests {
             known_count >= 147,
             "Expected 147+ known trigger modes, got {known_count}"
         );
+    }
+
+    /// CR 508.1c: the subtype axis round-trips through serde in the
+    /// struct-variant form, and the legacy unit tag written before the axis
+    /// existed still decodes as its only historical meaning (every
+    /// planeswalker the protected player controls). Committed card-data and
+    /// integration fixtures may hold the legacy form, so removing the
+    /// `Deserialize` shim fails their consumers.
+    #[test]
+    fn planeswalker_subtype_round_trips_and_legacy_unit_decodes_as_unscoped() {
+        for (subtype, json) in [
+            (None, r#"{"Planeswalker":{"subtype":null}}"#),
+            (
+                Some("Jace".to_string()),
+                r#"{"Planeswalker":{"subtype":"Jace"}}"#,
+            ),
+        ] {
+            let filter = AttackTargetFilter::Planeswalker { subtype };
+            assert_eq!(serde_json::to_string(&filter).unwrap(), json);
+            assert_eq!(
+                serde_json::from_str::<AttackTargetFilter>(json).unwrap(),
+                filter
+            );
+        }
+
+        // Legacy unit form -> unscoped (the shim under test).
+        assert_eq!(
+            serde_json::from_str::<AttackTargetFilter>(r#""Planeswalker""#).unwrap(),
+            AttackTargetFilter::Planeswalker { subtype: None }
+        );
+        // The legacy tag also decodes when nested, the shape fixtures hold.
+        let nested: Vec<AttackTargetFilter> = serde_json::from_str(
+            r#"["Planeswalker",{"Planeswalker":{"subtype":"Jace"}},"Player"]"#,
+        )
+        .unwrap();
+        assert_eq!(
+            nested,
+            vec![
+                AttackTargetFilter::Planeswalker { subtype: None },
+                AttackTargetFilter::Planeswalker {
+                    subtype: Some("Jace".to_string())
+                },
+                AttackTargetFilter::Player,
+            ]
+        );
+        // Unknown tags still fail: the shim maps exactly one legacy form.
+        assert!(serde_json::from_str::<AttackTargetFilter>(r#""NotAFilter""#).is_err());
     }
 }

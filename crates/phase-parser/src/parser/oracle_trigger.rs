@@ -2423,6 +2423,12 @@ fn lower_trigger_effect_chain(
     {
         ability.optional = true;
     }
+    // CR 118.12: a "they may pay ..." trigger head names the triggering player
+    // as both chooser and payer — but that rebind lives ONLY in the
+    // `optional_player` stamp in `lower_trigger_ir`, which rewrites a
+    // still-default `PayCost` payer alongside the phase-head collective
+    // initialization (Bow to My Command). A second rewrite here would run
+    // ahead of that stamp and defeat its `Controller`-payer guard.
     ability
 }
 
@@ -2496,6 +2502,128 @@ pub(crate) fn reflexive_event_trigger(
             uses_tracked_set: false,
         },
     )
+}
+
+/// CR 603.2 + CR 608.2c: a `ScopedPlayer` attack restriction is bound in exactly
+/// two enclosing contexts — the phase trigger's fire-time stamp (active player)
+/// and the coordinated per-iteration channel (marked by a `ScopedPlayerMatches`
+/// condition, e.g. City Hall's chaos trigger). The controlled-creatures
+/// recognizer (`try_parse_controlled_creatures_cant_attack_prohibition`) runs
+/// inside `parse_effect_clause`, which cannot see the enclosing trigger mode,
+/// so under any other trigger the scope stays unbound and `add_restriction`
+/// falls back to the ability's controller — restricting the wrong player while
+/// reporting the clause as supported. Demote such nodes to an honest gap.
+///
+/// Runs in `lower_trigger_ir`, where `def.mode` is known. The phase-trigger
+/// case (Jace, Web of Inertia, Advokist, Second Doctor) passes through
+/// untouched, as do coordinated bodies carrying the binding proof.
+fn demote_unbound_scoped_attack_restrictions(ability: &mut AbilityDefinition, mode: &TriggerMode) {
+    use crate::types::ability::{GameRestriction, ProhibitedActivity, RestrictionPlayerScope};
+
+    let is_scoped_attack = matches!(
+        ability.effect.as_ref(),
+        Effect::AddRestriction {
+            restriction: GameRestriction::ProhibitActivity {
+                affected_players: RestrictionPlayerScope::ScopedPlayer,
+                activity: ProhibitedActivity::Attack { .. },
+                ..
+            },
+        }
+    );
+    let bound = ability
+        .condition
+        .as_ref()
+        .is_some_and(condition_binds_scoped_player);
+    if is_scoped_attack && !bound {
+        let fragment = ability.description.clone().unwrap_or_else(|| {
+            format!(
+                "attack restriction under a non-Phase trigger ({mode:?}) cannot bind its player"
+            )
+        });
+        *ability.effect =
+            Effect::unimplemented("unbound_scoped_player_attack_restriction", fragment);
+    }
+    if let Some(sub) = ability.sub_ability.as_deref_mut() {
+        demote_unbound_scoped_attack_restrictions(sub, mode);
+    }
+    if let Some(other) = ability.else_ability.as_deref_mut() {
+        demote_unbound_scoped_attack_restrictions(other, mode);
+    }
+    for mode_ability in &mut ability.mode_abilities {
+        demote_unbound_scoped_attack_restrictions(mode_ability, mode);
+    }
+}
+
+/// Whether a condition tree carries the coordinated per-iteration binding proof
+/// for `ScopedPlayer`. Exhaustive, with no wildcard: the only nesting
+/// combinators recurse, every leaf answers false, and a new variant requires
+/// a deliberate compiler-guided decision. A missed nesting combinator would
+/// demote a working coordinated node, so the blast radius of any error here
+/// surfaces in the parse-diff receipt rather than as a silent misbind.
+fn condition_binds_scoped_player(condition: &AbilityCondition) -> bool {
+    match condition {
+        AbilityCondition::ScopedPlayerMatches { .. } => true,
+        AbilityCondition::And { conditions } | AbilityCondition::Or { conditions } => {
+            conditions.iter().any(condition_binds_scoped_player)
+        }
+        AbilityCondition::Not { condition } => condition_binds_scoped_player(condition),
+        AbilityCondition::ConditionInstead { inner } => condition_binds_scoped_player(inner),
+        AbilityCondition::WhenYouDo
+        | AbilityCondition::TriggerEventTargetDamagedBySourceThisTurn
+        | AbilityCondition::TriggerEventTargetExploitedBySource
+        | AbilityCondition::AdditionalCostPaidInstead
+        | AbilityCondition::AlternativeManaCostPaid
+        | AbilityCondition::EffectOutcome { .. }
+        | AbilityCondition::EventOutcomeWon
+        | AbilityCondition::SourceEnteredThisTurn
+        | AbilityCondition::HasMaxSpeed
+        | AbilityCondition::IsMonarch
+        | AbilityCondition::IsInitiative
+        | AbilityCondition::HasCityBlessing
+        | AbilityCondition::HasEnduringStory
+        | AbilityCondition::ControlsCommander { .. }
+        | AbilityCondition::DiscardedCardMatchesFilter { .. }
+        | AbilityCondition::IsRingBearer
+        | AbilityCondition::HasObjectTarget
+        | AbilityCondition::IsYourTurn
+        | AbilityCondition::FirstCombatPhaseOfTurn
+        | AbilityCondition::FirstEndStepOfTurn
+        | AbilityCondition::SourceIsTapped
+        | AbilityCondition::SourceAttachedToCreature
+        | AbilityCondition::DayNightIsNeither
+        | AbilityCondition::AdditionalCostPaid { .. }
+        | AbilityCondition::CoinFlipOutcome { .. }
+        | AbilityCondition::ChosenLabelIs { .. }
+        | AbilityCondition::WasCast { .. }
+        | AbilityCondition::CastDuringPhase { .. }
+        | AbilityCondition::CurrentPhaseIs { .. }
+        | AbilityCondition::CastTimingPermission { .. }
+        | AbilityCondition::ManaColorSpent { .. }
+        | AbilityCondition::RevealedHasCardType { .. }
+        | AbilityCondition::ObjectsShareQuality { .. }
+        | AbilityCondition::TargetSharesNameWithOtherExiledThisWay { .. }
+        | AbilityCondition::CastVariantPaid { .. }
+        | AbilityCondition::CastVariantPaidInstead { .. }
+        | AbilityCondition::QuantityCheck { .. }
+        | AbilityCondition::QuantityQuality { .. }
+        | AbilityCondition::PreviousEffectAmount { .. }
+        | AbilityCondition::CompletedDungeon { .. }
+        | AbilityCondition::TargetHasKeywordInstead { .. }
+        | AbilityCondition::TargetMatchesFilter { .. }
+        | AbilityCondition::TriggeringSpellTargetsFilter { .. }
+        | AbilityCondition::SourceMatchesFilter { .. }
+        | AbilityCondition::PostReplacementDamageSourceMatchesFilter { .. }
+        | AbilityCondition::ZoneChangeObjectMatchesFilter { .. }
+        | AbilityCondition::ControllerControlsMatching { .. }
+        | AbilityCondition::ControllerControlledMatchingAsCast { .. }
+        | AbilityCondition::WasStartingPlayer { .. }
+        | AbilityCondition::SpellCastWithVariantThisTurn { .. }
+        | AbilityCondition::ZoneChangedThisWay { .. }
+        | AbilityCondition::CostPaidObjectMatchesFilter { .. }
+        | AbilityCondition::DayNightIs { .. }
+        | AbilityCondition::AbilityUseCountThisTurn { .. }
+        | AbilityCondition::SourceLacksKeyword { .. } => false,
+    }
 }
 
 /// CR 603.1 + CR 608.2c: parse a triggered ability's body, which resolves as
@@ -2809,6 +2937,16 @@ pub(crate) fn lower_trigger_ir(ir: &TriggerIr) -> TriggerDefinition {
                 def.description.clone().unwrap_or_default(),
             ),
         )));
+    }
+    // CR 603.2 + CR 608.2c: the phase stamp is Phase-mode-only, so a
+    // `ScopedPlayer` attack restriction under any other trigger is unbound
+    // unless the coordinated channel proves the binding. Demote those nodes
+    // (see `demote_unbound_scoped_attack_restrictions`); the phase-trigger
+    // case passes through untouched.
+    if def.mode != TriggerMode::Phase {
+        if let Some(ability) = execute.as_deref_mut() {
+            demote_unbound_scoped_attack_restrictions(ability, &def.mode);
+        }
     }
     def.execute = execute;
     def.optional = modifiers.optional;
@@ -7097,7 +7235,7 @@ fn attack_clause_names_attacked_player(def: &TriggerDefinition) -> bool {
             def.valid_target.is_some()
         }
         Some(
-            AttackTargetFilter::Planeswalker
+            AttackTargetFilter::Planeswalker { .. }
             | AttackTargetFilter::Battle
             | AttackTargetFilter::Owner
             | AttackTargetFilter::OwnerOrPlaneswalker
@@ -10384,7 +10522,7 @@ fn parse_attackers_to_controller_min_condition(input: &str) -> OracleResult<'_, 
             tag("you or planeswalkers you control"),
         ),
         value(
-            AttackTargetFilter::Planeswalker,
+            AttackTargetFilter::Planeswalker { subtype: None },
             tag("planeswalkers you control"),
         ),
         value(AttackTargetFilter::Player, tag("you")),
@@ -16213,7 +16351,10 @@ fn try_parse_event(
                         tag(" you and/or one or more planeswalkers you control"),
                     )),
                 ),
-                value(AttackTargetFilter::Planeswalker, tag(" a planeswalker")),
+                value(
+                    AttackTargetFilter::Planeswalker { subtype: None },
+                    tag(" a planeswalker"),
+                ),
                 value(
                     AttackTargetFilter::Player,
                     preceded(tag(" "), parse_one_of_your_opponents),
@@ -24654,20 +24795,24 @@ pub(crate) fn parse_dangling_phase_trigger_head(input: &str) -> OracleResult<'_,
 /// going on the stack; choosing a defending player).
 ///
 /// The possessive table itself lives in [`parse_turn_possessive_prefix`] — one
-/// table, two consumers. Also checks for a trailing "on your turn" suffix.
+/// table, two consumers. The trailing "on <spec>" suffix reuses the shared
+/// [`parse_during_turn_spec`] table, so "on your turn" and "on each opponent's
+/// turn" (Jace, Multiverse Architect / Web of Inertia) constrain identically to
+/// their prefix and "during" siblings.
 fn parse_turn_constraint(phase_text: &str) -> Option<TriggerConstraint> {
     // Prefix-based: try at the start of the text
     if let Ok((_, constraint)) = parse_turn_possessive_prefix(phase_text) {
         return Some(constraint);
     }
-    // Suffix-based: "combat on your turn", "each combat on your turn"
+    // Suffix-based: "combat on your turn", "combat on each opponent's turn".
+    // The spec after "on " runs through the shared turn-spec authority rather
+    // than a second literal table, so the suffix can never drift from it.
     let mut remaining = phase_text;
     while !remaining.is_empty() {
-        if tag::<_, _, OracleError<'_>>("on your turn")
-            .parse(remaining)
-            .is_ok()
+        if let Ok((_, constraint)) =
+            preceded(tag::<_, _, OracleError<'_>>("on "), parse_during_turn_spec).parse(remaining)
         {
-            return Some(TriggerConstraint::OnlyDuringYourTurn);
+            return Some(constraint);
         }
         remaining = remaining
             .find(' ')
@@ -24676,10 +24821,116 @@ fn parse_turn_constraint(phase_text: &str) -> Option<TriggerConstraint> {
     None
 }
 
+/// The "on <spec>" phase-head suffix shares [`parse_during_turn_spec`], so every
+/// spec the "during" path constrains is honored after "on" too — in particular
+/// "on each opponent's turn" (Jace, Multiverse Architect / Web of Inertia),
+/// which previously parsed to an unrestricted `BeginCombat` trigger.
+#[cfg(test)]
+mod phase_turn_constraint_suffix_tests {
+    use super::parse_trigger_line;
+    use crate::types::ability::TriggerConstraint;
+    use crate::types::phase::Phase;
+    use crate::types::triggers::TriggerMode;
+
+    /// Jace, Multiverse Architect, first ability, verbatim.
+    #[test]
+    fn combat_on_each_opponents_turn_constrains_to_opponents() {
+        let def = parse_trigger_line(
+            "At the beginning of combat on each opponent's turn, they may pay {2}. If they don't, creatures they control can't attack Jaces you control this turn.",
+            "Jace, Multiverse Architect",
+        );
+        assert_eq!(def.mode, TriggerMode::Phase);
+        assert_eq!(def.phase, Some(Phase::BeginCombat));
+        assert_eq!(
+            def.constraint,
+            Some(TriggerConstraint::OnlyDuringOpponentsTurn),
+            "got {:?}",
+            def.constraint
+        );
+    }
+
+    /// Web of Inertia, verbatim.
+    #[test]
+    fn web_head_constrains_to_opponents() {
+        let def = parse_trigger_line(
+            "At the beginning of combat on each opponent's turn, that player may exile a card from their graveyard. If the player doesn't, creatures they control can't attack you this turn.",
+            "Web of Inertia",
+        );
+        assert_eq!(def.mode, TriggerMode::Phase);
+        assert_eq!(def.phase, Some(Phase::BeginCombat));
+        assert_eq!(
+            def.constraint,
+            Some(TriggerConstraint::OnlyDuringOpponentsTurn),
+            "got {:?}",
+            def.constraint
+        );
+    }
+
+    /// The pre-existing "on your turn" suffix keeps its constraint.
+    #[test]
+    fn combat_on_your_turn_still_constrains_to_controller() {
+        let def = parse_trigger_line(
+            "At the beginning of combat on your turn, draw a card.",
+            "Probe",
+        );
+        assert_eq!(def.mode, TriggerMode::Phase);
+        assert_eq!(
+            def.constraint,
+            Some(TriggerConstraint::OnlyDuringYourTurn),
+            "got {:?}",
+            def.constraint
+        );
+    }
+
+    /// "on each of your turns" rides the shared table too.
+    #[test]
+    fn combat_on_each_of_your_turns_constrains_to_controller() {
+        let def = parse_trigger_line(
+            "At the beginning of combat on each of your turns, draw a card.",
+            "Probe",
+        );
+        assert_eq!(
+            def.constraint,
+            Some(TriggerConstraint::OnlyDuringYourTurn),
+            "got {:?}",
+            def.constraint
+        );
+    }
+
+    /// The possessive-prefix path is unchanged by the suffix work.
+    #[test]
+    fn opponents_prefix_control_is_unchanged() {
+        let def = parse_trigger_line(
+            "At the beginning of each opponent's upkeep, draw a card.",
+            "Probe",
+        );
+        assert_eq!(
+            def.constraint,
+            Some(TriggerConstraint::OnlyDuringOpponentsTurn),
+            "got {:?}",
+            def.constraint
+        );
+    }
+
+    /// A determiner head ("each player's") still constrains nothing: the
+    /// mode+phase assertions are the reach-guard proving the head parsed.
+    #[test]
+    fn determiner_head_stays_unconstrained() {
+        let def = parse_trigger_line(
+            "At the beginning of each player's upkeep, draw a card.",
+            "Probe",
+        );
+        assert_eq!(def.mode, TriggerMode::Phase);
+        assert_eq!(def.phase, Some(Phase::Upkeep));
+        assert_eq!(def.constraint, None, "got {:?}", def.constraint);
+    }
+}
+
 /// CR 603.1: match the turn specifier that follows "during " in a trigger's
 /// turn-restriction clause → the corresponding trigger constraint. Single
-/// authority shared by the trailing peel ([`peel_trailing_turn_constraint`]) and
-/// the leading matcher ([`parse_leading_turn_constraint`]).
+/// authority shared by the trailing peel ([`peel_trailing_turn_constraint`]),
+/// the leading matcher ([`parse_leading_turn_constraint`]), and the phase-head
+/// "on <spec>" suffix ([`parse_turn_constraint`]).
 fn parse_during_turn_spec(input: &str) -> OracleResult<'_, TriggerConstraint> {
     alt((
         value(

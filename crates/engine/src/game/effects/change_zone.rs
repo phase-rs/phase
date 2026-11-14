@@ -568,6 +568,50 @@ pub(crate) fn exact_scoped_graveyard_exile_is_infeasible(
     )
 }
 
+/// CR 608.2d + CR 400.7: an ordinary-optional exact graveyard exile ("that
+/// player may exile a card from their graveyard", Web of Inertia) is
+/// impossible when no eligible card exists — the typed move names a graveyard
+/// population, and an exact selection from an empty set cannot be performed.
+/// Sibling of [`exact_scoped_graveyard_exile_is_infeasible`], which serves the
+/// `optional_for: AnyPlayer` fan-out shape; this one serves the single-prompt
+/// shape (`multi_target: None`, exact-1, non-`up_to`) with any typed filter.
+/// Untargeted moves only: bound targets keep today's behavior under the
+/// targeting/fizzle machinery. Returns `false` (feasible) for shapes outside
+/// the gate or with a candidate in hand.
+pub(crate) fn optional_exact_graveyard_exile_is_infeasible(
+    state: &GameState,
+    ability: &ResolvedAbility,
+) -> bool {
+    let Effect::ChangeZone {
+        origin: Some(Zone::Graveyard),
+        destination: Zone::Exile,
+        target: TargetFilter::Typed { .. },
+        up_to: false,
+        ..
+    } = &ability.effect
+    else {
+        return false;
+    };
+    if !ability.optional || ability.multi_target.is_some() || !ability.targets.is_empty() {
+        return false;
+    }
+    let target_filter = match &ability.effect {
+        Effect::ChangeZone { target, .. } => target,
+        _ => unreachable!("shape matched above"),
+    };
+    let filter_controller =
+        crate::game::effects::controller_for_relative_filter(state, ability, target_filter);
+    let candidates = resolution_zone_candidates(
+        state,
+        ability,
+        target_filter,
+        filter_controller,
+        &[Zone::Graveyard],
+        Zone::Exile,
+    );
+    candidates.is_empty()
+}
+
 // PLAN §7 Phase A: the zone-change pipeline (result enums, delivery tail,
 // `execute_zone_move`, `deliver_replaced_zone_change`) now lives in
 // `crate::game::zone_pipeline`. These shims keep every existing

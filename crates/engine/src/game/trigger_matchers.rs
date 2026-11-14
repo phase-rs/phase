@@ -1175,6 +1175,7 @@ fn count_matching_trigger_event_subjects(
         GameEvent::GameStarted
         | GameEvent::TurnStarted { .. }
         | GameEvent::PhaseChanged { .. }
+        | GameEvent::PhaseChangedForPlayer { .. }
         | GameEvent::PriorityPassed { .. }
         | GameEvent::SpellCopied { .. }
         | GameEvent::XValueChosen { .. }
@@ -2429,7 +2430,7 @@ pub(super) fn attack_target_type_matches(
             crate::types::triggers::AttackTargetFilter::Player,
             crate::game::combat::AttackTarget::Player(_)
         ) | (
-            crate::types::triggers::AttackTargetFilter::Planeswalker,
+            crate::types::triggers::AttackTargetFilter::Planeswalker { subtype: None },
             crate::game::combat::AttackTarget::Planeswalker(_)
         ) | (
             crate::types::triggers::AttackTargetFilter::PlayerOrPlaneswalker,
@@ -3231,16 +3232,20 @@ pub(super) fn match_phase(
     source_context: &TriggerSourceContext,
     state: &GameState,
 ) -> bool {
-    if let GameEvent::PhaseChanged { phase } = event {
-        let phase_matches = if let Some(ref trigger_phase) = trigger.phase {
-            phase == trigger_phase
-        } else {
-            true
-        };
-        phase_matches && valid_player_matches(trigger, state, state.active_player, source_context)
+    // CR 805.4d: a fanned occurrence admits exactly like the production event
+    // (active-player-based); its bound player is binding context, not an
+    // admission criterion.
+    let phase = match event {
+        GameEvent::PhaseChanged { phase } => phase,
+        GameEvent::PhaseChangedForPlayer { phase, .. } => phase,
+        _ => return false,
+    };
+    let phase_matches = if let Some(ref trigger_phase) = trigger.phase {
+        phase == trigger_phase
     } else {
-        false
-    }
+        true
+    };
+    phase_matches && valid_player_matches(trigger, state, state.active_player, source_context)
 }
 
 // CR 603.4: Match when the trigger's source becomes the target of a spell or ability.
@@ -19562,5 +19567,62 @@ mod tests {
             !reanimation_matches(FormatConfig::standard(), p0, p1, None),
             "Standard has no shared pile"
         );
+    }
+
+    /// Row 10a — the subtype-defended restriction scope never appears in an
+    /// "attacked:" trigger position, so the pure type matcher rejects it for
+    /// every attack target. The `matches!` has no wildcard, which compiles
+    /// silently on a widened arm — this pin is the revert-fail mechanism
+    /// (widening the arm to `{ .. }` is the revert).
+    #[test]
+    fn subtype_defended_scope_never_matches_attack_trigger_position() {
+        use crate::types::triggers::AttackTargetFilter;
+        let subtype = AttackTargetFilter::Planeswalker {
+            subtype: Some("Jace".to_string()),
+        };
+        for target in [
+            crate::game::combat::AttackTarget::Player(PlayerId(0)),
+            crate::game::combat::AttackTarget::Planeswalker(ObjectId(7)),
+            crate::game::combat::AttackTarget::Battle(ObjectId(9)),
+        ] {
+            assert!(
+                !attack_target_type_matches(target, &subtype),
+                "restriction-only subtype scope must not match an attack-trigger position"
+            );
+        }
+        // Paired positive: the pinned value is the real production shape,
+        // and the unparameterized arm still matches its own position.
+        assert!(
+            attack_target_type_matches(
+                crate::game::combat::AttackTarget::Planeswalker(ObjectId(7)),
+                &AttackTargetFilter::Planeswalker { subtype: None },
+            ),
+            "reach-guard: the unparameterized Planeswalker arm still matches"
+        );
+    }
+
+    /// Row 10d — the restriction-only subtype scope never binds an attacked
+    /// player for "whenever you attack a player" triggers. `matches!` on
+    /// `Some(Player | Monarch)` is false by default for every other variant.
+    #[test]
+    fn subtype_defended_scope_never_binds_attacked_player() {
+        use crate::types::triggers::AttackTargetFilter;
+        let mut trigger = make_trigger(TriggerMode::Attacks);
+        trigger.attack_target_filter = Some(AttackTargetFilter::Planeswalker {
+            subtype: Some("Jace".to_string()),
+        });
+        assert!(
+            !you_attack_binds_attacked_player(&trigger),
+            "a restriction-only scope binds no attacked player"
+        );
+        // Paired positives: the player-typed slots still bind.
+        for filter in [AttackTargetFilter::Player, AttackTargetFilter::Monarch] {
+            let mut sibling = make_trigger(TriggerMode::Attacks);
+            sibling.attack_target_filter = Some(filter);
+            assert!(
+                you_attack_binds_attacked_player(&sibling),
+                "reach-guard: player-typed attack slots still bind"
+            );
+        }
     }
 }

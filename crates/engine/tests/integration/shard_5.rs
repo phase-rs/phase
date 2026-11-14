@@ -393,6 +393,7 @@ mod ward_of_bones_relative_count_cast_prohibition;
 mod ward_of_bones_relative_count_land_prohibition;
 mod warning_source_shield_persists_across_damage_steps;
 mod warped_space_alt_cost_from_exile;
+mod web_of_inertia;
 mod wedding_announcement_transform;
 mod wedding_ring_etb_token_copy;
 mod weeping_angel_combat_prevention;
