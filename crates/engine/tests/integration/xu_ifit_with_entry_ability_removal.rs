@@ -1129,6 +1129,106 @@ fn zombify_returned_grist_enters_with_loyalty() {
     );
 }
 
+/// Mystic Reflection {1}{U} Instant — verbatim.
+const MYSTIC_REFLECTION: &str = "Choose target nonlegendary creature. The next time one or more creatures or planeswalkers enter this turn, they enter as copies of the chosen creature.\nForetell {U} (During your turn, you may pay {2} and exile this card from your hand face down. Cast it on a later turn for its foretell cost.)";
+
+/// Summon: Fenrir {2}{G} Enchantment Creature — Saga Wolf 3/2 — verbatim.
+const SUMMON_FENRIR: &str = "(As this Saga enters and after your draw step, add a lore counter. Sacrifice after III.)\nI \u{2014} Crescent Fang \u{2014} Search your library for a basic land card, put it onto the battlefield tapped, then shuffle.\nII \u{2014} Heavenward Howl \u{2014} When you next cast a creature spell this turn, that creature enters with an additional +1/+1 counter on it.\nIII \u{2014} Ecliptic Growl \u{2014} Draw a card if you control the creature with the greatest power or tied for the greatest power.";
+
+/// A board with the returner, Summon: Fenrir on the battlefield, Grizzly Bears in P0's
+/// graveyard, and Mystic Reflection already resolved choosing Fenrir, so the Bears' return is
+/// the next entry and it enters as a copy of Fenrir (CR 707.2).
+fn mystic_fenrir_board(returner: Returner) -> (GameRunner, ObjectId, ObjectId, ObjectId) {
+    let (mut scenario, source) = returner_board(returner);
+    let fenrir = scenario
+        .add_creature(P0, "Summon: Fenrir", 3, 2)
+        .as_enchantment()
+        .as_creature()
+        .with_subtypes(vec!["Saga", "Wolf"])
+        .from_oracle_text(SUMMON_FENRIR)
+        .id();
+    let mystic = scenario
+        .add_spell_to_hand_from_oracle(P0, "Mystic Reflection", true, MYSTIC_REFLECTION)
+        .id();
+    let bears = add_grizzly_bears_to_graveyard(&mut scenario, P0);
+    let mut runner = scenario.build();
+    runner.cast(mystic).target_object(fenrir).resolve();
+    (runner, source, mystic, bears)
+}
+
+fn lore_counters(runner: &GameRunner, id: ObjectId) -> u32 {
+    runner.state().objects[&id]
+        .counters
+        .get(&CounterType::Lore)
+        .copied()
+        .unwrap_or(0)
+}
+
+/// R-MR — CR 707.2 + CR 611.2e + CR 613.1f + CR 714.3a: the Bears enters as a copy of Summon:
+/// Fenrir, and Xu-Ifit's rider removes the copied Saga's intrinsic "enters with a lore counter"
+/// ability with the entry, so it enters with no lore counter. CR 714.4 + Summon: Fenrir ruling
+/// (2025-06-06): a Saga that has lost all its chapter abilities is not sacrificed.
+#[test]
+fn xu_ifit_returned_bears_copying_fenrir_enters_without_lore() {
+    let (mut runner, xu, _mystic, bears) = mystic_fenrir_board(Returner::XuIfit);
+
+    let events = return_card(&mut runner, Returner::XuIfit, xu, bears);
+
+    let bears_obj = &runner.state().objects[&bears];
+    assert_eq!(bears_obj.zone, Zone::Battlefield);
+    assert_eq!(
+        bears_obj.name, "Summon: Fenrir",
+        "the Bears entered as a copy"
+    );
+    let types = subtypes(&runner, bears);
+    assert!(types.iter().any(|t| t == "Saga"), "copied Saga: {types:?}");
+    assert!(
+        types.iter().any(|t| t == "Skeleton"),
+        "reach guard: Xu-Ifit's rider applied: {types:?}"
+    );
+    assert_eq!(
+        lore_counters(&runner, bears),
+        0,
+        "the copied Saga's intrinsic lore ability was removed with the entry"
+    );
+    assert!(
+        !events.iter().any(|event| matches!(
+            event,
+            GameEvent::CounterAdded {
+                object_id,
+                counter_type: CounterType::Lore,
+                ..
+            } if *object_id == bears
+        )),
+        "no lore counter was put on the Bears"
+    );
+    assert_priority_with_empty_stack(&runner);
+}
+
+/// R-MRc — control: with Zombify, the Bears enters as a copy of Summon: Fenrir with one lore
+/// counter (CR 714.3a); chapter I (CR 714.2b) finds no basic land, and the Saga stays.
+#[test]
+fn zombify_returned_bears_copying_fenrir_enters_with_lore() {
+    let (mut runner, zombify, _mystic, bears) = mystic_fenrir_board(Returner::Zombify);
+
+    runner
+        .cast(zombify)
+        .target_object(bears)
+        .search_none()
+        .resolve();
+
+    let bears_obj = &runner.state().objects[&bears];
+    assert_eq!(bears_obj.zone, Zone::Battlefield);
+    assert_eq!(
+        bears_obj.name, "Summon: Fenrir",
+        "the Bears entered as a copy"
+    );
+    let types = subtypes(&runner, bears);
+    assert!(types.iter().any(|t| t == "Saga"), "copied Saga: {types:?}");
+    assert_eq!(lore_counters(&runner, bears), 1);
+    assert_priority_with_empty_stack(&runner);
+}
+
 /// Tormod, the Desecrator {3}{B} Legendary Creature — Zombie Wizard 4/2 — verbatim.
 const TORMOD_THE_DESECRATOR: &str = "Whenever one or more cards leave your graveyard, create a tapped 2/2 black Zombie creature token.\nPartner (You can have two commanders if both have partner.)";
 /// Containment Priest {1}{W} Creature — Human Cleric 2/2 — verbatim.
