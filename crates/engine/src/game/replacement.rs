@@ -14687,10 +14687,9 @@ mod tests {
     /// R-U4 — CR 306.5b + CR 613.1f + CR 611.2e: an entrant entering as a copy of a
     /// planeswalker (printed loyalty 3) gets the copied intrinsic loyalty only while its own
     /// abilities apply. Under an ability-removing effect of the same resolution the stale
-    /// intrinsic Loyalty is dropped and no copied Loyalty is added; other counters stay. No
-    /// printed board reaches this (every printed enter-as-copy replacement is the entrant's own
-    /// and is withheld under such an effect); nearest printed cards Essence of the Wild
-    /// ("Creatures you control enter as a copy of this creature.") and Spark Double.
+    /// intrinsic Loyalty is dropped and no copied Loyalty is added; other counters stay. This
+    /// row isolates the helper's loyalty behavior. An external copy replacement such as Mystic
+    /// Reflection can reach the production reseed path for an entrant whose abilities are removed.
     #[test]
     fn retarget_copied_intrinsic_counters_needs_the_entrants_own_abilities() {
         use crate::types::proposed_event::EntrantAbilities;

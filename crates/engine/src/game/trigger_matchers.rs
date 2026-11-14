@@ -1505,11 +1505,11 @@ fn zone_change_clause_matches(
             record.from_zone,
             *to,
         );
-        // CR 603.6a + CR 603.10: an enters half reads the entrant as it existed immediately after
-        // its entry event. CR 603.10a: every other half is a leaves-a-zone half and looks back: it
-        // reads the subject as it appeared immediately before the event, which the zone-change
-        // record owns, for every destination; an "is/has" effect applied with a battlefield entry
-        // (CR 611.2e) is not part of that appearance. Syr Konrad, the Grim's "a creature card
+        // CR 603.6a + CR 603.10: an enters half reads the entrant immediately after the event.
+        // The remaining cases here read the zone-change record. For a trigger that looks back
+        // under CR 603.10a, that record supplies the subject's pre-move appearance. An "is/has"
+        // effect applied with battlefield entry (CR 611.2e) is not part of that appearance.
+        // Syr Konrad, the Grim's "a creature card
         // leaves your graveyard" sees Enduring Innocence ("It's an enchantment. (It's not a
         // creature.)") leave as the enchantment creature card it was; Oglor, Devoted Assistant's
         // granted "When this card leaves your graveyard" matches by `SelfRef` against the record's
