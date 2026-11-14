@@ -723,11 +723,10 @@ fn hidden_library_move(destination: Zone) -> ProposedEvent {
 /// need no knowledge of that card: its event kind, its destination zone, and
 /// a `valid_card` that names its own host, which sits in a public zone and so
 /// is not the hidden card. The replacements of objects in hidden zones are not
-/// public. The moved card's own are among them, and one that declares no
-/// zones does not function from the library (CR 113.6), so the resolver does
-/// not admit it either. The exception is a card's own entry replacement
-/// (CR 614.12), so a move onto the battlefield is always answered as possibly
-/// replaced.
+/// public. The resolver currently does not admit the hidden card's own
+/// from-anywhere redirect when it declares no active zones. It does admit
+/// the card's own entry replacement (CR 614.12), so a move onto the
+/// battlefield is always answered as possibly replaced.
 fn hidden_library_move_may_be_replaced(
     board: &GameState,
     player: PlayerId,

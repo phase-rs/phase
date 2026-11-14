@@ -155,11 +155,11 @@ pub fn apply_mill_after_replacement(
     )
 }
 
-/// CR 401.2 + CR 701.17b: The (up to) `count` cards on `player`'s library edge
-/// named by `position`, in the order the instruction takes them. A player can't
-/// take more cards than are in their library; if instructed to, they take as
-/// many as possible. A placement-only `LibraryPosition` names no edge and yields
-/// nothing.
+/// CR 401.2 + CR 609.3: The available cards on `player`'s library edge named
+/// by `position`, up to `count`, in the order the instruction takes them.
+/// For milling specifically, CR 701.17b limits the number milled to the
+/// cards in the library. A placement-only `LibraryPosition` names no edge
+/// and yields nothing.
 fn library_edge_cards(
     state: &GameState,
     player_id: crate::types::player::PlayerId,
