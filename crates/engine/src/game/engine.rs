@@ -35,7 +35,7 @@ use crate::types::player::PlayerId;
 use crate::types::proposed_event::TokenAttackRequest;
 #[cfg(debug_assertions)]
 use crate::types::resolution::debug_assert_runtime_resolution_invariants;
-use crate::types::resolution::ResolutionStack;
+use crate::types::resolution::{ResolutionFrame, ResolutionStack};
 use crate::types::resolved_commands::{
     ResolvedInformationAudience, ResolvedInformationEdit, ResolvedInformationLifetime,
     ResolvedOncePerTurnPermission, ResolvedRulesCommand,
@@ -1747,7 +1747,7 @@ fn apply_action_boundary_core(
     // (CR 603.2 + CR 603.3b place them on the stack before the next player receives priority).
     // Reaching here with something to realize means the action settled WITHOUT running
     // `run_post_action_pipeline` — one of the reducer arms that builds an `ActionResult` straight
-    // out of the match (`handle_tribute_choice` is the reachable one). Converge those onto the same
+    // out of the match. Converge those onto the same
     // pipeline the rest of the reducer uses, scanning ONLY the slice this realization appended, so
     // a handler that already settled its own events (`handle_opponent_may_choice`, which collects
     // into `deferred_triggers` without recording them in `consumed_before_priority_trigger_events`)
@@ -10212,14 +10212,6 @@ pub(crate) fn drain_pending_cost_move_resume(
     Ok(Some(waiting_for))
 }
 
-/// CR 605.3b + CR 616.1 + CR 608.2c: the common priority boundary. One pass
-/// for every state except a parked counter-cost root whose replacement subtree
-/// is still live: `resume_resolution_frames` advances one top frame per pass,
-/// so a subtree several frames deep needs several, and the root resumes in the
-/// pass that retires the last of it (a due root resumes mid-pass through
-/// `resume_due_counter_cost_root`; the cost-move drain admits it at
-/// `PriorityBoundary`). A repeat needs the position to strictly decrease, so
-/// the loop ends.
 /// CR 118.11 + CR 614.11a: only a bare activation whose own cost is the draw
 /// instruction may resume at the common boundary; a cast or activation paused
 /// on an unrelated choice keeps its existing owner.
@@ -10266,6 +10258,19 @@ pub(crate) fn cost_includes_draw_instruction(cost: &crate::types::ability::Abili
     }
 }
 
+/// CR 605.3b + CR 616.1 + CR 608.2c: the common priority boundary. One pass
+/// for every state except two. First, a parked counter-cost root whose
+/// replacement subtree is still live: `resume_resolution_frames` advances one
+/// top frame per pass, so a subtree several frames deep needs several, and the
+/// root resumes in the pass that retires the last of it (a due root resumes
+/// mid-pass through `resume_due_counter_cost_root`; the cost-move drain admits
+/// it at `PriorityBoundary`). Second (CR 117.2e + CR 614.6), a pass that leaves
+/// a copy owner or a post-replacement drain on top at priority: a substitute's
+/// retired drain or completed inner copy owner exposed it, and the work it
+/// belongs to is unfinished (for a copy owner, the ability whose creation was
+/// replaced is still resolving). That repeat follows the whole pass, so the
+/// pass's entry commits (CR 614.12a) land before the exposed owner completes.
+/// A repeat needs the position to strictly decrease, so the loop ends.
 pub(super) fn resume_pending_continuation_if_priority(
     state: &mut GameState,
     events: &mut Vec<GameEvent>,
@@ -10274,8 +10279,20 @@ pub(super) fn resume_pending_continuation_if_priority(
         let before = SubtreePosition::at(&state.resolution_stack);
         resume_pending_continuation_pass(state, events)?;
         let after = SubtreePosition::at(&state.resolution_stack);
+        // CR 117.2e + CR 608.2 + CR 614.6: a pass that shrinks the subtree and
+        // leaves a copy owner or a post-replacement drain on top has exposed it (a
+        // substitute's drain retired, or an inner copy owner completed). The work
+        // that frame belongs to is unfinished (for a copy owner, the ability whose
+        // creation the substitute replaced is still resolving), so no player may
+        // receive priority: pass again. The repeat follows the whole pass, so that
+        // pass's entry commits land first (CR 614.12a).
+        let exposes_resolving_owner = matches!(
+            state.resolution_stack.last(),
+            Some(ResolutionFrame::CopyToken(_) | ResolutionFrame::PostReplacement(_))
+        );
         if !matches!(state.waiting_for, WaitingFor::Priority { .. })
-            || state.counter_cost_root_subtree() != CounterCostRootSubtree::Unfinished
+            || (state.counter_cost_root_subtree() != CounterCostRootSubtree::Unfinished
+                && !exposes_resolving_owner)
             || !after.is_strictly_inside(&before)
         {
             // CR 614.11a + CR 118.11: a bare cast/activation whose draw cost
@@ -15509,12 +15526,15 @@ fn apply_non_priority_pass_action(
             waiting_for @ WaitingFor::TributeChoice { .. },
             GameAction::DecideOptionalEffect { accept },
         ) => {
-            return engine_payment_choices::handle_tribute_choice(
+            // CR 603.3b: the resumed entry carrier can emit its committed entry
+            // inside this handler. Run the shared post-action pipeline over those
+            // events even when the boundary has no parked entry left to realize.
+            engine_payment_choices::handle_tribute_choice(
                 state,
                 waiting_for.clone(),
                 accept,
                 &mut events,
-            );
+            )?
         }
         // CR 118.12: Player decided whether to pay an "unless pays" cost.
         (waiting_for @ WaitingFor::UnlessPayment { .. }, GameAction::PayUnlessCost { pay }) => {

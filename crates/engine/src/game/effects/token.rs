@@ -26,7 +26,7 @@ use crate::types::card_type::{CardType, CoreType, Supertype};
 use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
-    DelayedTrigger, GameState, LiminalEntry, LiminalTokenAbilityInjection,
+    DelayedTrigger, GameState, LiminalEntry, LiminalTokenAbilityInjection, OfferedBatchCustody,
     PendingCopyTokenResolution, PendingCounterAddition, PendingCounterPostAction,
     PendingEffectResolutionEvent, PendingEffectResolved, PendingTokenBattlefieldEntry,
     PendingTokenEventDelivery, PositionedTokenBatch, PositionedTokenIds, TokenEntryEventEmission,
@@ -1172,15 +1172,16 @@ pub(crate) fn continue_token_event_delivery(
 ) -> bool {
     if let Some(position) = delivery.resumed.take() {
         let published = std::mem::take(&mut state.last_created_token_ids);
+        // One membership set for the ids the event already holds.
+        let held: HashSet<ObjectId> = delivery
+            .prefix
+            .iter()
+            .chain(delivery.delivered.iter().flat_map(|entry| entry.ids.iter()))
+            .copied()
+            .collect();
         let resumed_ids: Vec<ObjectId> = published
             .into_iter()
-            .filter(|id| {
-                !delivery.prefix.contains(id)
-                    && !delivery
-                        .delivered
-                        .iter()
-                        .any(|entry| entry.ids.contains(id))
-            })
+            .filter(|id| !held.contains(id))
             .collect();
         match delivery
             .delivered
@@ -1226,7 +1227,7 @@ fn primary_token_ids(delivered: &[PositionedTokenIds]) -> Vec<ObjectId> {
 /// first run and every resume.
 fn drive_token_event_delivery(
     state: &mut GameState,
-    mut cursor: PendingTokenEventDelivery,
+    cursor: PendingTokenEventDelivery,
     pause_event: PendingEffectResolutionEvent,
     events: &mut Vec<GameEvent>,
 ) -> CreateTokenDelivery {
@@ -1236,17 +1237,12 @@ fn drive_token_event_delivery(
     // the event's batches the copy drive's environment (no inline frame drain
     // inside a liminal-immediate copy apply, and every route writes the
     // ledger); the event's ids are handed to it once, below.
-    let mut held_frame = if cursor
+    let held_frame = if cursor
         .remaining
         .iter()
         .any(|positioned| positioned.batch.copy.is_some())
-        && state.active_copy_token().is_some()
     {
-        let frame = state
-            .take_active_copy_token()
-            .expect("the active CopyToken frame can be consumed")
-            .expect("the active CopyToken frame exists");
-        Some((frame, state.resolution_stack.capture_child_boundary()))
+        detach_active_copy_token_frame(state)
     } else {
         None
     };
@@ -1259,6 +1255,34 @@ fn drive_token_event_delivery(
         pause_event
     };
 
+    // CR 111.1 + CR 614.12: the held owner's tokens are published for the delivery
+    // (`deliver_with_held_copy_owner`). The window closes before the owner is re-parked,
+    // at whichever exit the delivery took, so the re-park reads the frame and the order
+    // of the re-park is unchanged.
+    let (delivery, owed) = deliver_with_held_copy_owner(state, held_frame.as_ref(), |state| {
+        deliver_token_event_positions(state, cursor, pause_event, events)
+    });
+    // CR 608.2c: a paused exit hands over what it owes now and settles the
+    // offered batch; a completed one hands over the event's ids.
+    let completion = if delivery.is_completed() {
+        super::token_copy::CopyTokenApplyCompletion::Completed
+    } else {
+        super::token_copy::CopyTokenApplyCompletion::Paused
+    };
+    repark_event_copy_frame(state, held_frame, owed, completion);
+    delivery
+}
+
+/// The delivery loop of [`drive_token_event_delivery`]: deliver the event's
+/// remaining positions until one pauses or all have landed. Returns the outcome
+/// and the ids the CopyToken owner the delivery detached is owed at that exit
+/// (none at a pause that hands them over later); the caller re-parks the owner.
+fn deliver_token_event_positions(
+    state: &mut GameState,
+    mut cursor: PendingTokenEventDelivery,
+    pause_event: PendingEffectResolutionEvent,
+    events: &mut Vec<GameEvent>,
+) -> (CreateTokenDelivery, Vec<ObjectId>) {
     while !cursor.remaining.is_empty() {
         let PositionedTokenBatch {
             position,
@@ -1302,8 +1326,7 @@ fn drive_token_event_delivery(
                     );
                     // Nothing to hand over yet: the event's ids reach the
                     // frame when the rest of the event is delivered.
-                    repark_event_copy_frame(state, held_frame.take(), Vec::new());
-                    return CreateTokenDelivery::Paused { primary_ids };
+                    return (CreateTokenDelivery::Paused { primary_ids }, Vec::new());
                 }
             }
             Some(copy) => {
@@ -1327,10 +1350,11 @@ fn drive_token_event_delivery(
                     initial.clone(),
                     events,
                 );
+                let held: HashSet<ObjectId> = initial.iter().copied().collect();
                 let ids = status
                     .created_ids
                     .into_iter()
-                    .filter(|id| !initial.contains(id))
+                    .filter(|id| !held.contains(id))
                     .collect();
                 cursor.delivered.push(PositionedTokenIds { position, ids });
                 match status.completion {
@@ -1347,8 +1371,7 @@ fn drive_token_event_delivery(
                         // copies` to the ledger; hand them to the frame exactly
                         // as the copy drive does at its own pause.
                         let published = state.last_created_token_ids.clone();
-                        repark_event_copy_frame(state, held_frame.take(), published);
-                        return CreateTokenDelivery::Paused { primary_ids };
+                        return (CreateTokenDelivery::Paused { primary_ids }, published);
                     }
                     super::token_copy::CopyTokenApplyCompletion::Paused => {
                         // CR 614.1a + CR 616.2: batches remain behind this copy
@@ -1373,8 +1396,7 @@ fn drive_token_event_delivery(
                             token_event_cursor_completion(cursor, pause_event),
                             batch_boundary,
                         );
-                        repark_event_copy_frame(state, held_frame.take(), Vec::new());
-                        return CreateTokenDelivery::Paused { primary_ids };
+                        return (CreateTokenDelivery::Paused { primary_ids }, Vec::new());
                     }
                 }
             }
@@ -1390,20 +1412,77 @@ fn drive_token_event_delivery(
         .copied()
         .chain(ordered.iter().copied())
         .collect();
-    repark_event_copy_frame(state, held_frame.take(), ordered);
-    CreateTokenDelivery::Completed { primary_ids }
+    (CreateTokenDelivery::Completed { primary_ids }, ordered)
 }
 
-/// CR 608.2c: hand the CopyToken owner that a compound token event detached
-/// the ids that event owes it, and re-park it — on top, or below the
-/// child stack a pause raised (`token_copy::park_copy_token_after_current_batch`).
-/// The owner's drain later assigns its ids to `last_created_token_ids`.
+/// CR 608.2c: detach the active CopyToken owner while a token event that carries
+/// a copy batch is delivered, so the copy apply runs in the copy drive's
+/// environment (its liminal terminal neither merges into nor drains the owner)
+/// and the delivery hands the ids the event created to the owner once, and
+/// settles its offered batch unless the event completed having created nothing,
+/// through [`repark_event_copy_frame`]. `None` when the top frame is not a
+/// CopyToken owner.
+fn detach_active_copy_token_frame(
+    state: &mut GameState,
+) -> Option<(PendingCopyTokenResolution, ChildStackDepth)> {
+    state.active_copy_token()?;
+    let frame = state
+        .take_active_copy_token()
+        .expect("the active CopyToken frame can be consumed")
+        .expect("the active CopyToken frame exists");
+    Some((frame, state.resolution_stack.capture_child_boundary()))
+}
+
+/// CR 111.1 + CR 614.12: run `deliver` while the CopyToken owner `held` is off the
+/// resolution stack, with the tokens its earlier batches created published as the
+/// resolution's co-entrants (`token_copy::publish_committed_copy_tokens`). The window
+/// closes before the owner is re-parked. With no owner held, `deliver` runs as is.
+fn deliver_with_held_copy_owner<R>(
+    state: &mut GameState,
+    held: Option<&(PendingCopyTokenResolution, ChildStackDepth)>,
+    deliver: impl FnOnce(&mut GameState) -> R,
+) -> R {
+    match held {
+        Some((frame, _)) => super::token_copy::publish_committed_copy_tokens(
+            state,
+            frame.created_ids.clone(),
+            deliver,
+        ),
+        None => deliver(state),
+    }
+}
+
+/// CR 608.2c: hand the CopyToken owner that a token event's delivery detached
+/// (a compound event, or a single-batch copy event) the ids that event owes it,
+/// and re-park it — on top, or below the child stack a pause raised
+/// (`token_copy::park_copy_token_after_current_batch`). The frame was detached
+/// for the whole delivery, so no other writer reached it and `ids` are not yet
+/// listed. It hands the ids the event created to the owner once, and settles
+/// its offered batch unless the event completed having created nothing
+/// (`completion` is the delivery's own outcome). The owner's drain later
+/// assigns its ids to `last_created_token_ids`.
 fn repark_event_copy_frame(
     state: &mut GameState,
     held: Option<(PendingCopyTokenResolution, ChildStackDepth)>,
     ids: Vec<ObjectId>,
+    completion: super::token_copy::CopyTokenApplyCompletion,
 ) {
     if let Some((mut frame, boundary)) = held {
+        // CR 614.6 + CR 609.3: a delivery that completed having created nothing did not
+        // deliver the offered batch's tokens. The event was replaced by a different creation
+        // (Jinnie Fay, Moonlit Meditation, Esix), or reduced to nothing (Halving Season).
+        // Either way the owner adopts on resume whatever replaced it, which is nothing in the
+        // second case. Every other handoff settles. This reads "replaced by a different
+        // creation" exactly only while a substituted event delivers none of its batches
+        // (`replacement::apply_single_replacement` zeroes only a substituted event's own
+        // batch, not the batches a replacement appended to it).
+        let delivered_nothing = matches!(
+            completion,
+            super::token_copy::CopyTokenApplyCompletion::Completed
+        ) && ids.is_empty();
+        if !delivered_nothing {
+            frame.offered_batch = OfferedBatchCustody::Settled;
+        }
         frame.created_ids.extend(ids);
         super::token_copy::park_copy_token_after_current_batch(state, frame, boundary);
     }
@@ -1466,21 +1545,28 @@ fn apply_create_token_batch(
     };
 
     if let Some(copy) = copy {
-        let status = super::token_copy::apply_copy_token_after_replacement(
-            state,
-            owner,
-            *copy,
-            enter_tapped,
-            spec.enter_with_counters.clone(),
-            final_count,
-            events,
-        );
+        // CR 608.2c + CR 614.6: a single-batch copy event delivered under its
+        // CopyToken owner (the frame a replacement-choice answer left parked)
+        // gets the compound event's custody: the owner is detached for the
+        // batch and handed the batch's ids once, then re-parked for the
+        // caller's drain to continue. A substitute that runs before the owner
+        // resumes hands its tokens to the owner through the owner's own
+        // adoption (`OfferedBatchCustody`), not through this re-park.
+        let held = detach_active_copy_token_frame(state);
+        let status = deliver_with_held_copy_owner(state, held.as_ref(), |state| {
+            super::token_copy::apply_copy_token_after_replacement(
+                state,
+                owner,
+                *copy,
+                enter_tapped,
+                spec.enter_with_counters.clone(),
+                final_count,
+                events,
+            )
+        });
         let primary_ids = status.created_ids.clone();
-        if let Some(pending) = state.active_copy_token_mut() {
-            pending.created_ids.extend(status.created_ids);
-        } else {
-            state.last_created_token_ids = status.created_ids;
-        }
+        state.last_created_token_ids = status.created_ids;
+        repark_event_copy_frame(state, held, primary_ids.clone(), status.completion);
         return match status.completion {
             super::token_copy::CopyTokenApplyCompletion::Completed => {
                 CreateTokenDelivery::Completed { primary_ids }
@@ -2209,10 +2295,7 @@ fn continue_liminal_copy_token_batch(
     state.waiting_for = WaitingFor::Priority {
         player: state.active_player,
     };
-    let created_ids = state.last_created_token_ids.clone();
-    if let Some(pending) = state.active_copy_token_mut() {
-        pending.created_ids = created_ids;
-    }
+    record_copy_batch_ledger_on_active_copy_token(state);
     let Some(continuation) = continuation else {
         return finish_liminal_copy_token_batch(state, events);
     };
@@ -2250,10 +2333,7 @@ pub(crate) fn finish_liminal_copy_token_batch(
     if !super::counters::resume_parked_token_event_delivery(state, events) {
         return false;
     }
-    let created_ids = state.last_created_token_ids.clone();
-    if let Some(pending) = state.active_copy_token_mut() {
-        pending.created_ids = created_ids;
-    }
+    record_copy_batch_ledger_on_active_copy_token(state);
     if state.active_copy_token().is_some() {
         super::token_copy::drain_pending_copy_token_resolution(state, events);
     }
@@ -2359,6 +2439,22 @@ impl TokenEntryMode {
             Self::Forced
         }
     }
+}
+
+/// CR 111.1 + CR 111.2: place a liminal token's projected body on the battlefield under its
+/// owner, the token's creator, without a zone move. The single placement authority for a
+/// liminal token birth, shared by the commit and the CR 614.12 entrant projection
+/// (`filter::BattlefieldEntrantProjection::for_liminal_token`), so the projection places a
+/// token exactly as its birth does.
+pub(crate) fn place_liminal_token_on_battlefield(
+    state: &mut GameState,
+    entry_ref: ObjectId,
+    object: GameObject,
+) {
+    let owner = object.owner;
+    state.objects.insert(entry_ref, object);
+    // allow-raw-zone: liminal token birth has no from-zone move; TokenEntry already consults entry replacements (CR 111.2 + CR 614.12).
+    zones::add_to_zone(state, entry_ref, Zone::Battlefield, owner);
 }
 
 /// The production entry: a token entry whose proposal already cleared the
@@ -2496,11 +2592,7 @@ pub(crate) fn commit_liminal_token_entry_with_replacement_state(
         }
     });
 
-    state
-        .objects
-        .insert(entry_ref, entry.object.into_projected());
-    // allow-raw-zone: liminal token birth has no from-zone move; TokenEntry already consults entry replacements (CR 111.2 + CR 614.12).
-    zones::add_to_zone(state, entry_ref, Zone::Battlefield, owner);
+    place_liminal_token_on_battlefield(state, entry_ref, entry.object.into_projected());
 
     // CR 303.4f: an Aura entering the battlefield by any means other than
     // resolving as an Aura spell, where the effect doesn't specify a host, has
@@ -3061,6 +3153,30 @@ pub(crate) fn record_last_created_token(state: &mut GameState, object_id: Object
     exists
 }
 
+/// CR 608.2c + CR 603.7 + CR 111.1: merge the copy batch's ledger
+/// (`last_created_token_ids`, reset per batch) into the active CopyToken owner's
+/// buffer, which holds every token the whole resolution created ("those
+/// tokens"): its earlier batches' first, then this batch's not yet listed, in
+/// creation order. The single authority for that re-sync; an assignment would
+/// drop the earlier batches' tokens once a paused batch resumes. The ledger is
+/// the guarded one, so no id its guard withheld is published.
+///
+/// Runs at every resume of a paused batch, with a ledger that grows each time
+/// (a token multiplier such as Parallel Lives enlarges every batch), so the
+/// membership check is a set built once per call: linear in the owner's buffer
+/// plus the batch, never a rescan of the buffer per id. An id repeated inside
+/// the batch is listed once. With no active CopyToken owner nothing changes.
+pub(crate) fn record_copy_batch_ledger_on_active_copy_token(state: &mut GameState) {
+    let batch = &state.last_created_token_ids;
+    let Some(pending) = state.resolution_stack.active_copy_token_mut() else {
+        return;
+    };
+    let mut listed: HashSet<ObjectId> = pending.created_ids.iter().copied().collect();
+    pending
+        .created_ids
+        .extend(batch.iter().copied().filter(|id| listed.insert(*id)));
+}
+
 /// CR 111.1 + CR 707.2: publish a just-created token into BOTH destinations the
 /// anaphora slot has while a copy batch is in flight — [`record_last_created_token`]'s ledger 3 and
 /// the in-flight `PendingCopyTokenResolution::created_ids` buffer — under ONE evaluation of the
@@ -3154,8 +3270,8 @@ pub(crate) fn flush_pending_token_battlefield_entry(
 ///   also puts the CR 400.7 row on the ledger before that pipeline's SBA pass (CR 704.3) can bury a
 ///   0-toughness copy under CR 704.5f.
 /// * in `apply_action_boundary_core`, after `apply_action` returned — for the handlers that build
-///   an `ActionResult` straight out of the reducer match and never reach that pipeline
-///   (`handle_tribute_choice` is the reachable one). That call site converges them onto
+///   an `ActionResult` straight out of the reducer match and never reach that pipeline.
+///   That call site converges them onto
 ///   `engine_priority::run_post_action_pipeline_from` over exactly the slice this realization
 ///   appended, so the CR 603.6a check runs for them too and their ETB observers fire. For the
 ///   REALIZED ENTRY the only remaining difference from the in-`apply_action` call is ordering
@@ -7764,6 +7880,128 @@ mod tests {
         ));
     }
 
+    /// F6 — CR 614.12 + CR 111.1 (Clone Legion ruling 2015-02-25): while a compound token
+    /// event's delivery holds the CopyToken owner off the resolution stack, the tokens the
+    /// owner's earlier batches created are still co-entrants of the event's copy batches.
+    /// The owner lists a Margle-shaped "other creatures you control lose all abilities"
+    /// token; the event delivers a copy of Voice of All, whose own as-enters choice is
+    /// offered because that token doesn't yet exist as the copy enters. Reach guard: with
+    /// the token not listed, the resident remover strips the choice and the copy commits.
+    #[test]
+    fn held_copy_token_owner_keeps_its_tokens_as_co_entrants_of_the_event_delivery() {
+        use crate::game::scenario::GameScenario;
+        use crate::types::game_state::{
+            PendingCopyTokenResolution, PendingTokenEventDelivery, PositionedTokenBatch,
+        };
+        use crate::types::proposed_event::{CopyTokenSpec, EtbTapState, TokenBatch};
+        const MARGLE: &str =
+            "Other creatures you control lose all abilities, can't gain abilities, and get +2/+2.";
+        const VOICE_OF_ALL: &str = "Flying\nAs this creature enters, choose a color.\nThis creature has protection from the chosen color.";
+
+        let deliver = |owner_lists_margle: bool| {
+            let mut scenario = GameScenario::new_n_player(2, 7);
+            let margle = scenario
+                .add_creature_from_oracle(PlayerId(0), "Margle, Cousin of Yargle", 5, 2, MARGLE)
+                .id();
+            let voice = scenario
+                .add_creature_from_oracle(PlayerId(1), "Voice of All", 2, 2, VOICE_OF_ALL)
+                .id();
+            let mut runner = scenario.build();
+            let mut state = runner.state_mut().clone();
+            state.push_copy_token(PendingCopyTokenResolution {
+                created_ids: if owner_lists_margle {
+                    vec![margle]
+                } else {
+                    Vec::new()
+                },
+                remaining: std::collections::VecDeque::new(),
+                effect_kind: EffectKind::CopyTokenOf,
+                source_id: voice,
+                referent_set: None,
+                offered_batch: OfferedBatchCustody::Settled,
+            });
+            let copy = CopyTokenSpec {
+                values: Box::new(intrinsic_copiable_values(&state.objects[&voice])),
+                display: DisplayIdentity {
+                    display_source: DisplaySource::Token,
+                    ..Default::default()
+                },
+                extra_keywords: Vec::new(),
+                additional_modifications: Vec::new(),
+                tapped: false,
+                enters_attacking: false,
+                attack_request: crate::types::proposed_event::TokenAttackRequest::Unspecified,
+                sacrifice_at: None,
+                source_id: voice,
+                controller: PlayerId(0),
+                donor: None,
+            };
+            let spec = copy_probe_spec_for(voice, PlayerId(0), None, &copy.values);
+            let delivery = PendingTokenEventDelivery {
+                remaining: vec![PositionedTokenBatch {
+                    position: 0,
+                    batch: TokenBatch {
+                        owner: PlayerId(0),
+                        spec: Box::new(spec),
+                        copy: Some(Box::new(copy)),
+                        enter_tapped: EtbTapState::from_seeded_tapped(false),
+                        count: 1,
+                    },
+                }],
+                delivered: Vec::new(),
+                resumed: None,
+                prefix: Vec::new(),
+                source_id: voice,
+            };
+            let mut events = Vec::new();
+            continue_token_event_delivery(&mut state, delivery, &mut events);
+            assert!(
+                state.objects[&margle].is_phased_in_permanent(),
+                "REACH-GUARD: the Margle-shaped token stays on the battlefield"
+            );
+            state
+        };
+
+        let state = deliver(true);
+        assert!(
+            matches!(
+                state.waiting_for,
+                WaitingFor::NamedChoice {
+                    player: PlayerId(0),
+                    ..
+                }
+            ),
+            "the copy's own choice is offered to its creator, got {:?}",
+            state.waiting_for
+        );
+        assert!(
+            state.active_copy_token_resolution_tokens.is_none(),
+            "the publication closes with the delivery"
+        );
+        assert!(
+            state.resolution_stack.iter().any(|frame| matches!(
+                frame,
+                crate::types::resolution::ResolutionFrame::CopyToken(_)
+            )),
+            "the owner is parked again"
+        );
+
+        let state = deliver(false);
+        assert!(
+            matches!(state.waiting_for, WaitingFor::Priority { .. }),
+            "the resident remover strips the choice, got {:?}",
+            state.waiting_for
+        );
+        let copies: Vec<&GameObject> = state
+            .objects
+            .values()
+            .filter(|obj| obj.is_token && obj.name == "Voice of All")
+            .collect();
+        assert_eq!(copies.len(), 1, "REACH-GUARD: the copy committed");
+        assert_eq!(copies[0].zone, Zone::Battlefield);
+        assert!(copies[0].chosen_attributes.is_empty(), "nothing was chosen");
+    }
+
     /// CR 614.1a + CR 608.2c: delivering a compound CreateToken event creates
     /// every batch, publishes the whole referent in event order (own batch
     /// first), and reports the own batch's ids separately.
@@ -11367,6 +11605,131 @@ mod tests {
         );
         let (mut state, ability) = with_gear(attached_to_it);
         assert_eq!(live_entry_counters(&mut state, &ability), vec![0, 0]);
+    }
+
+    /// Test shorthand: the [`ObjectId`]s for `raw`, in order.
+    fn ids(raw: &[u64]) -> Vec<ObjectId> {
+        raw.iter().copied().map(ObjectId).collect()
+    }
+
+    /// CR 608.2c + CR 111.1: a paused copy batch resumes with a ledger that
+    /// re-lists every id it already published, so each merge must append only
+    /// the ids the owner does not hold yet — once each, in ledger order —
+    /// however many times it runs.
+    #[test]
+    fn copy_batch_ledger_merge_appends_each_unlisted_id_once_in_creation_order() {
+        let mut state = GameState::new_two_player(42);
+        state.push_copy_token(PendingCopyTokenResolution {
+            created_ids: ids(&[1, 2]),
+            remaining: Default::default(),
+            effect_kind: EffectKind::CopyTokenOf,
+            source_id: ObjectId(99),
+            referent_set: None,
+            offered_batch: OfferedBatchCustody::Settled,
+        });
+        let owner_ids = |state: &GameState| {
+            state
+                .active_copy_token()
+                .expect("the CopyToken owner stays parked")
+                .created_ids
+                .clone()
+        };
+
+        state.last_created_token_ids = ids(&[1, 2, 3]);
+        record_copy_batch_ledger_on_active_copy_token(&mut state);
+        assert_eq!(owner_ids(&state), ids(&[1, 2, 3]));
+
+        // The ledger grew and repeats both an already-listed id and a new one.
+        state.last_created_token_ids = ids(&[1, 2, 3, 4, 4]);
+        record_copy_batch_ledger_on_active_copy_token(&mut state);
+        assert_eq!(owner_ids(&state), ids(&[1, 2, 3, 4]));
+
+        // Re-running on the same ledger is a no-op.
+        record_copy_batch_ledger_on_active_copy_token(&mut state);
+        assert_eq!(owner_ids(&state), ids(&[1, 2, 3, 4]));
+    }
+
+    /// CR 608.2c: with no CopyToken owner on the resolution stack the ledger
+    /// merge has nothing to merge into, so the ledger and the resolution stack
+    /// are left exactly as they were.
+    #[test]
+    fn copy_batch_ledger_merge_without_copy_token_owner_changes_nothing() {
+        let mut state = GameState::new_two_player(43);
+        state.last_created_token_ids = ids(&[5, 6, 6]);
+        let before = state.clone();
+
+        record_copy_batch_ledger_on_active_copy_token(&mut state);
+
+        assert!(state.active_copy_token().is_none());
+        assert_eq!(state.last_created_token_ids, before.last_created_token_ids);
+        assert_eq!(state.resolution_stack, before.resolution_stack);
+    }
+
+    /// CR 614.6 + CR 609.3: the delivery handoff settles an owner's offered batch only when
+    /// it delivered that batch's tokens. A delivery that completed having created nothing was
+    /// replaced by a different creation (or reduced to nothing), so the owner stays marked
+    /// and adopts the replacing creation's tokens on resume. A paused delivery and a delivery
+    /// that created tokens both settle, and an unmarked owner stays settled.
+    #[test]
+    fn event_copy_frame_handoff_settles_only_a_delivered_batch() {
+        use super::super::token_copy::CopyTokenApplyCompletion;
+        let cases = [
+            (
+                OfferedBatchCustody::AtReplacementPrompt,
+                CopyTokenApplyCompletion::Completed,
+                Vec::new(),
+                OfferedBatchCustody::AtReplacementPrompt,
+            ),
+            (
+                OfferedBatchCustody::AtReplacementPrompt,
+                CopyTokenApplyCompletion::Completed,
+                ids(&[7]),
+                OfferedBatchCustody::Settled,
+            ),
+            (
+                OfferedBatchCustody::AtReplacementPrompt,
+                CopyTokenApplyCompletion::Paused,
+                Vec::new(),
+                OfferedBatchCustody::Settled,
+            ),
+            (
+                OfferedBatchCustody::Settled,
+                CopyTokenApplyCompletion::Completed,
+                Vec::new(),
+                OfferedBatchCustody::Settled,
+            ),
+        ];
+        for (offered, completion, handed, settled) in cases {
+            let mut state = GameState::new_two_player(44);
+            let frame = PendingCopyTokenResolution {
+                created_ids: ids(&[1]),
+                remaining: Default::default(),
+                effect_kind: EffectKind::CopyTokenOf,
+                source_id: ObjectId(99),
+                referent_set: None,
+                offered_batch: offered,
+            };
+            let boundary = state.resolution_stack.capture_child_boundary();
+            repark_event_copy_frame(
+                &mut state,
+                Some((frame, boundary)),
+                handed.clone(),
+                completion,
+            );
+
+            let owner = state
+                .active_copy_token()
+                .expect("REACH-GUARD: the handoff re-parks the owner on top");
+            let listed: Vec<ObjectId> = ids(&[1]).into_iter().chain(handed.clone()).collect();
+            assert_eq!(
+                owner.offered_batch, settled,
+                "{offered:?} handed {handed:?} on {completion:?}"
+            );
+            assert_eq!(
+                owner.created_ids, listed,
+                "the owner lists exactly the ids handed to it, once"
+            );
+        }
     }
 }
 

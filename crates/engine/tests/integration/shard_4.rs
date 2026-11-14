@@ -277,6 +277,7 @@ mod lifeblood_hydra_shared_equal_to_quantity;
 mod lightning_dart_disjunctive_color_instead;
 mod liliana_dreadhorde_multi_dies;
 mod liliana_waker_cross_scope_decline;
+mod liminal_copy_entry_ability_removal;
 mod liminal_copy_token_etb_observers;
 mod limited_command_zone;
 mod limited_deck_format_gate;

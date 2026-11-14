@@ -667,6 +667,9 @@ struct TriggerCollectionSession {
     /// session prepares each event batch with `ObserveEventBatch` and reads
     /// these sources instead of rebuilding them (`BulkMemberTriggerCollection`).
     bulk_member_sources: Option<Vec<OffZoneTriggerSourceCache>>,
+    /// CR 614.12a + CR 603.2: only an explicitly collected payment slice
+    /// observes the board before this entrant's simultaneous entry group.
+    payment_entrant: Option<ObjectId>,
 }
 
 impl TriggerCollectionSession {
@@ -676,6 +679,7 @@ impl TriggerCollectionSession {
             operation_journal: None,
             admitted_matches: 0,
             bulk_member_sources: None,
+            payment_entrant: None,
         }
     }
 
@@ -689,6 +693,7 @@ impl TriggerCollectionSession {
             operation_journal: Some(operation_journal),
             admitted_matches: 0,
             bulk_member_sources: None,
+            payment_entrant: None,
         }
     }
 
@@ -5290,6 +5295,42 @@ pub(crate) fn has_active_state_triggers(state: &GameState) -> bool {
         })
 }
 
+/// CR 614.12a + CR 611.3b + CR 611.3c + CR 603.10: payment observers see the
+/// battlefield before the entry group and its continuous effects exist.
+/// The projection owns only observation; admission and occurrence ledgers
+/// continue to be written through the live collection session.
+struct TriggerObservationBoard {
+    pre_entry: Option<Box<GameState>>,
+}
+
+impl TriggerObservationBoard {
+    fn prepare(state: &GameState, payment_entrant: Option<ObjectId>) -> Self {
+        let pre_entry = payment_entrant.and_then(|entrant| {
+            let mut absent = super::effects::token_copy::entering_token_co_entrants(state, entrant);
+            absent.push(entrant);
+            match super::filter::pre_entry_board(state, &absent) {
+                Cow::Borrowed(_) => None,
+                Cow::Owned(board) => Some(Box::new(board)),
+            }
+        });
+        Self { pre_entry }
+    }
+
+    fn candidates_for_event(
+        &mut self,
+        live: &mut GameState,
+        event: &GameEvent,
+    ) -> smallvec::SmallVec<[ObjectId; 16]> {
+        let board = self.pre_entry.as_deref_mut().unwrap_or(live);
+        super::trigger_index::ensure_ready(board);
+        super::trigger_index::candidates_for_event(board, event)
+    }
+
+    fn read<'a>(&'a self, live: &'a GameState) -> &'a GameState {
+        self.pre_entry.as_deref().unwrap_or(live)
+    }
+}
+
 fn collect_pending_triggers_with_collection(
     state: &mut GameState,
     events: &[GameEvent],
@@ -5318,6 +5359,7 @@ fn collect_pending_triggers_with_collection(
     // occurrence-count == 1 for the placement that just fired. Same chokepoint as
     // the tap ledger, so effect, ETB, and ability counter placements all count.
     session.prepare(state, events);
+    let mut observation = TriggerObservationBoard::prepare(state, session.payment_entrant);
     let mut pending: Vec<PendingTriggerContext> = Vec::new();
     // CR 603.2c: Track which batched triggers (source_id, trig_idx) have already
     // fired in this pass so "one or more" triggers fire at most once per batch.
@@ -5331,12 +5373,12 @@ fn collect_pending_triggers_with_collection(
     } else if let Some(sources) = &session.bulk_member_sources {
         sources.clone()
     } else {
-        off_zone_trigger_source_caches(state)
+        off_zone_trigger_source_caches(observation.read(state))
     };
     let active_suppress_triggers = if events.is_empty() {
         Vec::new()
     } else {
-        active_suppress_trigger_statics(state)
+        active_suppress_trigger_statics(observation.read(state))
     };
     // CR 603.2 + CR 400.7: `events` accumulates every event produced across a
     // WHOLE resolved ability chain (e.g. Living Death's exile, then sacrifice,
@@ -5349,7 +5391,20 @@ fn collect_pending_triggers_with_collection(
     // otherwise a permanent returned to the battlefield later in the chain
     // retroactively "sees" a sacrifice/etc. that occurred earlier in the same
     // chain, before it was there to observe it (issue #8160).
-    let battlefield_entry_index = battlefield_entry_observation_indices(events);
+    let mut battlefield_entry_index = battlefield_entry_observation_indices(events);
+    // CR 614.12a + CR 603.2: an as-enters payment precedes the whole group's
+    // entry even when earlier tokens have physically moved on a prior action.
+    // Extend the same observation boundary used by both indexed and shadow
+    // scans only for the explicit payment slice. Earlier entry occurrences
+    // belong to the ordinary live-board scan (CR 603.6a).
+    if let Some(entrant) = session.payment_entrant {
+        for source in super::effects::token_copy::entering_token_co_entrants(state, entrant)
+            .into_iter()
+            .chain(std::iter::once(entrant))
+        {
+            battlefield_entry_index.insert(source, events.len());
+        }
+    }
     // CR 603.10a: built on the first co-departure group this pass sees.
     let mut co_departure_index: Option<CoDepartureObserverIndex> = None;
 
@@ -5388,8 +5443,7 @@ fn collect_pending_triggers_with_collection(
         // `evaluate_layers` rebuild at the top of `collect_pending_triggers`
         // guarantees the index reflects post-layer trigger sets.
         //
-        super::trigger_index::ensure_ready(state);
-        let candidates = crate::game::trigger_index::candidates_for_event(state, event);
+        let candidates = observation.candidates_for_event(state, event);
 
         // CR 603.2 differential test (debug-only): run a SHADOW scan over the
         // full battlefield with cloned dedup sets and verify every matched
@@ -5422,6 +5476,7 @@ fn collect_pending_triggers_with_collection(
                 has_decayed,
                 matched_triggers,
             ) = {
+                let state = observation.read(state);
                 let obj = match state.objects.get(&obj_id) {
                     Some(o) => o,
                     None => continue,
@@ -5872,6 +5927,7 @@ fn collect_pending_triggers_with_collection(
         #[cfg(debug_assertions)]
         {
             if audit_trigger_index {
+                let state = observation.read(state);
                 // CR 113.6: "Abilities of an instant or sorcery spell usually function only
                 // while that object is on the stack. Abilities of all other objects usually
                 // function only while that object is on the battlefield." The shadow
@@ -6446,6 +6502,7 @@ fn collect_pending_triggers_with_collection(
                     continue;
                 }
                 let matched_triggers = {
+                    let state = observation.read(state);
                     let obj = match state
                         .objects
                         .get(&obj_id)
@@ -7384,10 +7441,10 @@ fn collect_pending_triggers_with_collection(
     // alongside The Ring's emblem trigger rather than from object definitions.
     super::cipher::collect_combat_damage_recast_triggers(state, events, &mut pending);
 
-    // CR 603.2d: Trigger doubling — Panharmonicon-style effects.
-    // Scan battlefield for objects with StaticMode::Panharmonicon statics,
-    // then clone matching pending triggers.
-    apply_trigger_doubling(state, &mut pending);
+    // CR 614.12a + CR 603.2d + CR 603.10: trigger doubling observes
+    // the same board as trigger discovery, before entry for payments and live
+    // otherwise. Admission and occurrence accounting stay on the live session.
+    apply_trigger_doubling(observation.read(state), &mut pending);
     pending = filter_auto_inert_noop_triggers(state, pending);
 
     // CR 800.4d: a departing permanent's own leaves-the-battlefield abilities
@@ -9146,6 +9203,25 @@ pub(crate) fn handle_order_triggers(
 /// if the continuation paused on a target.
 pub(crate) fn collect_triggers_into_deferred(state: &mut GameState, events: &[GameEvent]) {
     let pending = collect_pending_triggers(state, events);
+    state.deferred_triggers.extend(pending);
+}
+
+/// CR 614.12a + CR 603.2: collect only the occurrences emitted by an
+/// as-enters payment before its entry group exists. Ordinary entry events
+/// retain their live-board observers, even while this payment is parked.
+pub(crate) fn collect_entry_payment_triggers_into_deferred(
+    state: &mut GameState,
+    events: &[GameEvent],
+    entrant: ObjectId,
+) {
+    let mut session = TriggerCollectionSession::new(TriggerCollectionOverlay::default());
+    session.payment_entrant = Some(entrant);
+    let pending = collect_pending_triggers_with_collection(
+        state,
+        events,
+        LogicalZoneTriggerCollection::Ordinary,
+        &mut session,
+    );
     state.deferred_triggers.extend(pending);
 }
 

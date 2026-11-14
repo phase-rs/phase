@@ -603,7 +603,7 @@ fn ready_copy_entry_completion(
         return None;
     }
     match queue.completion.as_ref()?.post_actions.first()? {
-        PendingCounterPostAction::FinishCopyTargetChoiceEntry { entrant } => Some(*entrant),
+        PendingCounterPostAction::FinishCopyTargetChoiceEntry { entrant, .. } => Some(*entrant),
         _ => None,
     }
 }
@@ -776,9 +776,16 @@ pub(crate) fn resume_copy_target_entry_completions(
                     "Copy entry completion lost its counter frame".to_string(),
                 )
             })?;
-        completion.post_actions.remove(0);
+        let PendingCounterPostAction::FinishCopyTargetChoiceEntry { resume_stage, .. } =
+            completion.post_actions.remove(0)
+        else {
+            unreachable!("ready copy-entry head was checked")
+        };
         match crate::game::engine_replacement::resume_copy_target_choice_entry(
-            state, entrant, events,
+            state,
+            entrant,
+            resume_stage,
+            events,
         )? {
             CopyEntryResumption::Paused => {
                 if !completion.is_noop() {
@@ -1171,18 +1178,18 @@ fn apply_pending_counter_post_action(
                 super::token::record_last_created_token(state, object_id);
             }
             // DELIBERATELY NOT `record_last_created_copy_batch_token`: this arm RE-SYNCS the batch
-            // buffer to the whole guarded ledger rather than appending one id, and the two are not
+            // buffer with the whole guarded ledger rather than appending one id, and the two are not
             // interchangeable — the buffer accumulates across batches while the ledger is reset per
-            // batch. Copying the ledger cannot publish an id the ledger's own guard withheld, so
+            // batch. Merging the ledger cannot publish an id the ledger's own guard withheld, so
             // this shape needs no second predicate; it needs the source to stay the GUARDED ledger,
             // which is what `state.last_created_token_ids` is after the call above.
-            let created_ids = state.last_created_token_ids.clone();
-            if let Some(pending) = state.active_copy_token_mut() {
-                pending.created_ids = created_ids;
-            }
+            super::token::record_copy_batch_ledger_on_active_copy_token(state);
             true
         }
-        PendingCounterPostAction::FinishCopyTargetChoiceEntry { entrant } => {
+        PendingCounterPostAction::FinishCopyTargetChoiceEntry {
+            entrant,
+            resume_stage,
+        } => {
             // The drain parks this fallible action for the result-aware engine
             // boundary (`resume_copy_target_entry_completions`) and never
             // dispatches it here. Should a caller reach this arm anyway, re-park
@@ -1197,7 +1204,10 @@ fn apply_pending_counter_post_action(
                 PendingEffectResolved::with_post_actions_without_effect(
                     EffectKind::BecomeCopy,
                     entrant.object_id,
-                    vec![PendingCounterPostAction::FinishCopyTargetChoiceEntry { entrant }],
+                    vec![PendingCounterPostAction::FinishCopyTargetChoiceEntry {
+                        entrant,
+                        resume_stage,
+                    }],
                 ),
             );
             false
@@ -9388,6 +9398,59 @@ mod tests {
         );
     }
 
+    /// CR 608.2c + CR 111.1: `EmitCommittedCopyTokenEntry` re-syncs the batch ledger onto an
+    /// ACTIVE CopyToken owner by merging, so the earlier batches' tokens the owner already lists
+    /// ("those tokens") stay ahead of this batch's. An assignment there would drop them, since
+    /// the ledger is reset per batch. The earlier id lives only in the owner's buffer.
+    #[test]
+    fn emit_committed_copy_token_entry_merges_the_ledger_into_the_active_copy_token_owner() {
+        use crate::types::game_state::{OfferedBatchCustody, PendingCopyTokenResolution};
+        use std::collections::VecDeque;
+
+        let mut state = GameState::new_two_player(42);
+        let earlier = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Earlier Copy".to_string(),
+            Zone::Battlefield,
+        );
+        let object_id = create_object(
+            &mut state,
+            CardId(0),
+            PlayerId(0),
+            "Copy Token".to_string(),
+            Zone::Battlefield,
+        );
+        state.push_copy_token(PendingCopyTokenResolution {
+            created_ids: vec![earlier],
+            remaining: VecDeque::new(),
+            effect_kind: EffectKind::CopyTokenOf,
+            source_id: earlier,
+            referent_set: None,
+            offered_batch: OfferedBatchCustody::Settled,
+        });
+        assert!(
+            state.last_created_token_ids.is_empty(),
+            "REACH-GUARD: the ledger holds only this batch, and starts empty"
+        );
+        let mut events = Vec::new();
+        assert!(apply_pending_counter_post_action(
+            &mut state,
+            PendingCounterPostAction::EmitCommittedCopyTokenEntry { object_id },
+            &mut events,
+        ));
+        assert_eq!(state.last_created_token_ids, vec![object_id]);
+        assert_eq!(
+            state
+                .active_copy_token()
+                .expect("REACH-GUARD: the owner stays parked")
+                .created_ids,
+            vec![earlier, object_id],
+            "the owner keeps the earlier batch's token, then lists this batch's once"
+        );
+    }
+
     /// The COPY-BATCH BUFFER half of the same invariant, and the one every test above is
     /// structurally blind to.
     ///
@@ -9423,7 +9486,7 @@ mod tests {
     /// Both leave the PRESENT row passing, so neither is caught by a fixture that never ran.
     #[test]
     fn a_vanished_token_never_reaches_the_anaphora_slot_through_the_copy_batch_buffer() {
-        use crate::types::game_state::PendingCopyTokenResolution;
+        use crate::types::game_state::{OfferedBatchCustody, PendingCopyTokenResolution};
         use std::collections::VecDeque;
 
         /// The two routes that publish a single just-created id while a copy batch is in flight.
@@ -9467,6 +9530,8 @@ mod tests {
                 remaining: VecDeque::new(),
                 effect_kind: EffectKind::CopyTokenOf,
                 source_id,
+                referent_set: None,
+                offered_batch: OfferedBatchCustody::Settled,
             });
             assert!(
                 state.active_copy_token().is_some(),

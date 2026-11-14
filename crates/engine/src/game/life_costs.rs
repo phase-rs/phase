@@ -21,7 +21,9 @@
 //! - **CR 119.4b** — Players can always pay 0 life, even under a pay-life prohibition.
 //! - **CR 119.8** — "A cost that involves having that player pay life can't be paid."
 
-use crate::game::effects::life::{try_apply_life_loss, LifeChangeError, ReplacementDeferred};
+use crate::game::effects::life::{
+    try_apply_life_loss_with_prohibition_board, LifeChangeError, ReplacementDeferred,
+};
 use crate::game::static_abilities::{player_cant_pay_life_as_cost, player_has_cant_lose_life};
 use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, WaitingFor};
@@ -114,7 +116,7 @@ pub fn can_pay_life_cost(state: &GameState, player: PlayerId, amount: u32) -> bo
 
 /// CR 118.3b + CR 119.4 + CR 119.8: Pay `amount` life from `player` as a cost.
 ///
-/// Routes the life deduction through [`try_apply_life_loss`] per CR 119.4
+/// Routes the life deduction through [`try_apply_life_loss_with_prohibition_board`] per CR 119.4
 /// ("paying life IS losing life"), so the replacement pipeline and the
 /// `CantLoseLife` short-circuit run consistently with every other life-loss event.
 ///
@@ -132,13 +134,27 @@ pub fn pay_life_as_cost(
     amount: u32,
     events: &mut Vec<GameEvent>,
 ) -> PayLifeCostResult {
+    pay_life_as_cost_with_prohibition_board(state, player, amount, None, events)
+}
+
+/// CR 614.12a + CR 119.4: an entry payment may judge prohibitions on its
+/// pre-entry board. Only that query uses the supplied board; affordability,
+/// life-loss replacements, settlement and deferred continuations remain live.
+/// `None` preserves the ordinary live-board payment context.
+pub(crate) fn pay_life_as_cost_with_prohibition_board(
+    state: &mut GameState,
+    player: PlayerId,
+    amount: u32,
+    prohibition_board: Option<&GameState>,
+    events: &mut Vec<GameEvent>,
+) -> PayLifeCostResult {
     // CR 119.4b: Paying 0 life always succeeds, no event emitted.
     if amount == 0 {
         return PayLifeCostResult::Paid { amount: 0 };
     }
 
     // CR 119.8: Lock → cost can't be paid.
-    if player_has_cant_lose_life(state, player) {
+    if player_has_cant_lose_life(prohibition_board.unwrap_or(state), player) {
         return PayLifeCostResult::Prohibited;
     }
 
@@ -159,7 +175,13 @@ pub fn pay_life_as_cost(
     // Engine representability limit, not a rule: a deduction the engine cannot
     // record leaves life and counters untouched and is reported through the
     // existing unpayable variant.
-    match try_apply_life_loss(state, player, amount, events) {
+    match try_apply_life_loss_with_prohibition_board(
+        state,
+        player,
+        amount,
+        prohibition_board,
+        events,
+    ) {
         Ok(_) => PayLifeCostResult::Paid { amount },
         Err(LifeChangeError::Unrepresentable(_)) => PayLifeCostResult::InsufficientLife,
         Err(LifeChangeError::Deferred(ReplacementDeferred::ReplacementChoice)) => {
